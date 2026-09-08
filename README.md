@@ -19,7 +19,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow.rs` pure helpers with unit tests
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
-- `scx/src/topology.rs` trimmed per CPU cards
+- `scx/src/topology.rs` trimmed per-CPU cards
 - `scx/src/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
 - `tools/install_scx_flow.sh` overlay build installer
@@ -28,30 +28,30 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 ## Design
 
 Two tiers share the work. Tier zero is interactive with
-a five hundred microsecond slice and direct placement
+a 500µs slice and direct placement
 to the target DSQ. Head inserts carry wakeups and tail
-inserts carry requeues. Tier one is batch with an eight
-millisecond slice through one shared DSQ ordered by
+inserts carry requeues. Tier one is batch with an 8ms
+slice through one shared DSQ ordered by
 vruntime. The batch DSQ uses id `0x2000` and the park
 DSQ uses id `0x2001` for tasks with no allowed CPU. New
 tasks start in tier zero. Estimates hold the last burst
-clamped at one nanosecond to one second with no
+clamped at 1ns to 1s with no
 smoothing. A runnable task that burns the full slice
 moves down one tier at once. The burn check compares
 the burst against the stored grant. Blocked tasks build
-a streak of short bursts below one millisecond. Three
+a streak of short bursts below 1ms. Three
 short blocks move up one tier with the streak capped at
 seven. Dispatch serves eight tier zero runs per tier
 one run when both tiers hold work. An idle kick is sent
 on every insert with a valid target. A narrow busy
 preemption covers tier zero wakeups against tier one
-runners with a per CPU gap of one millisecond. New
+runners with a per-CPU gap of 1ms. New
 batch tasks join at the vruntime floor. Running batch
 tasks advance by the burst with saturation.
 Counts use atomics with saturation on gauges.
 Inserts and runs count per tier. Moves, gated serves,
 kicks and preemptions count across tiers.
-The watchdog is thirty thousand milliseconds. Ops name
+The watchdog is 30 seconds. Ops name
 is `flow`.
 
 ## Build
@@ -64,7 +64,7 @@ rsync -a scx/ WS/scheds/experimental/scx_flow/
 cargo build --manifest-path WS/scheds/experimental/scx_flow/Cargo.toml
 ```
 
-Or run `tools/install_scx_flow.sh WS` which overlays,
+Alternatively, run `tools/install_scx_flow.sh WS` which overlays,
 builds in release mode and installs the binary.
 
 ## Installer

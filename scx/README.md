@@ -10,12 +10,12 @@ slices are fixed per tier. It is deliberately knob-free.
 
 Tasks wait in two tiers, plus one park DSQ for tasks
 with no allowed CPU. Tier zero is interactive with a
-five hundred microsecond slice. Tier one is batch with
-an eight millisecond slice ordered by vruntime. New
+500µs slice. Tier one is batch with
+an 8ms slice ordered by vruntime. New
 tasks start in tier zero. Each tier keeps its own
 waiting count. A runnable task that burns the full
 slice moves down one tier at once. Blocked tasks build
-a streak of short bursts below one millisecond. Three
+a streak of short bursts below 1ms. Three
 short blocks in a row move up one tier, with the streak
 capped at seven. Dispatch serves tier zero eight times
 per tier one serve when both tiers hold work. Idle
@@ -33,17 +33,17 @@ validation in `src/config.rs`. Stats and the dashboard
 payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
-Ops name is `flow` with 30000 ms watchdog.
+Ops name is `flow` with a 30 second watchdog.
 
 ## Typical Use Cases
 
 - Gaming and other latency-sensitive applications.
-  Short bursts start in tier zero with five hundred
-  microsecond slices and drain first, so wakeups and
+  Short bursts start in tier zero with 500µs
+  slices and drain first, so wakeups and
   frame work rarely wait behind batch work.
 - General desktop use. The session stays responsive
   while long bursts move toward tier one and serve
-  eight millisecond slices without competing with
+  8ms slices without competing with
   interactive tasks.
 - Mixed batch workloads. Long jobs keep throughput
   with vruntime order while short arrivals keep
@@ -70,12 +70,12 @@ config checks.
 
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
-summary line, two tier rows with per tier slices and
+summary line, two tier rows with per-tier slices and
 waiting counts and a per-CPU grid with running
 estimates and running tier badges, with no
 authentication, since the loopback address is the trust
 boundary. `--no-webui` disables it. Empty states show
-an idle tier line and a no CPU data card when no data
+an idle tier line and an empty CPU data card when no data
 has arrived.
 
 ## Tiers
@@ -86,11 +86,11 @@ One park DSQ holds tasks with no allowed CPU.
 
 ## Slices
 
-Tier zero serves five hundred microseconds. Tier one
-serves eight milliseconds. Each grant is fixed at
+Tier zero serves 500µs. Tier one
+serves 8ms. Each grant is fixed at
 insert time and stored for the burn check. Per task
-estimates hold the last burst clamped at one nanosecond
-to one second with no smoothing. New batch tasks join
+estimates hold the last burst clamped at 1ns
+to 1s with no smoothing. New batch tasks join
 at the vruntime floor. Running batch tasks advance by
 the burst with saturation.
 
@@ -103,8 +103,8 @@ requeue keeps the count and may move tiers on burn, so
 no double count occurs. Running keeps the entry.
 Blocking releases it at once. Disable and exit release
 exactly once. A full slice burn with the task runnable
-moves down one tier. Three short blocks below one
-millisecond move up one tier. Enqueue keys the CPU off
+moves down one tier. Three short blocks below 1ms
+move up one tier. Enqueue keys the CPU off
 the selected CPU, then the first allowed CPU. Pinned
 tasks use their CPU or the park. Tasks that cannot
 move stay on the current CPU. Dispatch serves the
