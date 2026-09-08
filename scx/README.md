@@ -34,6 +34,8 @@ validation in `src/config.rs`. Stats and the dashboard
 payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
+Ops name is `flow` with 30000 ms watchdog.
+
 ## Typical Use Cases
 
 - Gaming and other latency-sensitive applications.
@@ -58,7 +60,11 @@ scheduling constants are compile-time values in
 `src/bpf/intf.h`, and no command-line option changes
 the scheduling behavior. The runtime footprint depends
 only on the reporting options, which are `--stats`,
-`--monitor` and `--no-webui`.
+`--monitor` and `--no-webui`. See `src/config.rs` and
+`src/flow.rs` for the checked values and the unit tests
+for estimate choice, top down drain, steal split,
+affinity guard, quantum clamp, queue math and config
+checks.
 
 ## Web UI
 
@@ -143,21 +149,6 @@ final hint without an allowed cpu is left for the
 kernel. The path uses only public helpers with version
 gates where needed.
 
-## Ops
-
-Ops name is `flow`. The watchdog is thirty thousand
-milliseconds. Flags honor exiting tasks, the last
-enqueue hint, migration disabled tasks and queued
-wakeups.
-
-## Config
-
-The scheduler ships without knobs. Constants validate
-at start. See `src/config.rs` and `src/flow.rs` for
-the checked values and the unit tests for estimate
-choice, top down drain, steal split, affinity guard,
-quantum clamp, queue math and config checks.
-
 ## Stats
 
 `--stats` prints deltas. `--monitor` runs the printer
@@ -165,20 +156,3 @@ only. Counters cover per level inserts, moves down,
 remote moves, local and remote moves and inserts
 without state. Dispatches count local and remote
 moves. Steals count remote moves only.
-
-## Build
-
-This dir overlays into a workspace at
-`scheds/experimental/scx_flow` and builds there with
-path deps at `../../../rust`. See the root readme and
-`tools/install_scx_flow.sh` for the steps.
-
-## Verification
-
-fmt is clean, 45 tests pass, debug and release builds
-succeed, and veristat reports 12 of 12 success.
-Workspace-wide clippy with -D warnings currently fails
-in upstream crates under rustc 1.98.1 and clippy 0.1.98
-with no diagnostics in this package. Package-scoped
-fmt, clippy, test, and build gates for this package are
-green.
