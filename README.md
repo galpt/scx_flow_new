@@ -60,7 +60,10 @@ Full builds need a workspace checkout since path deps use
 `../../../rust`. Copy `scx` into the workspace and build:
 
 ```
+# 1. Copy the scheduler into a workspace checkout
 rsync -a scx/ WS/scheds/experimental/scx_flow/
+
+# 2. Build from inside the workspace so path deps resolve
 cargo build --manifest-path WS/scheds/experimental/scx_flow/Cargo.toml
 ```
 
@@ -111,9 +114,16 @@ and start the loader again.
 ## Run
 
 ```
+# 1. Run with defaults
 scx_flow
+
+# 2. Print stats once per second
 scx_flow --stats 1
+
+# 3. Run the stats printer only
 scx_flow --monitor 1
+
+# 4. Run without the dashboard
 scx_flow --no-webui
 ```
 
@@ -123,8 +133,13 @@ socket fallback at `/tmp/scx_flow.sock`.
 ## Checks
 
 ```
+# 1. Formatting must be clean
 cargo fmt --check
+
+# 2. Lints must be clean for the package
 cargo clippy --all-targets -- -D warnings
+
+# 3. Unit tests must pass
 cargo test
 ```
 
