@@ -145,11 +145,11 @@ impl<'a> Scheduler<'a> {
             });
             Some(tx)
         };
-        let cpu_static = if opts.no_webui {
-            Vec::new()
-        } else {
-            topology::web_cpu_static()
-        };
+        /* Static cards seed the start log and the cards. */
+        /* Frequency stays display only here. */
+        let cards = topology::web_cpu_static();
+        info!("Topology: {}", topology::describe_topology(&cards));
+        let cpu_static = if opts.no_webui { Vec::new() } else { cards };
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
@@ -234,7 +234,8 @@ impl<'a> Scheduler<'a> {
     /*
      * Dashboard snapshot. Merges the static cards with
      * live state and per tier slices. Gauges only, no
-     * deltas.
+     * deltas. Frequency stays display only and never
+     * feeds placement or division.
      */
     fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self

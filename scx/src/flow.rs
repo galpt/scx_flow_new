@@ -60,6 +60,74 @@ pub fn quantum_tier(tier: u32) -> u64 {
 }
 
 /*
+ * True when a frequency value is known. Zero means
+ * unknown, so callers use a plain fallback and never
+ * divide by the value.
+ */
+#[cfg(test)]
+pub fn freq_known(freq_khz: u64) -> bool {
+    freq_khz != 0
+}
+
+/*
+ * True when any entry claims a sibling thread. False
+ * means plain hardware with one thread per core, so
+ * callers keep plain per cpu behavior.
+ */
+#[cfg(test)]
+pub fn topology_has_smt(smt: &[bool]) -> bool {
+    smt.iter().any(|v| *v)
+}
+
+/*
+ * True when a sibling may be used. Needs sibling
+ * hardware and an allowed peer, else plain per cpu
+ * choice stays.
+ */
+#[cfg(test)]
+pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
+    if !has_smt {
+        return false;
+    }
+    if sibling < 0 {
+        return false;
+    }
+    if let Some(&ok) = allowed.get(sibling as usize) {
+        return ok;
+    }
+    false
+}
+
+/*
+ * Next peer for a scan. Returns none with one or no
+ * cpus, so scans end at once with a single cpu and
+ * no peers. Returns none for an out of range cpu.
+ */
+#[cfg(test)]
+pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
+    if nr_cpus <= 1 {
+        return None;
+    }
+    if (cpu as usize) >= nr_cpus {
+        return None;
+    }
+    Some((cpu + 1) % nr_cpus as u32)
+}
+
+/*
+ * Bound of a peer scan. Zero with one or no cpus, so
+ * steal scans and rotation end at once with a single
+ * cpu. Otherwise one less than the cpu count.
+ */
+#[cfg(test)]
+pub fn scan_bound(nr_cpus: usize) -> usize {
+    if nr_cpus <= 1 {
+        return 0;
+    }
+    nr_cpus - 1
+}
+
+/*
  * Clamp a per task estimate to the estimate range. The
  * floor keeps the value positive. The ceiling keeps a
  * single long run from shaping later choice.
@@ -236,6 +304,39 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
         if ok {
             return Some(i as u32);
         }
+    }
+    None
+}
+
+/*
+ * Check that a cpu may run a task with the given
+ * mask. Mirrors the BPF head and kick guards. A
+ * negative cpu fails closed. An out of range cpu
+ * fails closed. A missing entry fails closed.
+ */
+#[cfg(test)]
+pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
+    if cpu < 0 {
+        return false;
+    }
+    if let Some(&ok) = allowed.get(cpu as usize) {
+        return ok;
+    }
+    false
+}
+
+/*
+ * Target cpu for a task that cannot move. Mirrors
+ * the BPF local path. An out of range cpu yields no
+ * target for park use.
+ */
+#[cfg(test)]
+pub fn stay_target(task_cpu: i32, nr_cpus: usize) -> Option<u32> {
+    if task_cpu < 0 {
+        return None;
+    }
+    if (task_cpu as usize) < nr_cpus {
+        return Some(task_cpu as u32);
     }
     None
 }
@@ -771,5 +872,166 @@ mod tests {
         assert_eq!(counts.sum(), 0);
         counts.leave(0);
         assert_eq!(counts.sum(), 0);
+    }
+
+    #[test]
+    fn pinned_single_cpu_never_leaves() {
+        let pinned = [false, false, true, false];
+        for sel in [-1, 0, 1, 2, 3, 5, 99] {
+            assert_eq!(pick_target_cpu(sel, &pinned), Some(2));
+        }
+        assert!(may_run_on(2, &pinned));
+        assert!(!may_run_on(0, &pinned));
+        assert!(!may_run_on(1, &pinned));
+        assert!(!may_run_on(3, &pinned));
+        assert!(!may_run_on(-1, &pinned));
+        assert!(!may_run_on(99, &pinned));
+    }
+
+    #[test]
+    fn narrow_mask_keeps_within_mask() {
+        let narrow = [false, false, true, true, false];
+        assert_eq!(pick_target_cpu(3, &narrow), Some(3));
+        assert_eq!(pick_target_cpu(2, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(0, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(4, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(-1, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(99, &narrow), Some(2));
+        assert!(may_run_on(2, &narrow));
+        assert!(may_run_on(3, &narrow));
+        assert!(!may_run_on(0, &narrow));
+        assert!(!may_run_on(4, &narrow));
+    }
+
+    #[test]
+    fn empty_mask_parks() {
+        let empty = [false, false, false];
+        assert_eq!(pick_target_cpu(0, &empty), None);
+        assert_eq!(pick_target_cpu(2, &empty), None);
+        assert_eq!(pick_target_cpu(-1, &empty), None);
+        assert!(!may_run_on(0, &empty));
+        assert!(!may_run_on(2, &empty));
+        assert_eq!(pick_target_cpu(-1, &[]), None);
+        assert!(!may_run_on(0, &[]));
+    }
+
+    #[test]
+    fn head_guard_blocks_foreign() {
+        let pinned = [false, false, true];
+        assert!(!may_run_on(0, &pinned));
+        assert!(may_run_on(2, &pinned));
+        let narrow = [false, true, true];
+        assert!(!may_run_on(0, &narrow));
+        assert!(may_run_on(1, &narrow));
+        assert!(may_run_on(2, &narrow));
+    }
+
+    #[test]
+    fn kick_guard_blocks_foreign() {
+        let pinned = [false, true, false];
+        assert!(may_run_on(1, &pinned));
+        assert!(!may_run_on(0, &pinned));
+        assert!(!may_run_on(2, &pinned));
+        assert!(!may_run_on(-1, &pinned));
+    }
+
+    #[test]
+    fn stay_local_keeps_task_cpu() {
+        assert_eq!(stay_target(2, 8), Some(2));
+        assert_eq!(stay_target(0, 8), Some(0));
+        assert_eq!(stay_target(-1, 8), None);
+        assert_eq!(stay_target(99, 8), None);
+        assert_eq!(stay_target(7, 8), Some(7));
+        assert_eq!(stay_target(8, 8), None);
+    }
+
+    #[test]
+    fn batch_serve_needs_allowed_head() {
+        let pinned = [false, false, true];
+        assert!(!may_run_on(0, &pinned));
+        assert!(may_run_on(2, &pinned));
+        assert!(deficit_should_serve(8, true, true));
+        assert!(!deficit_should_serve(0, true, true));
+    }
+
+    #[test]
+    fn park_fallback_tries_once() {
+        let pinned = [false, false, true];
+        let first_try = may_run_on(0, &pinned);
+        let second_try = may_run_on(0, &pinned);
+        assert!(!first_try);
+        assert_eq!(first_try, second_try);
+        assert_eq!(pick_target_cpu(0, &pinned), Some(2));
+    }
+
+    #[test]
+    fn zero_freq_is_unknown_with_fallback() {
+        assert!(!freq_known(0));
+        assert!(freq_known(1));
+        assert!(freq_known(3_800_000));
+        assert!(freq_known(u64::MAX));
+    }
+
+    #[test]
+    fn no_sibling_keeps_plain_per_cpu() {
+        assert!(!topology_has_smt(&[false, false, false]));
+        assert!(!topology_has_smt(&[]));
+        assert!(!topology_has_smt(&[false]));
+        assert!(topology_has_smt(&[false, true, false]));
+        assert!(topology_has_smt(&[true]));
+        let allowed = [true, true, true];
+        assert!(!sibling_ok(false, 1, &allowed));
+        assert!(!sibling_ok(false, 0, &allowed));
+        assert!(sibling_ok(true, 1, &allowed));
+        assert!(!sibling_ok(true, 1, &[true, false, true]));
+        assert!(!sibling_ok(true, -1, &allowed));
+        assert!(!sibling_ok(true, 9, &allowed));
+        assert_eq!(pick_target_cpu(0, &[true]), Some(0));
+        assert!(may_run_on(0, &[true]));
+        assert!(!may_run_on(1, &[true]));
+    }
+
+    #[test]
+    fn single_cpu_has_no_peers() {
+        assert_eq!(next_peer(0, 1), None);
+        assert_eq!(next_peer(0, 0), None);
+        assert_eq!(next_peer(0, 2), Some(1));
+        assert_eq!(next_peer(1, 2), Some(0));
+        assert_eq!(next_peer(2, 2), None);
+        assert_eq!(scan_bound(0), 0);
+        assert_eq!(scan_bound(1), 0);
+        assert_eq!(scan_bound(2), 1);
+        assert_eq!(scan_bound(8), 7);
+        assert_eq!(stay_target(0, 1), Some(0));
+        assert_eq!(stay_target(1, 1), None);
+        assert_eq!(stay_target(-1, 1), None);
+        assert_eq!(pick_target_cpu(0, &[true]), Some(0));
+        assert_eq!(pick_target_cpu(-1, &[true]), Some(0));
+        assert_eq!(pick_target_cpu(5, &[true]), Some(0));
+        assert_eq!(pick_target_cpu(0, &[false]), None);
+        assert!(!deficit_should_serve(0, true, false));
+        assert!(deficit_should_serve(0, false, true));
+        assert!(deficit_should_serve(8, true, true));
+    }
+
+    #[test]
+    fn single_cpu_scan_ends_at_once() {
+        let mut steps = 0;
+        let mut cur = next_peer(0, 1);
+        while let Some(n) = cur {
+            steps += 1;
+            cur = next_peer(n, 1);
+        }
+        assert_eq!(steps, 0);
+        assert_eq!(cur, None);
+        let mut seen = 0;
+        let mut at = 0;
+        let bound = scan_bound(1);
+        while seen < bound {
+            at = next_peer(at, 1).unwrap_or(0);
+            seen += 1;
+        }
+        assert_eq!(seen, 0);
+        assert_eq!(at, 0);
     }
 }

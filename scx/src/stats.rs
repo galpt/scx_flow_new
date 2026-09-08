@@ -65,7 +65,7 @@ pub struct Metrics {
 pub struct PerCpuMetrics {
     /* Cpu id. */
     pub id: u32,
-    /* Max frequency in kilohertz. */
+    /* Max frequency in kilohertz. Zero when unknown. */
     pub freq_khz: u64,
     /* Live frequency in kilohertz. Zero when unknown. */
     pub cur_freq_khz: u64,

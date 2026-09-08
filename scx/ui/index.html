@@ -400,7 +400,9 @@
     }
 
     /* Per cpu cards with the running tier index
-     * and the running estimate plus the pid. */
+     * and the running estimate plus the pid. Freq
+     * unknown stays plain with no zero print. No
+     * sibling stays plain with no badge. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -416,9 +418,15 @@
           (cpu.cur_freq_khz || 0) / 1000);
         var maxMhz = Math.round(
           (cpu.freq_khz || 0) / 1000);
-        var freqLabel = curMhz > 0
-          ? curMhz + ' of ' + maxMhz + ' MHz'
-          : maxMhz + ' MHz';
+        var freqLabel = 'freq unknown';
+        if (maxMhz > 0 && curMhz > 0) {
+          freqLabel = curMhz + ' of ' +
+            maxMhz + ' MHz';
+        } else if (maxMhz > 0) {
+          freqLabel = maxMhz + ' MHz';
+        } else if (curMhz > 0) {
+          freqLabel = curMhz + ' MHz';
+        }
         var smtLabel = cpu.smt
           ? ' <span class="core-smt">SMT</span>'
           : '';

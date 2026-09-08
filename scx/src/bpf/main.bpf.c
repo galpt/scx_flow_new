@@ -130,12 +130,13 @@ static __always_inline bool flow_cpu_ok(
 }
 
 /*
- * Check that a parked task may run here. The peek
- * gives an untrusted view, so a trusted reference is
- * used for the mask test. A missing peek fails closed
- * and skips the move.
+ * Check that the head task in one DSQ may run here.
+ * The peek gives an untrusted view, so a trusted
+ * reference is used for the mask test. A missing
+ * peek fails closed and skips the move. Used for
+ * park moves and batch moves alike.
  */
-static __always_inline bool flow_park_ok(s32 cpu,
+static __always_inline bool flow_head_ok(s32 cpu,
 	u64 dsq)
 {
 	struct task_struct *cand;
@@ -260,6 +261,8 @@ static __always_inline void flow_clear_running(s32 cpu)
  * Set the cpu hint of one tier. Interactive asks
  * for the max level. Batch restores the default,
  * so the hint tracks the task now on the cpu.
+ * The hint is fixed per tier and never uses
+ * frequency, so unknown frequency stays safe.
  */
 static __always_inline void flow_cpuperf_set(s32 cpu,
 	u32 tier)
@@ -320,6 +323,23 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 first;
 
 	this_cpu = (s32)bpf_get_smp_processor_id();
+	/* Plain per cpu choice with no sibling step. */
+	/* No sibling hosts stay plain here. */
+	/* Single cpu ends at the first allowed cpu. */
+	/* Tasks that cannot move stay on the current cpu. */
+	if (is_migration_disabled(p)) {
+		s32 here = scx_bpf_task_cpu(p);
+
+		if (flow_cpu_ok(p, here))
+			return here;
+		if (flow_cpu_ok(p, prev_cpu))
+			return prev_cpu;
+		first = (s32)bpf_cpumask_first(p->cpus_ptr);
+		if (flow_cpu_ok(p, first))
+			return first;
+		/* No allowed cpu, park hint for enqueue. */
+		return prev_cpu;
+	}
 	/* Pinned tasks stay where they are. */
 	if (p->nr_cpus_allowed == 1) {
 		s32 here = scx_bpf_task_cpu(p);
@@ -331,7 +351,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			return prev_cpu;
 		/* The single allowed cpu is the valid hint. */
 		allow = (s32)bpf_cpumask_first(p->cpus_ptr);
-		return allow;
+		if (flow_cpu_ok(p, allow))
+			return allow;
+		/* No allowed cpu, park hint for enqueue. */
+		return prev_cpu;
 	}
 	/* Prefer an idle cpu inside the mask. */
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
@@ -350,7 +373,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;
-	/* No allowed cpu found, kernel checks the hint. */
+	/* No allowed cpu, park hint for enqueue. */
 	return prev_cpu;
 }
 
@@ -377,6 +400,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		grant = flow_quantum_tier(0);
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx,
 		    1);
+		/* Local keeps a task that cannot move. */
+		if (is_migration_disabled(p)) {
+			s32 here = scx_bpf_task_cpu(p);
+
+			if (here >= 0 &&
+			    flow_cpu_id_ok((u32)here)) {
+				scx_bpf_dsq_insert(p,
+				    (u64)SCX_DSQ_LOCAL, grant, 0);
+				return;
+			}
+		}
+		/* Park holds the task for a later move. */
 		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
 		    grant, 0);
 		return;
@@ -401,6 +436,33 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		tier = tctx->tier;
 		if (!flow_tier_ok(tier))
 			tier = 0;
+	}
+	/* Tasks that cannot move stay on the current cpu. */
+	if (is_migration_disabled(p)) {
+		s32 here = scx_bpf_task_cpu(p);
+
+		/* Local keeps the task where it may run. */
+		if (here >= 0 && flow_cpu_id_ok((u32)here)) {
+			if (need_join)
+				flow_acquire(tctx, tier);
+			grant = flow_quantum_tier(tier);
+			tctx->grant_ns = grant;
+			if (tier == (u32)FLOW_TIER_BATCH &&
+			    tctx->vruntime == 0)
+				tctx->vruntime = flow_min_vtime;
+			scx_bpf_dsq_insert(p, (u64)SCX_DSQ_LOCAL,
+			    grant, 0);
+			if (tier == 0)
+				__sync_fetch_and_add(
+				    &flow_stats.enq_tier0, 1);
+			else
+				__sync_fetch_and_add(
+				    &flow_stats.enq_tier1, 1);
+			scx_bpf_kick_cpu(here, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			return;
+		}
+		/* No usable cpu, fall through to park. */
 	}
 	if (flow_cpu_ok(p, sel)) {
 		cpu = sel;
@@ -451,14 +513,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (tctx->vruntime == 0)
 			tctx->vruntime = floor;
 		vtime = tctx->vruntime;
+		/* Shared holds batch work for an allowed cpu. */
 		scx_bpf_dsq_insert_vtime(p,
 		    (u64)FLOW_DSQ_BATCH, grant, vtime, 0);
 		__sync_fetch_and_add(&flow_stats.enq_tier1, 1);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		__sync_fetch_and_add(&flow_stats.kicks, 1);
+		/* Kick only a cpu in the mask. */
+		if (flow_cpu_ok(p, cpu)) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
+		}
 		return;
 	}
-	/* Interactive tasks place direct to the target. */
+	/* Interactive tasks place direct to the allowed target. */
 	if (need_join)
 		flow_acquire(tctx, tier);
 	grant = flow_quantum_tier(tier);
@@ -473,8 +539,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    SCX_ENQ_HEAD);
 	}
 	__sync_fetch_and_add(&flow_stats.enq_tier0, 1);
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-	__sync_fetch_and_add(&flow_stats.kicks, 1);
+	/* Kick only a cpu in the mask. */
+	if (flow_cpu_ok(p, cpu)) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		__sync_fetch_and_add(&flow_stats.kicks, 1);
+	}
 	/* Busy preemption stays narrow by design. */
 	if (!is_requeue) {
 		struct flow_cpu_state *st;
@@ -487,9 +556,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    st->running_tier ==
 			    (u32)FLOW_TIER_BATCH)
 				busy_batch = true;
+			/* Preempt only a cpu in the mask. */
 			if (busy_batch &&
 			    flow_preempt_gap_ok(now,
-			    st->last_preempt_at)) {
+			    st->last_preempt_at) &&
+			    flow_cpu_ok(p, cpu)) {
 				scx_bpf_kick_cpu(cpu,
 				    SCX_KICK_PREEMPT);
 				__sync_lock_test_and_set(
@@ -514,6 +585,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		return;
 	if (!flow_cpu_id_ok((u32)cpu))
 		return;
+	/* One try per DSQ with no peer scan. */
+	/* Single cpu ends at once with no peers. */
 	st = flow_cpu((u32)cpu);
 	if (st)
 		served0 = st->served0;
@@ -525,42 +598,47 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Gated batch serve keeps long waits bounded. */
 	if (flow_deficit_should_serve(served0, tier0_wait,
 	    tier1_wait)) {
-		struct task_struct *cand = NULL;
-		u64 vtime = 0;
-		bool have = false;
+		/* Head must allow this cpu, else try park. */
+		if (flow_head_ok(cpu, (u64)FLOW_DSQ_BATCH)) {
+			struct task_struct *cand = NULL;
+			u64 vtime = 0;
+			bool have = false;
 
-		if (bpf_ksym_exists(scx_bpf_dsq_peek)) {
-			cand = scx_bpf_dsq_peek(
-			    (u64)FLOW_DSQ_BATCH);
-			if (cand) {
-				vtime = cand->scx.dsq_vtime;
-				have = true;
+			if (bpf_ksym_exists(scx_bpf_dsq_peek)) {
+				cand = scx_bpf_dsq_peek(
+				    (u64)FLOW_DSQ_BATCH);
+				if (cand) {
+					vtime = cand->scx.dsq_vtime;
+					have = true;
+				}
 			}
-		}
-		if (have)
-			flow_floor_advance(vtime);
-		if (scx_bpf_dsq_move_to_local(
-		    (u64)FLOW_DSQ_BATCH, 0)) {
-			__sync_fetch_and_add(
-			    &flow_stats.deficit_serves, 1);
-			/* Batch runs restore the default hint. */
-			flow_cpuperf_set(cpu,
-			    (u32)FLOW_TIER_BATCH);
-			return;
+			if (have)
+				flow_floor_advance(vtime);
+			/* Move is safe, head allows this cpu. */
+			if (scx_bpf_dsq_move_to_local(
+			    (u64)FLOW_DSQ_BATCH, 0)) {
+				__sync_fetch_and_add(
+				    &flow_stats.deficit_serves, 1);
+				/* Batch runs restore default hint. */
+				flow_cpuperf_set(cpu,
+				    (u32)FLOW_TIER_BATCH);
+				return;
+			}
 		}
 	}
 	/* Parked tasks move when the mask allows. */
 	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0) {
-		if (!flow_park_ok(cpu, (u64)FLOW_DSQ_PARK)) {
+		if (!flow_head_ok(cpu, (u64)FLOW_DSQ_PARK)) {
 			/* Blocked park keeps the local hint. */
 			if (tier0_wait)
 				flow_cpuperf_set(cpu,
 				    (u32)FLOW_TIER_INTERACTIVE);
 			return;
 		}
+		/* Move is safe, head allows this cpu. */
 		scx_bpf_dsq_move_to_local((u64)FLOW_DSQ_PARK,
 		    0);
-		/* Park moves leave the hint alone. */
+		/* One try only, hint stays, no spin. */
 		return;
 	}
 	/* Interactive backlog asks for the max hint. */

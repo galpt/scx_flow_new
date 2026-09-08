@@ -98,6 +98,12 @@ machine.
   run on the idle CPU.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
+- Unknown frequency stays unknown. Hosts that report
+  zero show freq unknown on the dashboard and in the
+  start log, with no effect on placement.
+- Machines with one thread per core run plain per CPU
+  with no sibling step and no SMT badge. A single CPU
+  host runs with no peer scan through the same gates.
 - sched_ext cannot schedule RT and DL tasks. The
   kernel resolves them to the rt and dl classes before
   sched_ext, so this scheduler handles SCHED_NORMAL,
@@ -132,25 +138,29 @@ exactly once. A full slice burn with the task runnable
 moves down one tier. Three short blocks below one
 millisecond move up one tier. Enqueue keys the CPU off
 the selected CPU, then the first allowed CPU. Pinned
-tasks use their CPU or the park. Dispatch serves the
+tasks use their CPU or the park. Tasks that cannot
+move stay on the current CPU. Dispatch serves the
 batch DSQ through the eight to one deficit gate. Each
-pass moves at most one batch task plus park tasks whose
-head may run on the asking CPU. An idle kick is sent
-when the target has a valid CPU. A busy preemption is
-sent only for tier zero wakeups against tier one
-runners inside the per CPU gap.
+pass moves a batch task only when the head may run on
+the asking CPU, plus park tasks whose head may run on
+the asking CPU. Each pass tries once with no spin. An
+idle kick is sent only to a CPU in the task mask. A
+busy preemption is sent only for tier zero wakeups
+against tier one runners inside the per CPU gap and
+only to a CPU in the wakee mask.
 
 ## Cpu choice
 
 Cpu choice prefers an idle CPU in the task mask, then
 the prior CPU when allowed, then the current CPU when
 allowed, then the first allowed CPU. Pinned tasks stay
-in place. Idle choice is rechecked in the mask. A
-final hint without an allowed CPU is left for the
-kernel. Enqueue reuses the selected CPU when allowed,
-then the first allowed CPU, then the park. The path
-uses only public helpers with version gates where
-needed.
+in place. Tasks that cannot move stay on the current
+CPU. Idle choice is rechecked in the mask. A final
+hint without an allowed CPU falls back to the park in
+enqueue. Enqueue reuses the selected CPU when allowed,
+then the first allowed CPU, then the park. Tasks that
+cannot move use the local DSQ. The path uses only
+public helpers with version gates where needed.
 
 ## Stats
 

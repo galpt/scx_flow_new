@@ -5,6 +5,8 @@
  * Trimmed topology for the flow scheduler. Only the
  * static per cpu cards and the live frequency read are
  * needed. Placement needs no bitmaps or sibling tables.
+ * Frequency is display only and never shapes placement.
+ * Zero means unknown and keeps a plain fallback.
  */
 use log::warn;
 use scx_utils::Topology;
@@ -22,8 +24,10 @@ fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
 /*
  * Static per cpu cards seeded once at attach. Max
  * frequency, cache domain and thread role come from
- * the host topology. Failures yield an empty list so
- * the scheduler keeps running without cards.
+ * the host topology. Zero frequency means unknown and
+ * stays display only. Failures yield an empty list so
+ * the scheduler keeps running without cards. Single
+ * cpu and no sibling hosts keep plain per cpu cards.
  */
 pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
     let topo = match Topology::new() {
@@ -55,8 +59,34 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
 }
 
 /*
+ * One line topology summary for the start log. Counts
+ * cpus and notes sibling and frequency state in plain
+ * words. Unknown frequency stays unknown and never
+ * prints as zero. Missing cards stay unknown. Single
+ * cpu prints as one cpu with no peers. No sibling
+ * prints as no SMT with plain per cpu behavior.
+ */
+pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
+    if cards.is_empty() {
+        return "topology unknown, plain per cpu".to_string();
+    }
+    let count = cards.len();
+    let smt = cards.iter().any(|c| c.smt);
+    let freq = cards.iter().any(|c| c.freq_khz != 0);
+    let cpu_word = if count == 1 { "cpu" } else { "cpus" };
+    let smt_word = if smt { "SMT" } else { "no SMT" };
+    let freq_word = if freq { "freq known" } else { "freq unknown" };
+    format!(
+        "topology: {} {}, {}, {}",
+        count, cpu_word, smt_word, freq_word
+    )
+}
+
+/*
  * Live frequency of one cpu in kilohertz. Reads the
- * cpufreq file. Missing files yield zero.
+ * cpufreq file. Missing files yield zero for unknown.
+ * The value is display only and never feeds placement
+ * or division.
  */
 pub fn current_freq_khz(cpu: u32) -> u64 {
     std::fs::read_to_string(format!(

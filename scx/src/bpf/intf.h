@@ -305,7 +305,8 @@ static __always_inline bool flow_preempt_gap_ok(u64 now,
 /*
  * Cpu hint of one tier. Interactive asks for the
  * max level. Batch restores the default, so a
- * batch run never keeps the max hint.
+ * batch run never keeps the max hint. The hint is
+ * fixed per tier and never uses frequency.
  */
 static __always_inline u32 flow_cpuperf_tier(u32 tier)
 {
