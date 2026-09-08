@@ -1,65 +1,570 @@
+<!--
+  SPDX-License-Identifier: GPL-2.0
+  Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+  Flow web UI: a live view of the per-level means,
+  per-CPU running tasks and system counters, served
+  by src/webui.rs over loopback port 50005 (or the
+  unix-socket fallback). Offline-first: no external
+  fonts or libraries.
+-->
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>flow stats</title>
-<style>
-body{font-family:system-ui,sans-serif;margin:16px;background:#0a0a0a;color:#eee}
-.card{background:#111;border:1px solid #222;border-radius:8px;padding:12px;margin-bottom:12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
-.cell{background:#181818;border:1px solid #222;border-radius:6px;padding:8px;font-size:12px}
-.mono{font-family:monospace}
-h1{font-size:18px;margin:0 0 12px 0}
-h2{font-size:14px;margin:0 0 8px 0;color:#aaa}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0" />
+  <title>scx_flow stats</title>
+  <style>
+    :root {
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --elevated: #111111;
+      --border: #1a1a1a;
+      --border-hover: #333333;
+      --text-primary: #ededed;
+      --text-secondary: #888888;
+      --text-muted: #6a6a6a;
+      --accent: #3f83f8;
+      --success: #31c48d;
+      --warning: #f5a623;
+      --error: #ee0000;
+      --font-sans: system-ui, -apple-system,
+        "Segoe UI", sans-serif;
+      --font-mono: ui-monospace, "Cascadia Mono",
+        "SF Mono", Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    *, *::before, *::after {
+      transition: none !important;
+      animation: none !important;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      -webkit-font-smoothing: antialiased;
+      padding: 16px;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    @media (min-width: 640px) {
+      body { padding: 24px; }
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      min-width: 0;
+      overflow: hidden;
+    }
+    .stat-value {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-feature-settings: "tnum";
+    }
+    /* Per-CPU card grid. Dense chips in a wrapping
+     * grid with a bounded height and an internal
+     * scroll, so a many-core machine never
+     * stretches the page. */
+    .core-grid {
+      display: grid;
+      grid-template-columns:
+        repeat(auto-fill, minmax(132px, 1fr));
+      gap: 6px;
+      margin-bottom: 16px;
+      max-height: 52vh;
+      overflow-y: auto;
+      padding-right: 4px;
+      scrollbar-width: thin;
+    }
+    .core-card { padding: 8px; font-size: 0.75rem; }
+    .core-card .core-id {
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .core-card .core-freq {
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+      margin-top: 1px;
+    }
+    .core-card .core-smt {
+      font-size: 0.625rem;
+      color: var(--warning);
+    }
+    .core-card .core-llc {
+      font-size: 0.625rem;
+      color: var(--text-muted);
+    }
+    .core-card .core-pid {
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 2px;
+    }
+    /* Level badge on each CPU card. The color
+     * names the running level, idle stays muted. */
+    .lvl {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 1px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border-hover);
+      font-family: var(--font-mono);
+      font-size: 0.6875rem;
+    }
+    .lvl-idle { color: var(--text-muted); }
+    .lvl-0 {
+      color: var(--success);
+      border-color: var(--success);
+    }
+    .lvl-1 {
+      color: var(--warning);
+      border-color: var(--warning);
+    }
+    .lvl-2 {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    /* Per-level rows. One row per level with a
+     * bar scaled to the largest live mean. */
+    .level-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .level-row:last-child { margin-bottom: 0; }
+    .level-label {
+      width: 28px;
+      flex: none;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    .level-track {
+      flex: 1;
+      min-width: 0;
+      height: 8px;
+      background: var(--elevated);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .level-fill { height: 100%; border-radius: 999px; }
+    .level-fill-0 { background: var(--success); }
+    .level-fill-1 { background: var(--warning); }
+    .level-fill-2 { background: var(--accent); }
+    .level-meta {
+      flex: none;
+      min-width: 200px;
+      text-align: right;
+      font-family: var(--font-mono);
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+    }
+    .level-meta .level-mean {
+      color: var(--text-primary);
+    }
+    /* Summary card */
+    .summary-tldr {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--success);
+      line-height: 1.45;
+      margin-bottom: 8px;
+    }
+    .summary-explanation {
+      font-size: 0.8125rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+    .section-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .subsection-label {
+      font-size: 0.6875rem;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+    /* System stats grid */
+    .sys-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      font-size: 0.8125rem;
+    }
+    @media (min-width: 640px) {
+      .sys-grid { grid-template-columns: repeat(4, 1fr); }
+    }
+    @media (max-width: 640px) {
+      body { padding: 8px; }
+      .card { padding: 10px; }
+      .stat-value {
+        font-size: 0.875rem !important;
+        word-break: break-all;
+      }
+      .core-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+      }
+      .level-meta { min-width: 0; }
+    }
+  </style>
 </head>
 <body>
-<h1>flow scheduler</h1>
-<div class="card">
-<h2>Summary</h2>
-<div id="summary" class="mono">waiting for data</div>
-</div>
-<div class="card">
-<h2>Levels live means</h2>
-<div id="levels" class="mono">waiting for data</div>
-</div>
-<div class="card">
-<h2>Per cpu</h2>
-<div id="cpus" class="grid"></div>
-</div>
-<script>
-async function tick(){
-  try{
-    const r=await fetch("/api/stats",{cache:"no-store"});
-    const j=await r.json();
-    const s=j.stats||{};
-    const el=document.getElementById("summary");
-    el.textContent="run "+(s.on_cpu||0)+" runtime "+(s.total_runtime||0)
-      +" l0 "+(s.l0_placements||0)+" l1 "+(s.l1_placements||0)
-      +" l2 "+(s.l2_placements||0)+" demote "+(s.demotions||0)
-      +" steal "+(s.steals||0)+" disp "+(s.dispatches||0);
-    const lv=document.getElementById("levels");
-    const m=j.mean_ns||[];
-    lv.textContent="live mean ns ["+m.join(", ")+"]";
-    const box=document.getElementById("cpus");
-    box.innerHTML="";
-    const pcs=j.per_cpu||[];
-    for(const c of pcs){
-      const d=document.createElement("div");
-      d.className="cell";
-      const lvl=(c.running_level==null||c.running_level<0)?"idle":("L"+c.running_level);
-      d.textContent="cpu "+c.id+" "+lvl+" pid "+(c.running_pid||0)
-        +" "+(c.freq_khz||0)+"kHz";
-      box.appendChild(d);
+  <div style="max-width:1152px;margin:auto">
+
+    <!-- Header -->
+    <header class="card" style="margin-bottom:16px;display:flex;
+      align-items:center;justify-content:space-between;
+      gap:12px;">
+      <div style="min-width:0;overflow:hidden">
+        <h1 style="font-size:1.25rem;font-weight:700">
+          scx_flow stats
+        </h1>
+        <p style="font-size:0.8125rem;
+          color:var(--text-secondary);margin-top:2px">
+          three feedback levels, live means, placement,
+          demotion and stealing
+        </p>
+      </div>
+      <div id="status-badge" style="font-size:0.75rem;
+        padding:3px 10px;border-radius:999px;
+        border:1px solid var(--success);
+        color:var(--success);
+        font-family:var(--font-mono);white-space:nowrap">
+        ● running
+      </div>
+    </header>
+
+    <!-- Levels -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Levels</p>
+      <div id="levels"></div>
+    </div>
+
+    <!-- Per-CPU cards -->
+    <div id="core-cards" class="core-grid"></div>
+
+    <!-- Summary -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Summary</p>
+      <p class="subsection-label">TL;DR</p>
+      <p class="summary-tldr" id="summary-tldr">
+        Loading...
+      </p>
+      <p class="subsection-label">Explanation</p>
+      <p class="summary-explanation"
+        id="summary-explanation"></p>
+    </div>
+
+    <!-- System stats -->
+    <div class="card">
+      <p class="section-label">System</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">
+          On CPU:</span>
+          <span class="stat-value" id="on-cpu">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Uptime:</span>
+          <span class="stat-value" id="uptime">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Runtime:</span>
+          <span class="stat-value" id="runtime">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          L0 placements:</span>
+          <span class="stat-value" id="l0-place">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          L1 placements:</span>
+          <span class="stat-value" id="l1-place">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          L2 placements:</span>
+          <span class="stat-value" id="l2-place">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Demotions:</span>
+          <span class="stat-value" id="demotions">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Steals:</span>
+          <span class="stat-value" id="steals">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Dispatches:</span>
+          <span class="stat-value" id="dispatches">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          No task state:</span>
+          <span class="stat-value" id="no-tctx">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection status -->
+    <div style="text-align:center;margin-top:16px">
+      <p style="font-size:0.75rem;color:var(--text-muted)"
+        id="conn-status">Loading...</p>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+
+    function clamp(v) { return v < 0 ? 0 : v; }
+
+    // Compact counter form, same shape as the
+    // system table values.
+    function fmt(n) {
+      n = clamp(n);
+      if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
+      if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toLocaleString();
     }
-  }catch(e){
-    const el=document.getElementById("summary");
-    if(el)el.textContent="waiting for data";
-  }
-}
-setInterval(tick,1000);
-tick();
-</script>
+
+    // Nanoseconds as a wall-clock duration for the
+    // uptime and runtime gauges.
+    function fmtRuntime(ns) {
+      ns = clamp(ns);
+      var sec = ns / 1e9;
+      if (sec < 60) return sec.toFixed(1) + ' sec';
+      var min = sec / 60;
+      if (min < 60) return min.toFixed(1) + ' min';
+      var hr = min / 60;
+      if (hr < 24) return hr.toFixed(1) + ' hr';
+      var day = hr / 24;
+      return day.toFixed(1) + ' days';
+    }
+
+    // Live mean quanta. Nanoseconds below a
+    // microsecond stay in ns, below a millisecond
+    // show us, runs above show ms.
+    function fmtMean(ns) {
+      ns = clamp(ns);
+      if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
+      if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
+      return Math.round(ns) + ' ns';
+    }
+
+    // One row per level: a badge, a bar scaled to
+    // the largest live mean, and the mean plus
+    // the queued depth.
+    function renderLevels(meanNs, depth) {
+      var box = el('levels');
+      var means = [meanNs[0] || 0, meanNs[1] || 0,
+        meanNs[2] || 0];
+      var depths = [depth[0] || 0, depth[1] || 0,
+        depth[2] || 0];
+      var max = Math.max(means[0], means[1],
+        means[2], 1);
+      var names = ['L0', 'L1', 'L2'];
+      var html = '';
+      for (var i = 0; i < 3; i++) {
+        var pct = (means[i] / max * 100).toFixed(1);
+        html += '<div class="level-row">' +
+          '<div class="level-label">' + names[i] +
+          '</div>' +
+          '<div class="level-track">' +
+          '<div class="level-fill level-fill-' + i +
+          '" style="width:' + pct + '%"></div>' +
+          '</div>' +
+          '<div class="level-meta">' +
+          '<span class="level-mean">' +
+          fmtMean(means[i]) + '</span>' +
+          ' queued ' + fmt(depths[i]) +
+          '</div>' +
+          '</div>';
+      }
+      box.innerHTML = html;
+    }
+
+    // Per-CPU cards with a color badge for the
+    // running level and the running pid.
+    function renderCoreCards(data) {
+      var container = el('core-cards');
+      var perCpu = data.per_cpu || [];
+      if (!perCpu.length) {
+        container.innerHTML = '<div class="card" ' +
+          'style="grid-column:1/-1;text-align:center;' +
+          'color:var(--text-muted)">' +
+          'No CPU data yet</div>';
+        return;
+      }
+      container.innerHTML = perCpu.map(function(cpu) {
+        var curMhz = Math.round(
+          (cpu.cur_freq_khz || 0) / 1000);
+        var maxMhz = Math.round(
+          (cpu.freq_khz || 0) / 1000);
+        var freqLabel = curMhz > 0
+          ? curMhz + ' of ' + maxMhz + ' MHz'
+          : maxMhz + ' MHz';
+        var smtLabel = cpu.smt
+          ? ' <span class="core-smt">SMT</span>'
+          : '';
+        var lvl = cpu.running_level;
+        var idle = (lvl === null || lvl === undefined ||
+          lvl < 0 || lvl > 2);
+        var badge = idle
+          ? '<span class="lvl lvl-idle">idle</span>'
+          : '<span class="lvl lvl-' + lvl + '">L' +
+            lvl + '</span>';
+        var pid = cpu.running_pid || 0;
+        var pidLabel = idle
+          ? '<div class="core-pid">pid -</div>'
+          : '<div class="core-pid">pid ' + pid +
+            '</div>';
+        return '<div class="card core-card">' +
+          '<div class="core-id">CPU ' + cpu.id +
+          smtLabel + '</div>' +
+          '<div class="core-freq">' + freqLabel +
+          '</div>' +
+          '<div class="core-llc">LLC ' +
+          (cpu.llc_id || 0) + '</div>' +
+          '<div>' + badge + '</div>' +
+          pidLabel +
+          '</div>';
+      }).join('');
+    }
+
+    // Summary prose, built from the live gauges.
+    // The tldr names the running count and the
+    // busiest insert level. The explanation walks
+    // the means, the depths, the placement split,
+    // and the steal share of dispatches.
+    function buildSummary(s, meanNs, depth) {
+      var onCpu = s.on_cpu || 0;
+      var l0 = s.l0_placements || 0;
+      var l1 = s.l1_placements || 0;
+      var l2 = s.l2_placements || 0;
+      var placed = l0 + l1 + l2;
+      var demote = s.demotions || 0;
+      var steals = s.steals || 0;
+      var disp = s.dispatches || 0;
+      var means = [meanNs[0] || 0, meanNs[1] || 0,
+        meanNs[2] || 0];
+      var depths = [depth[0] || 0, depth[1] || 0,
+        depth[2] || 0];
+      var tldr, explanation;
+      if (placed === 0) {
+        tldr = 'Flow is idle and waiting for work.';
+        explanation = 'As you can see from the ' +
+          'placement gauges, no tasks have been ' +
+          'placed yet. The live means show ' +
+          fmtMean(means[0]) + ', ' +
+          fmtMean(means[1]) + ' and ' +
+          fmtMean(means[2]) + ' for L0, L1 and ' +
+          'L2, with ' + fmt(depths[0]) + ', ' +
+          fmt(depths[1]) + ' and ' +
+          fmt(depths[2]) + ' tasks queued.';
+      } else if (onCpu > 0) {
+        var top = 'L0';
+        if (l1 > l0 && l1 >= l2) top = 'L1';
+        if (l2 > l0 && l2 > l1) top = 'L2';
+        tldr = 'Flow is running ' + fmt(onCpu) +
+          ' tasks, with inserts favoring ' + top +
+          '.';
+        explanation = 'As you can see from the ' +
+          'placement gauges, inserts split ' +
+          fmt(l0) + ' / ' + fmt(l1) + ' / ' +
+          fmt(l2) + ' across L0, L1 and L2, and ' +
+          fmt(demote) + ' slices moved down one ' +
+          'level. The live means show ' +
+          fmtMean(means[0]) + ', ' +
+          fmtMean(means[1]) + ' and ' +
+          fmtMean(means[2]) + ', with ' +
+          fmt(depths[0]) + ', ' +
+          fmt(depths[1]) + ' and ' +
+          fmt(depths[2]) + ' tasks queued. ' +
+          'Steals cover ' + fmt(steals) + ' of ' +
+          fmt(disp) + ' dispatches.';
+      } else {
+        tldr = 'Flow placed ' + fmt(placed) +
+          ' tasks and is now idle.';
+        explanation = 'As you can see from the ' +
+          'placement gauges, inserts split ' +
+          fmt(l0) + ' / ' + fmt(l1) + ' / ' +
+          fmt(l2) + ' across L0, L1 and L2, with ' +
+          fmt(demote) + ' demotions. The live ' +
+          'means show ' + fmtMean(means[0]) +
+          ', ' + fmtMean(means[1]) + ' and ' +
+          fmtMean(means[2]) + ', and steals ' +
+          'cover ' + fmt(steals) + ' of ' +
+          fmt(disp) + ' dispatches.';
+      }
+      return { tldr: tldr, explanation: explanation };
+    }
+
+    function updateUI(data) {
+      el('status-badge').textContent = '● running';
+      el('status-badge').style.borderColor =
+        'var(--success)';
+      el('status-badge').style.color = 'var(--success)';
+
+      var s = data.stats || {};
+      var meanNs = data.mean_ns || [];
+      var depth = data.depth || [];
+      renderLevels(meanNs, depth);
+
+      var summary = buildSummary(s, meanNs, depth);
+      el('summary-tldr').textContent = summary.tldr;
+      el('summary-explanation').textContent =
+        summary.explanation;
+
+      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('uptime').textContent =
+        fmtRuntime(s.uptime_ns || 0);
+      el('runtime').textContent =
+        fmtRuntime(s.total_runtime || 0);
+      el('l0-place').textContent =
+        fmt(s.l0_placements || 0);
+      el('l1-place').textContent =
+        fmt(s.l1_placements || 0);
+      el('l2-place').textContent =
+        fmt(s.l2_placements || 0);
+      el('demotions').textContent =
+        fmt(s.demotions || 0);
+      el('steals').textContent = fmt(s.steals || 0);
+      el('dispatches').textContent =
+        fmt(s.dispatches || 0);
+      el('no-tctx').textContent =
+        fmt(s.enq_no_tctx || 0);
+
+      renderCoreCards(data);
+    }
+
+    function pollStats() {
+      fetch('/api/stats', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          updateUI(data);
+          el('conn-status').textContent = 'Live at ' +
+            new Date().toLocaleTimeString();
+        })
+        .catch(function() {
+          el('status-badge').textContent =
+            '● disconnected';
+          el('status-badge').style.borderColor =
+            'var(--error)';
+          el('status-badge').style.color = 'var(--error)';
+          el('conn-status').textContent =
+            'Disconnected, retrying...';
+        });
+    }
+
+    pollStats();
+    setInterval(pollStats, 1000);
+  </script>
 </body>
 </html>

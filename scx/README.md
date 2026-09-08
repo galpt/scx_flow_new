@@ -15,16 +15,19 @@ It is deliberately knob-free.
 Tasks are placed into three per-CPU levels, L0 for
 short bursts, L1 for middle bursts and L2 for long
 bursts. Each level keeps a live mean quantum from the
-estimated remainders of its queued tasks, seeded at 1,
-2 and 8 ms and clamped to 500 us and 32 ms. Enqueue
-picks the first level whose mean covers the estimate.
-Unknown estimates start at the top and large estimates
-fall to the bottom. Queues run first in first out.
-Dispatch drains the local queues top down with no
-level cap inside a batch of 32. A task that burns its
-full slice moves down one level. There is no move up
-and no wakeup preemption. Idle CPUs pull remote work
-level major with affinity-checked steals.
+estimated remainders of its unfinished tasks, seeded
+at 1, 2 and 8 ms and clamped to 500 us and 32 ms.
+Enqueue picks the first level whose mean covers the
+estimate for new arrivals. Unknown estimates start at
+the top and large estimates fall to the bottom.
+A runnable requeue keeps its mean entry. Queues run
+first in first out. Dispatch drains the local queues
+top down with a bottom guard inside a batch of 32.
+Every sixteenth move takes the lowest nonempty level.
+A task that burns its full slice moves down one level.
+There is no move up and no wakeup preemption. Idle
+CPUs pull remote work level major with
+affinity-checked steals.
 
 The level math and the pick rule live in
 `src/bpf/intf.h`, insert, accounting, dispatch and the
@@ -112,7 +115,7 @@ middle work. Level two holds long work.
 ## Quanta
 
 Level means seed at one, two and eight milliseconds.
-Each level keeps a live mean from queued estimates.
+Each level keeps a live mean from unfinished estimates.
 The mean is the sum over the count clamped to five
 hundred microseconds and thirty two milliseconds.
 Updates are incremental with saturation. An empty
@@ -122,22 +125,27 @@ the same quantum range.
 
 ## Insert and dispatch
 
-Enqueue picks a level from the estimate. Unknown goes
-to the top. Known uses the first level with a live
-mean at or above the estimate. Large falls to the
-bottom. Inserts use the tail, so each queue stays
-first in first out. Each insert adds the clamped
-estimate to the level sum. Each consume removes it
-with compare and swap and saturation. A demote moves
-the entry between levels. Dispatch drains the local
-queues top down. Each level drains fully before the
-next one with no level cap. Steal scans level major
-with sixty four checks in total. The top uses twenty
-two checks and the others use twenty one each. Steal
-moves a task only when the head may run on the
-stealing cpu. Each pass moves up to thirty two tasks
-in batch. A consumed slice moves the task down one
-level. No kick is sent on wakeup.
+Enqueue picks a level from the estimate for new
+arrivals. Unknown goes to the top. Known uses the
+first level with a live mean at or above the estimate.
+Large falls to the bottom. A runnable requeue keeps
+its mean entry and refreshes the sum only, so no
+double count occurs. Inserts use the tail, so each
+queue stays first in first out. Each new insert adds
+the clamped estimate to the level sum. Running keeps
+the entry. Blocking releases it with compare and swap
+and saturation. A demote subtracts the old level and
+adds the new one. Enqueue keys the queue off the
+selected cpu, then the first allowed cpu. Pinned tasks
+use their cpu or the global park. Dispatch drains the
+local queues top down with a bottom guard. Every
+sixteenth move takes the lowest nonempty level. Steal
+scans level major with sixty four checks in total. The
+top uses twenty two checks and the others use twenty
+one each. Steal moves a task only when the head may
+run on the stealing cpu. Each pass moves up to thirty
+two tasks in batch. A consumed slice moves the task
+down one level. No kick is sent on wakeup.
 
 ## Cpu choice
 
@@ -146,8 +154,10 @@ the prior cpu when allowed, then the current cpu when
 allowed, then the first allowed cpu. Pinned tasks stay
 in place. Idle choice is rechecked in the mask. A
 final hint without an allowed cpu is left for the
-kernel. The path uses only public helpers with version
-gates where needed.
+kernel. Enqueue reuses the selected cpu when allowed,
+then the first allowed cpu, then the global park. The
+path uses only public helpers with version gates where
+needed.
 
 ## Stats
 

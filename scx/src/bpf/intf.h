@@ -63,6 +63,9 @@ enum flow_consts {
 	FLOW_STEAL_L2 = 21ULL,
 	/* Bound of the moved tasks in one dispatch pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
+	/* Bottom gets a slot every sixteen moves. */
+	/* Paper order is batch static, online arrivals need guard. */
+	FLOW_GUARANTEE_EVERY = 16ULL,
 	/* Watchdog limit in milliseconds. */
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 	/* Compile time bound of supported cpus. */

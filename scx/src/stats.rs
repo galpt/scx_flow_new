@@ -81,6 +81,9 @@ pub struct WebMetrics {
     pub per_cpu: Vec<PerCpuMetrics>,
     /* Live per level mean quanta in nanoseconds. */
     pub mean_ns: Vec<u64>,
+    /* Queued tasks per level. Index matches means. */
+    #[serde(default)]
+    pub depth: Vec<u64>,
 }
 
 impl Metrics {

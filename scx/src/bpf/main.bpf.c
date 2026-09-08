@@ -319,13 +319,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
     u64 enq_flags)
 {
 	struct flow_task_ctx *tctx;
+	s32 sel;
 	s32 cpu;
 	u32 level;
 	u64 dsq;
 	u64 slice;
+	u64 est;
 
 	tctx = flow_get(p);
-	cpu = scx_bpf_task_cpu(p);
+	sel = p->scx.selected_cpu;
 	if (!tctx) {
 		u64 live;
 
@@ -336,22 +338,78 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, live, 0);
 		return;
 	}
+	/* Runnable requeue keeps the mean entry, refresh only. */
+	if (tctx->acct_valid) {
+		level = tctx->level;
+		if (!flow_level_ok(level))
+			level = 0;
+		est = flow_clamp_est(tctx->est_ns);
+		if (flow_level_ok(tctx->acct_level)) {
+			if (tctx->acct_level != level) {
+				/* Level changed, shift the entry. */
+				flow_level_remove(tctx->acct_level,
+				    tctx->acct_est);
+				flow_level_add(level, est);
+				tctx->acct_level = level;
+				tctx->acct_est = est;
+			} else if (tctx->acct_est != est) {
+				/* Same level, refresh the sum. */
+				/* Remove then add keeps the count. */
+				flow_level_remove(tctx->acct_level,
+				    tctx->acct_est);
+				flow_level_add(level, est);
+				tctx->acct_est = est;
+			}
+		} else {
+			/* Bad stored level, add a fresh entry. */
+			flow_level_add(level, est);
+			tctx->acct_level = level;
+			tctx->acct_est = est;
+			tctx->acct_valid = 1;
+		}
+		tctx->level = level;
+		/* Key the target off the selected cpu. */
+		/* Fallback is first allowed, then global park. */
+		if (flow_cpu_ok(p, sel)) {
+			cpu = sel;
+		} else {
+			cpu = (s32)bpf_cpumask_first(p->cpus_ptr);
+			if (!flow_cpu_ok(p, cpu)) {
+				u64 live;
+
+				/* No allowed cpu, use global queue. */
+				live = flow_quantum_for_level(level,
+				    flow_mean_ns);
+				live = flow_clamp_quantum(live);
+				tctx->slice_ns = live;
+				scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL,
+				    live, 0);
+				return;
+			}
+		}
+		/* Cpu is checked above, cast is safe. */
+		dsq = flow_dsq_id((u32)cpu, level);
+		slice = flow_quantum_for_level(level, flow_mean_ns);
+		slice = flow_clamp_quantum(slice);
+		tctx->slice_ns = slice;
+		/* Plain tail insert. No head insert is used. */
+		scx_bpf_dsq_insert(p, dsq, slice, 0);
+		return;
+	}
 	/* Pick a level from the estimate, top on unknown. */
 	level = flow_pick_level(tctx->est_ns, flow_mean_ns);
 	tctx->level = level;
-	/* Keep the target inside the task mask. */
-	if (!flow_cpu_ok(p, cpu)) {
+	/* Key the target off the selected cpu. */
+	/* Fallback is first allowed, then global park. */
+	if (flow_cpu_ok(p, sel)) {
+		cpu = sel;
+	} else {
 		cpu = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (!flow_cpu_ok(p, cpu)) {
 			u64 live;
 
 			/* No allowed cpu found, use the global */
 			/* queue, kernel places the task safely. */
-			if (tctx->acct_valid) {
-				flow_level_remove(tctx->acct_level,
-				    tctx->acct_est);
-				tctx->acct_valid = 0;
-			}
 			live = flow_quantum_for_level(0,
 			    flow_mean_ns);
 			live = flow_clamp_quantum(live);
@@ -359,12 +417,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    live, 0);
 			return;
 		}
-	}
-	/* Replace a stale entry before the new insert. */
-	if (tctx->acct_valid) {
-		flow_level_remove(tctx->acct_level,
-		    tctx->acct_est);
-		tctx->acct_valid = 0;
 	}
 	/* Cpu is checked above, cast is safe. */
 	dsq = flow_dsq_id((u32)cpu, level);
@@ -386,7 +438,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	u32 n = 0;
 	u32 moved = 0;
 	struct flow_cpu_state *st;
-	s32 level;
 	s32 k;
 	s32 off;
 
@@ -400,30 +451,47 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (n > 1024)
 			n = 1024;
 	}
-	/* Serve the local queues top down in batch. */
-	/* Each level drains fully before the next one. */
-	bpf_for(level, 0, 3) {
+	/* Serve local queues, bottom gets every sixteenth move. */
+	/* Paper order is batch static, online arrivals need guard. */
+	/* Normal moves drain top down, guard moves drain bottom up. */
+	bpf_for(k, 0, 32) {
+		u64 q0;
+		u64 q1;
+		u64 q2;
+		s32 lvl;
+		u64 local;
+
 		__sink(moved);
 		if (moved >= 32)
 			break;
-		bpf_for(k, 0, 32) {
-			u64 local;
-
-			__sink(moved);
-			if (moved >= 32)
-				break;
-			local = flow_dsq_id((u32)cpu,
-			    (u32)level);
-			if (!scx_bpf_dsq_nr_queued(local))
-				break;
-			if (!scx_bpf_dsq_move_to_local(local,
-			    0))
-				break;
-			__sync_fetch_and_add(
-			    &flow_stats.dispatches, 1);
-			moved++;
-			__sink(moved);
+		q0 = scx_bpf_dsq_nr_queued(flow_dsq_id((u32)cpu, 0));
+		q1 = scx_bpf_dsq_nr_queued(flow_dsq_id((u32)cpu, 1));
+		q2 = scx_bpf_dsq_nr_queued(flow_dsq_id((u32)cpu, 2));
+		if (!q0 && !q1 && !q2)
+			break;
+		/* Every sixteenth move takes lowest nonempty level. */
+		if ((u64)(moved + 1) %
+		    (u64)FLOW_GUARANTEE_EVERY == 0) {
+			if (q2)
+				lvl = 2;
+			else if (q1)
+				lvl = 1;
+			else
+				lvl = 0;
+		} else {
+			if (q0)
+				lvl = 0;
+			else if (q1)
+				lvl = 1;
+			else
+				lvl = 2;
 		}
+		local = flow_dsq_id((u32)cpu, (u32)lvl);
+		if (!scx_bpf_dsq_move_to_local(local, 0))
+			break;
+		__sync_fetch_and_add(&flow_stats.dispatches, 1);
+		moved++;
+		__sink(moved);
 	}
 	if (moved >= 32)
 		goto out;
@@ -535,12 +603,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	cpu = scx_bpf_task_cpu(p);
 	if (tctx)
 		tctx->run_at = flow_now();
-	/* Consume the queued entry on run. */
-	if (tctx && tctx->acct_valid) {
-		flow_level_remove(tctx->acct_level,
-		    tctx->acct_est);
-		tctx->acct_valid = 0;
-	}
+	/* Keep the mean entry while running. */
+	/* Paper ready set covers all unfinished tasks. */
 	/* Negative ids fall back to zero, use needs a check. */
 	st = flow_cpu((u32)(cpu < 0 ? 0 : cpu));
 	if (st && cpu >= 0) {
@@ -551,9 +615,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 }
 
 /*
- * Drop the queued entry when the task leaves a queue
+ * Drop the mean entry when the task leaves a queue
  * without running. The valid flag keeps the release
- * idempotent with the consume path.
+ * idempotent with the stopping path.
  */
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
     u64 deq_flags)
@@ -587,10 +651,14 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	__sync_fetch_and_sub(&flow_stats.on_cpu, 1);
 	tctx->run_at = 0;
+	/* Blocked tasks leave the paper ready set at once. */
+	if (!runnable) {
+		flow_release(tctx);
+		return;
+	}
 	/* Demote one level on a consumed slice. No move up. */
-	/* The queued entry was consumed at running time, */
-	/* so no mean update happens here. */
-	if (runnable && delta >= tctx->slice_ns &&
+	/* The move shifts the mean entry between levels. */
+	if (delta >= tctx->slice_ns &&
 	    tctx->slice_ns > 0) {
 		u32 old = tctx->level;
 		u32 next = flow_next_level(old);
@@ -598,6 +666,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		if (next != old) {
 			u64 live;
 
+			if (tctx->acct_valid) {
+				flow_level_remove(
+				    tctx->acct_level,
+				    tctx->acct_est);
+				tctx->acct_valid = 0;
+			}
+			flow_level_add(next, est);
+			tctx->acct_level = next;
+			tctx->acct_est = est;
+			tctx->acct_valid = 1;
 			tctx->level = next;
 			__sync_fetch_and_add(
 			    &flow_stats.demotions, 1);

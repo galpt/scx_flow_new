@@ -41,6 +41,9 @@ pub const STEAL_L1: u32 = 21;
 pub const STEAL_L2: u32 = 21;
 /* Bound of the moved tasks in one dispatch pass. */
 pub const DISPATCH_BATCH: u32 = 32;
+/* Bottom gets a slot every sixteen moves. */
+/* Paper order is batch static, online arrivals need guard. */
+pub const GUARANTEE_EVERY: u32 = 16;
 
 /*
  * Queue id of a cpu and level pair. The layout is base
@@ -286,6 +289,88 @@ pub fn top_with_work(queued: [bool; 3]) -> Option<u32> {
         return Some(2);
     }
     None
+}
+
+/*
+ * Bottom level with queued work. Empty lower levels fall
+ * back upward. Empty input yields no level. The result
+ * models the guard slot that favors the bottom.
+ */
+pub fn bottom_with_work(queued: [bool; 3]) -> Option<u32> {
+    if queued[2] {
+        return Some(2);
+    }
+    if queued[1] {
+        return Some(1);
+    }
+    if queued[0] {
+        return Some(0);
+    }
+    None
+}
+
+/*
+ * Dispatch choice with bottom guard. Normal moves drain
+ * top down. Every sixteenth move drains bottom up, so the
+ * bottom level keeps a slot under online arrivals. Paper
+ * order is batch static, online arrivals need guard. The
+ * sequence counts moves already done in the batch.
+ */
+pub fn dispatch_pick(queued: [bool; 3], moved: u32) -> Option<u32> {
+    if !queued[0] && !queued[1] && !queued[2] {
+        return None;
+    }
+    if (moved as u64 + 1) % GUARANTEE_EVERY as u64 == 0 {
+        return bottom_with_work(queued);
+    }
+    top_with_work(queued)
+}
+
+/*
+ * Target cpu from the selected cpu. A valid allowed
+ * selected cpu wins. Otherwise the first allowed cpu
+ * wins. No allowed cpu yields no target for global park.
+ * Pinned tasks resolve to the single allowed cpu here.
+ */
+pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
+    if selected >= 0 {
+        if let Some(&ok) = allowed.get(selected as usize) {
+            if ok {
+                return Some(selected as u32);
+            }
+        }
+    }
+    for (i, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(i as u32);
+        }
+    }
+    None
+}
+
+/*
+ * Refresh one estimate in place. The count stays fixed,
+ * the sum swaps the old estimate for the new one. Used
+ * when a runnable requeue keeps the mean entry, so no
+ * double count occurs.
+ */
+pub fn refresh_estimate_in_place(
+    levels: &mut [LevelState; 3],
+    level: u32,
+    old_est: u64,
+    new_est: u64,
+) {
+    if !level_ok(level) {
+        return;
+    }
+    let o = clamp_est(old_est);
+    let n = clamp_est(new_est);
+    if o == n {
+        return;
+    }
+    let st = &mut levels[level as usize];
+    st.sum_rem = st.sum_rem.saturating_sub(o).saturating_add(n);
+    st.recompute(level);
 }
 
 /* Decode the owning cpu from a queue id. */
@@ -599,5 +684,133 @@ mod tests {
         assert_eq!(dsq_level(0), 0);
         assert_eq!(dsq_cpu(DSQ_BASE - 1), 0);
         assert_eq!(dsq_level(DSQ_BASE - 1), 0);
+    }
+
+    #[test]
+    fn paper_running_keeps_membership() {
+        let mut levels: [LevelState; 3] =
+            [LevelState::new(0), LevelState::new(1), LevelState::new(2)];
+        levels[0].add(0, 1_000_000);
+        levels[1].add(1, 8_000_000);
+        let n0 = levels[0].nr;
+        let s0 = levels[0].sum_rem;
+        let q0 = levels[0].quantum;
+        let n1 = levels[1].nr;
+        let s1 = levels[1].sum_rem;
+        assert_eq!(n0, 1);
+        assert_eq!(n1, 1);
+        assert_eq!(s0, 1_000_000);
+        assert_eq!(s1, 8_000_000);
+        assert_eq!(q0, 1_000_000);
+    }
+
+    #[test]
+    fn paper_block_releases_entry() {
+        let mut levels: [LevelState; 3] =
+            [LevelState::new(0), LevelState::new(1), LevelState::new(2)];
+        levels[0].add(0, 1_000_000);
+        assert_eq!(levels[0].nr, 1);
+        levels[0].remove(0, 1_000_000);
+        assert_eq!(levels[0].nr, 0);
+        assert_eq!(levels[0].sum_rem, 0);
+        assert_eq!(levels[0].quantum, 1_000_000);
+    }
+
+    #[test]
+    fn paper_demote_moves_entry() {
+        let mut levels: [LevelState; 3] =
+            [LevelState::new(0), LevelState::new(1), LevelState::new(2)];
+        levels[0].add(0, 1_000_000);
+        move_between_levels(&mut levels, 0, 1, 1_000_000, 2_000_000);
+        assert_eq!(levels[0].nr, 0);
+        assert_eq!(levels[0].sum_rem, 0);
+        assert_eq!(levels[1].nr, 1);
+        assert_eq!(levels[1].sum_rem, 2_000_000);
+        let total: u64 = levels[0].nr + levels[1].nr + levels[2].nr;
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn paper_enqueue_refresh_avoids_double() {
+        let mut levels: [LevelState; 3] =
+            [LevelState::new(0), LevelState::new(1), LevelState::new(2)];
+        levels[0].add(0, 1_000_000);
+        refresh_estimate_in_place(&mut levels, 0, 1_000_000, 2_000_000);
+        assert_eq!(levels[0].nr, 1);
+        assert_eq!(levels[0].sum_rem, 2_000_000);
+        assert_eq!(levels[0].quantum, 2_000_000);
+        refresh_estimate_in_place(&mut levels, 0, 2_000_000, 2_000_000);
+        assert_eq!(levels[0].nr, 1);
+        assert_eq!(levels[0].sum_rem, 2_000_000);
+    }
+
+    #[test]
+    fn paper_refresh_bad_level_is_noop() {
+        let mut levels: [LevelState; 3] =
+            [LevelState::new(0), LevelState::new(1), LevelState::new(2)];
+        levels[0].add(0, 1_000_000);
+        refresh_estimate_in_place(&mut levels, 9, 1_000_000, 2_000_000);
+        assert_eq!(levels[0].nr, 1);
+        assert_eq!(levels[0].sum_rem, 1_000_000);
+    }
+
+    #[test]
+    fn guard_every_is_sixteen() {
+        assert_eq!(GUARANTEE_EVERY, 16);
+    }
+
+    #[test]
+    fn guard_bottom_prefers_bottom() {
+        assert_eq!(bottom_with_work([true, true, true]), Some(2));
+        assert_eq!(bottom_with_work([true, true, false]), Some(1));
+        assert_eq!(bottom_with_work([true, false, false]), Some(0));
+        assert_eq!(bottom_with_work([false, true, true]), Some(2));
+        assert_eq!(bottom_with_work([false, false, false]), None);
+    }
+
+    #[test]
+    fn guard_sixteenth_takes_bottom() {
+        assert_eq!(dispatch_pick([true, true, true], 0), Some(0));
+        assert_eq!(dispatch_pick([true, true, true], 14), Some(0));
+        assert_eq!(dispatch_pick([true, true, true], 15), Some(2));
+        assert_eq!(dispatch_pick([true, true, true], 31), Some(2));
+        assert_eq!(dispatch_pick([true, true, true], 16), Some(0));
+    }
+
+    #[test]
+    fn guard_bottom_falls_back_upward() {
+        assert_eq!(dispatch_pick([true, true, false], 15), Some(1));
+        assert_eq!(dispatch_pick([true, false, false], 15), Some(0));
+        assert_eq!(dispatch_pick([false, false, false], 15), None);
+        assert_eq!(dispatch_pick([false, true, true], 0), Some(1));
+        assert_eq!(dispatch_pick([false, false, true], 0), Some(2));
+    }
+
+    #[test]
+    fn target_prefers_selected_when_allowed() {
+        assert_eq!(pick_target_cpu(2, &[true, true, true]), Some(2));
+        assert_eq!(pick_target_cpu(0, &[true, false]), Some(0));
+        assert_eq!(pick_target_cpu(1, &[false, true]), Some(1));
+    }
+
+    #[test]
+    fn target_falls_back_to_first_when_invalid() {
+        assert_eq!(pick_target_cpu(-1, &[false, true, true]), Some(1));
+        assert_eq!(pick_target_cpu(5, &[true, false]), Some(0));
+        assert_eq!(pick_target_cpu(1, &[true, false]), Some(0));
+        assert_eq!(pick_target_cpu(-1, &[]), None);
+    }
+
+    #[test]
+    fn target_none_when_no_allowed() {
+        assert_eq!(pick_target_cpu(0, &[false, false]), None);
+        assert_eq!(pick_target_cpu(-1, &[false]), None);
+    }
+
+    #[test]
+    fn target_pinned_resolves_to_single() {
+        assert_eq!(pick_target_cpu(2, &[false, false, true]), Some(2));
+        assert_eq!(pick_target_cpu(0, &[false, false, true]), Some(2));
+        assert_eq!(pick_target_cpu(-1, &[false, true, false]), Some(1));
     }
 }

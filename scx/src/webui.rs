@@ -62,6 +62,7 @@ fn merged(snap: &WebMetrics) -> Value {
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
         "mean_ns": jv(&snap.mean_ns),
+        "depth": jv(&snap.depth),
     })
 }
 
@@ -231,4 +232,29 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
         }
     }
     log::info!("web stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /* Dashboard keeps the old field names. */
+    #[test]
+    fn merged_keeps_compat_fields() {
+        let snap = WebMetrics::default();
+        let v = merged(&snap);
+        assert!(v.get("stats").is_some());
+        assert!(v.get("per_cpu").is_some());
+        assert!(v.get("mean_ns").is_some());
+        assert!(v.get("depth").is_some());
+    }
+
+    /* Old snapshots without depth still decode. */
+    #[test]
+    fn web_metrics_missing_depth_defaults() {
+        let mut v = jv(&WebMetrics::default());
+        v.as_object_mut().unwrap().remove("depth");
+        let m: WebMetrics = serde_json::from_value(v).unwrap();
+        assert!(m.depth.is_empty());
+    }
 }

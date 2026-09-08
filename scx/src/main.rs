@@ -219,6 +219,12 @@ impl<'a> Scheduler<'a> {
         bss.flow_mean_ns.to_vec()
     }
 
+    /* Read the queued depth per level from BPF memory. */
+    fn read_depths(&self) -> Vec<u64> {
+        let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
+        bss.flow_nr.to_vec()
+    }
+
     /*
      * Dashboard snapshot. Merges the static cards with
      * live state and live means. Gauges only, no deltas.
@@ -261,10 +267,12 @@ impl<'a> Scheduler<'a> {
         }
         let stats = self.get_metrics();
         let mean_ns = self.read_means();
+        let depth = self.read_depths();
         stats::WebMetrics {
             stats,
             per_cpu,
             mean_ns,
+            depth,
         }
     }
 

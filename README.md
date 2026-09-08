@@ -26,23 +26,29 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Three feedback levels per cpu. Queue ids use base `0x1000`
 plus cpu times three plus level. Level quanta seed at one,
 two and eight milliseconds. Each level keeps a live mean
-from queued estimates clamped to five hundred
+from unfinished estimates clamped to five hundred
 microseconds and thirty two milliseconds. Estimates clamp
 at one nanosecond to one second. Enqueue picks a level
-from the estimate. Unknown estimates go to the top. Known
-estimates use the first level with a live mean at or above
-the estimate. Large estimates fall to the bottom. Inserts
-use the tail. Dispatch drains the local queues top down.
-Each level drains fully before the next one with no level
-cap. A consumed slice moves down one level. There is no
-move up and no preempt kick. Steal scans level major with
-sixty four checks in total. The top uses twenty two checks
-and the others use twenty one each. Steal moves a task only
-when the head may run on the stealing cpu. Each pass moves
-up to thirty two tasks in batch. Counts use saturating
-means with compare and swap. Dispatches count local and
-remote moves. Steals count remote moves. The watchdog is
-thirty thousand milliseconds. Ops name is `flow`.
+from the estimate for new arrivals. Unknown estimates go
+to the top. Known estimates use the first level with
+a live mean at or above the estimate. Large estimates
+fall to the bottom. A runnable requeue keeps its entry
+and refreshes the sum only. Running keeps the entry.
+Blocking releases it. A demote moves the entry between
+levels. Enqueue keys the queue off the selected cpu,
+then the first allowed cpu, then the global park. Inserts
+use the tail. Dispatch drains the local queues top down
+with a bottom guard. Every sixteenth move takes the
+lowest nonempty level. A consumed slice moves down one
+level. There is no move up and no preempt kick. Steal
+scans level major with sixty four checks in total. The
+top uses twenty two checks and the others use twenty one
+each. Steal moves a task only when the head may run on
+the stealing cpu. Each pass moves up to thirty two tasks
+in batch. Counts use saturating means with compare and
+swap. Dispatches count local and remote moves. Steals
+count remote moves. The watchdog is thirty thousand
+milliseconds. Ops name is `flow`.
 
 ## Build
 
