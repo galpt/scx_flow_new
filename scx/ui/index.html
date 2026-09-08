@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>flow stats</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:16px;background:#0a0a0a;color:#eee}
+.card{background:#111;border:1px solid #222;border-radius:8px;padding:12px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.cell{background:#181818;border:1px solid #222;border-radius:6px;padding:8px;font-size:12px}
+.mono{font-family:monospace}
+h1{font-size:18px;margin:0 0 12px 0}
+h2{font-size:14px;margin:0 0 8px 0;color:#aaa}
+</style>
+</head>
+<body>
+<h1>flow scheduler</h1>
+<div class="card">
+<h2>Summary</h2>
+<div id="summary" class="mono">waiting for data</div>
+</div>
+<div class="card">
+<h2>Levels live means</h2>
+<div id="levels" class="mono">waiting for data</div>
+</div>
+<div class="card">
+<h2>Per cpu</h2>
+<div id="cpus" class="grid"></div>
+</div>
+<script>
+async function tick(){
+  try{
+    const r=await fetch("/api/stats",{cache:"no-store"});
+    const j=await r.json();
+    const s=j.stats||{};
+    const el=document.getElementById("summary");
+    el.textContent="run "+(s.on_cpu||0)+" runtime "+(s.total_runtime||0)
+      +" l0 "+(s.l0_placements||0)+" l1 "+(s.l1_placements||0)
+      +" l2 "+(s.l2_placements||0)+" demote "+(s.demotions||0)
+      +" steal "+(s.steals||0)+" disp "+(s.dispatches||0);
+    const lv=document.getElementById("levels");
+    const m=j.mean_ns||[];
+    lv.textContent="live mean ns ["+m.join(", ")+"]";
+    const box=document.getElementById("cpus");
+    box.innerHTML="";
+    const pcs=j.per_cpu||[];
+    for(const c of pcs){
+      const d=document.createElement("div");
+      d.className="cell";
+      const lvl=(c.running_level==null||c.running_level<0)?"idle":("L"+c.running_level);
+      d.textContent="cpu "+c.id+" "+lvl+" pid "+(c.running_pid||0)
+        +" "+(c.freq_khz||0)+"kHz";
+      box.appendChild(d);
+    }
+  }catch(e){
+    const el=document.getElementById("summary");
+    if(el)el.textContent="waiting for data";
+  }
+}
+setInterval(tick,1000);
+tick();
+</script>
+</body>
+</html>
