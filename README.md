@@ -5,6 +5,9 @@ installer in `tools` and this readme at the root. The layout
 matches an overlay build. The `scx` dir copies into a
 workspace at `scheds/experimental/scx_flow` and builds there.
 
+> [!NOTE]
+> The `main` branch can be unstable. Stable versions will use `archive/*` branch names.
+
 ## Layout
 
 - `scx/Cargo.toml` package `scx_flow` at `4.0.1`
