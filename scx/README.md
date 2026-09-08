@@ -85,7 +85,7 @@ Each CPU serves its mean. The seed is 8ms. The floor is
 500µs. The ceiling is 32ms. Each grant is fixed at
 insert time and stores the mean. Per task
 estimates hold the last burst clamped at 1ns
-to 1s with no smoothing. Fresh tasks join
+to 1 second with no smoothing. Fresh tasks join
 with the current mean, so the mean stays neutral.
 
 ## Insert and dispatch
@@ -149,7 +149,7 @@ machine.
 
 - Idle wakeup kick. Wakeups join ordered and kick an
   idle target to collect at once.
-- Queues stay per CPU. Idle CPUs collect park work and
+- Queues stay per-CPU. Idle CPUs collect park work and
   steal peer work only when the head may run on the idle
   CPU.
 - The topology is snapshotted at attach, so a CPU

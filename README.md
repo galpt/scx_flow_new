@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.6`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.7`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -42,7 +42,8 @@ cursor and take the head of a peer queue when the head
 allows the thief, moving on to the next peer otherwise.
 Kicks wake idle targets only with a mask
 check and no busy preemption. Hints use only estimate against
-mean. Counts cover inserts, requeues, completions, park moves,
+mean. Stops restore the low hint when the CPU goes idle.
+Counts cover inserts, requeues, completions, park moves,
 steal moves and kicks. Per-CPU queues use ids `0x4000` plus
 the CPU id with up to 1024 CPUs. The park queue uses id
 `0x5000` for tasks with no allowed CPU. The watchdog is 30
@@ -101,7 +102,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.6`, state `enabled` and ops containing `flow`. To
+`4.0.7`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

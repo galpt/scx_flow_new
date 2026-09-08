@@ -101,6 +101,26 @@ pub fn cpuperf_for_est(est: u64, tq: u64) -> u32 {
 }
 
 /*
+ * True when a stop should restore the low hint. Runnable
+ * stops keep their work, so they never restore. Queued
+ * work also keeps the hint, so restore runs once per
+ * idle change.
+ */
+#[cfg(test)]
+pub fn should_restore_hint(runnable: bool, dsq: u64, local: u64) -> bool {
+    if runnable {
+        return false;
+    }
+    if dsq != 0 {
+        return false;
+    }
+    if local != 0 {
+        return false;
+    }
+    true
+}
+
+/*
  * Next peer for a steal scan. Returns none with one
  * or no CPUs, so scans end at once with a single CPU
  * and no peers. Returns none for an out of range CPU.
@@ -909,6 +929,15 @@ mod tests {
         assert_eq!(cpuperf_for_est(8_000_001, 8_000_000), CPUPERF_LONG);
         assert_eq!(cpuperf_for_est(32_000_000, 500_000), CPUPERF_LONG);
         assert_eq!(cpuperf_for_est(1, 500_000), CPUPERF_SHORT);
+    }
+
+    #[test]
+    fn idle_restore_needs_blocked_and_empty() {
+        assert!(should_restore_hint(false, 0, 0));
+        assert!(!should_restore_hint(true, 0, 0));
+        assert!(!should_restore_hint(false, 1, 0));
+        assert!(!should_restore_hint(false, 0, 1));
+        assert!(!should_restore_hint(true, 1, 1));
     }
 
     #[test]

@@ -357,6 +357,34 @@ static __always_inline void flow_cpuperf_set(s32 cpu,
 }
 
 /*
+ * Restore the low hint when a stop leaves the CPU
+ * idle. Runnable stops keep their work, so they
+ * never restore. Queued work also keeps the hint,
+ * so restore runs once per idle change.
+ */
+static __always_inline void flow_cpuperf_restore(s32 cpu,
+	bool runnable)
+{
+	u64 dsq;
+
+	if (runnable)
+		return;
+	if (cpu < 0)
+		return;
+	if (!flow_cpu_live((u32)cpu))
+		return;
+	dsq = flow_dsq_for_cpu((u32)cpu);
+	if (scx_bpf_dsq_nr_queued(dsq) != 0)
+		return;
+	if (scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
+	    (u64)cpu) != 0)
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	scx_bpf_cpuperf_set(cpu, (u32)FLOW_CPUPERF_LONG);
+}
+
+/*
  * Release one accounted entry exactly once. A missing
  * entry is a no op, so double release stays safe.
  */
@@ -805,6 +833,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	    tctx->run_at == (u64)-1) {
 		flow_clear_running(cpu);
 		flow_on_cpu_dec();
+		flow_cpuperf_restore(cpu, runnable);
 		return;
 	}
 	if (now >= tctx->run_at)
@@ -831,6 +860,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* Blocked tasks complete and release at once. */
 	__sync_fetch_and_add(&flow_stats.completions, 1);
 	flow_release(tctx);
+	flow_cpuperf_restore(cpu, runnable);
 }
 
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)

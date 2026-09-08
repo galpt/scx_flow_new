@@ -63,74 +63,98 @@
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    /* Per CPU card grid. Dense chips in a wrapping
-     * grid with a bounded height and an internal
-     * scroll, so a many core machine never
-     * stretches the page. */
+    /* Per-CPU card grid. Dense small chips that
+     * wrap across the page. No inner scroll: the
+     * page scrolls as one page so 20+ cores fit
+     * without a nested scroll container. */
     .core-grid {
       display: grid;
       grid-template-columns:
-        repeat(auto-fill, minmax(148px, 1fr));
-      gap: 6px;
-      margin-bottom: 16px;
-      max-height: 52vh;
-      overflow-y: auto;
-      padding-right: 4px;
-      scrollbar-width: thin;
+        repeat(auto-fill, minmax(104px, 1fr));
+      gap: 4px;
+      margin-bottom: 12px;
     }
-    .core-card { padding: 8px; font-size: 0.75rem; }
+    .core-card {
+      padding: 4px 6px;
+      font-size: 0.625rem;
+      line-height: 1.35;
+      border-radius: 6px;
+    }
     .core-card .core-id {
-      font-size: 0.6875rem;
+      font-size: 0.625rem;
+      font-weight: 600;
       color: var(--text-muted);
       font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-freq {
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
       color: var(--text-secondary);
-      margin-top: 1px;
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-smt {
-      font-size: 0.625rem;
+      font-size: 0.5625rem;
       color: var(--warning);
     }
     .core-card .core-llc {
-      font-size: 0.625rem;
+      font-size: 0.6rem;
       color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-pid {
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
-      margin-top: 2px;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-est {
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
-      margin-top: 1px;
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-tq {
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
-      margin-top: 1px;
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .core-card .core-depth {
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
-      margin-top: 1px;
+      margin-top: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. */
     .run-badge {
       display: inline-block;
-      margin-top: 4px;
-      padding: 1px 8px;
+      margin-top: 2px;
+      padding: 0 6px;
       border-radius: 999px;
       border: 1px solid var(--border-hover);
       font-family: var(--font-mono);
-      font-size: 0.6875rem;
+      font-size: 0.6rem;
+      line-height: 1.5;
     }
     .run-idle { color: var(--text-muted); }
     .run-live {
@@ -173,13 +197,15 @@
     @media (max-width: 640px) {
       body { padding: 8px; }
       .card { padding: 10px; }
+      .core-card { padding: 4px 5px; }
       .stat-value {
         font-size: 0.875rem !important;
         word-break: break-all;
       }
       .core-grid {
-        grid-template-columns: repeat(2, 1fr);
-        gap: 6px;
+        grid-template-columns:
+          repeat(auto-fill, minmax(92px, 1fr));
+        gap: 4px;
       }
     }
   </style>
