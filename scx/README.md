@@ -7,18 +7,6 @@ It keeps one ordered queue per cpu. Tasks order by
 estimated burst with the shortest first. The slice
 follows a global live mean. It is deliberately knob-free.
 
-## Breaking note in 4.0.0
-
-Version stays at `4.0.0` by user decision, but this
-release breaks prior behavior. The prior three queues
-per cpu are now one ordered queue per cpu with stride
-one. The prior per level placements and demotions are
-now placements and requeues. The prior per level means
-and depths are now a single live mean, a total queued
-count, per cpu depths and head and tail ages. Per cpu
-cards now carry a running estimate with no level. Old
-stat readers and old dashboards need an update.
-
 ## Overview
 
 Tasks wait in one per cpu ordered queue, plus a global
