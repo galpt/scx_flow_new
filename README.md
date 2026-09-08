@@ -57,6 +57,31 @@ cargo build --manifest-path WS/scheds/experimental/scx_flow/Cargo.toml
 Or run `tools/install_scx_flow.sh WS` which overlays,
 builds in release mode and installs the binary.
 
+## Installer
+
+`tools/install_scx_flow.sh` takes the workspace checkout
+path and defaults to `/tmp/opencode/scx`. It needs
+`cargo`, `clang` and `rsync`, plus a workspace with a
+`rust` dir. Stop the running scheduler first:
+
+```
+sudo systemctl stop scx_loader 2>/dev/null || true
+sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
+/usr/local/bin/scx_flow --version
+sudo systemctl start scx_loader
+sleep 2
+cat /sys/kernel/sched_ext/state
+cat /sys/kernel/sched_ext/root/ops
+```
+
+The script overlays `scx` into
+`scheds/experimental/scx_flow`, builds in release mode
+and installs to `/usr/local/bin`. Without root it copies
+the binary to the repo dir instead. Expect version
+`4.0.0`, state `enabled` and ops containing `flow`. To
+roll back, stop the loader, restore the prior binary
+and start the loader again.
+
 ## Run
 
 ```
