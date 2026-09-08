@@ -72,16 +72,32 @@ builds in release mode and installs the binary.
 `tools/install_scx_flow.sh` takes the workspace checkout
 path and defaults to `/tmp/opencode/scx`. It needs
 `cargo`, `clang` and `rsync`, plus a workspace with a
-`rust` dir. Stop the running scheduler first:
+`rust` dir.
 
-```
+```bash
+# 1. Stop the loader before replacing the binary
 sudo systemctl stop scx_loader 2>/dev/null || true
+
+# 2. Run the installer with a workspace checkout
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
+
+# 3. Confirm the version
 /usr/local/bin/scx_flow --version
+
+# 4. Start the loader again
 sudo systemctl start scx_loader
-sleep 2
-cat /sys/kernel/sched_ext/state
+
+# 5. If the loader stays idle, start the scheduler by hand
+sudo scxctl start --sched flow --mode auto
+
+# 6. Confirm the scheduler is enabled
+sleep 2; cat /sys/kernel/sched_ext/state
+
+# 7. Confirm the ops string mentions flow
 cat /sys/kernel/sched_ext/root/ops
+
+# 8. Watch the loader log during testing
+journalctl -u scx_loader -f
 ```
 
 The script overlays `scx` into
