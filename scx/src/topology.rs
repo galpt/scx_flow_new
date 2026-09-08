@@ -45,7 +45,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             cur_freq_khz: 0,
             llc_id: cpu.llc_id as u32,
             smt,
-            running_level: -1,
+            running_est_ns: 0,
             running_pid: 0,
         });
     }

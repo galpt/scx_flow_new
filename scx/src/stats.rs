@@ -4,7 +4,8 @@
  *
  * Stats server and web snapshot for the flow scheduler.
  * Metrics mirrors the BPF counters plus uptime. Web
- * metrics adds per cpu cards and live level means.
+ * metrics adds per cpu cards and the global mean with
+ * queue depths and head and tail ages.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -29,14 +30,10 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Uptime since attach in nanoseconds")]
     pub uptime_ns: u64,
-    #[stat(desc = "Inserts at level zero")]
-    pub l0_placements: u64,
-    #[stat(desc = "Inserts at level one")]
-    pub l1_placements: u64,
-    #[stat(desc = "Inserts at level two")]
-    pub l2_placements: u64,
-    #[stat(desc = "Moves down one level")]
-    pub demotions: u64,
+    #[stat(desc = "First inserts")]
+    pub placements: u64,
+    #[stat(desc = "Runnable requeues")]
+    pub requeues: u64,
     #[stat(desc = "Remote moves in dispatch")]
     pub steals: u64,
     #[stat(desc = "Local and remote moves in dispatch")]
@@ -62,8 +59,8 @@ pub struct PerCpuMetrics {
     pub llc_id: u32,
     /* True for the second thread of a core. */
     pub smt: bool,
-    /* Level now on the cpu. Negative when idle. */
-    pub running_level: i32,
+    /* Estimate of the task now on the cpu. Zero when idle. */
+    pub running_est_ns: u64,
     /* Pid now on the cpu. Zero when idle. */
     pub running_pid: u32,
 }
@@ -78,28 +75,37 @@ pub struct WebMetrics {
     /* Scheduler wide counters. Raw values. */
     pub stats: Metrics,
     /* One entry per online cpu. */
-    pub per_cpu: Vec<PerCpuMetrics>,
-    /* Live per level mean quanta in nanoseconds. */
-    pub mean_ns: Vec<u64>,
-    /* Queued tasks per level. Index matches means. */
     #[serde(default)]
-    pub depth: Vec<u64>,
+    pub per_cpu: Vec<PerCpuMetrics>,
+    /* Global mean quantum in nanoseconds. */
+    #[serde(default)]
+    pub live_mean_ns: u64,
+    /* Accounted tasks in the global set. */
+    #[serde(default)]
+    pub total_queued: u64,
+    /* Accounted tasks per cpu. Index is the cpu id. */
+    #[serde(default)]
+    pub depth_per_cpu: Vec<u64>,
+    /* Age of the busy period in nanoseconds. */
+    #[serde(default)]
+    pub head_age_ns: u64,
+    /* Age of the most recent arrival in nanoseconds. */
+    #[serde(default)]
+    pub tail_age_ns: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime={} uptime={} l0={} l1={} \
-            l2={} demote={} steal={} disp={} noctx={}",
+            "[{}] run={} runtime={} uptime={} place={} \
+            requeue={} steal={} disp={} noctx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
             self.uptime_ns,
-            self.l0_placements,
-            self.l1_placements,
-            self.l2_placements,
-            self.demotions,
+            self.placements,
+            self.requeues,
             self.steals,
             self.dispatches,
             self.enq_no_tctx,
@@ -116,10 +122,8 @@ impl Metrics {
             on_cpu: self.on_cpu,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             uptime_ns: self.uptime_ns,
-            l0_placements: self.l0_placements.wrapping_sub(rhs.l0_placements),
-            l1_placements: self.l1_placements.wrapping_sub(rhs.l1_placements),
-            l2_placements: self.l2_placements.wrapping_sub(rhs.l2_placements),
-            demotions: self.demotions.wrapping_sub(rhs.demotions),
+            placements: self.placements.wrapping_sub(rhs.placements),
+            requeues: self.requeues.wrapping_sub(rhs.requeues),
             steals: self.steals.wrapping_sub(rhs.steals),
             dispatches: self.dispatches.wrapping_sub(rhs.dispatches),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),

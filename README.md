@@ -21,34 +21,43 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `tools/install_scx_flow.sh` overlay build installer
 - `LICENSE` full license text, a real file
 
+## Breaking note in 4.0.0
+
+Version stays at `4.0.0` by user decision, but this
+release breaks prior behavior. The prior three queues
+per cpu are now one ordered queue per cpu. Queue ids use
+base `0x1000` plus cpu with stride one. Counters now use
+placements and requeues, with per level placements and
+demotions removed. The dashboard payload now uses live
+mean, total queued, per cpu depths and head and tail
+ages, with per level means and depths removed. Old
+dashboards and old stat readers need an update.
+
 ## Design
 
-Three feedback levels per cpu. Queue ids use base `0x1000`
-plus cpu times three plus level. Level quanta seed at one,
-two and eight milliseconds. Each level keeps a live mean
-from unfinished estimates clamped to five hundred
-microseconds and thirty two milliseconds. Estimates clamp
-at one nanosecond to one second. Enqueue picks a level
-from the estimate for new arrivals. Unknown estimates go
-to the top. Known estimates use the first level with
-a live mean at or above the estimate. Large estimates
-fall to the bottom. A runnable requeue keeps its entry
-and refreshes the sum only. Running keeps the entry.
-Blocking releases it. A demote moves the entry between
-levels. Enqueue keys the queue off the selected cpu,
-then the first allowed cpu, then the global park. Inserts
-use the tail. Dispatch drains the local queues top down
-with a bottom guard. Every sixteenth move takes the
-lowest nonempty level. A consumed slice moves down one
-level. There is no move up and no preempt kick. Steal
-scans level major with sixty four checks in total. The
-top uses twenty two checks and the others use twenty one
-each. Steal moves a task only when the head may run on
-the stealing cpu. Each pass moves up to thirty two tasks
-in batch. Counts use saturating means with compare and
-swap. Dispatches count local and remote moves. Steals
-count remote moves. The watchdog is thirty thousand
-milliseconds. Ops name is `flow`.
+One ordered queue per cpu. Queue ids use base `0x1000`
+plus cpu with stride one, plus a global park. Inserts
+order by estimate only. Unknown estimates map to key
+zero and sort at the front. Known estimates map to the
+clamped estimate and sort ascending. Equal keys keep
+insert order. The slice follows the live global mean
+only, so the grant is independent of the key. The mean
+covers all accounted tasks, seeded at two milliseconds
+and clamped to five hundred microseconds and thirty two
+milliseconds. Estimates clamp at one nanosecond to one
+second. Running tasks stay counted. A release happens
+exactly once on block, dequeue, disable and exit. A
+runnable requeue refreshes the sum and reinserts in
+order. There is no demote step. Enqueue keys the queue
+off the selected cpu, then the first allowed cpu, then
+the global park. Dispatch drains the local queue in a
+batch of thirty two. Steal scans in one pass of sixty
+four checks with rotation and a mask guard. There is no
+guarantee slot and no preempt kick. Counts use
+saturating means with compare and swap. Dispatches count
+local and remote moves. Steals count remote moves. The
+watchdog is thirty thousand milliseconds. Ops name is
+`flow`.
 
 ## Build
 

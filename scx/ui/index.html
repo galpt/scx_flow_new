@@ -2,11 +2,10 @@
   SPDX-License-Identifier: GPL-2.0
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-  Flow web UI: a live view of the per-level means,
-  per-CPU running tasks and system counters, served
-  by src/webui.rs over loopback port 50005 (or the
-  unix-socket fallback). Offline-first: no external
-  fonts or libraries.
+  Flow web UI. A live view of the single ordered queue,
+  per cpu running tasks and system counters, served by
+  the dashboard server over loopback with a unix socket
+  fallback. Offline first with no external assets.
 -->
 <!doctype html>
 <html lang="en">
@@ -64,9 +63,9 @@
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    /* Per-CPU card grid. Dense chips in a wrapping
+    /* Per cpu card grid. Dense chips in a wrapping
      * grid with a bounded height and an internal
-     * scroll, so a many-core machine never
+     * scroll, so a many core machine never
      * stretches the page. */
     .core-grid {
       display: grid;
@@ -104,9 +103,15 @@
       font-family: var(--font-mono);
       margin-top: 2px;
     }
-    /* Level badge on each CPU card. The color
-     * names the running level, idle stays muted. */
-    .lvl {
+    .core-card .core-est {
+      font-size: 0.6875rem;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      margin-top: 1px;
+    }
+    /* Queue badge on each cpu card. Running tasks
+     * show a live badge, idle cards stay muted. */
+    .queue-badge {
       display: inline-block;
       margin-top: 4px;
       padding: 1px 8px;
@@ -115,36 +120,28 @@
       font-family: var(--font-mono);
       font-size: 0.6875rem;
     }
-    .lvl-idle { color: var(--text-muted); }
-    .lvl-0 {
+    .queue-idle { color: var(--text-muted); }
+    .queue-live {
       color: var(--success);
       border-color: var(--success);
     }
-    .lvl-1 {
-      color: var(--warning);
-      border-color: var(--warning);
-    }
-    .lvl-2 {
-      color: var(--accent);
-      border-color: var(--accent);
-    }
-    /* Per-level rows. One row per level with a
-     * bar scaled to the largest live mean. */
-    .level-row {
+    /* Single queue meter. One bar scaled to the
+     * ceiling with the live mean and the total. */
+    .queue-row {
       display: flex;
       align-items: center;
       gap: 8px;
       margin-bottom: 8px;
     }
-    .level-row:last-child { margin-bottom: 0; }
-    .level-label {
-      width: 28px;
+    .queue-row:last-child { margin-bottom: 0; }
+    .queue-label {
+      width: 52px;
       flex: none;
       font-family: var(--font-mono);
       font-size: 0.75rem;
       color: var(--text-secondary);
     }
-    .level-track {
+    .queue-track {
       flex: 1;
       min-width: 0;
       height: 8px;
@@ -153,19 +150,20 @@
       border-radius: 999px;
       overflow: hidden;
     }
-    .level-fill { height: 100%; border-radius: 999px; }
-    .level-fill-0 { background: var(--success); }
-    .level-fill-1 { background: var(--warning); }
-    .level-fill-2 { background: var(--accent); }
-    .level-meta {
+    .queue-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: var(--success);
+    }
+    .queue-meta {
       flex: none;
-      min-width: 200px;
+      min-width: 220px;
       text-align: right;
       font-family: var(--font-mono);
       font-size: 0.6875rem;
       color: var(--text-muted);
     }
-    .level-meta .level-mean {
+    .queue-meta .queue-mean {
       color: var(--text-primary);
     }
     /* Summary card */
@@ -212,7 +210,7 @@
         grid-template-columns: repeat(2, 1fr);
         gap: 6px;
       }
-      .level-meta { min-width: 0; }
+      .queue-meta { min-width: 0; }
     }
   </style>
 </head>
@@ -229,8 +227,8 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          three feedback levels, live means, placement,
-          demotion and stealing
+          single ordered queue, live mean, placement
+          and stealing
         </p>
       </div>
       <div id="status-badge" style="font-size:0.75rem;
@@ -242,13 +240,13 @@
       </div>
     </header>
 
-    <!-- Levels -->
+    <!-- Queue -->
     <div class="card" style="margin-bottom:16px">
-      <p class="section-label">Levels</p>
-      <div id="levels"></div>
+      <p class="section-label">Queue</p>
+      <div id="queue"></div>
     </div>
 
-    <!-- Per-CPU cards -->
+    <!-- Per cpu cards -->
     <div id="core-cards" class="core-grid"></div>
 
     <!-- Summary -->
@@ -280,20 +278,28 @@
           <span class="stat-value" id="runtime">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          L0 placements:</span>
-          <span class="stat-value" id="l0-place">0</span>
+          Live mean:</span>
+          <span class="stat-value" id="live-mean">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          L1 placements:</span>
-          <span class="stat-value" id="l1-place">0</span>
+          Total queued:</span>
+          <span class="stat-value" id="total-queued">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          L2 placements:</span>
-          <span class="stat-value" id="l2-place">0</span>
+          Head age:</span>
+          <span class="stat-value" id="head-age">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Demotions:</span>
-          <span class="stat-value" id="demotions">0</span>
+          Tail age:</span>
+          <span class="stat-value" id="tail-age">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Placements:</span>
+          <span class="stat-value" id="placements">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Requeues:</span>
+          <span class="stat-value" id="requeues">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Steals:</span>
@@ -334,7 +340,7 @@
       return n.toLocaleString();
     }
 
-    // Nanoseconds as a wall-clock duration for the
+    // Nanoseconds as a wall clock duration for the
     // uptime and runtime gauges.
     function fmtRuntime(ns) {
       ns = clamp(ns);
@@ -348,7 +354,7 @@
       return day.toFixed(1) + ' days';
     }
 
-    // Live mean quanta. Nanoseconds below a
+    // Live mean quantum. Nanoseconds below a
     // microsecond stay in ns, below a millisecond
     // show us, runs above show ms.
     function fmtMean(ns) {
@@ -358,40 +364,33 @@
       return Math.round(ns) + ' ns';
     }
 
-    // One row per level: a badge, a bar scaled to
-    // the largest live mean, and the mean plus
-    // the queued depth.
-    function renderLevels(meanNs, depth) {
-      var box = el('levels');
-      var means = [meanNs[0] || 0, meanNs[1] || 0,
-        meanNs[2] || 0];
-      var depths = [depth[0] || 0, depth[1] || 0,
-        depth[2] || 0];
-      var max = Math.max(means[0], means[1],
-        means[2], 1);
-      var names = ['L0', 'L1', 'L2'];
-      var html = '';
-      for (var i = 0; i < 3; i++) {
-        var pct = (means[i] / max * 100).toFixed(1);
-        html += '<div class="level-row">' +
-          '<div class="level-label">' + names[i] +
-          '</div>' +
-          '<div class="level-track">' +
-          '<div class="level-fill level-fill-' + i +
-          '" style="width:' + pct + '%"></div>' +
-          '</div>' +
-          '<div class="level-meta">' +
-          '<span class="level-mean">' +
-          fmtMean(means[i]) + '</span>' +
-          ' queued ' + fmt(depths[i]) +
-          '</div>' +
-          '</div>';
+    // Single queue meter. One bar scaled to the
+    // ceiling with the live mean and the total.
+    function renderQueue(meanNs, total, depths) {
+      var box = el('queue');
+      var mean = meanNs || 0;
+      var queued = total || 0;
+      var perCpu = depths || [];
+      if (!mean && !queued && !perCpu.length) {
+        box.innerHTML = '<div style="color:var(--text-muted);' +
+          'font-size:0.8125rem">Queue is idle, no tasks yet</div>';
+        return;
       }
+      var max = 32e6;
+      var pct = Math.min(100, mean / max * 100).toFixed(1);
+      var html = '<div class="queue-row">' +
+        '<div class="queue-label">queue</div>' +
+        '<div class="queue-track">' +
+        '<div class="queue-fill" style="width:' + pct +
+        '%"></div></div>' +
+        '<div class="queue-meta"><span class="queue-mean">' +
+        fmtMean(mean) + '</span> queued ' + fmt(queued) +
+        '</div></div>';
       box.innerHTML = html;
     }
 
-    // Per-CPU cards with a color badge for the
-    // running level and the running pid.
+    // Per cpu cards with a badge for running tasks
+    // and the running estimate plus the pid.
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -402,7 +401,8 @@
           'No CPU data yet</div>';
         return;
       }
-      container.innerHTML = perCpu.map(function(cpu) {
+      var depths = data.depth_per_cpu || [];
+      container.innerHTML = perCpu.map(function(cpu, idx) {
         var curMhz = Math.round(
           (cpu.cur_freq_khz || 0) / 1000);
         var maxMhz = Math.round(
@@ -413,94 +413,70 @@
         var smtLabel = cpu.smt
           ? ' <span class="core-smt">SMT</span>'
           : '';
-        var lvl = cpu.running_level;
-        var idle = (lvl === null || lvl === undefined ||
-          lvl < 0 || lvl > 2);
-        var badge = idle
-          ? '<span class="lvl lvl-idle">idle</span>'
-          : '<span class="lvl lvl-' + lvl + '">L' +
-            lvl + '</span>';
         var pid = cpu.running_pid || 0;
+        var est = cpu.running_est_ns || 0;
+        var idle = !pid;
+        var badge = idle
+          ? '<span class="queue-badge queue-idle">idle</span>'
+          : '<span class="queue-badge queue-live">live</span>';
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
-          : '<div class="core-pid">pid ' + pid +
+          : '<div class="core-pid">pid ' + pid + '</div>';
+        var estLabel = idle
+          ? '<div class="core-est">est -</div>'
+          : '<div class="core-est">est ' + fmtMean(est) +
             '</div>';
+        var depth = depths[idx] || 0;
+        var depthLabel = '<div class="core-llc">depth ' +
+          fmt(depth) + ' LLC ' + (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
           '<div class="core-id">CPU ' + cpu.id +
           smtLabel + '</div>' +
           '<div class="core-freq">' + freqLabel +
-          '</div>' +
-          '<div class="core-llc">LLC ' +
-          (cpu.llc_id || 0) + '</div>' +
+          '</div>' + depthLabel +
           '<div>' + badge + '</div>' +
-          pidLabel +
+          pidLabel + estLabel +
           '</div>';
       }).join('');
     }
 
     // Summary prose, built from the live gauges.
-    // The tldr names the running count and the
-    // busiest insert level. The explanation walks
-    // the means, the depths, the placement split,
-    // and the steal share of dispatches.
-    function buildSummary(s, meanNs, depth) {
+    // The tldr names the running count and the queue
+    // total. The explanation walks the mean, the
+    // depths, the placement split and the steal share.
+    function buildSummary(s, meanNs, total, depths) {
       var onCpu = s.on_cpu || 0;
-      var l0 = s.l0_placements || 0;
-      var l1 = s.l1_placements || 0;
-      var l2 = s.l2_placements || 0;
-      var placed = l0 + l1 + l2;
-      var demote = s.demotions || 0;
+      var placed = s.placements || 0;
+      var requeue = s.requeues || 0;
       var steals = s.steals || 0;
       var disp = s.dispatches || 0;
-      var means = [meanNs[0] || 0, meanNs[1] || 0,
-        meanNs[2] || 0];
-      var depths = [depth[0] || 0, depth[1] || 0,
-        depth[2] || 0];
+      var mean = meanNs || 0;
+      var queued = total || 0;
       var tldr, explanation;
-      if (placed === 0) {
+      if (!placed && !requeue && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
-        explanation = 'As you can see from the ' +
-          'placement gauges, no tasks have been ' +
-          'placed yet. The live means show ' +
-          fmtMean(means[0]) + ', ' +
-          fmtMean(means[1]) + ' and ' +
-          fmtMean(means[2]) + ' for L0, L1 and ' +
-          'L2, with ' + fmt(depths[0]) + ', ' +
-          fmt(depths[1]) + ' and ' +
-          fmt(depths[2]) + ' tasks queued.';
+        explanation = 'As you can see from the gauges, ' +
+          'no tasks have been placed yet. The live mean ' +
+          'shows ' + fmtMean(mean) + ' with ' +
+          fmt(queued) + ' tasks queued.';
       } else if (onCpu > 0) {
-        var top = 'L0';
-        if (l1 > l0 && l1 >= l2) top = 'L1';
-        if (l2 > l0 && l2 > l1) top = 'L2';
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks, with inserts favoring ' + top +
-          '.';
-        explanation = 'As you can see from the ' +
-          'placement gauges, inserts split ' +
-          fmt(l0) + ' / ' + fmt(l1) + ' / ' +
-          fmt(l2) + ' across L0, L1 and L2, and ' +
-          fmt(demote) + ' slices moved down one ' +
-          'level. The live means show ' +
-          fmtMean(means[0]) + ', ' +
-          fmtMean(means[1]) + ' and ' +
-          fmtMean(means[2]) + ', with ' +
-          fmt(depths[0]) + ', ' +
-          fmt(depths[1]) + ' and ' +
-          fmt(depths[2]) + ' tasks queued. ' +
+          ' tasks with ' + fmt(queued) + ' queued.';
+        explanation = 'As you can see from the gauges, ' +
+          'first inserts cover ' + fmt(placed) +
+          ' and requeues cover ' + fmt(requeue) +
+          '. The live mean shows ' + fmtMean(mean) +
+          ' with ' + fmt(queued) + ' tasks queued. ' +
           'Steals cover ' + fmt(steals) + ' of ' +
           fmt(disp) + ' dispatches.';
       } else {
-        tldr = 'Flow placed ' + fmt(placed) +
+        tldr = 'Flow placed ' + fmt(placed + requeue) +
           ' tasks and is now idle.';
-        explanation = 'As you can see from the ' +
-          'placement gauges, inserts split ' +
-          fmt(l0) + ' / ' + fmt(l1) + ' / ' +
-          fmt(l2) + ' across L0, L1 and L2, with ' +
-          fmt(demote) + ' demotions. The live ' +
-          'means show ' + fmtMean(means[0]) +
-          ', ' + fmtMean(means[1]) + ' and ' +
-          fmtMean(means[2]) + ', and steals ' +
-          'cover ' + fmt(steals) + ' of ' +
+        explanation = 'As you can see from the gauges, ' +
+          'first inserts cover ' + fmt(placed) +
+          ' and requeues cover ' + fmt(requeue) +
+          '. The live mean shows ' + fmtMean(mean) +
+          ' and steals cover ' + fmt(steals) + ' of ' +
           fmt(disp) + ' dispatches.';
       }
       return { tldr: tldr, explanation: explanation };
@@ -513,11 +489,14 @@
       el('status-badge').style.color = 'var(--success)';
 
       var s = data.stats || {};
-      var meanNs = data.mean_ns || [];
-      var depth = data.depth || [];
-      renderLevels(meanNs, depth);
+      var meanNs = data.live_mean_ns || 0;
+      var total = data.total_queued || 0;
+      var depths = data.depth_per_cpu || [];
+      var headAge = data.head_age_ns || 0;
+      var tailAge = data.tail_age_ns || 0;
+      renderQueue(meanNs, total, depths);
 
-      var summary = buildSummary(s, meanNs, depth);
+      var summary = buildSummary(s, meanNs, total, depths);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
@@ -527,14 +506,14 @@
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =
         fmtRuntime(s.total_runtime || 0);
-      el('l0-place').textContent =
-        fmt(s.l0_placements || 0);
-      el('l1-place').textContent =
-        fmt(s.l1_placements || 0);
-      el('l2-place').textContent =
-        fmt(s.l2_placements || 0);
-      el('demotions').textContent =
-        fmt(s.demotions || 0);
+      el('live-mean').textContent = fmtMean(meanNs);
+      el('total-queued').textContent = fmt(total);
+      el('head-age').textContent = fmtRuntime(headAge);
+      el('tail-age').textContent = fmtRuntime(tailAge);
+      el('placements').textContent =
+        fmt(s.placements || 0);
+      el('requeues').textContent =
+        fmt(s.requeues || 0);
       el('steals').textContent = fmt(s.steals || 0);
       el('dispatches').textContent =
         fmt(s.dispatches || 0);

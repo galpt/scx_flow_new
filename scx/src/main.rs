@@ -18,7 +18,6 @@ mod stats;
 mod topology;
 mod webui;
 
-use std::mem::size_of;
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
@@ -90,6 +89,21 @@ struct Opts {
     no_webui: bool,
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     libbpf: LibbpfOpts,
+}
+
+/*
+ * Monotonic time in nanoseconds since boot. Reads the
+ * system uptime file, so the base matches the kernel
+ * clock used for queue stamps. Missing files yield zero.
+ */
+fn monotonic_ns() -> u64 {
+    let txt = std::fs::read_to_string("/proc/uptime").unwrap_or_default();
+    let first = txt.split_whitespace().next().unwrap_or("0");
+    let secs: f64 = first.parse().unwrap_or(0.0);
+    if secs <= 0.0 {
+        return 0;
+    }
+    (secs * 1_000_000_000.0) as u64
 }
 
 /*
@@ -172,10 +186,8 @@ impl<'a> Scheduler<'a> {
             on_cpu: s.on_cpu,
             total_runtime: s.total_runtime,
             uptime_ns: self.started_at.elapsed().as_nanos() as u64,
-            l0_placements: s.l0_placements,
-            l1_placements: s.l1_placements,
-            l2_placements: s.l2_placements,
-            demotions: s.demotions,
+            placements: s.placements,
+            requeues: s.requeues,
             steals: s.steals,
             dispatches: s.dispatches,
             enq_no_tctx: s.enq_no_tctx,
@@ -188,10 +200,9 @@ impl<'a> Scheduler<'a> {
      */
     fn read_cpu(&self, cpu: usize) -> flow_cpu_state {
         let idle = flow_cpu_state {
-            running_level: -1,
+            running_est: 0,
             running_pid: 0,
             scan_off: 0,
-            pad: 0,
         };
         if cpu >= MAX_CPUS {
             return idle;
@@ -213,21 +224,46 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    /* Read the live per level means from BPF memory. */
-    fn read_means(&self) -> Vec<u64> {
+    /* Read the live global mean from BPF memory. */
+    fn read_mean(&self) -> u64 {
         let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
-        bss.flow_mean_ns.to_vec()
+        bss.flow_mean_ns
     }
 
-    /* Read the queued depth per level from BPF memory. */
-    fn read_depths(&self) -> Vec<u64> {
+    /* Read the accounted task count from BPF memory. */
+    fn read_total(&self) -> u64 {
         let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
-        bss.flow_nr.to_vec()
+        bss.flow_nr
+    }
+
+    /* Read the per cpu depths from BPF memory. */
+    fn read_depths(&self, nr: usize) -> Vec<u64> {
+        let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
+        let full = bss.flow_depth.to_vec();
+        let mut out = Vec::with_capacity(nr);
+        for cpu in 0..nr {
+            out.push(full.get(cpu).copied().unwrap_or(0));
+        }
+        out
+    }
+
+    /*
+     * Read the head and tail ages from BPF memory. The
+     * stamps use the kernel clock, so the ages compare
+     * them with monotonic time from uptime.
+     */
+    fn read_ages(&self) -> (u64, u64) {
+        let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
+        let now = monotonic_ns();
+        let head = crate::flow::head_age(now, bss.flow_head_at);
+        let tail = crate::flow::tail_age(now, bss.flow_tail_at);
+        (head, tail)
     }
 
     /*
      * Dashboard snapshot. Merges the static cards with
-     * live state and live means. Gauges only, no deltas.
+     * live state and the global mean. Gauges only, no
+     * deltas.
      */
     fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self
@@ -261,18 +297,23 @@ impl<'a> Scheduler<'a> {
             e.id = cpu as u32;
             e.cur_freq_khz = self.cur_freq_khz.get(cpu).copied().unwrap_or(0);
             let st = self.read_cpu(cpu);
-            e.running_level = st.running_level;
+            e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
             per_cpu.push(e);
         }
         let stats = self.get_metrics();
-        let mean_ns = self.read_means();
-        let depth = self.read_depths();
+        let live_mean_ns = crate::flow::live_quantum(self.read_mean());
+        let total_queued = self.read_total();
+        let depth_per_cpu = self.read_depths(nr);
+        let (head_age_ns, tail_age_ns) = self.read_ages();
         stats::WebMetrics {
             stats,
             per_cpu,
-            mean_ns,
-            depth,
+            live_mean_ns,
+            total_queued,
+            depth_per_cpu,
+            head_age_ns,
+            tail_age_ns,
         }
     }
 
@@ -301,27 +342,16 @@ impl<'a> Scheduler<'a> {
             }
         }
         let m = self.get_metrics();
+        let (place, requeue, steal) = (m.placements, m.requeues, m.steals);
+        let (disp, runtime, oncpu) = (m.dispatches, m.total_runtime, m.on_cpu);
         info!(
-            "exit l0={} l1={} l2={} demote={} steal={} \
+            "exit place={} requeue={} steal={} \
             disp={} runtime={} oncpu={}",
-            m.l0_placements,
-            m.l1_placements,
-            m.l2_placements,
-            m.demotions,
-            m.steals,
-            m.dispatches,
-            m.total_runtime,
-            m.on_cpu,
+            place, requeue, steal, disp, runtime, oncpu,
         );
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
-}
-
-/* Read one u64 map value for tests. Unused in run. */
-#[allow(dead_code)]
-fn map_u64_size() -> usize {
-    size_of::<u64>()
 }
 
 fn main() -> Result<()> {
@@ -400,24 +430,53 @@ mod tests {
     #[test]
     fn batch_and_scan_match_header() {
         assert_eq!(
-            crate::flow::DISPATCH_BATCH,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
+            crate::flow::DISPATCH_BATCH as u64,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
         );
         assert_eq!(
-            crate::flow::STEAL_SCAN_MAX,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_SCAN_MAX
+            crate::flow::STEAL_SCAN_MAX as u64,
+            crate::bpf_intf::flow_consts_FLOW_STEAL_SCAN_MAX as u64
+        );
+    }
+
+    #[test]
+    fn seed_and_stride_match_header() {
+        assert_eq!(
+            crate::flow::QUANTUM_SEED_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_SEED_NS as u64
         );
         assert_eq!(
-            crate::flow::STEAL_L0,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_L0
+            crate::flow::DSQ_BASE,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_BASE as u64
         );
         assert_eq!(
-            crate::flow::STEAL_L1,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_L1
+            crate::flow::DSQ_STRIDE,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_STRIDE as u64
+        );
+    }
+
+    #[test]
+    fn quantum_bounds_match_header() {
+        assert_eq!(
+            crate::flow::QUANTUM_MIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MIN_NS as u64
         );
         assert_eq!(
-            crate::flow::STEAL_L2,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_L2
+            crate::flow::QUANTUM_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MAX_NS as u64
         );
+        assert_eq!(
+            crate::flow::EST_MIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
+        );
+        assert_eq!(
+            crate::flow::EST_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
+        );
+    }
+
+    #[test]
+    fn monotonic_reads_without_panic() {
+        let _ = monotonic_ns();
     }
 }
