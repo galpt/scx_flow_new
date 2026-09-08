@@ -109,9 +109,9 @@ the selected CPU, then the first allowed CPU. Pinned
 tasks use their CPU or the park. Tasks that cannot
 move stay on the current CPU. Dispatch serves the
 batch DSQ through the eight to one deficit gate. Each
-pass moves a batch task only when the head may run on
-the asking CPU, plus park tasks whose head may run on
-the asking CPU. Each pass tries once with no spin. An
+pass moves up to 32 tasks across batch and park. Each
+move skips foreign, exiting, and unresolvable tasks,
+so one head never blocks later work. An
 idle kick is sent only to a CPU in the task mask. A
 busy preemption is sent only for tier zero wakeups
 against tier one runners inside the per-CPU gap and

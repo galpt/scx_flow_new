@@ -66,7 +66,9 @@ enum flow_consts {
 	FLOW_CPUPERF_TIER0 = 1024ULL,
 	/* CPU hint of the batch tier. */
 	FLOW_CPUPERF_TIER1 = 0ULL,
-	/* Bound of the moved tasks in one pass. */
+	/* Bound of moved tasks in one pass. */
+	/* Covers batch and park with skip past bad */
+	/* heads, so backlog drains in few passes. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	/* Unknown LLC id. Marks an empty table entry. */
 	FLOW_LLC_UNKNOWN = 0xFFFFFFFFULL,

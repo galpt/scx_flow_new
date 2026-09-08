@@ -210,32 +210,108 @@ static s32 flow_llc_idle(const struct task_struct *p,
 }
 
 /*
- * Check that the head task in one DSQ may run here.
- * The peek gives an untrusted view, so a trusted
- * reference is used for the mask test. A missing
- * peek fails closed and skips the move. Used for
- * park moves and batch moves alike.
+ * Forward floor advance. Defined below with the
+ * counters, used here by the batch drain.
  */
-static __always_inline bool flow_head_ok(s32 cpu,
-	u64 dsq)
+static __always_inline void flow_floor_advance(u64 vtime);
+
+/*
+ * Drain one batch DSQ with skip past bad heads.
+ * The iterator visits every queued task in order,
+ * so one foreign, exiting, or unresolvable head
+ * never blocks later work. Each eligible task moves
+ * to the local DSQ of the asking CPU. The floor
+ * moves forward with each moved task. Returns the
+ * count moved, capped at the given budget.
+ */
+static __always_inline u32 flow_drain_batch(s32 cpu,
+	u32 budget)
 {
-	struct task_struct *cand;
-	struct task_struct *ref;
-	bool ok;
+	struct task_struct *p;
+	u32 moved = 0;
 
 	if (cpu < 0)
-		return false;
-	if (!bpf_ksym_exists(scx_bpf_dsq_peek))
-		return false;
-	cand = scx_bpf_dsq_peek(dsq);
-	if (!cand)
-		return false;
-	ref = bpf_task_from_pid(cand->pid);
-	if (!ref)
-		return false;
-	ok = bpf_cpumask_test_cpu((u32)cpu, ref->cpus_ptr);
-	bpf_task_release(ref);
-	return ok;
+		return 0;
+	if (budget == 0)
+		return 0;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, FLOW_DSQ_BATCH, 0) {
+		u64 vtime;
+
+		if (moved >= budget)
+			break;
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue;
+		if (p->flags & PF_EXITING) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			continue;
+		}
+		vtime = p->scx.dsq_vtime;
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(p);
+			continue;
+		}
+		bpf_task_release(p);
+		flow_floor_advance(vtime);
+		__sync_fetch_and_add(
+		    &flow_stats.deficit_serves, 1);
+		moved++;
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
+
+/*
+ * Drain one park DSQ with skip past bad heads.
+ * The iterator visits every parked task in order,
+ * so one foreign, exiting, or unresolvable head
+ * never blocks later work. Each eligible task moves
+ * to the local DSQ of the asking CPU. Returns the
+ * count moved, capped at the given budget.
+ */
+static __always_inline u32 flow_drain_park(s32 cpu,
+	u32 budget)
+{
+	struct task_struct *p;
+	u32 moved = 0;
+
+	if (cpu < 0)
+		return 0;
+	if (budget == 0)
+		return 0;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, FLOW_DSQ_PARK, 0) {
+		if (moved >= budget)
+			break;
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue;
+		if (p->flags & PF_EXITING) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(p);
+			continue;
+		}
+		bpf_task_release(p);
+		moved++;
+	}
+	bpf_rcu_read_unlock();
+	return moved;
 }
 
 /*
@@ -666,14 +742,16 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u64 served0 = 0;
 	bool tier0_wait = false;
 	bool tier1_wait = false;
+	u32 budget = (u32)FLOW_DISPATCH_MAX_BATCH;
+	u32 moved = 0;
+	u32 batch = 0;
 
 	(void)prev;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_id_ok((u32)cpu))
 		return;
-	/* One try per DSQ with no peer scan. */
-	/* Single CPU ends at once with no peers. */
+	/* No peer scan, single CPU ends with no peers. */
 	st = flow_cpu((u32)cpu);
 	if (st)
 		served0 = st->served0;
@@ -685,51 +763,22 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Gated batch serve keeps long waits bounded. */
 	if (flow_deficit_should_serve(served0, tier0_wait,
 	    tier1_wait)) {
-		/* Head must allow this CPU, else try park. */
-		if (flow_head_ok(cpu, (u64)FLOW_DSQ_BATCH)) {
-			struct task_struct *cand = NULL;
-			u64 vtime = 0;
-			bool have = false;
-
-			if (bpf_ksym_exists(scx_bpf_dsq_peek)) {
-				cand = scx_bpf_dsq_peek(
-				    (u64)FLOW_DSQ_BATCH);
-				if (cand) {
-					vtime = cand->scx.dsq_vtime;
-					have = true;
-				}
-			}
-			if (have)
-				flow_floor_advance(vtime);
-			/* Move is safe, head allows this CPU. */
-			if (scx_bpf_dsq_move_to_local(
-			    (u64)FLOW_DSQ_BATCH, 0)) {
-				__sync_fetch_and_add(
-				    &flow_stats.deficit_serves, 1);
-				/* Batch runs restore default hint. */
-				flow_cpuperf_set(cpu,
-				    (u32)FLOW_TIER_BATCH);
-				return;
-			}
-		}
+		/* Iterator skips bad heads, backlog drains. */
+		batch = flow_drain_batch(cpu, budget);
+		moved += batch;
 	}
 	/* Parked tasks move when the mask allows. */
-	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0) {
-		if (!flow_head_ok(cpu, (u64)FLOW_DSQ_PARK)) {
-			/* Blocked park keeps the local hint. */
-			if (tier0_wait)
-				flow_cpuperf_set(cpu,
-				    (u32)FLOW_TIER_INTERACTIVE);
-			return;
-		}
-		/* Move is safe, head allows this CPU. */
-		scx_bpf_dsq_move_to_local((u64)FLOW_DSQ_PARK,
-		    0);
-		/* One try only, hint stays, no spin. */
-		return;
+	if (moved < budget &&
+	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0) {
+		/* Iterator skips bad heads, no wedge. */
+		moved += flow_drain_park(cpu, budget - moved);
 	}
+	/* Batch runs restore default hint. */
+	if (batch > 0)
+		flow_cpuperf_set(cpu,
+		    (u32)FLOW_TIER_BATCH);
 	/* Interactive backlog asks for the max hint. */
-	if (tier0_wait)
+	else if (tier0_wait)
 		flow_cpuperf_set(cpu,
 		    (u32)FLOW_TIER_INTERACTIVE);
 }
@@ -985,6 +1034,6 @@ SCX_OPS_DEFINE(flow_ops,
 	       .exit_task		= (void *)flow_exit_task,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
-	       .dispatch_max_batch	= 32,
+	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
 	       .timeout_ms		= 30000,
 	       .name			= "flow");

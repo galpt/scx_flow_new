@@ -475,6 +475,51 @@ pub fn stay_target(task_cpu: i32, nr_cpus: usize) -> Option<u32> {
 }
 
 /*
+ * Pending task for dispatch models. The mask names
+ * allowed CPUs. The exiting flag marks tasks in
+ * exit. The live flag marks tasks with a trusted
+ * reference. A cleared live flag models a NULL
+ * lookup from the pid table.
+ */
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTask {
+    /* Allowed CPUs. Index is the CPU. */
+    pub allowed: Vec<bool>,
+    /* True when the task is exiting. */
+    pub exiting: bool,
+    /* False models a NULL pid lookup. */
+    pub live: bool,
+}
+
+/*
+ * Drain up to budget tasks for one CPU. The scan
+ * visits every queued task in order and moves each
+ * live, non exiting task with the CPU in the mask.
+ * Bad heads are skipped, so one head never blocks
+ * later work. Returns the count moved.
+ */
+#[cfg(test)]
+pub fn drain_model(
+    queue: &mut std::collections::VecDeque<PendingTask>,
+    cpu: i32,
+    budget: u32,
+) -> u32 {
+    let mut moved = 0;
+    let mut kept = std::collections::VecDeque::new();
+    for task in queue.drain(..) {
+        let ok = moved < budget && task.live && !task.exiting && may_run_on(cpu, &task.allowed);
+        if ok {
+            moved += 1;
+        } else {
+            kept.push_back(task);
+        }
+    }
+    *queue = kept;
+    moved
+}
+
+/*
  * Running view of one CPU for tests. Mirrors the BPF
  * CPU state fields used by the dashboard. Zero pid
  * means idle.
@@ -1259,5 +1304,137 @@ mod tests {
             select_cpu_model(0, 0, &allowed, &idle_only_smt, &llc, &full, 2),
             Some(1)
         );
+    }
+
+    #[test]
+    fn dispatch_skips_dead_head() {
+        /* Dead head models a NULL pid lookup. */
+        let dead = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: false,
+        };
+        /* Good tasks allow the asking CPU. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+        };
+        let mut queue = VecDeque::from([dead.clone(), good.clone(), good.clone(), good.clone()]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(moved, 3);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], dead);
+    }
+
+    #[test]
+    fn dispatch_batch_drains_within_passes() {
+        /* Idle CPUs serve a saturated batch at once. */
+        assert!(deficit_should_serve(0, false, true));
+        let good = PendingTask {
+            allowed: vec![true; 16],
+            exiting: false,
+            live: true,
+        };
+        let mut queue = VecDeque::new();
+        for _ in 0..64 {
+            queue.push_back(good.clone());
+        }
+        let first = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(first, 32);
+        assert_eq!(queue.len(), 32);
+        let second = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(second, 32);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn dispatch_park_skips_exiting_head() {
+        /* Exiting head models a task in exit. */
+        let exiting = PendingTask {
+            allowed: vec![true, true],
+            exiting: true,
+            live: true,
+        };
+        /* Foreign head allows only the other CPU. */
+        let foreign = PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+        };
+        /* Good tasks allow the asking CPU. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+        };
+        let mut queue =
+            VecDeque::from([exiting.clone(), foreign.clone(), good.clone(), good.clone()]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(moved, 2);
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0], exiting);
+        assert_eq!(queue[1], foreign);
+    }
+
+    #[test]
+    fn incident_idle_cpu_progress_with_bad_heads() {
+        /* Idle CPUs serve batch at once through the gate. */
+        assert!(deficit_should_serve(0, false, true));
+        assert!(deficit_should_serve(8, true, true));
+        /* Foreign tasks pin to the busy CPU. */
+        let mut mask = vec![false; 16];
+        mask[15] = true;
+        let foreign = PendingTask {
+            allowed: mask,
+            exiting: false,
+            live: true,
+        };
+        /* Exiting tasks never run here. */
+        let exiting = PendingTask {
+            allowed: vec![true; 16],
+            exiting: true,
+            live: true,
+        };
+        /* Dead tasks model a NULL pid lookup. */
+        let dead = PendingTask {
+            allowed: vec![true; 16],
+            exiting: false,
+            live: false,
+        };
+        /* Good tasks allow the idle CPU. */
+        let good = PendingTask {
+            allowed: vec![true; 16],
+            exiting: false,
+            live: true,
+        };
+        let mut queue = VecDeque::new();
+        queue.push_back(exiting.clone());
+        queue.push_back(foreign.clone());
+        queue.push_back(dead.clone());
+        for _ in 0..40 {
+            queue.push_back(good.clone());
+        }
+        assert_eq!(queue.len(), 43);
+        /* First pass moves a full batch past bad heads. */
+        let first = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(first, 32);
+        assert_eq!(queue.len(), 11);
+        assert_eq!(queue[0], exiting);
+        assert_eq!(queue[1], foreign);
+        assert_eq!(queue[2], dead);
+        /* Second pass drains the rest past bad heads. */
+        let second = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(second, 8);
+        assert_eq!(queue.len(), 3);
+        /* Bad heads stay but never block new work. */
+        queue.push_back(good.clone());
+        queue.push_back(good.clone());
+        let third = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(third, 2);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0], exiting);
+        assert_eq!(queue[1], foreign);
+        assert_eq!(queue[2], dead);
     }
 }

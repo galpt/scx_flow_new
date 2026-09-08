@@ -466,7 +466,7 @@ mod tests {
         );
         assert_eq!(
             crate::flow::LLC_UNKNOWN,
-            crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN as u32
+            crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN
         );
     }
 
