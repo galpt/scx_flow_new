@@ -3,12 +3,11 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Stats server and web snapshot for the flow scheduler.
- * Metrics mirrors the BPF counters plus uptime. Moves
- * down and moves up count from the source queue, so
- * the bottom demotion slot and the first promotion
- * slot stay at zero by design. Web metrics adds per
- * cpu cards with per queue quanta and per queue depths
- * and per queue head ages.
+ * Metrics mirrors the BPF counters plus uptime. Tier
+ * inserts and serves count per tier. Moves count tier
+ * changes in either direction. Web metrics adds per cpu
+ * cards with per tier slices and per tier waiting
+ * counts.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -33,33 +32,26 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Uptime since attach in nanoseconds")]
     pub uptime_ns: u64,
-    #[stat(desc = "First inserts in queue zero")]
-    pub placements_q0: u64,
-    #[stat(desc = "First inserts in queue one")]
-    pub placements_q1: u64,
-    #[stat(desc = "First inserts in queue two")]
-    pub placements_q2: u64,
-    #[stat(desc = "Moves down from queue zero")]
-    pub demotions_q0: u64,
-    #[stat(desc = "Moves down from queue one")]
-    pub demotions_q1: u64,
-    #[stat(desc = "Moves down from queue two")]
-    pub demotions_q2: u64,
-    #[stat(desc = "Moves up from queue zero")]
-    pub promotions_q0: u64,
-    #[stat(desc = "Moves up from queue one")]
-    pub promotions_q1: u64,
-    #[stat(desc = "Moves up from queue two")]
-    pub promotions_q2: u64,
-    #[stat(desc = "Runnable requeues")]
-    pub requeues: u64,
-    #[stat(desc = "Remote moves in dispatch")]
-    pub steals: u64,
-    #[stat(desc = "Local and remote moves in dispatch")]
-    pub dispatches: u64,
+    #[stat(desc = "Inserts in tier zero")]
+    pub enq_tier0: u64,
+    #[stat(desc = "Inserts in tier one")]
+    pub enq_tier1: u64,
+    #[stat(desc = "Moves from tier zero to tier one")]
+    pub demotions: u64,
+    #[stat(desc = "Moves from tier one to tier zero")]
+    pub promotions: u64,
+    #[stat(desc = "Runs in tier zero")]
+    pub serves_tier0: u64,
+    #[stat(desc = "Runs in tier one")]
+    pub serves_tier1: u64,
+    #[stat(desc = "Gated batch serves in dispatch")]
+    pub deficit_serves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
+    #[stat(desc = "Busy preemption kicks for batch runners")]
+    #[serde(default)]
+    pub preempts: u64,
     #[stat(desc = "Inserts without task state")]
     pub enq_no_tctx: u64,
 }
@@ -85,9 +77,9 @@ pub struct PerCpuMetrics {
     pub running_est_ns: u64,
     /* Pid now on the cpu. Zero when idle. */
     pub running_pid: u32,
-    /* Queue of the task now on the cpu. Zero idle. */
+    /* Tier of the task now on the cpu. Zero idle. */
     #[serde(default)]
-    pub running_queue: u32,
+    pub running_tier: u32,
 }
 
 /*
@@ -102,44 +94,34 @@ pub struct WebMetrics {
     /* One entry per online cpu. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
-    /* Live quantum per queue in nanoseconds. */
+    /* Fixed slice per tier in nanoseconds. */
     #[serde(default)]
-    pub quanta_per_queue: [u64; 3],
-    /* Accounted tasks per queue. Index is queue. */
+    pub quanta_per_tier: [u64; 2],
+    /* Joined tasks per tier. Index is the tier. */
     #[serde(default)]
-    pub queued_per_queue: [u64; 3],
-    /* Head age per queue in nanoseconds. */
-    #[serde(default)]
-    pub head_age_per_queue: [u64; 3],
-    /* Accounted tasks per cpu. Index is the cpu id. */
-    #[serde(default)]
-    pub depth_per_cpu: Vec<u64>,
+    pub waiting_per_tier: [u64; 2],
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime={} uptime={} place={}/{}/{} \
-            demote={}/{}/{} promo={}/{}/{} requeue={} \
-            steal={} disp={} kick={} noctx={}",
+            "[{}] run={} runtime={} uptime={} enq={}/{} \
+            move={}/{} run={}/{} deficit={} kick={} \
+            preempt={} noctx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
             self.uptime_ns,
-            self.placements_q0,
-            self.placements_q1,
-            self.placements_q2,
-            self.demotions_q0,
-            self.demotions_q1,
-            self.demotions_q2,
-            self.promotions_q0,
-            self.promotions_q1,
-            self.promotions_q2,
-            self.requeues,
-            self.steals,
-            self.dispatches,
+            self.enq_tier0,
+            self.enq_tier1,
+            self.demotions,
+            self.promotions,
+            self.serves_tier0,
+            self.serves_tier1,
+            self.deficit_serves,
             self.kicks,
+            self.preempts,
             self.enq_no_tctx,
         )?;
         Ok(())
@@ -150,23 +132,20 @@ impl Metrics {
      * through unchanged.
      */
     pub fn delta(&self, rhs: &Self) -> Self {
+        let deficit = self.deficit_serves.wrapping_sub(rhs.deficit_serves);
         Self {
             on_cpu: self.on_cpu,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             uptime_ns: self.uptime_ns,
-            placements_q0: self.placements_q0.wrapping_sub(rhs.placements_q0),
-            placements_q1: self.placements_q1.wrapping_sub(rhs.placements_q1),
-            placements_q2: self.placements_q2.wrapping_sub(rhs.placements_q2),
-            demotions_q0: self.demotions_q0.wrapping_sub(rhs.demotions_q0),
-            demotions_q1: self.demotions_q1.wrapping_sub(rhs.demotions_q1),
-            demotions_q2: self.demotions_q2.wrapping_sub(rhs.demotions_q2),
-            promotions_q0: self.promotions_q0.wrapping_sub(rhs.promotions_q0),
-            promotions_q1: self.promotions_q1.wrapping_sub(rhs.promotions_q1),
-            promotions_q2: self.promotions_q2.wrapping_sub(rhs.promotions_q2),
-            requeues: self.requeues.wrapping_sub(rhs.requeues),
-            steals: self.steals.wrapping_sub(rhs.steals),
-            dispatches: self.dispatches.wrapping_sub(rhs.dispatches),
+            enq_tier0: self.enq_tier0.wrapping_sub(rhs.enq_tier0),
+            enq_tier1: self.enq_tier1.wrapping_sub(rhs.enq_tier1),
+            demotions: self.demotions.wrapping_sub(rhs.demotions),
+            promotions: self.promotions.wrapping_sub(rhs.promotions),
+            serves_tier0: self.serves_tier0.wrapping_sub(rhs.serves_tier0),
+            serves_tier1: self.serves_tier1.wrapping_sub(rhs.serves_tier1),
+            deficit_serves: deficit,
             kicks: self.kicks.wrapping_sub(rhs.kicks),
+            preempts: self.preempts.wrapping_sub(rhs.preempts),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
         }
     }

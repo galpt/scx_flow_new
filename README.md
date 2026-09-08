@@ -1,7 +1,7 @@
 # scx_flow_new
 
 This repo holds the flow scheduler source in `scx`, plus the
-installer in `tools` and this readme at the root. The layout
+installer in `tools` and this README at the root. The layout
 matches an overlay build. The `scx` dir copies into a
 workspace at `scheds/experimental/scx_flow` and builds there.
 
@@ -10,15 +10,15 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.1`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.2`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
-- `scx/src/main.rs` front end and run loop
+- `scx/src/main.rs` frontend and run loop
 - `scx/src/flow.rs` pure helpers with unit tests
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
-- `scx/src/topology.rs` trimmed per cpu cards
+- `scx/src/topology.rs` trimmed per CPU cards
 - `scx/src/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
 - `tools/install_scx_flow.sh` overlay build installer
@@ -26,32 +26,30 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Design
 
-Three queues per cpu. Queue ids use base `0x1000`
-plus cpu times three plus queue index, plus one park
-queue per queue index. New tasks start in queue zero.
-Each queue keeps FIFO order. Each queue keeps its own
-mean for the slice. Queue zero seeds at one millisecond
-and clamps to five hundred microseconds and four
-milliseconds. Queue one seeds at two milliseconds and
-clamps to one millisecond and eight milliseconds.
-Queue two seeds at eight milliseconds and clamps to
-four milliseconds and thirty two milliseconds.
-Estimates hold the last burst clamped at one nanosecond
-to one second with no smoothing. A runnable task that
-burns the full slice moves down one queue. Blocked
-tasks and short runs hold the queue. A head age past
-five hundred milliseconds lifts the queue past strict
-order and moves the task up one queue. Enqueue keys
-the cpu off the selected cpu, then the first allowed
-cpu, then the park. Dispatch moves up to thirty two
-tasks in strict queue order with the age override.
-Steal scans up to sixty four checks in queue order with
-rotation and a mask guard. An idle wakeup kick asks
-an idle target to collect work at once.
-Counts use saturating means with compare and swap.
-Placements, moves down and moves up count per queue.
-Requeues, steals, dispatches and kicks count across
-queues.
+Two tiers share the work. Tier zero is interactive with
+a five hundred microsecond slice and direct placement
+to the target DSQ. Head inserts carry wakeups and tail
+inserts carry requeues. Tier one is batch with an eight
+millisecond slice through one shared DSQ ordered by
+vruntime. The batch DSQ uses id `0x2000` and the park
+DSQ uses id `0x2001` for tasks with no allowed CPU. New
+tasks start in tier zero. Estimates hold the last burst
+clamped at one nanosecond to one second with no
+smoothing. A runnable task that burns the full slice
+moves down one tier at once. The burn check compares
+the burst against the stored grant. Blocked tasks build
+a streak of short bursts below one millisecond. Three
+short blocks move up one tier with the streak capped at
+seven. Dispatch serves eight tier zero runs per tier
+one run when both tiers hold work. An idle kick is sent
+on every insert with a valid target. A narrow busy
+preemption covers tier zero wakeups against tier one
+runners with a per CPU gap of one millisecond. New
+batch tasks join at the vruntime floor. Running batch
+tasks advance by the burst with saturation.
+Counts use atomics with saturation on gauges.
+Inserts and runs count per tier. Moves, gated serves,
+kicks and preemptions count across tiers.
 The watchdog is thirty thousand milliseconds. Ops name
 is `flow`.
 
@@ -89,7 +87,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.1`, state `enabled` and ops containing `flow`. To
+`4.0.2`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

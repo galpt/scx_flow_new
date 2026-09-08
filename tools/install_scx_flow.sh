@@ -11,6 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/opencode/scx}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
+VER="4.0.2"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -30,6 +31,12 @@ fi
 
 if [ ! -d "${SRC_DIR}/src" ]; then
     echo "source dir not found at ${SRC_DIR}/src" >&2
+    exit 1
+fi
+
+got="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
+if [ "${got}" != "${VER}" ]; then
+    echo "version mismatch: got ${got} want ${VER}" >&2
     exit 1
 fi
 

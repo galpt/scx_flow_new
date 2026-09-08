@@ -2,7 +2,7 @@
   SPDX-License-Identifier: GPL-2.0
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-  Flow web UI. A live view of the three queues,
+  Flow web UI. A live view of the two tiers,
   per cpu running tasks and system counters, served by
   the dashboard server over loopback with a unix socket
   fallback. Offline first with no external assets.
@@ -109,9 +109,9 @@
       font-family: var(--font-mono);
       margin-top: 1px;
     }
-    /* Queue badge on each cpu card. Running tasks
-     * show the queue index, idle cards stay muted. */
-    .queue-badge {
+    /* Tier badge on each cpu card. Running tasks
+     * show the tier index, idle cards stay muted. */
+    .tier-badge {
       display: inline-block;
       margin-top: 4px;
       padding: 1px 8px;
@@ -120,28 +120,28 @@
       font-family: var(--font-mono);
       font-size: 0.6875rem;
     }
-    .queue-idle { color: var(--text-muted); }
-    .queue-live {
+    .tier-idle { color: var(--text-muted); }
+    .tier-live {
       color: var(--success);
       border-color: var(--success);
     }
-    /* Queue meters. One row per queue scaled to
-     * the queue ceiling with quanta and queued. */
-    .queue-row {
+    /* Tier meters. One row per tier scaled to
+     * the tier slice with waiting counts. */
+    .tier-row {
       display: flex;
       align-items: center;
       gap: 8px;
       margin-bottom: 8px;
     }
-    .queue-row:last-child { margin-bottom: 0; }
-    .queue-label {
+    .tier-row:last-child { margin-bottom: 0; }
+    .tier-label {
       width: 52px;
       flex: none;
       font-family: var(--font-mono);
       font-size: 0.75rem;
       color: var(--text-secondary);
     }
-    .queue-track {
+    .tier-track {
       flex: 1;
       min-width: 0;
       height: 8px;
@@ -150,12 +150,12 @@
       border-radius: 999px;
       overflow: hidden;
     }
-    .queue-fill {
+    .tier-fill {
       height: 100%;
       border-radius: 999px;
       background: var(--success);
     }
-    .queue-meta {
+    .tier-meta {
       flex: none;
       min-width: 220px;
       text-align: right;
@@ -163,7 +163,7 @@
       font-size: 0.6875rem;
       color: var(--text-muted);
     }
-    .queue-meta .queue-mean {
+    .tier-meta .tier-slice {
       color: var(--text-primary);
     }
     /* Summary card */
@@ -210,7 +210,7 @@
         grid-template-columns: repeat(2, 1fr);
         gap: 6px;
       }
-      .queue-meta { min-width: 0; }
+      .tier-meta { min-width: 0; }
     }
   </style>
 </head>
@@ -227,8 +227,8 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          three queues, per queue quanta, placement
-          and stealing
+          two tiers, per tier slices, placement
+          and preemption
         </p>
       </div>
       <div id="status-badge" style="font-size:0.75rem;
@@ -240,10 +240,10 @@
       </div>
     </header>
 
-    <!-- Queues -->
+    <!-- Tiers -->
     <div class="card" style="margin-bottom:16px">
-      <p class="section-label">Queues</p>
-      <div id="queues"></div>
+      <p class="section-label">Tiers</p>
+      <div id="tiers"></div>
     </div>
 
     <!-- Per cpu cards -->
@@ -278,56 +278,40 @@
           <span class="stat-value" id="runtime">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Place queue 0:</span>
-          <span class="stat-value" id="place-q0">0</span>
+          Enq tier 0:</span>
+          <span class="stat-value" id="enq-t0">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Place queue 1:</span>
-          <span class="stat-value" id="place-q1">0</span>
+          Enq tier 1:</span>
+          <span class="stat-value" id="enq-t1">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Place queue 2:</span>
-          <span class="stat-value" id="place-q2">0</span>
+          Demotions:</span>
+          <span class="stat-value" id="demotions">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Demote from queue 0:</span>
-          <span class="stat-value" id="demote-q0">0</span>
+          Promotions:</span>
+          <span class="stat-value" id="promotions">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Demote from queue 1:</span>
-          <span class="stat-value" id="demote-q1">0</span>
+          Serves tier 0:</span>
+          <span class="stat-value" id="serves-t0">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Demote from queue 2:</span>
-          <span class="stat-value" id="demote-q2">0</span>
+          Serves tier 1:</span>
+          <span class="stat-value" id="serves-t1">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Promote from queue 0:</span>
-          <span class="stat-value" id="promote-q0">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Promote from queue 1:</span>
-          <span class="stat-value" id="promote-q1">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Promote from queue 2:</span>
-          <span class="stat-value" id="promote-q2">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Requeues:</span>
-          <span class="stat-value" id="requeues">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Steals:</span>
-          <span class="stat-value" id="steals">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Dispatches:</span>
-          <span class="stat-value" id="dispatches">0</span>
+          Deficit serves:</span>
+          <span class="stat-value" id="deficit">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Kicks:</span>
           <span class="stat-value" id="kicks">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempts:</span>
+          <span class="stat-value" id="preempts">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           No task state:</span>
@@ -374,50 +358,48 @@
       return day.toFixed(1) + ' days';
     }
 
-    /* Per queue quantum. Nanoseconds below a
+    /* Per tier slice. Nanoseconds below a
      * microsecond stay in ns, below a millisecond
      * show us, runs above show ms. */
-    function fmtMean(ns) {
+    function fmtSlice(ns) {
       ns = clamp(ns);
       if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
       if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
       return Math.round(ns) + ' ns';
     }
 
-    /* Three queue meters. Each row is scaled to
-     * the queue ceiling with quanta and queued. */
-    function renderQueues(quanta, queued, ages) {
-      var box = el('queues');
-      var q = quanta || [0, 0, 0];
-      var n = queued || [0, 0, 0];
-      var a = ages || [0, 0, 0];
-      var empty = !q[0] && !q[1] && !q[2] &&
-        !n[0] && !n[1] && !n[2];
+    /* Two tier meters. Each row is scaled to
+     * the tier slice with waiting counts. */
+    function renderTiers(quanta, waiting) {
+      var box = el('tiers');
+      var q = quanta || [0, 0];
+      var n = waiting || [0, 0];
+      var empty = !q[0] && !q[1] && !n[0] && !n[1];
       if (empty) {
         box.innerHTML = '<div style="color:var(--text-muted);' +
-          'font-size:0.8125rem">Queues are idle, no tasks yet</div>';
+          'font-size:0.8125rem">Tiers are idle, no tasks yet</div>';
         return;
       }
-      var max = [4e6, 8e6, 32e6];
+      var max = [0.5e6, 8e6];
+      var names = ['tier 0 interactive', 'tier 1 batch'];
       var html = '';
-      for (var i = 0; i < 3; i++) {
-        var mean = q[i] || 0;
+      for (var i = 0; i < 2; i++) {
+        var slice = q[i] || 0;
         var count = n[i] || 0;
-        var age = a[i] || 0;
-        var pct = Math.min(100, mean / max[i] * 100).toFixed(1);
-        html += '<div class="queue-row">' +
-          '<div class="queue-label">queue ' + i + '</div>' +
-          '<div class="queue-track">' +
-          '<div class="queue-fill" style="width:' + pct +
+        var pct = Math.min(100, slice / max[i] * 100).toFixed(1);
+        html += '<div class="tier-row">' +
+          '<div class="tier-label">tier ' + i + '</div>' +
+          '<div class="tier-track">' +
+          '<div class="tier-fill" style="width:' + pct +
           '%"></div></div>' +
-          '<div class="queue-meta"><span class="queue-mean">' +
-          fmtMean(mean) + '</span> queued ' + fmt(count) +
-          ' age ' + fmtRuntime(age) + '</div></div>';
+          '<div class="tier-meta"><span class="tier-slice">' +
+          fmtSlice(slice) + '</span> ' + names[i] +
+          ' waiting ' + fmt(count) + '</div></div>';
       }
       box.innerHTML = html;
     }
 
-    /* Per cpu cards with the running queue index
+    /* Per cpu cards with the running tier index
      * and the running estimate plus the pid. */
     function renderCoreCards(data) {
       var container = el('core-cards');
@@ -429,8 +411,7 @@
           'No CPU data yet</div>';
         return;
       }
-      var depths = data.depth_per_cpu || [];
-      container.innerHTML = perCpu.map(function(cpu, idx) {
+      container.innerHTML = perCpu.map(function(cpu) {
         var curMhz = Math.round(
           (cpu.cur_freq_khz || 0) / 1000);
         var maxMhz = Math.round(
@@ -443,27 +424,26 @@
           : '';
         var pid = cpu.running_pid || 0;
         var est = cpu.running_est_ns || 0;
-        var rq = cpu.running_queue || 0;
+        var rt = cpu.running_tier || 0;
         var idle = !pid;
         var badge = idle
-          ? '<span class="queue-badge queue-idle">idle</span>'
-          : '<span class="queue-badge queue-live">queue ' +
-            rq + '</span>';
+          ? '<span class="tier-badge tier-idle">idle</span>'
+          : '<span class="tier-badge tier-live">tier ' +
+            rt + '</span>';
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
         var estLabel = idle
           ? '<div class="core-est">est -</div>'
-          : '<div class="core-est">est ' + fmtMean(est) +
+          : '<div class="core-est">est ' + fmtSlice(est) +
             '</div>';
-        var depth = depths[idx] || 0;
-        var depthLabel = '<div class="core-llc">depth ' +
-          fmt(depth) + ' LLC ' + (cpu.llc_id || 0) + '</div>';
+        var llcLabel = '<div class="core-llc">LLC ' +
+          (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
           '<div class="core-id">CPU ' + cpu.id +
           smtLabel + '</div>' +
           '<div class="core-freq">' + freqLabel +
-          '</div>' + depthLabel +
+          '</div>' + llcLabel +
           '<div>' + badge + '</div>' +
           pidLabel + estLabel +
           '</div>';
@@ -472,46 +452,44 @@
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count and the
-     * queued total. The explanation walks the
-     * per queue depths and the move split. */
-    function buildSummary(s, queued) {
+     * waiting total. The explanation walks the
+     * per tier waiting counts and the move split. */
+    function buildSummary(s, waiting) {
       var onCpu = s.on_cpu || 0;
-      var p0 = s.placements_q0 || 0;
-      var p1 = s.placements_q1 || 0;
-      var p2 = s.placements_q2 || 0;
-      var placed = p0 + p1 + p2;
-      var requeue = s.requeues || 0;
-      var steals = s.steals || 0;
-      var disp = s.dispatches || 0;
-      var q = queued || [0, 0, 0];
-      var total = (q[0] || 0) + (q[1] || 0) + (q[2] || 0);
+      var e0 = s.enq_tier0 || 0;
+      var e1 = s.enq_tier1 || 0;
+      var placed = e0 + e1;
+      var dem = s.demotions || 0;
+      var pro = s.promotions || 0;
+      var deficit = s.deficit_serves || 0;
+      var w = waiting || [0, 0];
+      var total = (w[0] || 0) + (w[1] || 0);
       var tldr, explanation;
-      if (!placed && !requeue && !onCpu) {
+      if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet. Queues hold ' +
-          fmt(q[0]) + ', ' + fmt(q[1]) + ' and ' +
-          fmt(q[2]) + ' tasks.';
+          'no tasks have been placed yet. Tiers hold ' +
+          fmt(w[0]) + ' and ' + fmt(w[1]) + ' tasks.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks with ' + fmt(total) + ' queued.';
+          ' tasks with ' + fmt(total) + ' waiting.';
         explanation = 'As you can see from the gauges, ' +
-          'first inserts cover ' + fmt(placed) +
-          ' and requeues cover ' + fmt(requeue) +
-          '. Queues hold ' + fmt(q[0]) + ', ' +
-          fmt(q[1]) + ' and ' + fmt(q[2]) +
-          ' tasks. Steals cover ' + fmt(steals) +
-          ' of ' + fmt(disp) + ' dispatches.';
+          'tier inserts cover ' + fmt(placed) +
+          ' with moves down ' + fmt(dem) +
+          ' and moves up ' + fmt(pro) +
+          '. Tiers hold ' + fmt(w[0]) + ' and ' +
+          fmt(w[1]) + ' tasks. Gated serves cover ' +
+          fmt(deficit) + ' batch runs.';
       } else {
-        tldr = 'Flow placed ' + fmt(placed + requeue) +
+        tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
         explanation = 'As you can see from the gauges, ' +
-          'first inserts cover ' + fmt(placed) +
-          ' and requeues cover ' + fmt(requeue) +
-          '. Queues hold ' + fmt(q[0]) + ', ' +
-          fmt(q[1]) + ' and ' + fmt(q[2]) +
-          ' tasks. Steals cover ' + fmt(steals) +
-          ' of ' + fmt(disp) + ' dispatches.';
+          'tier inserts cover ' + fmt(placed) +
+          ' with moves down ' + fmt(dem) +
+          ' and moves up ' + fmt(pro) +
+          '. Tiers hold ' + fmt(w[0]) + ' and ' +
+          fmt(w[1]) + ' tasks. Gated serves cover ' +
+          fmt(deficit) + ' batch runs.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -523,12 +501,11 @@
       el('status-badge').style.color = 'var(--success)';
 
       var s = data.stats || {};
-      var quanta = data.quanta_per_queue || [0, 0, 0];
-      var queued = data.queued_per_queue || [0, 0, 0];
-      var ages = data.head_age_per_queue || [0, 0, 0];
-      renderQueues(quanta, queued, ages);
+      var quanta = data.quanta_per_tier || [0, 0];
+      var waiting = data.waiting_per_tier || [0, 0];
+      renderTiers(quanta, waiting);
 
-      var summary = buildSummary(s, queued);
+      var summary = buildSummary(s, waiting);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
@@ -538,31 +515,24 @@
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =
         fmtRuntime(s.total_runtime || 0);
-      el('place-q0').textContent =
-        fmt(s.placements_q0 || 0);
-      el('place-q1').textContent =
-        fmt(s.placements_q1 || 0);
-      el('place-q2').textContent =
-        fmt(s.placements_q2 || 0);
-      el('demote-q0').textContent =
-        fmt(s.demotions_q0 || 0);
-      el('demote-q1').textContent =
-        fmt(s.demotions_q1 || 0);
-      el('demote-q2').textContent =
-        fmt(s.demotions_q2 || 0);
-      el('promote-q0').textContent =
-        fmt(s.promotions_q0 || 0);
-      el('promote-q1').textContent =
-        fmt(s.promotions_q1 || 0);
-      el('promote-q2').textContent =
-        fmt(s.promotions_q2 || 0);
-      el('requeues').textContent =
-        fmt(s.requeues || 0);
-      el('steals').textContent = fmt(s.steals || 0);
-      el('dispatches').textContent =
-        fmt(s.dispatches || 0);
+      el('enq-t0').textContent =
+        fmt(s.enq_tier0 || 0);
+      el('enq-t1').textContent =
+        fmt(s.enq_tier1 || 0);
+      el('demotions').textContent =
+        fmt(s.demotions || 0);
+      el('promotions').textContent =
+        fmt(s.promotions || 0);
+      el('serves-t0').textContent =
+        fmt(s.serves_tier0 || 0);
+      el('serves-t1').textContent =
+        fmt(s.serves_tier1 || 0);
+      el('deficit').textContent =
+        fmt(s.deficit_serves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
+      el('preempts').textContent =
+        fmt(s.preempts || 0);
       el('no-tctx').textContent =
         fmt(s.enq_no_tctx || 0);
 

@@ -7,152 +7,62 @@
  * stays the same on both sides of the boundary.
  */
 
-/* Base id of the per cpu queues. */
+/* Count of tiers kept by the scheduler. */
+pub const NTIERS: u32 = 2;
+/* Fixed slice of the interactive tier in nanos. */
+pub const QUANTUM_TIER0_NS: u64 = 500_000;
+/* Fixed slice of the batch tier in nanos. */
+pub const QUANTUM_TIER1_NS: u64 = 8_000_000;
+/* Burst length that counts as short in nanos. */
+pub const SHORT_BOUND_NS: u64 = 1_000_000;
+/* Short blocks that earn a move up. */
+pub const PROMOTE_STREAK: u32 = 3;
+/* Upper bound of the block streak. */
+pub const STREAK_CAP: u32 = 7;
+/* Interactive serves per batch serve. */
+pub const DEFICIT_SERVES: u64 = 8;
+/* Minimum gap between busy preemptions in nanos. */
+pub const PREEMPT_GAP_NS: u64 = 1_000_000;
+/* Bound of the moved tasks in one pass. */
+pub const DISPATCH_BATCH: u32 = 32;
+/* Shared DSQ of the batch tier. */
 #[cfg(test)]
-pub const DSQ_BASE: u64 = 0x1000;
-/* Stride between the queues of one cpu. */
+pub const DSQ_BATCH: u64 = 0x2000;
+/* Park DSQ for tasks with no target. */
 #[cfg(test)]
-pub const DSQ_STRIDE: u64 = 3;
-/* Count of queues kept for each cpu. */
-#[cfg(test)]
-pub const NQUEUES: u32 = 3;
-/* Base id of the park queues, one per queue. */
-#[cfg(test)]
-pub const PARK_BASE: u64 = 0x1000 + 1024 * 3;
-/* Floor of the first queue quantum in nanoseconds. */
-pub const QUANTUM_MIN0_NS: u64 = 500_000;
-/* Ceiling of the first queue quantum in nanoseconds. */
-pub const QUANTUM_MAX0_NS: u64 = 4_000_000;
-/* Seed of the first queue quantum in nanoseconds. */
-pub const QUANTUM_SEED0_NS: u64 = 1_000_000;
-/* Floor of the second queue quantum in nanoseconds. */
-pub const QUANTUM_MIN1_NS: u64 = 1_000_000;
-/* Ceiling of the second queue quantum in nanoseconds. */
-pub const QUANTUM_MAX1_NS: u64 = 8_000_000;
-/* Seed of the second queue quantum in nanoseconds. */
-pub const QUANTUM_SEED1_NS: u64 = 2_000_000;
-/* Floor of the third queue quantum in nanoseconds. */
-pub const QUANTUM_MIN2_NS: u64 = 4_000_000;
-/* Ceiling of the third queue quantum in nanoseconds. */
-pub const QUANTUM_MAX2_NS: u64 = 32_000_000;
-/* Seed of the third queue quantum in nanoseconds. */
-pub const QUANTUM_SEED2_NS: u64 = 8_000_000;
-/* Lower bound of a per task estimate in nanoseconds. */
+pub const DSQ_PARK: u64 = 0x2001;
+/* Lower bound of a per task estimate in nanos. */
 #[cfg(test)]
 pub const EST_MIN_NS: u64 = 1;
-/* Upper bound of a per task estimate in nanoseconds. */
+/* Upper bound of a per task estimate in nanos. */
 #[cfg(test)]
 pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Head age that lifts a queue past strict order. */
-#[cfg(test)]
-pub const PROMOTE_AGE_NS: u64 = 500_000_000;
-/* Bound of the remote scan in one dispatch pass. */
-pub const STEAL_SCAN_MAX: u32 = 64;
-/* Bound of the moved tasks in one dispatch pass. */
-pub const DISPATCH_BATCH: u32 = 32;
 
 /*
- * Queue id of a cpu and queue pair. The layout is base
- * plus cpu times stride plus queue, so the owning cpu
- * and the queue decode with plain arithmetic.
+ * Check that a tier index names a real tier. Used to
+ * guard per tier array access.
  */
-#[cfg(test)]
-pub fn dsq_id(cpu: u32, queue: u32) -> u64 {
-    DSQ_BASE + cpu as u64 * DSQ_STRIDE + queue as u64
+pub fn tier_ok(tier: u32) -> bool {
+    tier < NTIERS
 }
 
 /*
- * Queue id of a park queue. The park holds tasks with
- * no allowed cpu. One park queue exists per queue.
+ * Fixed slice of one tier in nanos. Unknown tiers fall
+ * back to the interactive slice, so the result stays
+ * usable.
  */
-#[cfg(test)]
-pub fn park_id(queue: u32) -> u64 {
-    PARK_BASE + queue as u64
-}
-
-/* Check that a queue index names a real queue. */
-#[cfg(test)]
-pub fn queue_ok(queue: u32) -> bool {
-    queue < NQUEUES
-}
-
-/*
- * Check that an id names a park queue. Park ids sit in
- * a fixed range past all per cpu queues.
- */
-#[cfg(test)]
-pub fn is_park(id: u64) -> bool {
-    id >= PARK_BASE && id < PARK_BASE + NQUEUES as u64
-}
-
-/* Decode the owning cpu from a per cpu queue id. */
-#[cfg(test)]
-pub fn dsq_cpu(id: u64) -> u32 {
-    if is_park(id) {
-        return 0;
+pub fn quantum_tier(tier: u32) -> u64 {
+    if tier == 1 {
+        QUANTUM_TIER1_NS
+    } else {
+        QUANTUM_TIER0_NS
     }
-    if id < DSQ_BASE {
-        return 0;
-    }
-    ((id - DSQ_BASE) / DSQ_STRIDE) as u32
-}
-
-/*
- * Decode the queue index from a queue id. Park ids
- * decode to the park queue. Per cpu ids decode with
- * plain arithmetic. Unknown ids fall back to zero.
- */
-#[cfg(test)]
-pub fn dsq_queue(id: u64) -> u32 {
-    if is_park(id) {
-        return (id - PARK_BASE) as u32;
-    }
-    if id < DSQ_BASE {
-        return 0;
-    }
-    ((id - DSQ_BASE) % DSQ_STRIDE) as u32
-}
-
-/* Floor of one queue quantum in nanoseconds. */
-pub fn quantum_min(queue: u32) -> u64 {
-    match queue {
-        1 => QUANTUM_MIN1_NS,
-        2 => QUANTUM_MIN2_NS,
-        _ => QUANTUM_MIN0_NS,
-    }
-}
-
-/* Ceiling of one queue quantum in nanoseconds. */
-pub fn quantum_max(queue: u32) -> u64 {
-    match queue {
-        1 => QUANTUM_MAX1_NS,
-        2 => QUANTUM_MAX2_NS,
-        _ => QUANTUM_MAX0_NS,
-    }
-}
-
-/* Seed of one queue quantum in nanoseconds. */
-pub fn quantum_seed(queue: u32) -> u64 {
-    match queue {
-        1 => QUANTUM_SEED1_NS,
-        2 => QUANTUM_SEED2_NS,
-        _ => QUANTUM_SEED0_NS,
-    }
-}
-
-/*
- * Clamp a quantum of one queue to the queue range. Low
- * values rise to the floor. High values fall to the
- * ceiling.
- */
-pub fn clamp_quantum(queue: u32, v: u64) -> u64 {
-    v.clamp(quantum_min(queue), quantum_max(queue))
 }
 
 /*
  * Clamp a per task estimate to the estimate range. The
- * floor keeps the value positive. The ceiling keeps one
- * long run from shaping later choice.
+ * floor keeps the value positive. The ceiling keeps a
+ * single long run from shaping later choice.
  */
 #[cfg(test)]
 pub fn clamp_est(v: u64) -> u64 {
@@ -160,189 +70,151 @@ pub fn clamp_est(v: u64) -> u64 {
 }
 
 /*
- * Seed quantum of one queue. The seed sits inside the
- * queue range, so the clamp keeps it unchanged while
- * it guards later values.
- */
-pub fn seed_quantum(queue: u32) -> u64 {
-    clamp_quantum(queue, quantum_seed(queue))
-}
-
-/*
- * Mean quantum of one queue over accounted tasks. An
- * empty set keeps the last value. A zero last value
- * falls back to the seed, so the result is never zero.
+ * Check that a burst burned the full grant. A zero
+ * grant never counts as burned, so a missing grant
+ * holds the tier.
  */
 #[cfg(test)]
-pub fn mean_quantum(queue: u32, sum: u64, nr: u64, last: u64) -> u64 {
-    if nr == 0 {
-        if last == 0 {
-            return seed_quantum(queue);
-        }
-        return clamp_quantum(queue, last);
-    }
-    clamp_quantum(queue, sum / nr)
-}
-
-/*
- * Live quantum of one queue from its mean. A zero mean
- * falls back to the seed, so grants track the live
- * mean while the result stays in range.
- */
-pub fn live_quantum(queue: u32, mean: u64) -> u64 {
-    if mean == 0 {
-        return seed_quantum(queue);
-    }
-    clamp_quantum(queue, mean)
-}
-
-/*
- * Slice grant of one queue from its mean. The grant
- * follows the live mean only, so the slice is fixed
- * for the queue at grant time.
- */
-#[cfg(test)]
-pub fn slice_for_queue(queue: u32, mean: u64) -> u64 {
-    live_quantum(queue, mean)
-}
-
-/*
- * Queue of a new or unknown task. New tasks start at
- * the first queue, so short bursts drain first.
- */
-#[cfg(test)]
-pub fn queue_for_new() -> u32 {
-    0
-}
-
-/*
- * Check that a burst burned the full slice. A zero
- * slice never counts as burned, so a missing grant
- * holds the queue.
- */
-#[cfg(test)]
-pub fn burned(slice: u64, delta: u64) -> bool {
-    if slice == 0 {
+pub fn burned(grant: u64, delta: u64) -> bool {
+    if grant == 0 {
         return false;
     }
-    delta >= slice
+    delta >= grant
 }
 
 /*
- * Next queue after a run. A runnable task that burned
- * the full slice moves down one queue. All other tasks
- * hold the queue. The last queue holds as well.
+ * Check that a burst counts as short. Bursts below the
+ * bound earn the streak. Bursts at or past the bound
+ * reset the streak.
  */
 #[cfg(test)]
-pub fn next_on_burn(queue: u32, runnable: bool, is_burned: bool) -> u32 {
+pub fn is_short(delta: u64) -> bool {
+    delta < SHORT_BOUND_NS
+}
+
+/*
+ * Next streak after one voluntary block. Short blocks
+ * step forward with saturation at the cap. Long blocks
+ * reset to zero.
+ */
+#[cfg(test)]
+pub fn streak_next(streak: u32, delta: u64) -> u32 {
+    if !is_short(delta) {
+        return 0;
+    }
+    if streak >= STREAK_CAP {
+        return STREAK_CAP;
+    }
+    streak + 1
+}
+
+/*
+ * Check that a streak earns a move up. Streaks at or
+ * past the bound earn the reward. Younger streaks
+ * hold.
+ */
+#[cfg(test)]
+pub fn should_promote(streak: u32) -> bool {
+    streak >= PROMOTE_STREAK
+}
+
+/*
+ * Next tier after a run. A runnable task that burned
+ * the full grant moves from interactive to batch. All
+ * other tasks hold the tier.
+ */
+#[cfg(test)]
+pub fn next_on_burn(tier: u32, runnable: bool, is_burned: bool) -> u32 {
     if !runnable {
-        return queue;
+        return tier;
     }
     if !is_burned {
-        return queue;
+        return tier;
     }
-    if queue + 1 < NQUEUES {
-        return queue + 1;
+    if tier == 0 {
+        return 1;
     }
-    queue
+    tier
 }
 
 /*
- * Check that a head age earns a move up. Ages at or
- * past the bound earn the reward. Younger ages hold.
+ * Check that the batch tier may be served now. An empty
+ * batch tier never serves. An empty interactive tier
+ * serves batch at once. A busy interactive tier serves
+ * batch only after enough interactive serves.
  */
 #[cfg(test)]
-pub fn should_promote(age: u64) -> bool {
-    age >= PROMOTE_AGE_NS
+pub fn deficit_should_serve(s0: u64, w0: bool, w1: bool) -> bool {
+    if !w1 {
+        return false;
+    }
+    if !w0 {
+        return true;
+    }
+    s0 >= DEFICIT_SERVES
 }
 
 /*
- * Next queue after the age check. An aged queue moves
- * up one queue. All other queues hold. The first queue
- * holds as well.
+ * Next deficit count after one run. Batch runs reset
+ * to zero. Interactive runs step forward with
+ * saturation at the bound.
  */
 #[cfg(test)]
-pub fn promote_if_aged(queue: u32, age: u64) -> u32 {
-    if !should_promote(age) {
-        return queue;
+pub fn deficit_next(served0: u64, served_tier: u32) -> u64 {
+    if served_tier == 1 {
+        return 0;
     }
-    if queue == 0 {
-        return queue;
+    if served0 >= DEFICIT_SERVES {
+        return DEFICIT_SERVES;
     }
-    queue - 1
+    served0 + 1
 }
 
 /*
- * Resolve the next queue with promotion first. An aged
- * head earns one step up and skips the burn check. A
- * runnable burn moves down one queue. All other tasks
- * hold. The flags report the move for counters.
+ * Check that one vruntime sorts before another. Used
+ * to advance the floor with the smallest waiting
+ * value.
  */
 #[cfg(test)]
-pub fn resolve_queue(
-    current: u32,
-    runnable: bool,
-    is_burned: bool,
-    head_age: u64,
-) -> (u32, bool, bool) {
-    if should_promote(head_age) && current > 0 {
-        return (current - 1, true, false);
-    }
-    let next = next_on_burn(current, runnable, is_burned);
-    if next > current {
-        return (next, false, true);
-    }
-    (current, false, false)
+pub fn vruntime_before(a: u64, b: u64) -> bool {
+    a < b
 }
 
 /*
- * Pick the next queue to serve. Aged non empty queues
- * come first by oldest age. Other queues follow strict
- * order. Empty queues never win. No queued task yields
- * no pick.
+ * Advance a vruntime by one burst with saturation. The
+ * top value sticks, so a burst cannot wrap the order.
  */
 #[cfg(test)]
-pub fn pick_dispatch(queued: [bool; 3], head_age: [u64; 3]) -> Option<usize> {
-    let mut best_aged: Option<usize> = None;
-    let mut best_age: u64 = 0;
-    for (q, &is_q) in queued.iter().enumerate() {
-        if !is_q {
-            continue;
-        }
-        let age = head_age[q];
-        if !should_promote(age) {
-            continue;
-        }
-        match best_aged {
-            None => {
-                best_aged = Some(q);
-                best_age = age;
-            }
-            Some(_) => {
-                if age > best_age {
-                    best_aged = Some(q);
-                    best_age = age;
-                }
-            }
-        }
-    }
-    if let Some(q) = best_aged {
-        return Some(q);
-    }
-    (0..3).find(|&q| queued[q])
+pub fn vruntime_advance(base: u64, delta: u64) -> u64 {
+    base.saturating_add(delta)
 }
 
 /*
- * Check that a steal candidate may run here. The peer
- * mask must include the stealing cpu. Missing masks
- * fail closed and skip the steal.
+ * Advance the floor to the smallest waiting value. The
+ * floor only moves forward, so later joins never pass
+ * waiting work.
  */
 #[cfg(test)]
-pub fn steal_ok(peer_mask: &[bool], cpu: u32) -> bool {
-    match peer_mask.get(cpu as usize) {
-        Some(&v) => v,
-        None => false,
+pub fn floor_advance(floor: u64, vtime: u64) -> u64 {
+    if vruntime_before(floor, vtime) {
+        vtime
+    } else {
+        floor
     }
+}
+
+/*
+ * Check that a busy preemption may be sent now. Gaps
+ * at or past the bound allow the kick. Shorter gaps
+ * hold the kick. A clock step back allows the kick, so
+ * a skew never blocks progress for long.
+ */
+#[cfg(test)]
+pub fn preempt_gap_ok(now: u64, last: u64) -> bool {
+    if now < last {
+        return true;
+    }
+    now - last >= PREEMPT_GAP_NS
 }
 
 /*
@@ -369,213 +241,6 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 }
 
 /*
- * Age of the head of the busy period. A zero stamp
- * means the set is empty, so the age is zero. Later
- * time values give a forward age with saturation.
- */
-pub fn head_age(now: u64, head_at: u64) -> u64 {
-    if head_at == 0 {
-        return 0;
-    }
-    now.saturating_sub(head_at)
-}
-
-/*
- * Age of the most recent arrival. A zero stamp means
- * the set is empty, so the age is zero. Later time
- * values give a forward age with saturation.
- */
-#[cfg(test)]
-pub fn tail_age(now: u64, tail_at: u64) -> u64 {
-    if tail_at == 0 {
-        return 0;
-    }
-    now.saturating_sub(tail_at)
-}
-
-/*
- * Per queue mean state. The count holds accounted tasks
- * in the queue. The sum holds clamped estimates with
- * saturation. The mean holds the live quantum with keep
- * last. The queue selects the range for the clamp.
- */
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
-pub struct QueueState {
-    /* Accounted task count in the queue. */
-    pub nr: u64,
-    /* Sum of clamped estimates in the queue. */
-    pub sum: u64,
-    /* Live mean quantum of the queue. */
-    pub mean: u64,
-    /* Queue index that selects the range. */
-    pub queue: u32,
-}
-
-#[cfg(test)]
-impl QueueState {
-    /*
-     * Empty state of one queue seeded at the queue seed.
-     * The count starts at zero and the mean starts
-     * clamped.
-     */
-    pub fn new(queue: u32) -> Self {
-        let q = if queue_ok(queue) { queue } else { 0 };
-        Self {
-            nr: 0,
-            sum: 0,
-            mean: seed_quantum(q),
-            queue: q,
-        }
-    }
-
-    /*
-     * Recompute the mean. An empty set keeps the last
-     * value, so the quantum is never zero.
-     */
-    pub fn recompute(&mut self) {
-        self.mean = mean_quantum(self.queue, self.sum, self.nr, self.mean);
-    }
-
-    /*
-     * Add one estimate to the queue. The sum saturates
-     * at the top, so a burst cannot wrap the value.
-     */
-    pub fn add(&mut self, est: u64) {
-        let e = if est == 0 {
-            clamp_est(EST_MIN_NS)
-        } else {
-            clamp_est(est)
-        };
-        self.nr = self.nr.saturating_add(1);
-        self.sum = self.sum.saturating_add(e);
-        self.recompute();
-    }
-
-    /*
-     * Remove one estimate from the queue. The count and
-     * the sum never go below zero. An empty set keeps
-     * the last mean.
-     */
-    pub fn remove(&mut self, est: u64) {
-        let e = if est == 0 {
-            clamp_est(EST_MIN_NS)
-        } else {
-            clamp_est(est)
-        };
-        if self.nr > 0 {
-            self.nr -= 1;
-        }
-        self.sum = self.sum.saturating_sub(e);
-        self.recompute();
-    }
-
-    /*
-     * Refresh one estimate in place. The count stays
-     * fixed and the sum swaps the old estimate for the
-     * new one. Used when a runnable requeue keeps the
-     * queue, so no double count occurs.
-     */
-    pub fn refresh(&mut self, old_est: u64, new_est: u64) {
-        let o = if old_est == 0 {
-            clamp_est(EST_MIN_NS)
-        } else {
-            clamp_est(old_est)
-        };
-        let n = if new_est == 0 {
-            clamp_est(EST_MIN_NS)
-        } else {
-            clamp_est(new_est)
-        };
-        if o == n {
-            return;
-        }
-        self.sum = self.sum.saturating_sub(o).saturating_add(n);
-        self.recompute();
-    }
-}
-
-#[cfg(test)]
-impl Default for QueueState {
-    /* Default state matches the empty first queue. */
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
-
-/*
- * Per cpu depth table. Each slot counts accounted tasks
- * for one cpu across all queues. The sum of the slots
- * matches the queued total when no task waits in park.
- */
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(test)]
-pub struct CpuDepths {
-    /* One count per cpu. Index is the cpu id. */
-    pub counts: Vec<u64>,
-}
-
-#[cfg(test)]
-impl CpuDepths {
-    /*
-     * Empty table for a fixed cpu count. All slots
-     * start at zero.
-     */
-    pub fn new(nr_cpus: usize) -> Self {
-        Self {
-            counts: vec![0; nr_cpus],
-        }
-    }
-
-    /*
-     * Add one task to a cpu. Out of range ids are a no
-     * op, so park tasks leave the table alone.
-     */
-    pub fn inc(&mut self, cpu: u32) {
-        if let Some(v) = self.counts.get_mut(cpu as usize) {
-            *v = v.saturating_add(1);
-        }
-    }
-
-    /*
-     * Remove one task from a cpu. Counts never go below
-     * zero. Out of range ids are a no op.
-     */
-    pub fn dec(&mut self, cpu: u32) {
-        if let Some(v) = self.counts.get_mut(cpu as usize) {
-            *v = v.saturating_sub(1);
-        }
-    }
-
-    /*
-     * Move one task between cpus. A same cpu move is a
-     * no op. Out of range ids leave the table alone.
-     */
-    pub fn shift(&mut self, old_cpu: u32, new_cpu: u32) {
-        if old_cpu == new_cpu {
-            return;
-        }
-        self.dec(old_cpu);
-        self.inc(new_cpu);
-    }
-
-    /*
-     * Sum of all per cpu slots. Matches the queued
-     * total when the park is empty.
-     */
-    pub fn sum(&self) -> u64 {
-        self.counts.iter().copied().sum()
-    }
-
-    /*
-     * Depth of one cpu. Out of range ids read as zero.
-     */
-    pub fn get(&self, cpu: u32) -> u64 {
-        self.counts.get(cpu as usize).copied().unwrap_or(0)
-    }
-}
-
-/*
  * Running view of one cpu for tests. Mirrors the BPF
  * cpu state fields used by the dashboard. Zero pid
  * means idle.
@@ -587,8 +252,8 @@ pub struct RunningView {
     pub est: u64,
     /* Pid now on the cpu. Zero when idle. */
     pub pid: u32,
-    /* Queue of the task now on the cpu. */
-    pub queue: u32,
+    /* Tier of the task now on the cpu. */
+    pub tier: u32,
 }
 
 #[cfg(test)]
@@ -601,7 +266,7 @@ impl RunningView {
         Self {
             est: 0,
             pid: 0,
-            queue: 0,
+            tier: 0,
         }
     }
 
@@ -620,62 +285,78 @@ impl RunningView {
     pub fn clear(&mut self) {
         self.est = 0;
         self.pid = 0;
-        self.queue = 0;
+        self.tier = 0;
     }
 }
 
 /*
- * Release flag for the dequeue path. Dequeue keeps
- * the entry across dispatch to run, so the ordered
- * requeue finds the entry and counts the move.
+ * Per tier counts for tests. Each slot counts joined
+ * tasks in one tier across all cpus. The sum matches
+ * the joined total.
  */
 #[cfg(test)]
-pub fn release_on_dequeue() -> bool {
-    false
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TierCounts {
+    /* Joined tasks per tier. Index is the tier. */
+    pub nr: [u64; 2],
 }
 
-/*
- * Release flag for the stop path. Blocked tasks
- * release at once. Runnable tasks keep the entry
- * for the ordered requeue.
- */
 #[cfg(test)]
-pub fn release_on_stop(runnable: bool) -> bool {
-    !runnable
-}
-
-/*
- * Claim one accounted entry exactly once. A missing
- * entry is a no op, so double release stays safe.
- * Mirrors the valid flag in the task state.
- */
-#[cfg(test)]
-pub fn claim_release(valid: &mut bool) -> bool {
-    if !*valid {
-        return false;
+impl TierCounts {
+    /*
+     * Empty counts with both tiers at zero. Matches
+     * the BPF state after init.
+     */
+    pub fn new() -> Self {
+        Self { nr: [0, 0] }
     }
-    *valid = false;
-    true
+
+    /*
+     * Join one task to a tier. Unknown tiers join the
+     * interactive tier, so the count stays balanced.
+     */
+    pub fn join(&mut self, tier: u32) {
+        let t = if tier_ok(tier) { tier as usize } else { 0 };
+        self.nr[t] = self.nr[t].saturating_add(1);
+    }
+
+    /*
+     * Leave one task from a tier. Counts never go below
+     * zero. Unknown tiers leave the interactive tier.
+     */
+    pub fn leave(&mut self, tier: u32) {
+        let t = if tier_ok(tier) { tier as usize } else { 0 };
+        self.nr[t] = self.nr[t].saturating_sub(1);
+    }
+
+    /*
+     * Move one task between tiers. A same tier move is
+     * a no op. Unknown tiers map to interactive.
+     */
+    pub fn shift(&mut self, old: u32, new: u32) {
+        let o = if tier_ok(old) { old } else { 0 };
+        let n = if tier_ok(new) { new } else { 0 };
+        if o == n {
+            return;
+        }
+        self.leave(o);
+        self.join(n);
+    }
+
+    /*
+     * Sum of both tiers. Matches the joined total.
+     */
+    pub fn sum(&self) -> u64 {
+        self.nr[0].saturating_add(self.nr[1])
+    }
 }
 
-/*
- * Slot for a demotion move. The source queue owns the
- * count, so the first two slots stay reachable and the
- * bottom slot stays at zero by design.
- */
 #[cfg(test)]
-pub fn demotion_slot(source: u32) -> usize {
-    source as usize
-}
-
-/*
- * Slot for a promotion move. The source queue owns the
- * count, so the last two slots stay reachable and the
- * first slot stays at zero by design.
- */
-#[cfg(test)]
-pub fn promotion_slot(source: u32) -> usize {
-    source as usize
+impl Default for TierCounts {
+    /* Default counts match the empty state. */
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -684,86 +365,33 @@ mod tests {
     use std::collections::VecDeque;
 
     #[test]
-    fn dsq_ids_follow_base_stride_layout() {
-        assert_eq!(dsq_id(0, 0), 0x1000);
-        assert_eq!(dsq_id(0, 1), 0x1001);
-        assert_eq!(dsq_id(0, 2), 0x1002);
-        assert_eq!(dsq_id(1, 0), 0x1003);
-        assert_eq!(dsq_id(1, 1), 0x1004);
-        assert_eq!(dsq_id(1, 2), 0x1005);
-        assert_eq!(DSQ_STRIDE, 3);
-        assert_eq!(NQUEUES, 3);
+    fn tier_ids_match_spec() {
+        assert!(tier_ok(0));
+        assert!(tier_ok(1));
+        assert!(!tier_ok(2));
+        assert_eq!(NTIERS, 2);
+        assert_eq!(DSQ_BATCH, 0x2000);
+        assert_eq!(DSQ_PARK, 0x2001);
+        assert_ne!(DSQ_BATCH, DSQ_PARK);
     }
 
     #[test]
-    fn dsq_ids_round_trip_through_decode() {
-        for cpu in [0, 1, 7, 64] {
-            for q in [0, 1, 2] {
-                let id = dsq_id(cpu, q);
-                assert_eq!(dsq_cpu(id), cpu);
-                assert_eq!(dsq_queue(id), q);
-                assert!(!is_park(id));
-            }
-        }
+    fn quanta_match_spec() {
+        assert_eq!(QUANTUM_TIER0_NS, 500_000);
+        assert_eq!(QUANTUM_TIER1_NS, 8_000_000);
+        assert_eq!(quantum_tier(0), 500_000);
+        assert_eq!(quantum_tier(1), 8_000_000);
+        assert_eq!(quantum_tier(2), 500_000);
+        assert_eq!(quantum_tier(99), 500_000);
     }
 
     #[test]
-    fn park_ids_decode_to_park_queue() {
-        for q in [0, 1, 2] {
-            let id = park_id(q);
-            assert!(is_park(id));
-            assert_eq!(dsq_queue(id), q);
-        }
-        assert!(!is_park(dsq_id(0, 0)));
-        assert!(!is_park(dsq_id(3, 2)));
-    }
-
-    #[test]
-    fn park_base_sits_past_all_cpu_queues() {
-        let last = dsq_id(1023, 2);
-        assert!(last < PARK_BASE);
-        assert_eq!(PARK_BASE, 0x1000 + 1024 * 3);
-        assert_eq!(park_id(0), PARK_BASE);
-    }
-
-    #[test]
-    fn dsq_decode_guards_underflow() {
-        assert_eq!(dsq_cpu(0), 0);
-        assert_eq!(dsq_cpu(DSQ_BASE - 1), 0);
-        assert_eq!(dsq_queue(0), 0);
-    }
-
-    #[test]
-    fn quantum_ranges_match_spec() {
-        assert_eq!(QUANTUM_MIN0_NS, 500_000);
-        assert_eq!(QUANTUM_MAX0_NS, 4_000_000);
-        assert_eq!(QUANTUM_SEED0_NS, 1_000_000);
-        assert_eq!(QUANTUM_MIN1_NS, 1_000_000);
-        assert_eq!(QUANTUM_MAX1_NS, 8_000_000);
-        assert_eq!(QUANTUM_SEED1_NS, 2_000_000);
-        assert_eq!(QUANTUM_MIN2_NS, 4_000_000);
-        assert_eq!(QUANTUM_MAX2_NS, 32_000_000);
-        assert_eq!(QUANTUM_SEED2_NS, 8_000_000);
-    }
-
-    #[test]
-    fn quantum_clamp_holds_each_range() {
-        assert_eq!(clamp_quantum(0, 0), QUANTUM_MIN0_NS);
-        assert_eq!(clamp_quantum(0, u64::MAX), QUANTUM_MAX0_NS);
-        assert_eq!(clamp_quantum(1, 0), QUANTUM_MIN1_NS);
-        assert_eq!(clamp_quantum(1, u64::MAX), QUANTUM_MAX1_NS);
-        assert_eq!(clamp_quantum(2, 0), QUANTUM_MIN2_NS);
-        assert_eq!(clamp_quantum(2, u64::MAX), QUANTUM_MAX2_NS);
-        assert_eq!(clamp_quantum(0, 1_000_000), 1_000_000);
-        assert_eq!(clamp_quantum(1, 2_000_000), 2_000_000);
-        assert_eq!(clamp_quantum(2, 8_000_000), 8_000_000);
-    }
-
-    #[test]
-    fn quantum_seed_sits_in_range() {
-        assert_eq!(seed_quantum(0), 1_000_000);
-        assert_eq!(seed_quantum(1), 2_000_000);
-        assert_eq!(seed_quantum(2), 8_000_000);
+    fn short_bound_matches_spec() {
+        assert_eq!(SHORT_BOUND_NS, 1_000_000);
+        assert_eq!(PROMOTE_STREAK, 3);
+        assert_eq!(STREAK_CAP, 7);
+        assert_eq!(DEFICIT_SERVES, 8);
+        assert_eq!(PREEMPT_GAP_NS, 1_000_000);
     }
 
     #[test]
@@ -784,163 +412,33 @@ mod tests {
     }
 
     #[test]
-    fn new_tasks_start_at_first_queue() {
-        assert_eq!(queue_for_new(), 0);
+    fn burn_boundary_holds_below_grant() {
+        let grant0 = QUANTUM_TIER0_NS;
+        assert!(!burned(grant0, grant0 - 1));
+        assert!(burned(grant0, grant0));
+        assert!(burned(grant0, grant0 + 1));
+        let grant1 = QUANTUM_TIER1_NS;
+        assert!(!burned(grant1, grant1 - 1));
+        assert!(burned(grant1, grant1));
+        assert!(burned(grant1, grant1 + 1));
+        assert!(!burned(0, 0));
+        assert!(!burned(0, 1_000_000));
     }
 
     #[test]
-    fn mean_empty_keeps_last_per_queue() {
-        let last0 = 1_000_000;
-        assert_eq!(mean_quantum(0, 0, 0, last0), last0);
-        let last1 = 2_000_000;
-        assert_eq!(mean_quantum(1, 0, 0, last1), last1);
-        let last2 = 8_000_000;
-        assert_eq!(mean_quantum(2, 0, 0, last2), last2);
-    }
-
-    #[test]
-    fn mean_empty_zero_falls_back_to_seed() {
-        assert_eq!(mean_quantum(0, 0, 0, 0), 1_000_000);
-        assert_eq!(mean_quantum(1, 0, 0, 0), 2_000_000);
-        assert_eq!(mean_quantum(2, 0, 0, 0), 8_000_000);
-    }
-
-    #[test]
-    fn mean_divides_and_clamps_per_queue() {
-        assert_eq!(mean_quantum(0, 2_000_000, 2, 1_000_000), 1_000_000);
-        assert_eq!(mean_quantum(0, 100, 2, 1_000_000), QUANTUM_MIN0_NS);
-        assert_eq!(mean_quantum(0, 100_000_000, 1, 1_000_000), QUANTUM_MAX0_NS);
-        assert_eq!(mean_quantum(1, 100, 1, 2_000_000), QUANTUM_MIN1_NS);
-        assert_eq!(mean_quantum(2, 1, 1, 8_000_000), QUANTUM_MIN2_NS);
-    }
-
-    #[test]
-    fn live_quantum_tracks_mean_per_queue() {
-        assert_eq!(live_quantum(0, 1_000_000), 1_000_000);
-        assert_eq!(live_quantum(1, 2_000_000), 2_000_000);
-        assert_eq!(live_quantum(2, 8_000_000), 8_000_000);
-    }
-
-    #[test]
-    fn live_quantum_clamps_and_falls_back() {
-        assert_eq!(live_quantum(0, 100), QUANTUM_MIN0_NS);
-        assert_eq!(live_quantum(0, 100_000_000), QUANTUM_MAX0_NS);
-        assert_eq!(live_quantum(0, 0), 1_000_000);
-        assert_eq!(live_quantum(1, 0), 2_000_000);
-        assert_eq!(live_quantum(2, 0), 8_000_000);
-    }
-
-    #[test]
-    fn granted_slice_stays_in_queue_range() {
-        for q in [0, 1, 2] {
-            for mean in [quantum_min(q), seed_quantum(q)] {
-                let slice = slice_for_queue(q, mean);
-                assert!(slice >= quantum_min(q));
-                assert!(slice <= quantum_max(q));
-            }
-        }
-    }
-
-    #[test]
-    fn queue_add_recomputes_live_mean() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        assert_eq!(s.nr, 1);
-        assert_eq!(s.sum, 1_000_000);
-        assert_eq!(s.mean, 1_000_000);
-        s.add(3_000_000);
-        assert_eq!(s.nr, 2);
-        assert_eq!(s.mean, 2_000_000);
-    }
-
-    #[test]
-    fn queue_remove_saturates_at_zero() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        s.remove(5_000_000);
-        assert_eq!(s.nr, 0);
-        assert_eq!(s.sum, 0);
-        assert_eq!(s.mean, 1_000_000);
-    }
-
-    #[test]
-    fn queue_remove_empty_keeps_last() {
-        let mut s = QueueState::new(1);
-        let last = s.mean;
-        s.remove(1_000_000);
-        assert_eq!(s.nr, 0);
-        assert_eq!(s.sum, 0);
-        assert_eq!(s.mean, last);
-    }
-
-    #[test]
-    fn queue_sum_saturates_at_top() {
-        let mut s = QueueState::new(0);
-        s.sum = u64::MAX - 10;
-        s.nr = 1;
-        s.add(100);
-        assert_eq!(s.sum, u64::MAX);
-        assert_eq!(s.mean, QUANTUM_MAX0_NS);
-    }
-
-    #[test]
-    fn queue_nr_saturates_at_top() {
-        let mut s = QueueState::new(0);
-        s.nr = u64::MAX;
-        s.sum = u64::MAX;
-        s.add(1_000_000);
-        assert_eq!(s.nr, u64::MAX);
-        assert_eq!(s.sum, u64::MAX);
-    }
-
-    #[test]
-    fn refresh_keeps_count_stable() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        s.refresh(1_000_000, 2_000_000);
-        assert_eq!(s.nr, 1);
-        assert_eq!(s.sum, 2_000_000);
-        assert_eq!(s.mean, 2_000_000);
-    }
-
-    #[test]
-    fn refresh_same_value_is_noop() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        s.refresh(1_000_000, 1_000_000);
-        assert_eq!(s.nr, 1);
-        assert_eq!(s.sum, 1_000_000);
-    }
-
-    #[test]
-    fn refresh_balance_holds_sum() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        s.add(3_000_000);
-        assert_eq!(s.sum, 4_000_000);
-        s.refresh(1_000_000, 2_000_000);
-        assert_eq!(s.nr, 2);
-        assert_eq!(s.sum, 5_000_000);
-        assert_eq!(s.mean, 2_500_000);
-    }
-
-    #[test]
-    fn release_is_idempotent() {
-        let mut s = QueueState::new(0);
-        s.add(1_000_000);
-        s.remove(1_000_000);
-        assert_eq!(s.nr, 0);
-        assert_eq!(s.sum, 0);
-        s.remove(1_000_000);
-        assert_eq!(s.nr, 0);
-        assert_eq!(s.sum, 0);
+    fn burn_uses_stored_grant_not_slice() {
+        let grant = QUANTUM_TIER0_NS;
+        let other = QUANTUM_TIER1_NS;
+        assert!(burned(grant, grant));
+        assert!(!burned(grant, grant - 1));
+        assert!(burned(other, other));
+        assert!(!burned(other, grant));
     }
 
     #[test]
     fn demotion_moves_down_one_on_full_burn() {
         assert_eq!(next_on_burn(0, true, true), 1);
-        assert_eq!(next_on_burn(1, true, true), 2);
-        assert_eq!(next_on_burn(2, true, true), 2);
+        assert_eq!(next_on_burn(1, true, true), 1);
     }
 
     #[test]
@@ -949,35 +447,21 @@ mod tests {
         assert_eq!(next_on_burn(1, false, true), 1);
         assert_eq!(next_on_burn(0, true, false), 0);
         assert_eq!(next_on_burn(1, true, false), 1);
-        assert_eq!(next_on_burn(2, false, false), 2);
-    }
-
-    #[test]
-    fn demotion_burn_boundary_holds_below_slice() {
-        let slice = 2_000_000;
-        assert!(!burned(slice, slice - 1));
-        assert!(burned(slice, slice));
-        assert!(burned(slice, slice + 1));
-        assert!(!burned(0, 0));
-        assert!(!burned(0, 1_000_000));
-        assert_eq!(next_on_burn(0, true, false), 0);
-        assert_eq!(next_on_burn(0, true, true), 1);
+        assert_eq!(next_on_burn(1, false, false), 1);
     }
 
     #[test]
     fn demotion_property_holds_or_moves_one() {
-        for q in [0, 1, 2] {
+        for tier in [0, 1] {
             for runnable in [false, true] {
-                for delta in [0, 500_000, 2_000_000] {
-                    let slice = 2_000_000;
-                    let is_burned = burned(slice, delta);
-                    let next = next_on_burn(q, runnable, is_burned);
-                    assert!(next == q || next == q + 1);
-                    if q == 2 {
-                        assert_eq!(next, 2);
-                    }
-                    if !runnable || !is_burned {
-                        assert_eq!(next, q);
+                for delta in [0, 500_000, 8_000_000] {
+                    let grant = quantum_tier(tier);
+                    let hit = burned(grant, delta);
+                    let next = next_on_burn(tier, runnable, hit);
+                    if tier == 0 && runnable && hit {
+                        assert_eq!(next, 1);
+                    } else {
+                        assert_eq!(next, tier);
                     }
                 }
             }
@@ -985,65 +469,165 @@ mod tests {
     }
 
     #[test]
-    fn promotion_age_boundary_needs_full_wait() {
-        assert_eq!(PROMOTE_AGE_NS, 500_000_000);
-        assert!(!should_promote(PROMOTE_AGE_NS - 1));
-        assert!(should_promote(PROMOTE_AGE_NS));
-        assert!(should_promote(PROMOTE_AGE_NS + 1));
-        assert_eq!(promote_if_aged(2, PROMOTE_AGE_NS - 1), 2);
-        assert_eq!(promote_if_aged(2, PROMOTE_AGE_NS), 1);
-        assert_eq!(promote_if_aged(1, PROMOTE_AGE_NS), 0);
-        assert_eq!(promote_if_aged(0, PROMOTE_AGE_NS), 0);
+    fn streak_short_boundary_needs_full_wait() {
+        assert!(!is_short(SHORT_BOUND_NS));
+        assert!(!is_short(SHORT_BOUND_NS + 1));
+        assert!(is_short(SHORT_BOUND_NS - 1));
+        assert!(is_short(0));
+        assert_eq!(streak_next(0, SHORT_BOUND_NS - 1), 1);
+        assert_eq!(streak_next(0, SHORT_BOUND_NS), 0);
+        assert_eq!(streak_next(2, SHORT_BOUND_NS), 0);
     }
 
     #[test]
-    fn promotion_rewards_one_step_only() {
-        assert_eq!(promote_if_aged(2, u64::MAX), 1);
-        assert_eq!(promote_if_aged(1, u64::MAX), 0);
-        assert_eq!(promote_if_aged(0, u64::MAX), 0);
-        assert_eq!(promote_if_aged(2, 0), 2);
+    fn streak_steps_with_saturation_at_cap() {
+        assert_eq!(streak_next(0, 100), 1);
+        assert_eq!(streak_next(2, 100), 3);
+        assert_eq!(streak_next(6, 100), 7);
+        assert_eq!(streak_next(7, 100), 7);
+        assert_eq!(streak_next(7, 5_000_000), 0);
+        assert_eq!(streak_next(3, 5_000_000), 0);
     }
 
     #[test]
-    fn promotion_property_age_boundary_sweeps() {
-        for age in [
-            0,
-            1,
-            PROMOTE_AGE_NS - 1,
-            PROMOTE_AGE_NS,
-            PROMOTE_AGE_NS + 1,
-            u64::MAX,
-        ] {
-            for q in [0, 1, 2] {
-                let next = promote_if_aged(q, age);
-                if age < PROMOTE_AGE_NS || q == 0 {
-                    assert_eq!(next, q);
-                } else {
-                    assert_eq!(next, q - 1);
+    fn promotion_needs_three_short_blocks() {
+        assert!(!should_promote(0));
+        assert!(!should_promote(1));
+        assert!(!should_promote(2));
+        assert!(should_promote(3));
+        assert!(should_promote(7));
+    }
+
+    #[test]
+    fn streak_promotion_sequence() {
+        let mut streak = 0;
+        streak = streak_next(streak, 100_000);
+        assert_eq!(streak, 1);
+        assert!(!should_promote(streak));
+        streak = streak_next(streak, 200_000);
+        assert_eq!(streak, 2);
+        assert!(!should_promote(streak));
+        streak = streak_next(streak, 300_000);
+        assert_eq!(streak, 3);
+        assert!(should_promote(streak));
+        streak = streak_next(streak, 2_000_000);
+        assert_eq!(streak, 0);
+        assert!(!should_promote(streak));
+    }
+
+    #[test]
+    fn tier_transition_burn_then_streak() {
+        let mut tier = 0;
+        let grant = quantum_tier(tier);
+        let delta = grant;
+        assert!(burned(grant, delta));
+        tier = next_on_burn(tier, true, true);
+        assert_eq!(tier, 1);
+        let mut streak = 0;
+        for d in [100_000, 200_000, 300_000] {
+            streak = streak_next(streak, d);
+        }
+        assert!(should_promote(streak));
+        tier = 0;
+        assert!(tier_ok(tier));
+    }
+
+    #[test]
+    fn deficit_needs_batch_backlog() {
+        assert!(!deficit_should_serve(8, true, false));
+        assert!(!deficit_should_serve(0, true, false));
+        assert!(!deficit_should_serve(8, false, false));
+    }
+
+    #[test]
+    fn deficit_serves_eight_to_one() {
+        assert!(!deficit_should_serve(0, true, true));
+        assert!(!deficit_should_serve(7, true, true));
+        assert!(deficit_should_serve(8, true, true));
+        assert!(deficit_should_serve(8, false, true));
+        assert!(deficit_should_serve(0, false, true));
+    }
+
+    #[test]
+    fn deficit_next_tracks_interactive_serves() {
+        assert_eq!(deficit_next(0, 0), 1);
+        assert_eq!(deficit_next(7, 0), 8);
+        assert_eq!(deficit_next(8, 0), 8);
+        assert_eq!(deficit_next(8, 1), 0);
+        assert_eq!(deficit_next(3, 1), 0);
+    }
+
+    #[test]
+    fn deficit_sequence_holds_ratio() {
+        let mut served0 = 0;
+        for _ in 0..8 {
+            assert!(!deficit_should_serve(served0, true, true));
+            served0 = deficit_next(served0, 0);
+        }
+        assert_eq!(served0, 8);
+        assert!(deficit_should_serve(served0, true, true));
+        served0 = deficit_next(served0, 1);
+        assert_eq!(served0, 0);
+        assert!(!deficit_should_serve(served0, true, true));
+    }
+
+    #[test]
+    fn vruntime_order_sorts_by_service() {
+        assert!(vruntime_before(0, 1));
+        assert!(vruntime_before(100, 200));
+        assert!(!vruntime_before(200, 100));
+        assert!(!vruntime_before(5, 5));
+        assert_eq!(vruntime_advance(100, 50), 150);
+        assert_eq!(vruntime_advance(u64::MAX, 1), u64::MAX);
+        assert_eq!(vruntime_advance(u64::MAX - 1, 5), u64::MAX);
+    }
+
+    #[test]
+    fn vruntime_new_joins_at_floor() {
+        let floor = 1_000_000;
+        let joined = floor;
+        assert_eq!(joined, floor);
+        let later = vruntime_advance(joined, 500_000);
+        assert!(vruntime_before(joined, later));
+        let floor2 = floor_advance(floor, joined);
+        assert_eq!(floor2, floor);
+        let floor3 = floor_advance(floor, later);
+        assert_eq!(floor3, later);
+    }
+
+    #[test]
+    fn vruntime_property_advance_never_wraps() {
+        for base in [0, 1, 1_000_000, u64::MAX - 1, u64::MAX] {
+            for delta in [0, 1, 500_000, u64::MAX] {
+                let out = vruntime_advance(base, delta);
+                assert!(out >= base || out == u64::MAX);
+                if base != u64::MAX {
+                    assert!(out >= base);
                 }
             }
         }
     }
 
     #[test]
-    fn resolve_prefers_promotion_over_burn() {
-        let r = resolve_queue(2, true, true, PROMOTE_AGE_NS);
-        let (next, promoted, demoted) = r;
-        assert_eq!(next, 1);
-        assert!(promoted);
-        assert!(!demoted);
-        let (next, promoted, demoted) = resolve_queue(1, true, true, 0);
-        assert_eq!(next, 2);
-        assert!(!promoted);
-        assert!(demoted);
-        let (next, promoted, demoted) = resolve_queue(1, false, false, 0);
-        assert_eq!(next, 1);
-        assert!(!promoted);
-        assert!(!demoted);
+    fn floor_only_moves_forward() {
+        assert_eq!(floor_advance(100, 50), 100);
+        assert_eq!(floor_advance(100, 100), 100);
+        assert_eq!(floor_advance(100, 150), 150);
+        assert_eq!(floor_advance(0, 0), 0);
     }
 
     #[test]
-    fn fifo_order_survives_varied_estimates() {
+    fn preempt_gap_gates_busy_kicks() {
+        assert!(preempt_gap_ok(2_000_000, 0));
+        assert!(preempt_gap_ok(1_000_000, 0));
+        assert!(!preempt_gap_ok(999_999, 0));
+        assert!(!preempt_gap_ok(1_500_000, 1_000_000));
+        assert!(preempt_gap_ok(2_000_000, 1_000_000));
+        assert!(preempt_gap_ok(0, 5_000_000));
+    }
+
+    #[test]
+    fn fifo_tail_preserves_arrival_order() {
         let mut lane: VecDeque<u64> = VecDeque::new();
         let arrivals = [5_000_000, 100, 1_000_000, 50];
         for &id in &arrivals {
@@ -1074,115 +658,14 @@ mod tests {
     }
 
     #[test]
-    fn fifo_target_ignores_estimate_spread() {
-        let (a, _, _) = resolve_queue(1, true, false, 0);
-        let (b, _, _) = resolve_queue(1, true, false, 0);
-        assert_eq!(a, b);
-        assert_eq!(a, 1);
-    }
-
-    #[test]
-    fn dispatch_prefers_strict_order_when_young() {
-        let ages = [10, 20, 30];
-        assert_eq!(pick_dispatch([true, true, true], ages), Some(0));
-        assert_eq!(pick_dispatch([false, true, true], ages), Some(1));
-        assert_eq!(pick_dispatch([false, false, true], ages), Some(2));
-        assert_eq!(pick_dispatch([false, false, false], ages), None);
-    }
-
-    #[test]
-    fn dispatch_aging_override_lifts_old_queue() {
-        let ages = [10, 20, PROMOTE_AGE_NS + 10];
-        assert_eq!(pick_dispatch([true, true, true], ages), Some(2));
-        let ages = [10, PROMOTE_AGE_NS + 5, PROMOTE_AGE_NS];
-        assert_eq!(pick_dispatch([true, true, false], ages), Some(1));
-    }
-
-    #[test]
-    fn starvation_fairness_oldest_aged_wins() {
-        let ages = [PROMOTE_AGE_NS + 100, PROMOTE_AGE_NS, 0];
-        assert_eq!(pick_dispatch([true, true, false], ages), Some(0));
-        let ages = [PROMOTE_AGE_NS, PROMOTE_AGE_NS + 100, 0];
-        assert_eq!(pick_dispatch([true, true, false], ages), Some(1));
-    }
-
-    #[test]
-    fn starvation_fairness_property_aged_beats_young() {
-        for young in [0, 1, 100, PROMOTE_AGE_NS - 1] {
-            let ages = [young, young, PROMOTE_AGE_NS];
-            assert_eq!(pick_dispatch([true, true, true], ages), Some(2));
-            let ages = [young, young, young];
-            assert_eq!(pick_dispatch([true, true, true], ages), Some(0));
-        }
-    }
-
-    #[test]
-    fn depth_balance_matches_queued_total() {
-        let s0 = QueueState::new(0);
-        let s1 = QueueState::new(1);
-        let s2 = QueueState::new(2);
-        let mut states = [s0, s1, s2];
-        let mut d = CpuDepths::new(4);
-        states[0].add(1_000_000);
-        d.inc(0);
-        states[1].add(2_000_000);
-        d.inc(1);
-        let total: u64 = states.iter().map(|s| s.nr).sum();
-        assert_eq!(total, d.sum());
-        states[0].remove(1_000_000);
-        d.dec(0);
-        let total: u64 = states.iter().map(|s| s.nr).sum();
-        assert_eq!(total, d.sum());
-        assert_eq!(d.get(1), 1);
-    }
-
-    #[test]
-    fn depth_shift_keeps_total_stable() {
-        let mut d = CpuDepths::new(4);
-        d.inc(0);
-        d.inc(1);
-        assert_eq!(d.sum(), 2);
-        d.shift(0, 2);
-        assert_eq!(d.sum(), 2);
-        assert_eq!(d.get(0), 0);
-        assert_eq!(d.get(2), 1);
-    }
-
-    #[test]
-    fn depth_out_of_range_is_noop() {
-        let mut d = CpuDepths::new(2);
-        d.inc(9);
-        d.dec(9);
-        assert_eq!(d.sum(), 0);
-        assert_eq!(d.get(9), 0);
-    }
-
-    #[test]
-    fn head_age_tracks_busy_start() {
-        assert_eq!(head_age(1000, 0), 0);
-        assert_eq!(head_age(1000, 400), 600);
-        assert_eq!(head_age(100, 400), 0);
-    }
-
-    #[test]
-    fn tail_age_tracks_recent_arrival() {
-        assert_eq!(tail_age(1000, 0), 0);
-        assert_eq!(tail_age(1000, 900), 100);
-        assert_eq!(tail_age(100, 900), 0);
-    }
-
-    #[test]
-    fn steal_split_totals_scan_max() {
-        assert_eq!(STEAL_SCAN_MAX, 64);
-        assert_eq!(DISPATCH_BATCH, 32);
-    }
-
-    #[test]
-    fn steal_guard_needs_allowed_cpu() {
-        assert!(steal_ok(&[true, false], 0));
-        assert!(!steal_ok(&[true, false], 1));
-        assert!(!steal_ok(&[], 0));
-        assert!(!steal_ok(&[true], 5));
+    fn fifo_head_wakeup_jumps_ahead() {
+        let mut lane: VecDeque<u64> = VecDeque::new();
+        lane.push_back(1);
+        lane.push_back(2);
+        lane.push_front(3);
+        assert_eq!(lane.pop_front(), Some(3));
+        assert_eq!(lane.pop_front(), Some(1));
+        assert_eq!(lane.pop_front(), Some(2));
     }
 
     #[test]
@@ -1214,46 +697,44 @@ mod tests {
     }
 
     #[test]
-    fn default_state_matches_first_queue() {
-        assert_eq!(QueueState::default(), QueueState::new(0));
+    fn counts_balance_across_tier_moves() {
+        let mut c = TierCounts::new();
+        c.join(0);
+        c.join(0);
+        c.join(1);
+        assert_eq!(c.sum(), 3);
+        c.shift(0, 1);
+        assert_eq!(c.nr, [1, 2]);
+        assert_eq!(c.sum(), 3);
+        c.leave(1);
+        assert_eq!(c.sum(), 2);
+        c.leave(0);
+        c.leave(1);
+        assert_eq!(c.sum(), 0);
     }
 
-    /* Batch continues past one failed queue. */
     #[test]
-    fn dispatch_continues_past_failed_queue() {
-        let ages = [10, 20, 30];
-        let first = pick_dispatch([true, true, true], ages);
-        assert_eq!(first, Some(0));
-        let next = pick_dispatch([false, true, true], ages);
-        assert_eq!(next, Some(1));
-        let last = pick_dispatch([false, false, true], ages);
-        assert_eq!(last, Some(2));
-        let empty = pick_dispatch([false, false, false], ages);
-        assert_eq!(empty, None);
+    fn counts_saturate_at_bounds() {
+        let mut c = TierCounts::new();
+        c.nr = [u64::MAX, u64::MAX];
+        c.join(0);
+        assert_eq!(c.nr[0], u64::MAX);
+        c.nr = [0, 0];
+        c.leave(0);
+        assert_eq!(c.nr[0], 0);
     }
 
-    /* Move counters index by source queue. */
     #[test]
-    fn counters_index_by_source_queue() {
-        assert_eq!(demotion_slot(0), 0);
-        assert_eq!(demotion_slot(1), 1);
-        assert_eq!(promotion_slot(1), 1);
-        assert_eq!(promotion_slot(2), 2);
-        let r = resolve_queue(0, true, true, 0);
-        assert_eq!(r, (1, false, true));
-        assert_eq!(demotion_slot(0), 0);
-        let r = resolve_queue(2, true, false, PROMOTE_AGE_NS);
-        assert_eq!(r, (1, true, false));
-        assert_eq!(promotion_slot(2), 2);
+    fn default_counts_match_empty() {
+        assert_eq!(TierCounts::default(), TierCounts::new());
     }
 
-    /* Cleared running view reads as idle. */
     #[test]
     fn cleared_running_view_reads_idle() {
         let mut view = RunningView {
             est: 100,
             pid: 7,
-            queue: 1,
+            tier: 1,
         };
         assert!(!view.is_idle());
         view.clear();
@@ -1261,123 +742,34 @@ mod tests {
         assert!(view.is_idle());
     }
 
-    /* Dispatch keeps entry and burn moves down. */
     #[test]
-    fn dispatch_burn_requeue_keeps_entry() {
-        let mut s0 = QueueState::new(0);
-        let mut s1 = QueueState::new(1);
-        let mut s2 = QueueState::new(2);
-        let mut depths = CpuDepths::new(2);
-        let mut valid = false;
-        let cpu = 0;
-        let first = 1_000_000;
-        s0.add(first);
-        depths.inc(cpu);
-        valid = true;
-        assert_eq!(s0.nr, 1);
-        assert_eq!(depths.sum(), 1);
-        assert!(!release_on_dequeue());
-        assert_eq!(s0.nr, 1);
-        assert_eq!(depths.sum(), 1);
-        assert!(valid);
-        let slice = slice_for_queue(0, s0.mean);
-        let delta = slice;
-        assert!(burned(slice, delta));
-        assert!(!release_on_stop(true));
-        let (next, promoted, demoted) = resolve_queue(0, true, true, 0);
+    fn dispatch_burn_join_keeps_balance() {
+        let mut counts = TierCounts::new();
+        let mut tier = 0;
+        counts.join(tier);
+        assert_eq!(counts.sum(), 1);
+        let grant = quantum_tier(tier);
+        let delta = grant;
+        assert!(burned(grant, delta));
+        let next = next_on_burn(tier, true, true);
         assert_eq!(next, 1);
-        assert!(!promoted);
-        assert!(demoted);
-        assert_eq!(demotion_slot(0), 0);
-        let est = clamp_est(delta);
-        s0.remove(first);
-        depths.dec(cpu);
-        s1.add(est);
-        depths.inc(cpu);
-        assert_eq!(s0.nr, 0);
-        assert_eq!(s1.nr, 1);
-        assert_eq!(depths.sum(), 1);
-        assert!(valid);
-        let total = s0.nr + s1.nr + s2.nr;
-        assert_eq!(total, depths.sum());
-        let slice = slice_for_queue(1, s1.mean);
-        let delta = slice;
-        assert!(burned(slice, delta));
-        let (next, promoted, demoted) = resolve_queue(1, true, true, 0);
-        assert_eq!(next, 2);
-        assert!(!promoted);
-        assert!(demoted);
-        assert_eq!(demotion_slot(1), 1);
-        let est2 = clamp_est(delta);
-        s1.remove(est);
-        depths.dec(cpu);
-        s2.add(est2);
-        depths.inc(cpu);
-        assert_eq!(s1.nr, 0);
-        assert_eq!(s2.nr, 1);
-        assert_eq!(depths.sum(), 1);
-        assert!(valid);
-        let total = s0.nr + s1.nr + s2.nr;
-        assert_eq!(total, depths.sum());
+        counts.shift(tier, next);
+        tier = next;
+        assert_eq!(counts.nr, [0, 1]);
+        assert_eq!(counts.sum(), 1);
+        let v = vruntime_advance(0, delta);
+        assert!(v > 0);
+        assert!(tier_ok(tier));
     }
 
-    /* Block releases entry and keeps balance. */
     #[test]
-    fn block_releases_entry_and_keeps_balance() {
-        let mut s0 = QueueState::new(0);
-        let mut depths = CpuDepths::new(2);
-        let mut valid = false;
-        let cpu = 0;
-        let est = 1_000_000;
-        s0.add(est);
-        depths.inc(cpu);
-        valid = true;
-        assert!(!release_on_dequeue());
-        assert!(valid);
-        assert!(release_on_stop(false));
-        assert!(claim_release(&mut valid));
-        s0.remove(est);
-        depths.dec(cpu);
-        assert!(!valid);
-        assert_eq!(s0.nr, 0);
-        assert_eq!(s0.sum, 0);
-        assert_eq!(depths.sum(), 0);
-        assert!(!claim_release(&mut valid));
-        s0.remove(est);
-        depths.dec(cpu);
-        assert_eq!(s0.nr, 0);
-        assert_eq!(s0.sum, 0);
-        assert_eq!(depths.sum(), 0);
-        let total = s0.nr;
-        assert_eq!(total, depths.sum());
-    }
-
-    /* Exit releases once and idle holds balance. */
-    #[test]
-    fn exit_release_is_once_and_idle_holds() {
-        let s0 = QueueState::new(0);
-        let mut s1 = QueueState::new(1);
-        let s2 = QueueState::new(2);
-        let mut depths = CpuDepths::new(2);
-        let mut valid = false;
-        let cpu = 1;
-        let est = 2_000_000;
-        s1.add(est);
-        depths.inc(cpu);
-        valid = true;
-        assert!(!release_on_dequeue());
-        assert!(!release_on_stop(true));
-        assert!(valid);
-        assert!(claim_release(&mut valid));
-        s1.remove(est);
-        depths.dec(cpu);
-        assert!(!valid);
-        assert!(!claim_release(&mut valid));
-        let total = s0.nr + s1.nr + s2.nr;
-        assert_eq!(total, 0);
-        assert_eq!(depths.sum(), 0);
-        assert_eq!(s1.sum, 0);
-        assert!(s1.mean >= quantum_min(1));
-        assert!(s1.mean <= quantum_max(1));
+    fn block_release_keeps_balance() {
+        let mut counts = TierCounts::new();
+        counts.join(0);
+        assert_eq!(counts.sum(), 1);
+        counts.leave(0);
+        assert_eq!(counts.sum(), 0);
+        counts.leave(0);
+        assert_eq!(counts.sum(), 0);
     }
 }

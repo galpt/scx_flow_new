@@ -32,43 +32,37 @@ enum flow_consts {
 	NSEC_PER_USEC = 1000ULL,
 	NSEC_PER_MSEC = (1000ULL * 1000ULL),
 	NSEC_PER_SEC = (1000ULL * 1000ULL * 1000ULL),
-	/* Count of queues kept for each cpu. */
-	FLOW_NQUEUES = 3ULL,
-	/* Base id of the per cpu queues. */
-	FLOW_DSQ_BASE = 0x1000ULL,
-	/* Stride between the queues of one cpu. */
-	FLOW_DSQ_STRIDE = 3ULL,
+	/* Count of tiers kept by the scheduler. */
+	FLOW_NTIERS = 2ULL,
+	/* Tier index of the interactive tier. */
+	FLOW_TIER_INTERACTIVE = 0ULL,
+	/* Tier index of the batch tier. */
+	FLOW_TIER_BATCH = 1ULL,
+	/* Fixed slice of the interactive tier. */
+	FLOW_QUANTUM_TIER0_NS = (500ULL * 1000ULL),
+	/* Fixed slice of the batch tier. */
+	FLOW_QUANTUM_TIER1_NS = (8ULL * 1000ULL * 1000ULL),
+	/* Burst length that counts as short. */
+	FLOW_SHORT_BOUND_NS = (1ULL * 1000ULL * 1000ULL),
+	/* Short blocks that earn a move up. */
+	FLOW_PROMOTE_STREAK = 3ULL,
+	/* Upper bound of the block streak. */
+	FLOW_STREAK_CAP = 7ULL,
+	/* Interactive serves per batch serve. */
+	FLOW_DEFICIT_SERVES = 8ULL,
+	/* Shared DSQ of the batch tier. */
+	FLOW_DSQ_BATCH = 0x2000ULL,
+	/* Park DSQ for tasks with no target. */
+	FLOW_DSQ_PARK = 0x2001ULL,
 	/* Compile time bound of supported cpus. */
 	FLOW_MAX_CPUS = 1024ULL,
-	/* Base id of the park queues, one per queue. */
-	FLOW_PARK_BASE = (0x1000ULL + 1024ULL * 3ULL),
-	/* Floor of the first queue quantum. */
-	FLOW_QUANTUM_MIN0_NS = (500ULL * 1000ULL),
-	/* Ceiling of the first queue quantum. */
-	FLOW_QUANTUM_MAX0_NS = (4ULL * 1000ULL * 1000ULL),
-	/* Seed of the first queue quantum. */
-	FLOW_QUANTUM_SEED0_NS = (1ULL * 1000ULL * 1000ULL),
-	/* Floor of the second queue quantum. */
-	FLOW_QUANTUM_MIN1_NS = (1ULL * 1000ULL * 1000ULL),
-	/* Ceiling of the second queue quantum. */
-	FLOW_QUANTUM_MAX1_NS = (8ULL * 1000ULL * 1000ULL),
-	/* Seed of the second queue quantum. */
-	FLOW_QUANTUM_SEED1_NS = (2ULL * 1000ULL * 1000ULL),
-	/* Floor of the third queue quantum. */
-	FLOW_QUANTUM_MIN2_NS = (4ULL * 1000ULL * 1000ULL),
-	/* Ceiling of the third queue quantum. */
-	FLOW_QUANTUM_MAX2_NS = (32ULL * 1000ULL * 1000ULL),
-	/* Seed of the third queue quantum. */
-	FLOW_QUANTUM_SEED2_NS = (8ULL * 1000ULL * 1000ULL),
 	/* Lower bound of a per task estimate. */
 	FLOW_EST_MIN_NS = 1ULL,
 	/* Upper bound of a per task estimate. */
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
-	/* Head age that lifts a queue past strict order. */
-	FLOW_PROMOTE_AGE_NS = (500ULL * 1000ULL * 1000ULL),
-	/* Bound of the remote scan in one dispatch pass. */
-	FLOW_STEAL_SCAN_MAX = 64ULL,
-	/* Bound of the moved tasks in one dispatch pass. */
+	/* Minimum gap between busy preemptions. */
+	FLOW_PREEMPT_GAP_NS = (1ULL * 1000ULL * 1000ULL),
+	/* Bound of the moved tasks in one pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	/* Watchdog limit in milliseconds. */
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
@@ -78,147 +72,81 @@ enum flow_consts {
  * Per task state kept in task storage. The estimate
  * holds the last burst clamped to the estimate range
  * with no smoothing. The run stamp marks the start of
- * the current run. The slice holds the granted quantum
- * used to detect a full burn. The queue holds the
- * current queue index. The accounted fields describe
- * the live mean entry. The valid flag shows an entry
- * is present.
+ * the current run. The grant holds the slice given at
+ * insert time and is used to detect a full burn. The
+ * vruntime orders batch tasks by service received. The
+ * tier holds the current tier index. The streak counts
+ * consecutive short voluntary blocks with saturation.
  */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
-	u64 slice_ns;
-	u64 acct_est;
-	u32 queue;
-	u32 acct_cpu;
-	u32 acct_queue;
-	u32 acct_valid;
+	u64 grant_ns;
+	u64 vruntime;
+	u32 tier;
+	u32 streak;
 };
 
 /*
  * Per cpu state kept in an array map. The running
  * estimate describes the task now on the cpu. The
  * running pid names the task now on the cpu. The
- * running queue names the queue of the task now on
- * the cpu. The scan offset rotates the steal scan
- * start between passes.
+ * running tier names the tier of the task now on the
+ * cpu. The served count tracks interactive serves
+ * since the last batch serve for deficit control. The
+ * preempt stamp gates busy preemptions to one per
+ * gap.
  */
 struct flow_cpu_state {
 	u64 running_est;
 	u32 running_pid;
-	u32 running_queue;
-	u32 scan_off;
-	u32 __pad;
+	u32 running_tier;
+	u64 served0;
+	u64 last_preempt_at;
 };
 
 /*
  * Scheduler wide counters reported to userspace. The
- * placement arrays count first inserts per queue. The
- * demotion arrays count moves down from one queue. The
- * promotion arrays count moves up from one queue. The
- * requeue counter counts runnable requeues. The steal
- * counter counts remote moves. The dispatch counter
- * counts local and remote moves. The kick counter
- * counts idle wakeup kicks sent after insert.
+ * insert counters count inserts per tier. The move
+ * counters count tier changes in either direction. The
+ * serve counters count runs per tier. The deficit
+ * counter counts batch serves taken through the gated
+ * path. The kick counter counts idle wakeups. The
+ * preempt counter counts busy preemptions.
  */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
-	u64 placements[3];
-	u64 demotions[3];
-	u64 promotions[3];
-	u64 requeues;
-	u64 steals;
-	u64 dispatches;
+	u64 enq_tier0;
+	u64 enq_tier1;
+	u64 demotions;
+	u64 promotions;
+	u64 serves_tier0;
+	u64 serves_tier1;
+	u64 deficit_serves;
 	u64 kicks;
+	u64 preempts;
 	u64 enq_no_tctx;
 };
 
 /*
- * Queue id of a cpu and queue pair. The layout is base
- * plus cpu times stride plus queue, so the owning cpu
- * and the queue decode with plain arithmetic.
+ * Check that a tier index names a real tier. Used to
+ * guard per tier array access.
  */
-static __always_inline u64 flow_dsq_id(u32 cpu,
-    u32 queue)
+static __always_inline bool flow_tier_ok(u32 tier)
 {
-	return (u64)FLOW_DSQ_BASE + (u64)cpu *
-	    (u64)FLOW_DSQ_STRIDE + (u64)queue;
+	return tier < (u32)FLOW_NTIERS;
 }
 
 /*
- * Queue id of a park queue. The park holds tasks with
- * no allowed cpu. One park queue exists per queue.
+ * Fixed slice of one tier. Unknown tiers fall back to
+ * the interactive slice, so the result stays usable.
  */
-static __always_inline u64 flow_park_id(u32 queue)
+static __always_inline u64 flow_quantum_tier(u32 tier)
 {
-	return (u64)FLOW_PARK_BASE + (u64)queue;
-}
-
-/*
- * Check that a queue index names a real queue. Used to
- * guard per queue array access.
- */
-static __always_inline bool flow_queue_ok(u32 queue)
-{
-	return queue < (u32)FLOW_NQUEUES;
-}
-
-/*
- * Floor of one queue quantum. Unknown queues fall back
- * to the first floor, so the result is never zero.
- */
-static __always_inline u64 flow_quantum_min(u32 queue)
-{
-	if (queue == 1)
-		return (u64)FLOW_QUANTUM_MIN1_NS;
-	if (queue == 2)
-		return (u64)FLOW_QUANTUM_MIN2_NS;
-	return (u64)FLOW_QUANTUM_MIN0_NS;
-}
-
-/*
- * Ceiling of one queue quantum. Unknown queues fall
- * back to the first ceiling, so the result stays sane.
- */
-static __always_inline u64 flow_quantum_max(u32 queue)
-{
-	if (queue == 1)
-		return (u64)FLOW_QUANTUM_MAX1_NS;
-	if (queue == 2)
-		return (u64)FLOW_QUANTUM_MAX2_NS;
-	return (u64)FLOW_QUANTUM_MAX0_NS;
-}
-
-/*
- * Seed of one queue quantum. Unknown queues fall back
- * to the first seed, so the result stays in range.
- */
-static __always_inline u64 flow_quantum_seed(u32 queue)
-{
-	if (queue == 1)
-		return (u64)FLOW_QUANTUM_SEED1_NS;
-	if (queue == 2)
-		return (u64)FLOW_QUANTUM_SEED2_NS;
-	return (u64)FLOW_QUANTUM_SEED0_NS;
-}
-
-/*
- * Clamp a quantum of one queue to the queue range. Low
- * values rise to the floor. High values fall to the
- * ceiling.
- */
-static __always_inline u64 flow_clamp_quantum(u32 queue,
-    u64 v)
-{
-	u64 lo = flow_quantum_min(queue);
-	u64 hi = flow_quantum_max(queue);
-
-	if (v < lo)
-		return lo;
-	if (v > hi)
-		return hi;
-	return v;
+	if (tier == (u32)FLOW_TIER_BATCH)
+		return (u64)FLOW_QUANTUM_TIER1_NS;
+	return (u64)FLOW_QUANTUM_TIER0_NS;
 }
 
 /*
@@ -236,100 +164,138 @@ static __always_inline u64 flow_clamp_est(u64 v)
 }
 
 /*
- * Seed quantum of one queue. The seed sits inside the
- * queue range, so the clamp keeps it unchanged while
- * it guards later values.
+ * Check that a burst burned the full grant. A zero
+ * grant never counts as burned, so a missing grant
+ * holds the tier.
  */
-static __always_inline u64 flow_seed_quantum(u32 queue)
+static __always_inline bool flow_burned(u64 grant, u64 delta)
 {
-	return flow_clamp_quantum(queue,
-	    flow_quantum_seed(queue));
-}
-
-/*
- * Mean quantum of one queue over accounted tasks. An
- * empty set keeps the last value. A zero last value
- * falls back to the seed, so the result is never zero.
- */
-static __always_inline u64 flow_mean_quantum(u32 queue,
-    u64 sum, u64 nr, u64 last)
-{
-	u64 mean;
-
-	if (nr == 0) {
-		if (last == 0)
-			return flow_seed_quantum(queue);
-		return flow_clamp_quantum(queue, last);
-	}
-	mean = sum / nr;
-	return flow_clamp_quantum(queue, mean);
-}
-
-/*
- * Live quantum of one queue from its mean. A zero mean
- * falls back to the seed, so grants track the live
- * mean while the result stays in range.
- */
-static __always_inline u64 flow_live_quantum(u32 queue,
-    u64 mean)
-{
-	if (mean == 0)
-		return flow_seed_quantum(queue);
-	return flow_clamp_quantum(queue, mean);
-}
-
-/*
- * Check that a burst burned the full slice. A zero
- * slice never counts as burned, so a missing grant
- * holds the queue.
- */
-static __always_inline bool flow_burned(u64 slice,
-    u64 delta)
-{
-	if (slice == 0)
+	if (grant == 0)
 		return false;
-	return delta >= slice;
+	return delta >= grant;
 }
 
 /*
- * Next queue after a run. A runnable task that burned
- * the full slice moves down one queue. All other tasks
- * hold the queue. The bottom queue holds as well.
+ * Check that a burst counts as short. Bursts below
+ * the bound earn the streak. Bursts at or past the
+ * bound reset the streak.
  */
-static __always_inline u32 flow_next_on_burn(u32 queue,
-    bool runnable, bool burned)
+static __always_inline bool flow_short(u64 delta)
+{
+	return delta < (u64)FLOW_SHORT_BOUND_NS;
+}
+
+/*
+ * Next streak after one voluntary block. Short blocks
+ * step forward with saturation at the cap. Long blocks
+ * reset to zero.
+ */
+static __always_inline u32 flow_streak_next(u32 streak,
+	u64 delta)
+{
+	if (!flow_short(delta))
+		return 0;
+	if (streak >= (u32)FLOW_STREAK_CAP)
+		return (u32)FLOW_STREAK_CAP;
+	return streak + 1;
+}
+
+/*
+ * Check that a streak earns a move up. Streaks at or
+ * past the bound earn the reward. Younger streaks
+ * hold.
+ */
+static __always_inline bool flow_should_promote(u32 streak)
+{
+	return streak >= (u32)FLOW_PROMOTE_STREAK;
+}
+
+/*
+ * Next tier after a run. A runnable task that burned
+ * the full grant moves from interactive to batch. All
+ * other tasks hold the tier.
+ */
+static __always_inline u32 flow_next_on_burn(u32 tier,
+	bool runnable, bool burned)
 {
 	if (!runnable)
-		return queue;
+		return tier;
 	if (!burned)
-		return queue;
-	if (queue + 1 < (u32)FLOW_NQUEUES)
-		return queue + 1;
-	return queue;
+		return tier;
+	if (tier == (u32)FLOW_TIER_INTERACTIVE)
+		return (u32)FLOW_TIER_BATCH;
+	return tier;
 }
 
 /*
- * Check that a head age earns a move up. Ages at or
- * past the bound earn the reward. Younger ages hold.
+ * Check that the batch tier may be served now. An
+ * empty batch tier never serves. An empty interactive
+ * tier serves batch at once. A busy interactive tier
+ * serves batch only after enough interactive serves.
  */
-static __always_inline bool flow_should_promote(u64 age)
+static __always_inline bool flow_deficit_should_serve(
+	u64 served0, bool tier0_backlog, bool tier1_backlog)
 {
-	return age >= (u64)FLOW_PROMOTE_AGE_NS;
+	if (!tier1_backlog)
+		return false;
+	if (!tier0_backlog)
+		return true;
+	return served0 >= (u64)FLOW_DEFICIT_SERVES;
 }
 
 /*
- * Next queue after the age check. An aged queue moves
- * up one queue. All other queues hold. The first queue
- * holds as well.
+ * Next deficit count after one run. Batch runs reset
+ * to zero. Interactive runs step forward with
+ * saturation at the bound.
  */
-static __always_inline u32 flow_promote_if_aged(u32 queue,
-    u64 age)
+static __always_inline u64 flow_deficit_next(u64 served0,
+	u32 served_tier)
 {
-	if (!flow_should_promote(age))
-		return queue;
-	if (queue == 0)
-		return queue;
-	return queue - 1;
+	if (served_tier == (u32)FLOW_TIER_BATCH)
+		return 0;
+	if (served0 >= (u64)FLOW_DEFICIT_SERVES)
+		return (u64)FLOW_DEFICIT_SERVES;
+	return served0 + 1;
+}
+
+/*
+ * Check that one vruntime sorts before another. Used
+ * to advance the floor with the smallest waiting
+ * value.
+ */
+static __always_inline bool flow_vruntime_before(u64 a,
+	u64 b)
+{
+	return a < b;
+}
+
+/*
+ * Advance a vruntime by one burst with saturation. The
+ * top value sticks, so a burst cannot wrap the order.
+ */
+static __always_inline u64 flow_vruntime_advance(u64 base,
+	u64 delta)
+{
+	if (base > (u64)-1 - delta)
+		return (u64)-1;
+	return base + delta;
+}
+
+/*
+ * Check that a busy preemption may be sent now. Gaps
+ * at or past the bound allow the kick. Shorter gaps
+ * hold the kick. A clock step back allows the kick, so
+ * a skew never blocks progress for long.
+ */
+static __always_inline bool flow_preempt_gap_ok(u64 now,
+	u64 last)
+{
+	u64 gap;
+
+	if (now < last)
+		return true;
+	gap = now - last;
+	return gap >= (u64)FLOW_PREEMPT_GAP_NS;
 }
 
 #endif

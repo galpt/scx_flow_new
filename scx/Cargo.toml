@@ -1,9 +1,9 @@
 [package]
 name = "scx_flow"
-version = "4.0.1"
+version = "4.0.2"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
-description = "A three queue feedback scheduler for sched_ext."
+description = "A two tier interactive and batch scheduler for sched_ext."
 license = "GPL-2.0-only"
 
 [dependencies]
