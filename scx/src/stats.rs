@@ -3,9 +3,12 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Stats server and web snapshot for the flow scheduler.
- * Metrics mirrors the BPF counters plus uptime. Web
- * metrics adds per cpu cards and the global mean with
- * queue depths and head and tail ages.
+ * Metrics mirrors the BPF counters plus uptime. Moves
+ * down and moves up count from the source queue, so
+ * the bottom demotion slot and the first promotion
+ * slot stay at zero by design. Web metrics adds per
+ * cpu cards with per queue quanta and per queue depths
+ * and per queue head ages.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -30,8 +33,24 @@ pub struct Metrics {
     pub total_runtime: u64,
     #[stat(desc = "Uptime since attach in nanoseconds")]
     pub uptime_ns: u64,
-    #[stat(desc = "First inserts")]
-    pub placements: u64,
+    #[stat(desc = "First inserts in queue zero")]
+    pub placements_q0: u64,
+    #[stat(desc = "First inserts in queue one")]
+    pub placements_q1: u64,
+    #[stat(desc = "First inserts in queue two")]
+    pub placements_q2: u64,
+    #[stat(desc = "Moves down from queue zero")]
+    pub demotions_q0: u64,
+    #[stat(desc = "Moves down from queue one")]
+    pub demotions_q1: u64,
+    #[stat(desc = "Moves down from queue two")]
+    pub demotions_q2: u64,
+    #[stat(desc = "Moves up from queue zero")]
+    pub promotions_q0: u64,
+    #[stat(desc = "Moves up from queue one")]
+    pub promotions_q1: u64,
+    #[stat(desc = "Moves up from queue two")]
+    pub promotions_q2: u64,
     #[stat(desc = "Runnable requeues")]
     pub requeues: u64,
     #[stat(desc = "Remote moves in dispatch")]
@@ -59,10 +78,13 @@ pub struct PerCpuMetrics {
     pub llc_id: u32,
     /* True for the second thread of a core. */
     pub smt: bool,
-    /* Estimate of the task now on the cpu. Zero when idle. */
+    /* Estimate of the task now on the cpu. Zero idle. */
     pub running_est_ns: u64,
     /* Pid now on the cpu. Zero when idle. */
     pub running_pid: u32,
+    /* Queue of the task now on the cpu. Zero idle. */
+    #[serde(default)]
+    pub running_queue: u32,
 }
 
 /*
@@ -77,34 +99,40 @@ pub struct WebMetrics {
     /* One entry per online cpu. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
-    /* Global mean quantum in nanoseconds. */
+    /* Live quantum per queue in nanoseconds. */
     #[serde(default)]
-    pub live_mean_ns: u64,
-    /* Accounted tasks in the global set. */
+    pub quanta_per_queue: [u64; 3],
+    /* Accounted tasks per queue. Index is queue. */
     #[serde(default)]
-    pub total_queued: u64,
+    pub queued_per_queue: [u64; 3],
+    /* Head age per queue in nanoseconds. */
+    #[serde(default)]
+    pub head_age_per_queue: [u64; 3],
     /* Accounted tasks per cpu. Index is the cpu id. */
     #[serde(default)]
     pub depth_per_cpu: Vec<u64>,
-    /* Age of the busy period in nanoseconds. */
-    #[serde(default)]
-    pub head_age_ns: u64,
-    /* Age of the most recent arrival in nanoseconds. */
-    #[serde(default)]
-    pub tail_age_ns: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime={} uptime={} place={} \
-            requeue={} steal={} disp={} noctx={}",
+            "[{}] run={} runtime={} uptime={} place={}/{}/{} \
+            demote={}/{}/{} promo={}/{}/{} requeue={} \
+            steal={} disp={} noctx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
             self.uptime_ns,
-            self.placements,
+            self.placements_q0,
+            self.placements_q1,
+            self.placements_q2,
+            self.demotions_q0,
+            self.demotions_q1,
+            self.demotions_q2,
+            self.promotions_q0,
+            self.promotions_q1,
+            self.promotions_q2,
             self.requeues,
             self.steals,
             self.dispatches,
@@ -122,7 +150,15 @@ impl Metrics {
             on_cpu: self.on_cpu,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             uptime_ns: self.uptime_ns,
-            placements: self.placements.wrapping_sub(rhs.placements),
+            placements_q0: self.placements_q0.wrapping_sub(rhs.placements_q0),
+            placements_q1: self.placements_q1.wrapping_sub(rhs.placements_q1),
+            placements_q2: self.placements_q2.wrapping_sub(rhs.placements_q2),
+            demotions_q0: self.demotions_q0.wrapping_sub(rhs.demotions_q0),
+            demotions_q1: self.demotions_q1.wrapping_sub(rhs.demotions_q1),
+            demotions_q2: self.demotions_q2.wrapping_sub(rhs.demotions_q2),
+            promotions_q0: self.promotions_q0.wrapping_sub(rhs.promotions_q0),
+            promotions_q1: self.promotions_q1.wrapping_sub(rhs.promotions_q1),
+            promotions_q2: self.promotions_q2.wrapping_sub(rhs.promotions_q2),
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             steals: self.steals.wrapping_sub(rhs.steals),
             dispatches: self.dispatches.wrapping_sub(rhs.dispatches),

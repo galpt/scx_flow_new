@@ -47,6 +47,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             smt,
             running_est_ns: 0,
             running_pid: 0,
+            running_queue: 0,
         });
     }
     out.sort_by_key(|e| e.id);

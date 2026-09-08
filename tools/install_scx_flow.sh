@@ -41,7 +41,7 @@ echo "building ${BIN} in workspace"
 cargo build --manifest-path "${DEST}/Cargo.toml" --release
 
 echo "installing binary"
-install -m 0755 "${DEST}/../../../../../target/release/${BIN}" \
+install -m 0755 "${WS}/target/release/${BIN}" \
     "/usr/local/bin/${BIN}" 2>/dev/null || {
     echo "copying binary to current dir"
     cp "${WS}/target/release/${BIN}" "${REPO_DIR}/${BIN}"

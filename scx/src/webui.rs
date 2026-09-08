@@ -61,11 +61,10 @@ fn merged(snap: &WebMetrics) -> Value {
     json!({
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
-        "live_mean_ns": jv(&snap.live_mean_ns),
-        "total_queued": jv(&snap.total_queued),
+        "quanta_per_queue": jv(&snap.quanta_per_queue),
+        "queued_per_queue": jv(&snap.queued_per_queue),
+        "head_age_per_queue": jv(&snap.head_age_per_queue),
         "depth_per_cpu": jv(&snap.depth_per_cpu),
-        "head_age_ns": jv(&snap.head_age_ns),
-        "tail_age_ns": jv(&snap.tail_age_ns),
     })
 }
 
@@ -241,52 +240,56 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Dashboard keeps the new field names. */
+    /* Dashboard keeps the queue array names. */
     #[test]
-    fn merged_keeps_single_queue_fields() {
+    fn merged_keeps_queue_array_fields() {
         let snap = WebMetrics::default();
         let v = merged(&snap);
         assert!(v.get("stats").is_some());
         assert!(v.get("per_cpu").is_some());
-        assert!(v.get("live_mean_ns").is_some());
-        assert!(v.get("total_queued").is_some());
+        assert!(v.get("quanta_per_queue").is_some());
+        assert!(v.get("queued_per_queue").is_some());
+        assert!(v.get("head_age_per_queue").is_some());
         assert!(v.get("depth_per_cpu").is_some());
-        assert!(v.get("head_age_ns").is_some());
-        assert!(v.get("tail_age_ns").is_some());
+        assert!(v.get("live_mean_ns").is_none());
+        assert!(v.get("total_queued").is_none());
     }
 
     /* Old snapshots without new fields still decode. */
     #[test]
     fn web_metrics_missing_fields_default() {
         let txt = "{\"stats\":{\"on_cpu\":1,\"total_runtime\":0,\
-            \"uptime_ns\":0,\"placements\":0,\"requeues\":0,\
-            \"steals\":0,\"dispatches\":0,\"enq_no_tctx\":0}}";
+            \"uptime_ns\":0,\"placements_q0\":0,\
+            \"placements_q1\":0,\"placements_q2\":0,\
+            \"demotions_q0\":0,\"demotions_q1\":0,\
+            \"demotions_q2\":0,\"promotions_q0\":0,\
+            \"promotions_q1\":0,\"promotions_q2\":0,\
+            \"requeues\":0,\"steals\":0,\"dispatches\":0,\
+            \"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.live_mean_ns, 0);
-        assert_eq!(m.total_queued, 0);
+        assert_eq!(m.quanta_per_queue, [0, 0, 0]);
+        assert_eq!(m.queued_per_queue, [0, 0, 0]);
+        assert_eq!(m.head_age_per_queue, [0, 0, 0]);
         assert!(m.depth_per_cpu.is_empty());
-        assert_eq!(m.head_age_ns, 0);
-        assert_eq!(m.tail_age_ns, 0);
+        assert!(m.per_cpu.is_empty());
     }
 
     /* Full snapshot round trips through JSON. */
     #[test]
     fn web_metrics_round_trip() {
         let snap = WebMetrics {
-            live_mean_ns: 2_000_000,
-            total_queued: 3,
+            quanta_per_queue: [1_000_000, 2_000_000, 8_000_000],
+            queued_per_queue: [3, 1, 0],
+            head_age_per_queue: [100, 200, 300],
             depth_per_cpu: vec![1, 2],
-            head_age_ns: 100,
-            tail_age_ns: 50,
             ..Default::default()
         };
         let txt = serde_json::to_string(&snap).unwrap();
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
-        assert_eq!(back.live_mean_ns, 2_000_000);
-        assert_eq!(back.total_queued, 3);
+        assert_eq!(back.quanta_per_queue, [1_000_000, 2_000_000, 8_000_000]);
+        assert_eq!(back.queued_per_queue, [3, 1, 0]);
+        assert_eq!(back.head_age_per_queue, [100, 200, 300]);
         assert_eq!(back.depth_per_cpu, vec![1, 2]);
-        assert_eq!(back.head_age_ns, 100);
-        assert_eq!(back.tail_age_ns, 50);
     }
 }

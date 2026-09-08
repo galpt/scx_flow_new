@@ -2,7 +2,7 @@
   SPDX-License-Identifier: GPL-2.0
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-  Flow web UI. A live view of the single ordered queue,
+  Flow web UI. A live view of the three queues,
   per cpu running tasks and system counters, served by
   the dashboard server over loopback with a unix socket
   fallback. Offline first with no external assets.
@@ -110,7 +110,7 @@
       margin-top: 1px;
     }
     /* Queue badge on each cpu card. Running tasks
-     * show a live badge, idle cards stay muted. */
+     * show the queue index, idle cards stay muted. */
     .queue-badge {
       display: inline-block;
       margin-top: 4px;
@@ -125,8 +125,8 @@
       color: var(--success);
       border-color: var(--success);
     }
-    /* Single queue meter. One bar scaled to the
-     * ceiling with the live mean and the total. */
+    /* Queue meters. One row per queue scaled to
+     * the queue ceiling with quanta and queued. */
     .queue-row {
       display: flex;
       align-items: center;
@@ -227,7 +227,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          single ordered queue, live mean, placement
+          three queues, per queue quanta, placement
           and stealing
         </p>
       </div>
@@ -240,10 +240,10 @@
       </div>
     </header>
 
-    <!-- Queue -->
+    <!-- Queues -->
     <div class="card" style="margin-bottom:16px">
-      <p class="section-label">Queue</p>
-      <div id="queue"></div>
+      <p class="section-label">Queues</p>
+      <div id="queues"></div>
     </div>
 
     <!-- Per cpu cards -->
@@ -278,24 +278,40 @@
           <span class="stat-value" id="runtime">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Live mean:</span>
-          <span class="stat-value" id="live-mean">0</span>
+          Place queue 0:</span>
+          <span class="stat-value" id="place-q0">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Total queued:</span>
-          <span class="stat-value" id="total-queued">0</span>
+          Place queue 1:</span>
+          <span class="stat-value" id="place-q1">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Head age:</span>
-          <span class="stat-value" id="head-age">0</span>
+          Place queue 2:</span>
+          <span class="stat-value" id="place-q2">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Tail age:</span>
-          <span class="stat-value" id="tail-age">0</span>
+          Demote from queue 0:</span>
+          <span class="stat-value" id="demote-q0">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Placements:</span>
-          <span class="stat-value" id="placements">0</span>
+          Demote from queue 1:</span>
+          <span class="stat-value" id="demote-q1">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Demote from queue 2:</span>
+          <span class="stat-value" id="demote-q2">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote from queue 0:</span>
+          <span class="stat-value" id="promote-q0">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote from queue 1:</span>
+          <span class="stat-value" id="promote-q1">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote from queue 2:</span>
+          <span class="stat-value" id="promote-q2">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Requeues:</span>
@@ -328,8 +344,8 @@
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
-    // Compact counter form, same shape as the
-    // system table values.
+    /* Compact counter form, same shape as the
+     * system table values. */
     function fmt(n) {
       n = clamp(n);
       if (n >= 1e15) return (n / 1e15).toFixed(2) + 'Q';
@@ -340,8 +356,8 @@
       return n.toLocaleString();
     }
 
-    // Nanoseconds as a wall clock duration for the
-    // uptime and runtime gauges.
+    /* Nanoseconds as a wall clock duration for the
+     * uptime and runtime gauges. */
     function fmtRuntime(ns) {
       ns = clamp(ns);
       var sec = ns / 1e9;
@@ -354,9 +370,9 @@
       return day.toFixed(1) + ' days';
     }
 
-    // Live mean quantum. Nanoseconds below a
-    // microsecond stay in ns, below a millisecond
-    // show us, runs above show ms.
+    /* Per queue quantum. Nanoseconds below a
+     * microsecond stay in ns, below a millisecond
+     * show us, runs above show ms. */
     function fmtMean(ns) {
       ns = clamp(ns);
       if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
@@ -364,33 +380,41 @@
       return Math.round(ns) + ' ns';
     }
 
-    // Single queue meter. One bar scaled to the
-    // ceiling with the live mean and the total.
-    function renderQueue(meanNs, total, depths) {
-      var box = el('queue');
-      var mean = meanNs || 0;
-      var queued = total || 0;
-      var perCpu = depths || [];
-      if (!mean && !queued && !perCpu.length) {
+    /* Three queue meters. Each row is scaled to
+     * the queue ceiling with quanta and queued. */
+    function renderQueues(quanta, queued, ages) {
+      var box = el('queues');
+      var q = quanta || [0, 0, 0];
+      var n = queued || [0, 0, 0];
+      var a = ages || [0, 0, 0];
+      var empty = !q[0] && !q[1] && !q[2] &&
+        !n[0] && !n[1] && !n[2];
+      if (empty) {
         box.innerHTML = '<div style="color:var(--text-muted);' +
-          'font-size:0.8125rem">Queue is idle, no tasks yet</div>';
+          'font-size:0.8125rem">Queues are idle, no tasks yet</div>';
         return;
       }
-      var max = 32e6;
-      var pct = Math.min(100, mean / max * 100).toFixed(1);
-      var html = '<div class="queue-row">' +
-        '<div class="queue-label">queue</div>' +
-        '<div class="queue-track">' +
-        '<div class="queue-fill" style="width:' + pct +
-        '%"></div></div>' +
-        '<div class="queue-meta"><span class="queue-mean">' +
-        fmtMean(mean) + '</span> queued ' + fmt(queued) +
-        '</div></div>';
+      var max = [4e6, 8e6, 32e6];
+      var html = '';
+      for (var i = 0; i < 3; i++) {
+        var mean = q[i] || 0;
+        var count = n[i] || 0;
+        var age = a[i] || 0;
+        var pct = Math.min(100, mean / max[i] * 100).toFixed(1);
+        html += '<div class="queue-row">' +
+          '<div class="queue-label">queue ' + i + '</div>' +
+          '<div class="queue-track">' +
+          '<div class="queue-fill" style="width:' + pct +
+          '%"></div></div>' +
+          '<div class="queue-meta"><span class="queue-mean">' +
+          fmtMean(mean) + '</span> queued ' + fmt(count) +
+          ' age ' + fmtRuntime(age) + '</div></div>';
+      }
       box.innerHTML = html;
     }
 
-    // Per cpu cards with a badge for running tasks
-    // and the running estimate plus the pid.
+    /* Per cpu cards with the running queue index
+     * and the running estimate plus the pid. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -415,10 +439,12 @@
           : '';
         var pid = cpu.running_pid || 0;
         var est = cpu.running_est_ns || 0;
+        var rq = cpu.running_queue || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="queue-badge queue-idle">idle</span>'
-          : '<span class="queue-badge queue-live">live</span>';
+          : '<span class="queue-badge queue-live">queue ' +
+            rq + '</span>';
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
@@ -440,44 +466,48 @@
       }).join('');
     }
 
-    // Summary prose, built from the live gauges.
-    // The tldr names the running count and the queue
-    // total. The explanation walks the mean, the
-    // depths, the placement split and the steal share.
-    function buildSummary(s, meanNs, total, depths) {
+    /* Summary prose, built from the live gauges.
+     * The tldr names the running count and the
+     * queued total. The explanation walks the
+     * per queue depths and the move split. */
+    function buildSummary(s, queued) {
       var onCpu = s.on_cpu || 0;
-      var placed = s.placements || 0;
+      var p0 = s.placements_q0 || 0;
+      var p1 = s.placements_q1 || 0;
+      var p2 = s.placements_q2 || 0;
+      var placed = p0 + p1 + p2;
       var requeue = s.requeues || 0;
       var steals = s.steals || 0;
       var disp = s.dispatches || 0;
-      var mean = meanNs || 0;
-      var queued = total || 0;
+      var q = queued || [0, 0, 0];
+      var total = (q[0] || 0) + (q[1] || 0) + (q[2] || 0);
       var tldr, explanation;
       if (!placed && !requeue && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet. The live mean ' +
-          'shows ' + fmtMean(mean) + ' with ' +
-          fmt(queued) + ' tasks queued.';
+          'no tasks have been placed yet. Queues hold ' +
+          fmt(q[0]) + ', ' + fmt(q[1]) + ' and ' +
+          fmt(q[2]) + ' tasks.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks with ' + fmt(queued) + ' queued.';
+          ' tasks with ' + fmt(total) + ' queued.';
         explanation = 'As you can see from the gauges, ' +
           'first inserts cover ' + fmt(placed) +
           ' and requeues cover ' + fmt(requeue) +
-          '. The live mean shows ' + fmtMean(mean) +
-          ' with ' + fmt(queued) + ' tasks queued. ' +
-          'Steals cover ' + fmt(steals) + ' of ' +
-          fmt(disp) + ' dispatches.';
+          '. Queues hold ' + fmt(q[0]) + ', ' +
+          fmt(q[1]) + ' and ' + fmt(q[2]) +
+          ' tasks. Steals cover ' + fmt(steals) +
+          ' of ' + fmt(disp) + ' dispatches.';
       } else {
         tldr = 'Flow placed ' + fmt(placed + requeue) +
           ' tasks and is now idle.';
         explanation = 'As you can see from the gauges, ' +
           'first inserts cover ' + fmt(placed) +
           ' and requeues cover ' + fmt(requeue) +
-          '. The live mean shows ' + fmtMean(mean) +
-          ' and steals cover ' + fmt(steals) + ' of ' +
-          fmt(disp) + ' dispatches.';
+          '. Queues hold ' + fmt(q[0]) + ', ' +
+          fmt(q[1]) + ' and ' + fmt(q[2]) +
+          ' tasks. Steals cover ' + fmt(steals) +
+          ' of ' + fmt(disp) + ' dispatches.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -489,14 +519,12 @@
       el('status-badge').style.color = 'var(--success)';
 
       var s = data.stats || {};
-      var meanNs = data.live_mean_ns || 0;
-      var total = data.total_queued || 0;
-      var depths = data.depth_per_cpu || [];
-      var headAge = data.head_age_ns || 0;
-      var tailAge = data.tail_age_ns || 0;
-      renderQueue(meanNs, total, depths);
+      var quanta = data.quanta_per_queue || [0, 0, 0];
+      var queued = data.queued_per_queue || [0, 0, 0];
+      var ages = data.head_age_per_queue || [0, 0, 0];
+      renderQueues(quanta, queued, ages);
 
-      var summary = buildSummary(s, meanNs, total, depths);
+      var summary = buildSummary(s, queued);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
@@ -506,12 +534,24 @@
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =
         fmtRuntime(s.total_runtime || 0);
-      el('live-mean').textContent = fmtMean(meanNs);
-      el('total-queued').textContent = fmt(total);
-      el('head-age').textContent = fmtRuntime(headAge);
-      el('tail-age').textContent = fmtRuntime(tailAge);
-      el('placements').textContent =
-        fmt(s.placements || 0);
+      el('place-q0').textContent =
+        fmt(s.placements_q0 || 0);
+      el('place-q1').textContent =
+        fmt(s.placements_q1 || 0);
+      el('place-q2').textContent =
+        fmt(s.placements_q2 || 0);
+      el('demote-q0').textContent =
+        fmt(s.demotions_q0 || 0);
+      el('demote-q1').textContent =
+        fmt(s.demotions_q1 || 0);
+      el('demote-q2').textContent =
+        fmt(s.demotions_q2 || 0);
+      el('promote-q0').textContent =
+        fmt(s.promotions_q0 || 0);
+      el('promote-q1').textContent =
+        fmt(s.promotions_q1 || 0);
+      el('promote-q2').textContent =
+        fmt(s.promotions_q2 || 0);
       el('requeues').textContent =
         fmt(s.requeues || 0);
       el('steals').textContent = fmt(s.steals || 0);

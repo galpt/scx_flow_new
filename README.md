@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.0`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.1`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -23,29 +23,32 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Design
 
-One ordered queue per cpu. Queue ids use base `0x1000`
-plus cpu with stride one, plus a global park. Inserts
-order by estimate only. Unknown estimates map to key
-zero and sort at the front. Known estimates map to the
-clamped estimate and sort ascending. Equal keys keep
-insert order. The slice follows the live global mean
-only, so the grant is independent of the key. The mean
-covers all accounted tasks, seeded at two milliseconds
-and clamped to five hundred microseconds and thirty two
-milliseconds. Estimates clamp at one nanosecond to one
-second. Running tasks stay counted. A release happens
-exactly once on block, dequeue, disable and exit. A
-runnable requeue refreshes the sum and reinserts in
-order. There is no demote step. Enqueue keys the queue
-off the selected cpu, then the first allowed cpu, then
-the global park. Dispatch drains the local queue in a
-batch of thirty two. Steal scans in one pass of sixty
-four checks with rotation and a mask guard. There is no
-guarantee slot and no preempt kick. Counts use
-saturating means with compare and swap. Dispatches count
-local and remote moves. Steals count remote moves. The
-watchdog is thirty thousand milliseconds. Ops name is
-`flow`.
+Three queues per cpu. Queue ids use base `0x1000`
+plus cpu times three plus queue index, plus one park
+queue per queue index. New tasks start in queue zero.
+Each queue keeps FIFO order. Each queue keeps its own
+mean for the slice. Queue zero seeds at one millisecond
+and clamps to five hundred microseconds and four
+milliseconds. Queue one seeds at two milliseconds and
+clamps to one millisecond and eight milliseconds.
+Queue two seeds at eight milliseconds and clamps to
+four milliseconds and thirty two milliseconds.
+Estimates hold the last burst clamped at one nanosecond
+to one second with no smoothing. A runnable task that
+burns the full slice moves down one queue. Blocked
+tasks and short runs hold the queue. A head age past
+five hundred milliseconds lifts the queue past strict
+order and moves the task up one queue. Enqueue keys
+the cpu off the selected cpu, then the first allowed
+cpu, then the park. Dispatch moves up to thirty two
+tasks in strict queue order with the age override.
+Steal scans up to sixty four checks in queue order with
+rotation and a mask guard. There is no wakeup kick.
+Counts use saturating means with compare and swap.
+Placements, moves down and moves up count per queue.
+Requeues, steals and dispatches count across queues.
+The watchdog is thirty thousand milliseconds. Ops name
+is `flow`.
 
 ## Build
 
@@ -81,7 +84,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.0`, state `enabled` and ops containing `flow`. To
+`4.0.1`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 
