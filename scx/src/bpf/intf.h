@@ -54,7 +54,7 @@ enum flow_consts {
 	FLOW_DSQ_BATCH = 0x2000ULL,
 	/* Park DSQ for tasks with no target. */
 	FLOW_DSQ_PARK = 0x2001ULL,
-	/* Compile time bound of supported cpus. */
+	/* Compile time bound of supported CPUs. */
 	FLOW_MAX_CPUS = 1024ULL,
 	/* Lower bound of a per task estimate. */
 	FLOW_EST_MIN_NS = 1ULL,
@@ -62,12 +62,14 @@ enum flow_consts {
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
 	/* Minimum gap between busy preemptions. */
 	FLOW_PREEMPT_GAP_NS = (1ULL * 1000ULL * 1000ULL),
-	/* Cpu hint of the interactive tier. */
+	/* CPU hint of the interactive tier. */
 	FLOW_CPUPERF_TIER0 = 1024ULL,
-	/* Cpu hint of the batch tier. */
+	/* CPU hint of the batch tier. */
 	FLOW_CPUPERF_TIER1 = 0ULL,
 	/* Bound of the moved tasks in one pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
+	/* Unknown LLC id. Marks an empty table entry. */
+	FLOW_LLC_UNKNOWN = 0xFFFFFFFFULL,
 	/* Watchdog limit in milliseconds. */
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 };
@@ -92,11 +94,11 @@ struct flow_task_ctx {
 };
 
 /*
- * Per cpu state kept in an array map. The running
- * estimate describes the task now on the cpu. The
- * running pid names the task now on the cpu. The
+ * Per-CPU state kept in an array map. The running
+ * estimate describes the task now on the CPU. The
+ * running pid names the task now on the CPU. The
  * running tier names the tier of the task now on the
- * cpu. The served count tracks interactive serves
+ * CPU. The served count tracks interactive serves
  * since the last batch serve for deficit control. The
  * preempt stamp gates busy preemptions to one per
  * gap.
@@ -303,7 +305,7 @@ static __always_inline bool flow_preempt_gap_ok(u64 now,
 }
 
 /*
- * Cpu hint of one tier. Interactive asks for the
+ * CPU hint of one tier. Interactive asks for the
  * max level. Batch restores the default, so a
  * batch run never keeps the max hint. The hint is
  * fixed per tier and never uses frequency.
@@ -313,6 +315,26 @@ static __always_inline u32 flow_cpuperf_tier(u32 tier)
 	if (tier == (u32)FLOW_TIER_BATCH)
 		return (u32)FLOW_CPUPERF_TIER1;
 	return (u32)FLOW_CPUPERF_TIER0;
+}
+
+/*
+ * Check that an LLC id names a real domain. The
+ * unknown value marks an empty table entry and
+ * fails open with no LLC step.
+ */
+static __always_inline bool flow_llc_known(u32 id)
+{
+	return id != (u32)FLOW_LLC_UNKNOWN;
+}
+
+/*
+ * Check that the LLC step may run. Needs more than
+ * one domain, so single and unknown hosts stay
+ * plain with no extra scan.
+ */
+static __always_inline bool flow_llc_ok(u64 nr)
+{
+	return nr >= 2;
 }
 
 #endif

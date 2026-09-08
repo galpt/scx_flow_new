@@ -25,6 +25,8 @@ pub const DEFICIT_SERVES: u64 = 8;
 pub const PREEMPT_GAP_NS: u64 = 1_000_000;
 /* Bound of the moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
+/* Unknown LLC id. Marks an empty table entry. */
+pub const LLC_UNKNOWN: u32 = 0xFFFF_FFFF;
 /* Shared DSQ of the batch tier. */
 #[cfg(test)]
 pub const DSQ_BATCH: u64 = 0x2000;
@@ -72,7 +74,7 @@ pub fn freq_known(freq_khz: u64) -> bool {
 /*
  * True when any entry claims a sibling thread. False
  * means plain hardware with one thread per core, so
- * callers keep plain per cpu behavior.
+ * callers keep plain per-CPU behavior.
  */
 #[cfg(test)]
 pub fn topology_has_smt(smt: &[bool]) -> bool {
@@ -81,7 +83,7 @@ pub fn topology_has_smt(smt: &[bool]) -> bool {
 
 /*
  * True when a sibling may be used. Needs sibling
- * hardware and an allowed peer, else plain per cpu
+ * hardware and an allowed peer, else plain per-CPU
  * choice stays.
  */
 #[cfg(test)]
@@ -100,8 +102,8 @@ pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
 
 /*
  * Next peer for a scan. Returns none with one or no
- * cpus, so scans end at once with a single cpu and
- * no peers. Returns none for an out of range cpu.
+ * CPUs, so scans end at once with a single CPU and
+ * no peers. Returns none for an out of range CPU.
  */
 #[cfg(test)]
 pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
@@ -115,9 +117,9 @@ pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
 }
 
 /*
- * Bound of a peer scan. Zero with one or no cpus, so
+ * Bound of a peer scan. Zero with one or no CPUs, so
  * steal scans and rotation end at once with a single
- * cpu. Otherwise one less than the cpu count.
+ * CPU. Otherwise one less than the CPU count.
  */
 #[cfg(test)]
 pub fn scan_bound(nr_cpus: usize) -> usize {
@@ -125,6 +127,137 @@ pub fn scan_bound(nr_cpus: usize) -> usize {
         return 0;
     }
     nr_cpus - 1
+}
+
+/*
+ * Check that an LLC id names a real domain. The
+ * unknown value marks an empty entry and fails
+ * open with no LLC step.
+ */
+#[cfg(test)]
+pub fn llc_known(id: u32) -> bool {
+    id != LLC_UNKNOWN
+}
+
+/*
+ * Check that the LLC step may run. Needs more than
+ * one domain, so single and unknown hosts stay
+ * plain with no extra scan.
+ */
+#[cfg(test)]
+pub fn llc_ok(nr: u64) -> bool {
+    nr >= 2
+}
+
+/*
+ * LLC id of one CPU. Unknown ids fail open, so an
+ * out of range CPU yields no domain.
+ */
+#[cfg(test)]
+pub fn llc_of(cpu: usize, llc_ids: &[u32]) -> Option<u32> {
+    let id = *llc_ids.get(cpu)?;
+    if !llc_known(id) {
+        return None;
+    }
+    Some(id)
+}
+
+/*
+ * Idle CPU in the same LLC as the previous CPU.
+ * Skips the second thread of a busy core when the
+ * full set marks fully idle cores. Empty full set
+ * means no SMT preference. Returns none when no
+ * LLC idle CPU is found. Single and unknown hosts
+ * return none at once with no scan.
+ */
+#[cfg(test)]
+pub fn pick_llc_idle(
+    prev: i32,
+    llc_ids: &[u32],
+    allowed: &[bool],
+    idle: &[bool],
+    full: &[bool],
+    nr: u64,
+) -> Option<u32> {
+    if !llc_ok(nr) {
+        return None;
+    }
+    if prev < 0 {
+        return None;
+    }
+    let want = llc_of(prev as usize, llc_ids)?;
+    let use_full = !full.is_empty();
+    for (cpu, &id) in llc_ids.iter().enumerate() {
+        if id != want {
+            continue;
+        }
+        if !may_run_on(cpu as i32, allowed) {
+            continue;
+        }
+        if use_full {
+            match full.get(cpu) {
+                Some(true) => {}
+                _ => continue,
+            }
+        }
+        match idle.get(cpu) {
+            Some(true) => return Some(cpu as u32),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/*
+ * First idle CPU in the mask. Models the any idle
+ * step. Returns none when no allowed CPU is idle.
+ */
+#[cfg(test)]
+pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if !ok {
+            continue;
+        }
+        if let Some(true) = idle.get(cpu) {
+            return Some(cpu as u32);
+        }
+    }
+    None
+}
+
+/*
+ * Full select model. Mirrors the BPF order of LLC
+ * idle, any idle, previous, current and first.
+ * Returns none for park use when no CPU allows.
+ */
+#[cfg(test)]
+pub fn select_cpu_model(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    llc_ids: &[u32],
+    full: &[bool],
+    nr: u64,
+) -> Option<u32> {
+    if let Some(c) = pick_llc_idle(prev, llc_ids, allowed, idle, full, nr) {
+        return Some(c);
+    }
+    if let Some(c) = pick_any_idle(allowed, idle) {
+        return Some(c);
+    }
+    if may_run_on(prev, allowed) {
+        return Some(prev as u32);
+    }
+    if may_run_on(cur, allowed) {
+        return Some(cur as u32);
+    }
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(cpu as u32);
+        }
+    }
+    None
 }
 
 /*
@@ -286,10 +419,10 @@ pub fn preempt_gap_ok(now: u64, last: u64) -> bool {
 }
 
 /*
- * Target cpu from the selected cpu. A valid allowed
- * selected cpu wins. Otherwise the first allowed cpu
- * wins. No allowed cpu yields no target for park use.
- * Pinned tasks resolve to the single allowed cpu here.
+ * Target CPU from the selected CPU. A valid allowed
+ * selected CPU wins. Otherwise the first allowed CPU
+ * wins. No allowed CPU yields no target for park use.
+ * Pinned tasks resolve to the single allowed CPU here.
  */
 #[cfg(test)]
 pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
@@ -309,9 +442,9 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 }
 
 /*
- * Check that a cpu may run a task with the given
+ * Check that a CPU may run a task with the given
  * mask. Mirrors the BPF head and kick guards. A
- * negative cpu fails closed. An out of range cpu
+ * negative CPU fails closed. An out of range CPU
  * fails closed. A missing entry fails closed.
  */
 #[cfg(test)]
@@ -326,8 +459,8 @@ pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
 }
 
 /*
- * Target cpu for a task that cannot move. Mirrors
- * the BPF local path. An out of range cpu yields no
+ * Target CPU for a task that cannot move. Mirrors
+ * the BPF local path. An out of range CPU yields no
  * target for park use.
  */
 #[cfg(test)]
@@ -342,18 +475,18 @@ pub fn stay_target(task_cpu: i32, nr_cpus: usize) -> Option<u32> {
 }
 
 /*
- * Running view of one cpu for tests. Mirrors the BPF
- * cpu state fields used by the dashboard. Zero pid
+ * Running view of one CPU for tests. Mirrors the BPF
+ * CPU state fields used by the dashboard. Zero pid
  * means idle.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunningView {
-    /* Estimate of the task now on the cpu. */
+    /* Estimate of the task now on the CPU. */
     pub est: u64,
-    /* Pid now on the cpu. Zero when idle. */
+    /* Pid now on the CPU. Zero when idle. */
     pub pid: u32,
-    /* Tier of the task now on the cpu. */
+    /* Tier of the task now on the CPU. */
     pub tier: u32,
 }
 
@@ -372,7 +505,7 @@ impl RunningView {
     }
 
     /*
-     * True when no task runs on the cpu. The dashboard
+     * True when no task runs on the CPU. The dashboard
      * uses the pid for this check.
      */
     pub fn is_idle(&self) -> bool {
@@ -392,7 +525,7 @@ impl RunningView {
 
 /*
  * Per tier counts for tests. Each slot counts joined
- * tasks in one tier across all cpus. The sum matches
+ * tasks in one tier across all CPUs. The sum matches
  * the joined total.
  */
 #[cfg(test)]
@@ -1033,5 +1166,98 @@ mod tests {
         }
         assert_eq!(seen, 0);
         assert_eq!(at, 0);
+    }
+
+    #[test]
+    fn llc_ids_match_header() {
+        assert!(llc_known(0));
+        assert!(llc_known(1));
+        assert!(!llc_known(LLC_UNKNOWN));
+        assert!(!llc_ok(0));
+        assert!(!llc_ok(1));
+        assert!(llc_ok(2));
+        assert_eq!(llc_of(0, &[0, 1]), Some(0));
+        assert_eq!(llc_of(1, &[0, 1]), Some(1));
+        assert_eq!(llc_of(2, &[0, 1]), None);
+        assert_eq!(llc_of(0, &[LLC_UNKNOWN]), None);
+    }
+
+    #[test]
+    fn llc_prefers_local_idle_over_remote() {
+        let llc = [0, 0, 1, 1];
+        let allowed = [true, true, true, true];
+        let idle = [false, false, false, true];
+        let full: [bool; 0] = [];
+        assert_eq!(pick_llc_idle(2, &llc, &allowed, &idle, &full, 2), Some(3));
+        let idle2 = [true, false, false, false];
+        assert_eq!(pick_llc_idle(2, &llc, &allowed, &idle2, &full, 2), None);
+        assert_eq!(pick_any_idle(&allowed, &idle2), Some(0));
+        assert_eq!(
+            select_cpu_model(2, 0, &allowed, &idle, &llc, &full, 2),
+            Some(3)
+        );
+        let idle3 = [true, false, false, true];
+        assert_eq!(
+            select_cpu_model(2, 0, &allowed, &idle3, &llc, &full, 2),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn llc_fallback_when_domain_empty_unknown() {
+        let llc = [0, 0, 1, 1];
+        let allowed = [true, true, true, true];
+        let idle = [true, false, false, false];
+        let full: [bool; 0] = [];
+        assert_eq!(pick_llc_idle(-1, &llc, &allowed, &idle, &full, 2), None);
+        assert_eq!(pick_llc_idle(9, &llc, &allowed, &idle, &full, 2), None);
+        let unknown = [LLC_UNKNOWN, LLC_UNKNOWN];
+        assert_eq!(pick_llc_idle(0, &unknown, &allowed, &idle, &full, 0), None);
+        assert_eq!(pick_llc_idle(0, &llc, &allowed, &idle, &full, 0), None);
+        assert_eq!(pick_llc_idle(0, &llc, &allowed, &idle, &full, 1), None);
+        assert_eq!(
+            select_cpu_model(0, 0, &allowed, &idle, &llc, &full, 0),
+            Some(0)
+        );
+        let empty = [false, false, false, false];
+        assert_eq!(select_cpu_model(1, 0, &empty, &idle, &llc, &full, 2), None);
+    }
+
+    #[test]
+    fn single_llc_matches_plain_order() {
+        let single = [0, 0, 0, 0];
+        let unknown = [LLC_UNKNOWN, LLC_UNKNOWN, LLC_UNKNOWN];
+        let allowed = [true, true, true, true];
+        let idle = [false, true, false, false];
+        let full: [bool; 0] = [];
+        assert!(!llc_ok(1));
+        assert_eq!(pick_llc_idle(0, &single, &allowed, &idle, &full, 1), None);
+        let got = select_cpu_model(0, 0, &allowed, &idle, &single, &full, 1);
+        let exp = select_cpu_model(0, 0, &allowed, &idle, &unknown, &full, 0);
+        assert_eq!(got, exp);
+        assert_eq!(got, Some(1));
+        let busy = [false, false, false, false];
+        let got2 = select_cpu_model(2, 1, &allowed, &busy, &single, &full, 1);
+        let exp2 = select_cpu_model(2, 1, &allowed, &busy, &unknown, &full, 0);
+        assert_eq!(got2, exp2);
+        assert_eq!(got2, Some(2));
+    }
+
+    #[test]
+    fn llc_skips_smt_sibling_when_marked() {
+        let llc = [0, 0, 0];
+        let allowed = [true, true, true];
+        let idle = [false, true, true];
+        let full = [false, false, true];
+        assert_eq!(pick_llc_idle(0, &llc, &allowed, &idle, &full, 2), Some(2));
+        let idle_only_smt = [false, true, false];
+        assert_eq!(
+            pick_llc_idle(0, &llc, &allowed, &idle_only_smt, &full, 2),
+            None
+        );
+        assert_eq!(
+            select_cpu_model(0, 0, &allowed, &idle_only_smt, &llc, &full, 2),
+            Some(1)
+        );
     }
 }

@@ -5,7 +5,7 @@
  * Stats server and web snapshot for the flow scheduler.
  * Metrics mirrors the BPF counters plus uptime. Tier
  * inserts and serves count per tier. Moves count tier
- * changes in either direction. Web metrics adds per cpu
+ * changes in either direction. Web metrics adds per-CPU
  * cards with per tier slices and per tier waiting
  * counts.
  */
@@ -26,7 +26,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Tasks now on a cpu")]
+    #[stat(desc = "Tasks now on a CPU")]
     pub on_cpu: u64,
     #[stat(desc = "Total runtime in nanoseconds")]
     pub total_runtime: u64,
@@ -57,13 +57,13 @@ pub struct Metrics {
 }
 
 /*
- * One card of the per cpu grid. Static fields come from
+ * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
- * per cpu map on each poll.
+ * per-CPU map on each poll.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
-    /* Cpu id. */
+    /* CPU id. */
     pub id: u32,
     /* Max frequency in kilohertz. Zero when unknown. */
     pub freq_khz: u64,
@@ -73,11 +73,11 @@ pub struct PerCpuMetrics {
     pub llc_id: u32,
     /* True for the second thread of a core. */
     pub smt: bool,
-    /* Estimate of the task now on the cpu. Zero idle. */
+    /* Estimate of the task now on the CPU. Zero idle. */
     pub running_est_ns: u64,
-    /* Pid now on the cpu. Zero when idle. */
+    /* Pid now on the CPU. Zero when idle. */
     pub running_pid: u32,
-    /* Tier of the task now on the cpu. Zero idle. */
+    /* Tier of the task now on the CPU. Zero idle. */
     #[serde(default)]
     pub running_tier: u32,
 }
@@ -91,7 +91,7 @@ pub struct PerCpuMetrics {
 pub struct WebMetrics {
     /* Scheduler wide counters. Raw values. */
     pub stats: Metrics,
-    /* One entry per online cpu. */
+    /* One entry per online CPU. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
     /* Fixed slice per tier in nanoseconds. */

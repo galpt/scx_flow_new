@@ -3,7 +3,7 @@
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
   Flow web UI. A live view of the two tiers,
-  per cpu running tasks and system counters, served by
+  per-CPU running tasks and system counters, served by
   the dashboard server over loopback with a unix socket
   fallback. Offline first with no external assets.
 -->
@@ -63,7 +63,7 @@
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    /* Per cpu card grid. Dense chips in a wrapping
+    /* Per-CPU card grid. Dense chips in a wrapping
      * grid with a bounded height and an internal
      * scroll, so a many core machine never
      * stretches the page. */
@@ -109,7 +109,7 @@
       font-family: var(--font-mono);
       margin-top: 1px;
     }
-    /* Tier badge on each cpu card. Running tasks
+    /* Tier badge on each CPU card. Running tasks
      * show the tier index, idle cards stay muted. */
     .tier-badge {
       display: inline-block;
@@ -246,7 +246,7 @@
       <div id="tiers"></div>
     </div>
 
-    <!-- Per cpu cards -->
+    <!-- Per-CPU cards -->
     <div id="core-cards" class="core-grid"></div>
 
     <!-- Summary -->
@@ -399,7 +399,7 @@
       box.innerHTML = html;
     }
 
-    /* Per cpu cards with the running tier index
+    /* Per-CPU cards with the running tier index
      * and the running estimate plus the pid. Freq
      * unknown stays plain with no zero print. No
      * sibling stays plain with no badge. */

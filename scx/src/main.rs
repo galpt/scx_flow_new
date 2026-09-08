@@ -48,7 +48,7 @@ use stats::Metrics;
 
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
-/* Cpu bound shared with the BPF header. */
+/* CPU bound shared with the BPF header. */
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
 
 fn full_version() -> String {
@@ -100,7 +100,7 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
     /* Dashboard sender. None when disabled. */
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
-    /* Static per cpu cards seeded at attach. */
+    /* Static per-CPU cards seeded at attach. */
     cpu_static: Vec<stats::PerCpuMetrics>,
     /* Live frequency cache for the cards. */
     cur_freq_khz: Vec<u64>,
@@ -130,6 +130,13 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         skel.struct_ops.flow_ops_mut().flags = flags;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
+        /* Seed the LLC table before load. Fail open. */
+        let cards = topology::web_cpu_static();
+        if let Some(bss) = skel.maps.bss_data.as_mut() {
+            let (table, nr) = topology::llc_seed(&cards);
+            bss.flow_cpu_llc = table;
+            bss.flow_llc_nr = nr;
+        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
@@ -147,7 +154,6 @@ impl<'a> Scheduler<'a> {
         };
         /* Static cards seed the start log and the cards. */
         /* Frequency stays display only here. */
-        let cards = topology::web_cpu_static();
         info!("Topology: {}", topology::describe_topology(&cards));
         let cpu_static = if opts.no_webui { Vec::new() } else { cards };
         Ok(Self {
@@ -183,7 +189,7 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Read one cpu state without heap use. Failed
+     * Read one CPU state without heap use. Failed
      * lookups yield an idle view.
      */
     fn read_cpu(&self, cpu: usize) -> flow_cpu_state {
@@ -457,6 +463,10 @@ mod tests {
         assert_eq!(
             crate::flow::EST_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
+        );
+        assert_eq!(
+            crate::flow::LLC_UNKNOWN,
+            crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN as u32
         );
     }
 

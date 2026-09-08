@@ -6,11 +6,12 @@ matches an overlay build. The `scx` dir copies into a
 workspace at `scheds/experimental/scx_flow` and builds there.
 
 > [!NOTE]
-> The `main` branch can be unstable. Stable versions will use `archive/*` branch names.
+> The `main` branch can be unstable. Stable versions
+> will use `archive/*` branch names.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.3`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.4`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -87,7 +88,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.3`, state `enabled` and ops containing `flow`. To
+`4.0.4`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

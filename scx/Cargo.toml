@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "4.0.3"
+version = "4.0.4"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
 description = "A two tier interactive and batch scheduler for sched_ext."

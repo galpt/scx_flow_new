@@ -149,18 +149,23 @@ busy preemption is sent only for tier zero wakeups
 against tier one runners inside the per CPU gap and
 only to a CPU in the wakee mask.
 
-## Cpu choice
+## CPU choice
 
-Cpu choice prefers an idle CPU in the task mask, then
-the prior CPU when allowed, then the current CPU when
-allowed, then the first allowed CPU. Pinned tasks stay
-in place. Tasks that cannot move stay on the current
-CPU. Idle choice is rechecked in the mask. A final
-hint without an allowed CPU falls back to the park in
-enqueue. Enqueue reuses the selected CPU when allowed,
-then the first allowed CPU, then the park. Tasks that
-cannot move use the local DSQ. The path uses only
-public helpers with version gates where needed.
+CPU choice prefers an idle CPU in the previous CPU
+LLC domain, then an idle CPU in the task mask, then
+the prior CPU when allowed, then the current CPU
+when allowed, then the first allowed CPU. Pinned
+tasks stay in place. Tasks that cannot move stay on
+the current CPU. The LLC step skips the second
+thread of a busy core and is skipped on single LLC
+and unknown topology hosts, which stay plain. Idle
+choice is rechecked in the mask. A final hint
+without an allowed CPU falls back to the park in
+enqueue. Enqueue reuses the selected CPU when
+allowed, then the first allowed CPU, then the park.
+Tasks that cannot move use the local DSQ. The path
+uses only public helpers with version gates where
+needed.
 
 ## Stats
 

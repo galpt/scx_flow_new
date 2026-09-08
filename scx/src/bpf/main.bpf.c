@@ -32,7 +32,7 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 /*
- * Per cpu state. Keyed by cpu id. Holds the running
+ * Per-CPU state. Keyed by CPU id. Holds the running
  * view plus the deficit count and the preempt stamp.
  */
 struct {
@@ -42,7 +42,7 @@ struct {
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
 
-/* Number of possible cpus. Written once at init. */
+/* Number of possible CPUs. Written once at init. */
 volatile u64 nr_cpu_ids;
 
 /* Floor of batch vruntime. New batch tasks join here. */
@@ -53,6 +53,17 @@ volatile u64 flow_tier_nr[2];
 
 /* Scheduler wide counters. Updated with atomics. */
 volatile struct flow_sched_stats flow_stats;
+
+/*
+ * Per-CPU LLC ids. Seeded once by userspace from
+ * host topology. Unknown entries hold the unknown
+ * value. The count holds distinct domains. Zero or
+ * one means plain behavior with no LLC step.
+ */
+volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
+
+/* Count of distinct LLC domains. Zero is unknown. */
+volatile u64 flow_llc_nr;
 
 /*
  * Current time source. The plain kernel time is used
@@ -88,7 +99,7 @@ static struct flow_task_ctx *flow_get(
 }
 
 /*
- * Look up the cpu state for one cpu. Returns null for
+ * Look up the CPU state for one CPU. Returns null for
  * out of range ids.
  */
 static struct flow_cpu_state *flow_cpu(u32 cpu)
@@ -101,8 +112,8 @@ static struct flow_cpu_state *flow_cpu(u32 cpu)
 }
 
 /*
- * Check that a cpu id names a real cpu. Used to guard
- * per cpu state access.
+ * Check that a CPU id names a real CPU. Used to guard
+ * per-CPU state access.
  */
 static __always_inline bool flow_cpu_id_ok(u32 cpu)
 {
@@ -114,7 +125,7 @@ static __always_inline bool flow_cpu_id_ok(u32 cpu)
 }
 
 /*
- * Check that a cpu may run a task. The id must be in
+ * Check that a CPU may run a task. The id must be in
  * range and present in the task mask.
  */
 static __always_inline bool flow_cpu_ok(
@@ -127,6 +138,75 @@ static __always_inline bool flow_cpu_ok(
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
+}
+
+/*
+ * LLC id of one CPU. Unknown ids fail open with no
+ * LLC step, so out of range ids stay unknown.
+ */
+static __always_inline u32 flow_llc_of(u32 cpu)
+{
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return (u32)FLOW_LLC_UNKNOWN;
+	if ((u64)cpu >= nr_cpu_ids)
+		return (u32)FLOW_LLC_UNKNOWN;
+	return flow_cpu_llc[cpu];
+}
+
+/*
+ * Idle CPU in the same LLC as the previous CPU.
+ * Skips the second thread of a busy core when the
+ * idle set marks fully idle cores. Returns minus
+ * one when no LLC idle CPU is found. Single and
+ * unknown hosts return at once with no scan.
+ */
+static s32 flow_llc_idle(const struct task_struct *p,
+	s32 prev_cpu)
+{
+	u32 want;
+	const struct cpumask *idle_smt;
+	s32 cpu;
+	s32 found = -1;
+
+	if (!flow_llc_ok(flow_llc_nr))
+		return -1;
+	if (prev_cpu < 0)
+		return -1;
+	if ((u32)prev_cpu >= (u32)FLOW_MAX_CPUS)
+		return -1;
+	if ((u64)prev_cpu >= nr_cpu_ids)
+		return -1;
+	want = flow_llc_of((u32)prev_cpu);
+	if (!flow_llc_known(want))
+		return -1;
+	idle_smt = scx_bpf_get_idle_smtmask();
+	bpf_for(cpu, 0, 1024) {
+		u32 id;
+
+		if (cpu < 0)
+			continue;
+		if ((u32)cpu >= (u32)FLOW_MAX_CPUS)
+			break;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		id = flow_cpu_llc[(u32)cpu];
+		if (id != want)
+			continue;
+		if (!flow_cpu_ok(p, cpu))
+			continue;
+		if (idle_smt) {
+			if (!bpf_cpumask_test_cpu((u32)cpu,
+			    idle_smt))
+				continue;
+		}
+		if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+			found = cpu;
+			break;
+		}
+	}
+	if (idle_smt)
+		scx_bpf_put_idle_cpumask(idle_smt);
+	return found;
 }
 
 /*
@@ -159,7 +239,7 @@ static __always_inline bool flow_head_ok(s32 cpu,
 }
 
 /*
- * Drop the on cpu count without wrap. Zero stays at
+ * Drop the on CPU count without wrap. Zero stays at
  * zero, so a double stop never wraps the gauge.
  */
 static __always_inline void flow_on_cpu_dec(void)
@@ -238,7 +318,7 @@ static __always_inline void flow_floor_advance(u64 vtime)
 }
 
 /*
- * Clear the running view of one cpu. Zero pid means
+ * Clear the running view of one CPU. Zero pid means
  * idle, so the dashboard sees idle at once.
  */
 static __always_inline void flow_clear_running(s32 cpu)
@@ -258,9 +338,9 @@ static __always_inline void flow_clear_running(s32 cpu)
 }
 
 /*
- * Set the cpu hint of one tier. Interactive asks
+ * Set the CPU hint of one tier. Interactive asks
  * for the max level. Batch restores the default,
- * so the hint tracks the task now on the cpu.
+ * so the hint tracks the task now on the CPU.
  * The hint is fixed per tier and never uses
  * frequency, so unknown frequency stays safe.
  */
@@ -321,12 +401,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 this_cpu;
 	s32 picked;
 	s32 first;
+	s32 llc_pick;
 
 	this_cpu = (s32)bpf_get_smp_processor_id();
-	/* Plain per cpu choice with no sibling step. */
-	/* No sibling hosts stay plain here. */
-	/* Single cpu ends at the first allowed cpu. */
-	/* Tasks that cannot move stay on the current cpu. */
+	/* Single CPU ends at the first allowed CPU. */
+	/* Tasks that cannot move stay on the current CPU. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
@@ -337,7 +416,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		first = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (flow_cpu_ok(p, first))
 			return first;
-		/* No allowed cpu, park hint for enqueue. */
+		/* No allowed CPU, park hint for enqueue. */
 		return prev_cpu;
 	}
 	/* Pinned tasks stay where they are. */
@@ -349,31 +428,39 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			return here;
 		if (flow_cpu_ok(p, prev_cpu))
 			return prev_cpu;
-		/* The single allowed cpu is the valid hint. */
+		/* The single allowed CPU is the valid hint. */
 		allow = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (flow_cpu_ok(p, allow))
 			return allow;
-		/* No allowed cpu, park hint for enqueue. */
+		/* No allowed CPU, park hint for enqueue. */
 		return prev_cpu;
 	}
-	/* Prefer an idle cpu inside the mask. */
+	/* Prefer an idle CPU in the previous LLC domain. */
+	/* Single and unknown hosts skip the LLC step. */
+	llc_pick = flow_llc_idle(p, prev_cpu);
+	if (llc_pick >= 0) {
+		/* Idle choice honors the mask, recheck is safe. */
+		if (flow_cpu_ok(p, llc_pick))
+			return llc_pick;
+	}
+	/* Prefer an idle CPU inside the mask. */
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0) {
 		/* Idle choice honors the mask, recheck is safe. */
 		if (flow_cpu_ok(p, picked))
 			return picked;
 	}
-	/* Fall back to the previous cpu when allowed. */
+	/* Fall back to the previous CPU when allowed. */
 	if (flow_cpu_ok(p, prev_cpu))
 		return prev_cpu;
-	/* Fall back to the current cpu when allowed. */
+	/* Fall back to the current CPU when allowed. */
 	if (flow_cpu_ok(p, this_cpu))
 		return this_cpu;
-	/* Try the first allowed cpu when allowed. */
+	/* Try the first allowed CPU when allowed. */
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;
-	/* No allowed cpu, park hint for enqueue. */
+	/* No allowed CPU, park hint for enqueue. */
 	return prev_cpu;
 }
 
@@ -437,7 +524,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (!flow_tier_ok(tier))
 			tier = 0;
 	}
-	/* Tasks that cannot move stay on the current cpu. */
+	/* Tasks that cannot move stay on the current CPU. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
@@ -462,7 +549,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
 			return;
 		}
-		/* No usable cpu, fall through to park. */
+		/* No usable CPU, fall through to park. */
 	}
 	if (flow_cpu_ok(p, sel)) {
 		cpu = sel;
@@ -513,11 +600,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (tctx->vruntime == 0)
 			tctx->vruntime = floor;
 		vtime = tctx->vruntime;
-		/* Shared holds batch work for an allowed cpu. */
+		/* Shared holds batch work for an allowed CPU. */
 		scx_bpf_dsq_insert_vtime(p,
 		    (u64)FLOW_DSQ_BATCH, grant, vtime, 0);
 		__sync_fetch_and_add(&flow_stats.enq_tier1, 1);
-		/* Kick only a cpu in the mask. */
+		/* Kick only a CPU in the mask. */
 		if (flow_cpu_ok(p, cpu)) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
@@ -539,7 +626,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    SCX_ENQ_HEAD);
 	}
 	__sync_fetch_and_add(&flow_stats.enq_tier0, 1);
-	/* Kick only a cpu in the mask. */
+	/* Kick only a CPU in the mask. */
 	if (flow_cpu_ok(p, cpu)) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		__sync_fetch_and_add(&flow_stats.kicks, 1);
@@ -556,7 +643,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    st->running_tier ==
 			    (u32)FLOW_TIER_BATCH)
 				busy_batch = true;
-			/* Preempt only a cpu in the mask. */
+			/* Preempt only a CPU in the mask. */
 			if (busy_batch &&
 			    flow_preempt_gap_ok(now,
 			    st->last_preempt_at) &&
@@ -586,7 +673,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (!flow_cpu_id_ok((u32)cpu))
 		return;
 	/* One try per DSQ with no peer scan. */
-	/* Single cpu ends at once with no peers. */
+	/* Single CPU ends at once with no peers. */
 	st = flow_cpu((u32)cpu);
 	if (st)
 		served0 = st->served0;
@@ -598,7 +685,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Gated batch serve keeps long waits bounded. */
 	if (flow_deficit_should_serve(served0, tier0_wait,
 	    tier1_wait)) {
-		/* Head must allow this cpu, else try park. */
+		/* Head must allow this CPU, else try park. */
 		if (flow_head_ok(cpu, (u64)FLOW_DSQ_BATCH)) {
 			struct task_struct *cand = NULL;
 			u64 vtime = 0;
@@ -614,7 +701,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			}
 			if (have)
 				flow_floor_advance(vtime);
-			/* Move is safe, head allows this cpu. */
+			/* Move is safe, head allows this CPU. */
 			if (scx_bpf_dsq_move_to_local(
 			    (u64)FLOW_DSQ_BATCH, 0)) {
 				__sync_fetch_and_add(
@@ -635,7 +722,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				    (u32)FLOW_TIER_INTERACTIVE);
 			return;
 		}
-		/* Move is safe, head allows this cpu. */
+		/* Move is safe, head allows this CPU. */
 		scx_bpf_dsq_move_to_local((u64)FLOW_DSQ_PARK,
 		    0);
 		/* One try only, hint stays, no spin. */
@@ -678,7 +765,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		else
 			__sync_fetch_and_add(
 			    &flow_stats.serves_tier0, 1);
-		/* The hint tracks the task now on the cpu. */
+		/* The hint tracks the task now on the CPU. */
 		flow_cpuperf_set(cpu, tier);
 	}
 inc:
@@ -847,11 +934,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
-		scx_bpf_error("cpu count over bound");
+		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
 	if (n == 0) {
-		scx_bpf_error("no cpus found");
+		scx_bpf_error("no CPUs found");
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
