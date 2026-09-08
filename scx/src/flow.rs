@@ -335,18 +335,22 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 
 /*
  * Target CPU for a task that cannot move. Mirrors
- * the BPF local path. An out of range CPU yields no
- * target for park use.
+ * the BPF local path with a mask check. An out of
+ * range CPU yields no target for park use. A CPU
+ * outside the mask yields no target for park use.
  */
 #[cfg(test)]
-pub fn stay_target(task_cpu: i32, nr_cpus: usize) -> Option<u32> {
-    if task_cpu < 0 {
+pub fn stay_target(here: i32, nr_cpus: usize, allowed: &[bool]) -> Option<u32> {
+    if here < 0 {
         return None;
     }
-    if (task_cpu as usize) < nr_cpus {
-        return Some(task_cpu as u32);
+    if (here as usize) >= nr_cpus {
+        return None;
     }
-    None
+    if !may_run_on(here, allowed) {
+        return None;
+    }
+    Some(here as u32)
 }
 
 /*
@@ -573,6 +577,22 @@ pub fn drain_model(
 }
 
 /*
+ * True when one peer head may move to the thief.
+ * Mirrors the BPF peer drain head check. Only the
+ * head may move. A dead, exiting, or foreign head
+ * stays for its owner. A failed move stays with
+ * progress. An empty queue yields false.
+ */
+#[cfg(test)]
+pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
+    if let Some(t) = head {
+        t.live && !t.exiting && !t.fail && may_run_on(thief, &t.allowed)
+    } else {
+        false
+    }
+}
+
+/*
  * Steal up to budget tasks from peers for an idle CPU.
  * The scan visits at most bound peers starting after
  * the cursor with wrap. Only idle callers steal. Each
@@ -614,11 +634,7 @@ pub fn steal_model(
             continue;
         }
         if let Some(q) = peers.get_mut(next as usize) {
-            let head_ok = match q.front() {
-                Some(t) => t.live && !t.exiting && !t.fail && may_run_on(thief as i32, &t.allowed),
-                None => false,
-            };
-            if head_ok {
+            if peer_head_ok(thief as i32, q.front()) {
                 q.pop_front();
                 moved += 1;
             }
@@ -990,12 +1006,29 @@ mod tests {
 
     #[test]
     fn stay_local_keeps_task_cpu() {
-        assert_eq!(stay_target(2, 8), Some(2));
-        assert_eq!(stay_target(0, 8), Some(0));
-        assert_eq!(stay_target(-1, 8), None);
-        assert_eq!(stay_target(99, 8), None);
-        assert_eq!(stay_target(7, 8), Some(7));
-        assert_eq!(stay_target(8, 8), None);
+        let all = [true; 8];
+        assert_eq!(stay_target(2, 8, &all), Some(2));
+        assert_eq!(stay_target(0, 8, &all), Some(0));
+        assert_eq!(stay_target(-1, 8, &all), None);
+        assert_eq!(stay_target(99, 8, &all), None);
+        assert_eq!(stay_target(7, 8, &all), Some(7));
+        assert_eq!(stay_target(8, 8, &all), None);
+    }
+
+    #[test]
+    fn stay_disallowed_here_parks() {
+        /* In range but outside the mask parks. */
+        let narrow = [false, false, true];
+        assert_eq!(stay_target(0, 3, &narrow), None);
+        assert_eq!(stay_target(1, 3, &narrow), None);
+        assert_eq!(stay_target(2, 3, &narrow), Some(2));
+        /* Live range with an empty mask parks. */
+        let empty = [false, false, false];
+        assert_eq!(stay_target(0, 3, &empty), None);
+        /* A missing entry fails closed. */
+        assert_eq!(stay_target(0, 3, &[]), None);
+        /* Out of range parks even when allowed. */
+        assert_eq!(stay_target(3, 3, &[true, true, true]), None);
     }
 
     #[test]
@@ -1049,9 +1082,10 @@ mod tests {
         assert_eq!(scan_bound(2), 1);
         assert_eq!(scan_bound(8), 7);
         assert_eq!(scan_bound(64), STEAL_BOUND);
-        assert_eq!(stay_target(0, 1), Some(0));
-        assert_eq!(stay_target(1, 1), None);
-        assert_eq!(stay_target(-1, 1), None);
+        assert_eq!(stay_target(0, 1, &[true]), Some(0));
+        assert_eq!(stay_target(0, 1, &[false]), None);
+        assert_eq!(stay_target(1, 1, &[true]), None);
+        assert_eq!(stay_target(-1, 1, &[true]), None);
         assert_eq!(pick_target_cpu(0, &[true]), Some(0));
         assert_eq!(pick_target_cpu(-1, &[true]), Some(0));
         assert_eq!(pick_target_cpu(5, &[true]), Some(0));
@@ -1576,6 +1610,37 @@ mod tests {
         assert!(moved > 0);
         assert_eq!(moved, 1);
         assert_eq!(peers[1].len(), 3);
+    }
+
+    #[test]
+    fn peer_drain_explicit_mask_skips_foreign_head() {
+        /* Foreign head stays while good work waits. */
+        let foreign = PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        /* Good head allows the thief. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        assert!(!peer_head_ok(0, Some(&foreign)));
+        assert!(peer_head_ok(0, Some(&good)));
+        assert!(peer_head_ok(1, Some(&foreign)));
+        assert!(!peer_head_ok(0, None));
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([foreign.clone(), good.clone()]),
+            VecDeque::from([good.clone()]),
+        ];
+        let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert_eq!(moved, 1);
+        assert_eq!(peers[1].len(), 2);
+        assert_eq!(peers[2].len(), 0);
     }
 
     #[test]

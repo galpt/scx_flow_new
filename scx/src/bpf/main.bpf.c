@@ -507,14 +507,18 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 
 /*
  * Steal one task from a peer queue for an idle thief.
- * Uses the local move helper, so mask and liveness
- * are checked inside the helper. Returns one when a
- * task moved and zero otherwise.
+ * Peeks the head only, so a foreign head stays for
+ * its owner while the scan moves to the next peer.
+ * The mask check mirrors the own and park drains, so
+ * only allowed heads reach the move helper. Returns
+ * one when a task moved and zero otherwise.
  */
 static __always_inline u32 flow_drain_peer(s32 thief,
 	u32 peer)
 {
+	struct task_struct *p;
 	u64 dsq;
+	bool stole = false;
 
 	if (thief < 0)
 		return 0;
@@ -527,7 +531,31 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	dsq = flow_dsq_for_cpu(peer);
 	if (scx_bpf_dsq_nr_queued(dsq) == 0)
 		return 0;
-	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, dsq, 0) {
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			break;
+		if (p->flags & PF_EXITING) {
+			bpf_task_release(p);
+			break;
+		}
+		if (!bpf_cpumask_test_cpu((u32)thief,
+		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			break;
+		}
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)thief, 0)) {
+			bpf_task_release(p);
+			break;
+		}
+		bpf_task_release(p);
+		stole = true;
+		break;
+	}
+	bpf_rcu_read_unlock();
+	if (stole) {
 		__sync_fetch_and_add(&flow_stats.steal_moves, 1);
 		return 1;
 	}
@@ -637,7 +665,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
-		if (here >= 0 && flow_cpu_live((u32)here)) {
+		if (flow_cpu_ok(p, here)) {
 			cpu = here;
 			cpu_valid = true;
 		}

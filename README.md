@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.7`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.8`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -102,7 +102,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.7`, state `enabled` and ops containing `flow`. To
+`4.0.8`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 
