@@ -19,9 +19,14 @@ to 1 second with no smoothing. Blocked tasks complete and release
 at once. Runnable tasks requeue ordered with a refreshed
 estimate. Dispatch drains the local queue first, then the park
 queue, then idle steals from peers. Each pass visits every
-queued task in the owned and park queues in order and skips
-past dead, exiting, foreign and failed heads, so every pass
-moves at least one task when movable work exists there. Idle
+queued task in the owned and park queues in order and moves
+live tasks with no move failure when allowed, including
+exiting tasks so they run to exit, and skips past dead,
+foreign and failed heads, so every pass moves at least one
+task when movable work exists there. An idle CPU with no
+moved work steals past unmovable leftovers, while a busy CPU
+with moved work steals only when both queues are empty. Idle
+steals scan past bad heads to rescue movable work. Idle
 targets are kicked at once with a mask check and no busy preemption.
 
 The mean math and the queue rules live in
@@ -100,10 +105,14 @@ the entry. Blocking releases it at once. Disable and exit
 release exactly once. Dispatch drains the local queue first,
 then the park queue, then idle steals from peers. Each
 pass moves up to 32 tasks across local, park and steal. Each
-move in the local and park queues skips dead, exiting,
-foreign and failed tasks, so one head never blocks later
-work there. Steals take a peer head when it allows the
-thief and move on to the next peer otherwise. An
+move in the local and park queues moves live tasks with no
+move failure when allowed, including exiting tasks so they
+run to exit, and skips dead, foreign and failed tasks, so one
+head never blocks later work there. Steals take the first
+task in a peer queue that allows the thief and move past bad
+heads to rescue movable work behind them. An idle CPU with
+no moved work steals past unmovable leftovers, while a busy
+CPU with moved work steals only when both queues are empty. An
 idle kick is sent only to a CPU in the task mask with no
 busy preemption.
 
@@ -150,8 +159,9 @@ machine.
 - Idle wakeup kick. Wakeups join ordered and kick an
   idle target to collect at once.
 - Queues stay per-CPU. Idle CPUs collect park work and
-  steal peer work only when the head may run on the idle
-  CPU.
+  steal peer work with a scan past bad heads, so movable
+  work behind a dead, foreign or failed head is rescued
+  when the task allows the idle CPU.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report

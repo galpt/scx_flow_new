@@ -409,10 +409,12 @@ static __always_inline void flow_release(
 /*
  * Drain one per CPU queue with skip past bad heads.
  * The iterator visits every queued task in order, so
- * one foreign, exiting, or unresolvable head never
- * blocks later work. Each eligible task moves to the
- * local DSQ of the asking CPU. Returns the count
- * moved, capped at the given budget.
+ * one dead, foreign, or failed head never blocks
+ * later work. Exiting tasks move to the local DSQ to
+ * run to exit, so they never wedge behind a skip.
+ * Each eligible task moves to the local DSQ of the
+ * asking CPU. Returns the count moved, capped at the
+ * given budget.
  */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
@@ -435,10 +437,6 @@ static __always_inline u32 flow_drain_own(s32 cpu,
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-		if (p->flags & PF_EXITING) {
-			bpf_task_release(p);
-			continue;
-		}
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr)) {
 			bpf_task_release(p);
@@ -459,10 +457,12 @@ static __always_inline u32 flow_drain_own(s32 cpu,
 /*
  * Drain the park queue with skip past bad heads. The
  * iterator visits every parked task in order, so one
- * foreign, exiting, or unresolvable head never blocks
- * later work. Each eligible task moves to the local
- * DSQ of the asking CPU. Returns the count moved,
- * capped at the given budget.
+ * dead, foreign, or failed head never blocks later
+ * work. Exiting tasks move to the local DSQ to run
+ * to exit, so they never wedge behind a skip. Each
+ * eligible task moves to the local DSQ of the asking
+ * CPU. Returns the count moved, capped at the given
+ * budget.
  */
 static __always_inline u32 flow_drain_park(s32 cpu,
 	u32 budget)
@@ -483,10 +483,6 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-		if (p->flags & PF_EXITING) {
-			bpf_task_release(p);
-			continue;
-		}
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr)) {
 			bpf_task_release(p);
@@ -507,11 +503,13 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 
 /*
  * Steal one task from a peer queue for an idle thief.
- * Peeks the head only, so a foreign head stays for
- * its owner while the scan moves to the next peer.
- * The mask check mirrors the own and park drains, so
- * only allowed heads reach the move helper. Returns
- * one when a task moved and zero otherwise.
+ * The iterator visits every queued task in order, so
+ * one dead, foreign, or failed head never blocks
+ * later work. The first allowed task moves to the
+ * local DSQ of the thief. Exiting tasks move when
+ * allowed, so they run to exit on the owner or on a
+ * thief. Returns one when a task moved and zero
+ * otherwise.
  */
 static __always_inline u32 flow_drain_peer(s32 thief,
 	u32 peer)
@@ -535,20 +533,16 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
-			break;
-		if (p->flags & PF_EXITING) {
-			bpf_task_release(p);
-			break;
-		}
+			continue;
 		if (!bpf_cpumask_test_cpu((u32)thief,
 		    p->cpus_ptr)) {
 			bpf_task_release(p);
-			break;
+			continue;
 		}
 		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)thief, 0)) {
 			bpf_task_release(p);
-			break;
+			continue;
 		}
 		bpf_task_release(p);
 		stole = true;
@@ -767,9 +761,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		return;
 	own_left = scx_bpf_dsq_nr_queued(
 	    flow_dsq_for_cpu((u32)cpu));
-	if (own_left > 0)
+	/* An idle CPU steals past unmovable leftovers. */
+	/* A busy CPU with local work stays home. */
+	if (own_left > 0 && moved > 0)
 		return;
-	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0)
+	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
+	    moved > 0)
 		return;
 	/* Idle thieves scan peers with a rotating cursor. */
 	{

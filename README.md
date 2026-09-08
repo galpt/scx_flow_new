@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.8`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.9`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -35,12 +35,16 @@ complete and release at once. Runnable tasks requeue ordered
 with a refreshed estimate. Dispatch drains the local queue
 first, then the park queue, then idle steals from peers. Each
 pass visits every queued task in the owned and park queues in
-order and skips past dead, exiting, foreign and failed heads,
-so every pass moves at least one task when movable work exists
-there. Idle steals visit at most 8 peers with a rotating
-cursor and take the head of a peer queue when the head
-allows the thief, moving on to the next peer otherwise.
-Kicks wake idle targets only with a mask
+order and moves live tasks with no move failure when allowed,
+including exiting tasks so they run to exit, and skips past
+dead, foreign and failed heads, so every pass moves at least
+one task when movable work exists there. An idle CPU with no
+moved work steals past unmovable leftovers, while a busy CPU
+with moved work steals only when both queues are empty. Idle
+steals visit at most 8 peers with a rotating cursor and take
+the first task in a peer queue that allows the thief, moving
+past dead, foreign and failed heads to rescue movable work
+behind a bad head. Kicks wake idle targets only with a mask
 check and no busy preemption. Hints use only estimate against
 mean. Stops restore the low hint when the CPU goes idle.
 Counts cover inserts, requeues, completions, park moves,
@@ -102,7 +106,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.8`, state `enabled` and ops containing `flow`. To
+`4.0.9`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

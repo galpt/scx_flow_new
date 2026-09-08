@@ -546,11 +546,12 @@ pub struct PendingTask {
 /*
  * Drain up to budget tasks for one CPU. The scan
  * visits every queued task in order and moves each
- * live and non exiting task with the CPU in the mask
- * and with no move failure. Bad heads are skipped, so
- * one head never blocks later work. Returns the count
- * moved. A zero return means no movable work was
- * present.
+ * live task with the CPU in the mask and with no
+ * move failure. Exiting tasks move when allowed, so
+ * they run to exit on the owner or on a thief. Dead,
+ * foreign, and failed heads are skipped, so one head
+ * never blocks later work. Returns the count moved.
+ * A zero return means no movable work was present.
  */
 #[cfg(test)]
 pub fn drain_model(
@@ -561,11 +562,7 @@ pub fn drain_model(
     let mut moved = 0;
     let mut kept = std::collections::VecDeque::new();
     for task in queue.drain(..) {
-        let ok = moved < budget
-            && task.live
-            && !task.exiting
-            && !task.fail
-            && may_run_on(cpu, &task.allowed);
+        let ok = moved < budget && task.live && !task.fail && may_run_on(cpu, &task.allowed);
         if ok {
             moved += 1;
         } else {
@@ -577,16 +574,18 @@ pub fn drain_model(
 }
 
 /*
- * True when one peer head may move to the thief.
- * Mirrors the BPF peer drain head check. Only the
- * head may move. A dead, exiting, or foreign head
- * stays for its owner. A failed move stays with
- * progress. An empty queue yields false.
+ * True when one peer task may move to the thief.
+ * Mirrors the BPF peer drain task check. A live and
+ * allowed task with no move failure may move. Exiting
+ * tasks may move when allowed, so they run to exit.
+ * A dead, foreign, or failed task stays, so the scan
+ * moves past it with progress. An empty queue yields
+ * false.
  */
 #[cfg(test)]
 pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
     if let Some(t) = head {
-        t.live && !t.exiting && !t.fail && may_run_on(thief, &t.allowed)
+        t.live && !t.fail && may_run_on(thief, &t.allowed)
     } else {
         false
     }
@@ -596,11 +595,12 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
  * Steal up to budget tasks from peers for an idle CPU.
  * The scan visits at most bound peers starting after
  * the cursor with wrap. Only idle callers steal. Each
- * peer offers its head only. A head that is dead,
- * exiting, foreign, or failing moves the scan to the
- * next peer with the head left in place for its owner.
- * The cursor advances by the peers visited. Returns the
- * count moved and the new cursor.
+ * peer is scanned in order past dead, foreign, and
+ * failed heads, so movable work behind a bad head is
+ * rescued. Exiting tasks move when allowed, so they
+ * run to exit on the owner or on a thief. The cursor
+ * advances by the peers visited. Returns the count
+ * moved and the new cursor.
  */
 #[cfg(test)]
 pub fn steal_model(
@@ -634,8 +634,15 @@ pub fn steal_model(
             continue;
         }
         if let Some(q) = peers.get_mut(next as usize) {
-            if peer_head_ok(thief as i32, q.front()) {
-                q.pop_front();
+            let mut pos = None;
+            for (idx, task) in q.iter().enumerate() {
+                if peer_head_ok(thief as i32, Some(task)) {
+                    pos = Some(idx);
+                    break;
+                }
+            }
+            if let Some(idx) = pos {
+                q.remove(idx);
                 moved += 1;
             }
             if moved >= budget {
@@ -644,6 +651,21 @@ pub fn steal_model(
         }
     }
     (moved, cur)
+}
+
+/*
+ * True when a CPU may steal after draining own and
+ * park. An idle CPU with no moved work steals past
+ * unmovable leftovers, so only unmovable work never
+ * blocks a steal. A busy CPU with moved work steals
+ * only when both queues are empty.
+ */
+#[cfg(test)]
+pub fn may_steal(own_left: u64, park_left: u64, moved: u32) -> bool {
+    if moved == 0 {
+        return true;
+    }
+    own_left == 0 && park_left == 0
 }
 
 /*
@@ -1295,8 +1317,8 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_park_skips_exiting_head() {
-        /* Exiting head models a task in exit. */
+    fn dispatch_park_moves_exiting_head() {
+        /* Exiting tasks move to run to exit. */
         let exiting = PendingTask {
             allowed: vec![true, true],
             exiting: true,
@@ -1321,21 +1343,21 @@ mod tests {
             VecDeque::from([exiting.clone(), foreign.clone(), good.clone(), good.clone()]);
         let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
         assert!(moved > 0);
-        assert_eq!(moved, 2);
-        assert_eq!(queue.len(), 2);
-        assert_eq!(queue[0], exiting);
-        assert_eq!(queue[1], foreign);
+        assert_eq!(moved, 3);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], foreign);
     }
 
     #[test]
     fn progress_guarantee_moves_past_all_bad_heads() {
-        /* Every bad shape sits at the head at once. */
+        /* Dead, foreign, and failed heads stay at once. */
         let dead = PendingTask {
             allowed: vec![true, true],
             exiting: false,
             live: false,
             fail: false,
         };
+        /* Exiting tasks move to run to exit. */
         let exiting = PendingTask {
             allowed: vec![true, true],
             exiting: true,
@@ -1369,13 +1391,16 @@ mod tests {
         ]);
         let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
         assert!(moved > 0);
-        assert_eq!(moved, 1);
-        assert_eq!(queue.len(), 4);
+        assert_eq!(moved, 2);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0], dead);
+        assert_eq!(queue[1], foreign);
+        assert_eq!(queue[2], failed);
     }
 
     #[test]
     fn progress_guarantee_property_holds() {
-        /* Any movable task behind bad heads must move. */
+        /* Any movable and exiting task behind bad heads must move. */
         for trial in 0..32 {
             let mut queue = VecDeque::new();
             let bad = trial % 4;
@@ -1419,7 +1444,13 @@ mod tests {
             }
             let moved = drain_model(&mut queue, 0, 8);
             assert!(moved > 0);
-            assert_eq!(moved, 5);
+            if bad == 2 {
+                assert_eq!(moved, 5);
+                assert_eq!(queue.len(), 3);
+            } else {
+                assert_eq!(moved, 6);
+                assert_eq!(queue.len(), 2);
+            }
         }
     }
 
@@ -1465,7 +1496,7 @@ mod tests {
             live: true,
             fail: false,
         };
-        /* Exiting tasks never run here. */
+        /* Exiting tasks move to run to exit. */
         let exiting = PendingTask {
             allowed: vec![true; 16],
             exiting: true,
@@ -1507,36 +1538,36 @@ mod tests {
         assert!(first > 0);
         assert_eq!(first, 32);
         assert_eq!(queue.len(), 12);
-        assert_eq!(queue[0], exiting);
-        assert_eq!(queue[1], foreign);
-        assert_eq!(queue[2], dead);
-        assert_eq!(queue[3], failed);
+        assert_eq!(queue[0], foreign);
+        assert_eq!(queue[1], dead);
+        assert_eq!(queue[2], failed);
         /* Second pass drains the rest past bad heads. */
         let second = drain_model(&mut queue, 0, DISPATCH_BATCH);
         assert!(second > 0);
-        assert_eq!(second, 8);
-        assert_eq!(queue.len(), 4);
-        /* Bad heads stay but never block new work. */
+        assert_eq!(second, 9);
+        assert_eq!(queue.len(), 3);
+        /* Unmovable heads stay but never block new work. */
         queue.push_back(good.clone());
         queue.push_back(good.clone());
         let third = drain_model(&mut queue, 0, DISPATCH_BATCH);
         assert!(third > 0);
         assert_eq!(third, 2);
-        assert_eq!(queue.len(), 4);
-        assert_eq!(queue[0], exiting);
-        assert_eq!(queue[1], foreign);
-        assert_eq!(queue[2], dead);
-        assert_eq!(queue[3], failed);
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue[0], foreign);
+        assert_eq!(queue[1], dead);
+        assert_eq!(queue[2], failed);
     }
 
     #[test]
     fn incident_steal_keeps_progress_with_bad_heads() {
+        /* Good tasks allow the thief. */
         let good = PendingTask {
             allowed: vec![true, true, true, true],
             exiting: false,
             live: true,
             fail: false,
         };
+        /* Bad head allows only the far CPU. */
         let bad = PendingTask {
             allowed: vec![false, false, false, true],
             exiting: false,
@@ -1550,8 +1581,10 @@ mod tests {
         ];
         let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
         assert!(moved > 0);
-        assert_eq!(moved, 1);
-        assert_eq!(peers[1].len(), 2);
+        assert_eq!(moved, 2);
+        assert_eq!(peers[1].len(), 1);
+        assert_eq!(peers[1][0], bad);
+        assert_eq!(peers[2].len(), 0);
     }
 
     #[test]
@@ -1583,18 +1616,21 @@ mod tests {
 
     #[test]
     fn steal_checks_mask_and_skips_bad_heads() {
+        /* Foreign tasks allow no CPU here. */
         let foreign = PendingTask {
             allowed: vec![false, false],
             exiting: false,
             live: true,
             fail: false,
         };
+        /* Exiting tasks move to run to exit. */
         let exiting = PendingTask {
             allowed: vec![true, true],
             exiting: true,
             live: true,
             fail: false,
         };
+        /* Good tasks allow the thief. */
         let good = PendingTask {
             allowed: vec![true, true],
             exiting: false,
@@ -1608,8 +1644,11 @@ mod tests {
         ];
         let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
         assert!(moved > 0);
-        assert_eq!(moved, 1);
-        assert_eq!(peers[1].len(), 3);
+        assert_eq!(moved, 2);
+        assert_eq!(peers[1].len(), 2);
+        assert_eq!(peers[1][0], foreign);
+        assert_eq!(peers[1][1], good);
+        assert_eq!(peers[2].len(), 0);
     }
 
     #[test]
@@ -1638,9 +1677,137 @@ mod tests {
             VecDeque::from([good.clone()]),
         ];
         let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
-        assert_eq!(moved, 1);
-        assert_eq!(peers[1].len(), 2);
+        assert_eq!(moved, 2);
+        assert_eq!(peers[1].len(), 1);
+        assert_eq!(peers[1][0], foreign);
         assert_eq!(peers[2].len(), 0);
+    }
+
+    #[test]
+    fn peer_rescues_movable_behind_bad_head() {
+        /* Dead head stays while good behind moves. */
+        let dead = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: false,
+            fail: false,
+        };
+        /* Foreign head stays for its owner. */
+        let foreign = PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        /* Failed head stays with progress. */
+        let failed = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: true,
+        };
+        /* Good tasks allow the thief. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([dead.clone(), foreign.clone(), failed.clone(), good.clone()]),
+            VecDeque::new(),
+        ];
+        let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert!(moved > 0);
+        assert_eq!(moved, 1);
+        assert_eq!(peers[1].len(), 3);
+        assert_eq!(peers[1][0], dead);
+        assert_eq!(peers[1][1], foreign);
+        assert_eq!(peers[1][2], failed);
+    }
+
+    #[test]
+    fn exiting_task_eventually_runs() {
+        /* Exiting tasks move to run to exit. */
+        let exiting = PendingTask {
+            allowed: vec![true, true],
+            exiting: true,
+            live: true,
+            fail: false,
+        };
+        /* Good tasks allow the asking CPU. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        /* Owner moves its own exiting head. */
+        let mut queue = VecDeque::from([exiting.clone(), good.clone()]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(moved, 2);
+        assert!(queue.is_empty());
+        /* A thief moves an exiting head when allowed. */
+        assert!(peer_head_ok(0, Some(&exiting)));
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([exiting.clone()]),
+            VecDeque::new(),
+        ];
+        let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert_eq!(stolen, 1);
+        assert!(peers[1].is_empty());
+        /* A foreign exiting head stays for its owner. */
+        let far = PendingTask {
+            allowed: vec![false, true],
+            exiting: true,
+            live: true,
+            fail: false,
+        };
+        assert!(!peer_head_ok(0, Some(&far)));
+        assert!(peer_head_ok(1, Some(&far)));
+    }
+
+    #[test]
+    fn idle_steals_past_unmovable_leftovers() {
+        /* An idle CPU steals past unmovable leftovers. */
+        assert!(may_steal(2, 0, 0));
+        assert!(may_steal(0, 1, 0));
+        assert!(may_steal(5, 3, 0));
+        assert!(may_steal(0, 0, 0));
+        /* A busy CPU with local work stays home. */
+        assert!(!may_steal(1, 0, 1));
+        assert!(!may_steal(0, 1, 1));
+        assert!(!may_steal(2, 3, 2));
+        /* A busy CPU with empty queues may steal. */
+        assert!(may_steal(0, 0, 1));
+        assert!(may_steal(0, 0, 5));
+        /* Own queue with only foreign work stays idle. */
+        let foreign = PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut own = VecDeque::from([foreign.clone(), foreign.clone()]);
+        let moved = drain_model(&mut own, 0, DISPATCH_BATCH);
+        assert_eq!(moved, 0);
+        assert_eq!(own.len(), 2);
+        assert!(may_steal(own.len() as u64, 0, moved));
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([good.clone()]),
+            VecDeque::from([good.clone()]),
+        ];
+        let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert!(stolen > 0);
     }
 
     #[test]
