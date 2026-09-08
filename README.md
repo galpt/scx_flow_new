@@ -21,18 +21,6 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `tools/install_scx_flow.sh` overlay build installer
 - `LICENSE` full license text, a real file
 
-## Breaking note in 4.0.0
-
-Version stays at `4.0.0` by user decision, but this
-release breaks prior behavior. The prior three queues
-per cpu are now one ordered queue per cpu. Queue ids use
-base `0x1000` plus cpu with stride one. Counters now use
-placements and requeues, with per level placements and
-demotions removed. The dashboard payload now uses live
-mean, total queued, per cpu depths and head and tail
-ages, with per level means and depths removed. Old
-dashboards and old stat readers need an update.
-
 ## Design
 
 One ordered queue per cpu. Queue ids use base `0x1000`
