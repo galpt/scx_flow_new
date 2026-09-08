@@ -118,7 +118,8 @@ struct flow_cpu_state {
  * promotion arrays count moves up from one queue. The
  * requeue counter counts runnable requeues. The steal
  * counter counts remote moves. The dispatch counter
- * counts local and remote moves.
+ * counts local and remote moves. The kick counter
+ * counts idle wakeup kicks sent after insert.
  */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -129,6 +130,7 @@ struct flow_sched_stats {
 	u64 requeues;
 	u64 steals;
 	u64 dispatches;
+	u64 kicks;
 	u64 enq_no_tctx;
 };
 

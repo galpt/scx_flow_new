@@ -43,10 +43,12 @@ the cpu off the selected cpu, then the first allowed
 cpu, then the park. Dispatch moves up to thirty two
 tasks in strict queue order with the age override.
 Steal scans up to sixty four checks in queue order with
-rotation and a mask guard. There is no wakeup kick.
+rotation and a mask guard. An idle wakeup kick asks
+an idle target to collect work at once.
 Counts use saturating means with compare and swap.
 Placements, moves down and moves up count per queue.
-Requeues, steals and dispatches count across queues.
+Requeues, steals, dispatches and kicks count across
+queues.
 The watchdog is thirty thousand milliseconds. Ops name
 is `flow`.
 

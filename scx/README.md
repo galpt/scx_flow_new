@@ -25,7 +25,8 @@ queue past strict order and moves the task up one
 queue. Dispatch moves up to thirty two tasks in strict
 queue order with the age override. Idle cpus pull
 remote work in one scan of sixty four checks with
-affinity checked steals. There is no wakeup kick.
+affinity checked steals. An idle wakeup kick asks an
+idle target to collect work at once.
 
 The queue math and the move rules live in
 `src/bpf/intf.h`, insert, accounting, dispatch and the
@@ -94,7 +95,8 @@ machine.
 
 ## Limitations
 
-- No wakeup kick. Wakeups join the queue in FIFO order.
+- Idle wakeup kick. Wakeups join the queue in FIFO
+  order and kick an idle target to collect at once.
 - Queues are per cpu. Idle cpus pull remote work only
   when the head may run on the idle cpu.
 - The topology is snapshotted at attach, so a CPU
@@ -144,7 +146,8 @@ the local queues in strict queue order with the age
 override. Steal scans in one pass of sixty four checks
 with rotation. Steal moves a task only when the head
 may run on the stealing cpu. Each pass moves up to
-thirty two tasks in batch. No kick is sent on wakeup.
+thirty two tasks in batch. An idle kick is sent when
+the target has a valid cpu.
 
 ## Cpu choice
 
@@ -163,6 +166,7 @@ needed.
 `--stats` prints deltas. `--monitor` runs the printer
 only. Counters cover placements per queue, moves down
 per queue, moves up per queue, requeues, remote moves,
-local and remote moves and inserts without state.
+local and remote moves, idle kicks and inserts
+without state.
 Dispatches count local and remote moves. Steals count
-remote moves only.
+remote moves only. Kicks count idle wakeup kicks.

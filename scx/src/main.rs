@@ -198,6 +198,7 @@ impl<'a> Scheduler<'a> {
             requeues: s.requeues,
             steals: s.steals,
             dispatches: s.dispatches,
+            kicks: s.kicks,
             enq_no_tctx: s.enq_no_tctx,
         }
     }

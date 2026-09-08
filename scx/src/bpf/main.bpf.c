@@ -41,9 +41,6 @@ struct {
 /* Number of possible cpus. Written once at init. */
 volatile u64 nr_cpu_ids;
 
-/* Wakeup kick gate. Stays off by default. */
-volatile bool flow_kick_enabled;
-
 /* Accounted task count per queue for the mean. */
 volatile u64 flow_nr[3];
 
@@ -708,9 +705,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			dsq = flow_park_id(new_q);
 		scx_bpf_dsq_insert(p, dsq, live, 0);
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
-		if (flow_kick_enabled && cpu_valid) {
-			scx_bpf_kick_cpu((s32)cpu,
-			    SCX_KICK_IDLE);
+		/* Kick an idle target to collect now. */
+		if (cpu_valid) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
 		}
 		return;
 	}
@@ -761,9 +759,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scx_bpf_dsq_insert(p, dsq, live, 0);
 		__sync_fetch_and_add(
 		    &flow_stats.placements[new_q], 1);
-		if (flow_kick_enabled && cpu_valid) {
-			scx_bpf_kick_cpu((s32)cpu,
-			    SCX_KICK_IDLE);
+		/* Kick an idle target to collect now. */
+		if (cpu_valid) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
 		}
 	}
 }
@@ -1085,7 +1084,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	flow_kick_enabled = false;
 	/* Seed each queue mean. */
 	bpf_for(q, 0, 3) {
 		if (!flow_queue_ok(q))

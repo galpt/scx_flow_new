@@ -57,6 +57,9 @@ pub struct Metrics {
     pub steals: u64,
     #[stat(desc = "Local and remote moves in dispatch")]
     pub dispatches: u64,
+    #[stat(desc = "Idle wakeup kicks sent after insert")]
+    #[serde(default)]
+    pub kicks: u64,
     #[stat(desc = "Inserts without task state")]
     pub enq_no_tctx: u64,
 }
@@ -119,7 +122,7 @@ impl Metrics {
             w,
             "[{}] run={} runtime={} uptime={} place={}/{}/{} \
             demote={}/{}/{} promo={}/{}/{} requeue={} \
-            steal={} disp={} noctx={}",
+            steal={} disp={} kick={} noctx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -136,6 +139,7 @@ impl Metrics {
             self.requeues,
             self.steals,
             self.dispatches,
+            self.kicks,
             self.enq_no_tctx,
         )?;
         Ok(())
@@ -162,6 +166,7 @@ impl Metrics {
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             steals: self.steals.wrapping_sub(rhs.steals),
             dispatches: self.dispatches.wrapping_sub(rhs.dispatches),
+            kicks: self.kicks.wrapping_sub(rhs.kicks),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
         }
     }

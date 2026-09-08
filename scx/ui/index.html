@@ -326,6 +326,10 @@
           <span class="stat-value" id="dispatches">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
+          Kicks:</span>
+          <span class="stat-value" id="kicks">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
           No task state:</span>
           <span class="stat-value" id="no-tctx">0</span>
         </div>
@@ -557,6 +561,8 @@
       el('steals').textContent = fmt(s.steals || 0);
       el('dispatches').textContent =
         fmt(s.dispatches || 0);
+      el('kicks').textContent =
+        fmt(s.kicks || 0);
       el('no-tctx').textContent =
         fmt(s.enq_no_tctx || 0);
 

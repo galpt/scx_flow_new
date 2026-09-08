@@ -1,0 +1,105 @@
+name: ci
+
+# Overlay CI for the scx_flow scheduler.
+#
+# The scheduler in scx/ is a drop-in for scheds/experimental/scx_flow/
+# in an upstream sched-ext/scx checkout (path deps use ../../../rust),
+# so every job first assembles that workspace and then runs the usual
+# package-scoped checks inside it. No live scheduler run: GitHub
+# runners do not provide a sched_ext-enabled kernel, so only unit
+# tests plus a --version smoke check run here.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  BPF_CLANG: clang-19
+  # Pinned upstream workspace ref (sched-ext/scx main as of 2026-09-07).
+  # Bump deliberately after verifying the overlay still builds; the
+  # overlay needs scx_* 1.1.3 + libbpf-rs 0.27.0 from the workspace.
+  SCX_REF: 7cec98c51376a9d38b05a1e39e30cf7e5909cf16
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
+            libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
+            libseccomp-dev libcap-ng-dev stress-ng mold
+      - name: Assemble the scheduler workspace
+        run: |
+          git init -q /tmp/scx
+          git -C /tmp/scx remote add origin https://github.com/sched-ext/scx
+          git -C /tmp/scx fetch --depth 1 origin "${SCX_REF}"
+          git -C /tmp/scx checkout FETCH_HEAD
+          # Upstream already ships scheds/experimental/scx_flow, so
+          # replace it instead of merging into it.
+          rsync -a --delete --exclude /target/ scx/ /tmp/scx/scheds/experimental/scx_flow/
+          rm -f /tmp/scx/scheds/experimental/scx_flow/LICENSE
+          ln -s ../../../LICENSE /tmp/scx/scheds/experimental/scx_flow/LICENSE
+          grep -q '"scheds/experimental/scx_flow"' /tmp/scx/Cargo.toml
+      - name: Format
+        working-directory: /tmp/scx
+        run: cargo fmt -p scx_flow --check
+      - name: Clippy
+        working-directory: /tmp/scx
+        run: cargo clippy --profile ci --no-deps --locked -p scx_flow -- -D warnings
+      - name: Build
+        working-directory: /tmp/scx
+        run: cargo build --profile ci --locked -p scx_flow
+      - name: Unit tests
+        working-directory: /tmp/scx
+        run: cargo test --profile ci --locked -p scx_flow
+      - name: Smoke test (no kernel needed)
+        working-directory: /tmp/scx
+        run: |
+          target/ci/scx_flow --version
+          target/ci/scx_flow --help > /dev/null
+
+  veristat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
+            libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
+            libseccomp-dev libcap-ng-dev mold
+      - name: Assemble the scheduler workspace
+        run: |
+          git init -q /tmp/scx
+          git -C /tmp/scx remote add origin https://github.com/sched-ext/scx
+          git -C /tmp/scx fetch --depth 1 origin "${SCX_REF}"
+          git -C /tmp/scx checkout FETCH_HEAD
+          # Upstream already ships scheds/experimental/scx_flow, so
+          # replace it instead of merging into it.
+          rsync -a --delete --exclude /target/ scx/ /tmp/scx/scheds/experimental/scx_flow/
+          rm -f /tmp/scx/scheds/experimental/scx_flow/LICENSE
+          ln -s ../../../LICENSE /tmp/scx/scheds/experimental/scx_flow/LICENSE
+          grep -q '"scheds/experimental/scx_flow"' /tmp/scx/Cargo.toml
+      - name: Install veristat tools
+        run: |
+          git clone --depth 1 --recurse-submodules \
+            https://github.com/libbpf/veristat /tmp/veristat
+          make -C /tmp/veristat/src -j$(nproc)
+          sudo cp /tmp/veristat/src/veristat /usr/local/bin/
+          sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
+          cargo install cargo-veristat --locked
+      - name: Build and verify
+        working-directory: /tmp/scx
+        run: |
+          cargo build --profile ci --locked -p scx_flow
+          cargo metadata --format-version 1 > /tmp/meta.json
+          cargo veristat --profile ci --metadata-json /tmp/meta.json \
+            --no-build scx_flow
