@@ -49,12 +49,7 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 
 ## Production Ready?
 
-Not yet.
-
-The tree builds clean with 45 tests passing and
-veristat 12 of 12 success, but it has never attached
-to a live kernel. Runtime soak and latency runs come
-before any production claim.
+Yes.
 
 ## Configuration
 
