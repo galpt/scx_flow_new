@@ -62,6 +62,10 @@ enum flow_consts {
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
 	/* Minimum gap between busy preemptions. */
 	FLOW_PREEMPT_GAP_NS = (1ULL * 1000ULL * 1000ULL),
+	/* Cpu hint of the interactive tier. */
+	FLOW_CPUPERF_TIER0 = 1024ULL,
+	/* Cpu hint of the batch tier. */
+	FLOW_CPUPERF_TIER1 = 0ULL,
 	/* Bound of the moved tasks in one pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	/* Watchdog limit in milliseconds. */
@@ -296,6 +300,18 @@ static __always_inline bool flow_preempt_gap_ok(u64 now,
 		return true;
 	gap = now - last;
 	return gap >= (u64)FLOW_PREEMPT_GAP_NS;
+}
+
+/*
+ * Cpu hint of one tier. Interactive asks for the
+ * max level. Batch restores the default, so a
+ * batch run never keeps the max hint.
+ */
+static __always_inline u32 flow_cpuperf_tier(u32 tier)
+{
+	if (tier == (u32)FLOW_TIER_BATCH)
+		return (u32)FLOW_CPUPERF_TIER1;
+	return (u32)FLOW_CPUPERF_TIER0;
 }
 
 #endif

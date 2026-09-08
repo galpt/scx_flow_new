@@ -257,6 +257,26 @@ static __always_inline void flow_clear_running(s32 cpu)
 }
 
 /*
+ * Set the cpu hint of one tier. Interactive asks
+ * for the max level. Batch restores the default,
+ * so the hint tracks the task now on the cpu.
+ */
+static __always_inline void flow_cpuperf_set(s32 cpu,
+	u32 tier)
+{
+	u32 perf;
+
+	if (cpu < 0)
+		return;
+	if (!flow_cpu_id_ok((u32)cpu))
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	perf = flow_cpuperf_tier(tier);
+	scx_bpf_cpuperf_set(cpu, perf);
+}
+
+/*
  * Release one accounted entry exactly once. A missing
  * entry is a no op, so double release stays safe.
  */
@@ -523,16 +543,30 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		    (u64)FLOW_DSQ_BATCH, 0)) {
 			__sync_fetch_and_add(
 			    &flow_stats.deficit_serves, 1);
+			/* Batch runs restore the default hint. */
+			flow_cpuperf_set(cpu,
+			    (u32)FLOW_TIER_BATCH);
 			return;
 		}
 	}
 	/* Parked tasks move when the mask allows. */
 	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0) {
-		if (!flow_park_ok(cpu, (u64)FLOW_DSQ_PARK))
+		if (!flow_park_ok(cpu, (u64)FLOW_DSQ_PARK)) {
+			/* Blocked park keeps the local hint. */
+			if (tier0_wait)
+				flow_cpuperf_set(cpu,
+				    (u32)FLOW_TIER_INTERACTIVE);
 			return;
+		}
 		scx_bpf_dsq_move_to_local((u64)FLOW_DSQ_PARK,
 		    0);
+		/* Park moves leave the hint alone. */
+		return;
 	}
+	/* Interactive backlog asks for the max hint. */
+	if (tier0_wait)
+		flow_cpuperf_set(cpu,
+		    (u32)FLOW_TIER_INTERACTIVE);
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -566,6 +600,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		else
 			__sync_fetch_and_add(
 			    &flow_stats.serves_tier0, 1);
+		/* The hint tracks the task now on the cpu. */
+		flow_cpuperf_set(cpu, tier);
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
