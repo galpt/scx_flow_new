@@ -625,6 +625,40 @@ impl RunningView {
 }
 
 /*
+ * Release flag for the dequeue path. Dequeue keeps
+ * the entry across dispatch to run, so the ordered
+ * requeue finds the entry and counts the move.
+ */
+#[cfg(test)]
+pub fn release_on_dequeue() -> bool {
+    false
+}
+
+/*
+ * Release flag for the stop path. Blocked tasks
+ * release at once. Runnable tasks keep the entry
+ * for the ordered requeue.
+ */
+#[cfg(test)]
+pub fn release_on_stop(runnable: bool) -> bool {
+    !runnable
+}
+
+/*
+ * Claim one accounted entry exactly once. A missing
+ * entry is a no op, so double release stays safe.
+ * Mirrors the valid flag in the task state.
+ */
+#[cfg(test)]
+pub fn claim_release(valid: &mut bool) -> bool {
+    if !*valid {
+        return false;
+    }
+    *valid = false;
+    true
+}
+
+/*
  * Slot for a demotion move. The source queue owns the
  * count, so the first two slots stay reachable and the
  * bottom slot stays at zero by design.
@@ -1225,5 +1259,125 @@ mod tests {
         view.clear();
         assert_eq!(view, RunningView::idle());
         assert!(view.is_idle());
+    }
+
+    /* Dispatch keeps entry and burn moves down. */
+    #[test]
+    fn dispatch_burn_requeue_keeps_entry() {
+        let mut s0 = QueueState::new(0);
+        let mut s1 = QueueState::new(1);
+        let mut s2 = QueueState::new(2);
+        let mut depths = CpuDepths::new(2);
+        let mut valid = false;
+        let cpu = 0;
+        let first = 1_000_000;
+        s0.add(first);
+        depths.inc(cpu);
+        valid = true;
+        assert_eq!(s0.nr, 1);
+        assert_eq!(depths.sum(), 1);
+        assert!(!release_on_dequeue());
+        assert_eq!(s0.nr, 1);
+        assert_eq!(depths.sum(), 1);
+        assert!(valid);
+        let slice = slice_for_queue(0, s0.mean);
+        let delta = slice;
+        assert!(burned(slice, delta));
+        assert!(!release_on_stop(true));
+        let (next, promoted, demoted) = resolve_queue(0, true, true, 0);
+        assert_eq!(next, 1);
+        assert!(!promoted);
+        assert!(demoted);
+        assert_eq!(demotion_slot(0), 0);
+        let est = clamp_est(delta);
+        s0.remove(first);
+        depths.dec(cpu);
+        s1.add(est);
+        depths.inc(cpu);
+        assert_eq!(s0.nr, 0);
+        assert_eq!(s1.nr, 1);
+        assert_eq!(depths.sum(), 1);
+        assert!(valid);
+        let total = s0.nr + s1.nr + s2.nr;
+        assert_eq!(total, depths.sum());
+        let slice = slice_for_queue(1, s1.mean);
+        let delta = slice;
+        assert!(burned(slice, delta));
+        let (next, promoted, demoted) = resolve_queue(1, true, true, 0);
+        assert_eq!(next, 2);
+        assert!(!promoted);
+        assert!(demoted);
+        assert_eq!(demotion_slot(1), 1);
+        let est2 = clamp_est(delta);
+        s1.remove(est);
+        depths.dec(cpu);
+        s2.add(est2);
+        depths.inc(cpu);
+        assert_eq!(s1.nr, 0);
+        assert_eq!(s2.nr, 1);
+        assert_eq!(depths.sum(), 1);
+        assert!(valid);
+        let total = s0.nr + s1.nr + s2.nr;
+        assert_eq!(total, depths.sum());
+    }
+
+    /* Block releases entry and keeps balance. */
+    #[test]
+    fn block_releases_entry_and_keeps_balance() {
+        let mut s0 = QueueState::new(0);
+        let mut depths = CpuDepths::new(2);
+        let mut valid = false;
+        let cpu = 0;
+        let est = 1_000_000;
+        s0.add(est);
+        depths.inc(cpu);
+        valid = true;
+        assert!(!release_on_dequeue());
+        assert!(valid);
+        assert!(release_on_stop(false));
+        assert!(claim_release(&mut valid));
+        s0.remove(est);
+        depths.dec(cpu);
+        assert!(!valid);
+        assert_eq!(s0.nr, 0);
+        assert_eq!(s0.sum, 0);
+        assert_eq!(depths.sum(), 0);
+        assert!(!claim_release(&mut valid));
+        s0.remove(est);
+        depths.dec(cpu);
+        assert_eq!(s0.nr, 0);
+        assert_eq!(s0.sum, 0);
+        assert_eq!(depths.sum(), 0);
+        let total = s0.nr;
+        assert_eq!(total, depths.sum());
+    }
+
+    /* Exit releases once and idle holds balance. */
+    #[test]
+    fn exit_release_is_once_and_idle_holds() {
+        let s0 = QueueState::new(0);
+        let mut s1 = QueueState::new(1);
+        let s2 = QueueState::new(2);
+        let mut depths = CpuDepths::new(2);
+        let mut valid = false;
+        let cpu = 1;
+        let est = 2_000_000;
+        s1.add(est);
+        depths.inc(cpu);
+        valid = true;
+        assert!(!release_on_dequeue());
+        assert!(!release_on_stop(true));
+        assert!(valid);
+        assert!(claim_release(&mut valid));
+        s1.remove(est);
+        depths.dec(cpu);
+        assert!(!valid);
+        assert!(!claim_release(&mut valid));
+        let total = s0.nr + s1.nr + s2.nr;
+        assert_eq!(total, 0);
+        assert_eq!(depths.sum(), 0);
+        assert_eq!(s1.sum, 0);
+        assert!(s1.mean >= quantum_min(1));
+        assert!(s1.mean <= quantum_max(1));
     }
 }

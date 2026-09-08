@@ -971,20 +971,17 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 }
 
 /*
- * Drop the mean entry when the task leaves a queue
- * without running. The valid flag keeps the release
- * idempotent with the stopping path.
+ * Keep the mean entry across dispatch to run. The
+ * move to the local queue leaves custody but the
+ * entry stays for the ordered requeue. The block
+ * path and the exit paths release once through the
+ * valid flag.
  */
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
     u64 deq_flags)
 {
-	struct flow_task_ctx *tctx;
-
+	(void)p;
 	(void)deq_flags;
-	tctx = flow_lookup(p);
-	if (!tctx)
-		return;
-	flow_release(tctx);
 }
 
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,

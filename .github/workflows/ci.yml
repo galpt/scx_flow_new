@@ -51,13 +51,13 @@ jobs:
         run: cargo fmt -p scx_flow --check
       - name: Clippy
         working-directory: /tmp/scx
-        run: cargo clippy --profile ci --no-deps --locked -p scx_flow -- -D warnings
+        run: cargo clippy --profile ci --no-deps -p scx_flow -- -D warnings
       - name: Build
         working-directory: /tmp/scx
-        run: cargo build --profile ci --locked -p scx_flow
+        run: cargo build --profile ci -p scx_flow
       - name: Unit tests
         working-directory: /tmp/scx
-        run: cargo test --profile ci --locked -p scx_flow
+        run: cargo test --profile ci -p scx_flow
       - name: Smoke test (no kernel needed)
         working-directory: /tmp/scx
         run: |
@@ -95,11 +95,11 @@ jobs:
           make -C /tmp/veristat/src -j$(nproc)
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
-          cargo install cargo-veristat --locked
+          cargo install cargo-veristat
       - name: Build and verify
         working-directory: /tmp/scx
         run: |
-          cargo build --profile ci --locked -p scx_flow
+          cargo build --profile ci -p scx_flow
           cargo metadata --format-version 1 > /tmp/meta.json
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
             --no-build scx_flow
