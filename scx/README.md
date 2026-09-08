@@ -21,7 +21,7 @@ capped at seven. Dispatch serves tier zero eight times
 per tier one serve when both tiers hold work. Idle
 targets are kicked at once. A narrow busy preemption
 covers tier zero wakeups against tier one runners with
-a per CPU rate gate. Tier zero wakeups join at the head
+a per-CPU rate gate. Tier zero wakeups join at the head
 and requeues join at the tail. Tier one joins by
 vruntime with new tasks at the floor.
 
@@ -71,44 +71,12 @@ config checks.
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
 summary line, two tier rows with per tier slices and
-waiting counts and a per CPU grid with running
+waiting counts and a per-CPU grid with running
 estimates and running tier badges, with no
 authentication, since the loopback address is the trust
 boundary. `--no-webui` disables it. Empty states show
 an idle tier line and a no CPU data card when no data
 has arrived.
-
-## Measuring Wakeup Latency
-
-To measure the wakeup latency the scheduler delivers
-with cyclictest, pin the measurement threads to
-dedicated CPUs with `-a`, use the monotonic clock
-(`-c 0`), a realtime priority (`-p 99`), and the
-performance governor, and move the device IRQs off the
-measured CPUs. For percentiles, run schbench with two
-message threads (`-m 2`) on an otherwise quiet
-machine.
-
-## Limitations
-
-- Idle wakeup kick. Wakeups join tier zero at the head
-  and kick an idle target to collect at once.
-- Tiers share the machine. Idle CPUs collect batch
-  work through the deficit gate only when the head may
-  run on the idle CPU.
-- The topology is snapshotted at attach, so a CPU
-  hotplug needs a restart.
-- Unknown frequency stays unknown. Hosts that report
-  zero show freq unknown on the dashboard and in the
-  start log, with no effect on placement.
-- Machines with one thread per core run plain per CPU
-  with no sibling step and no SMT badge. A single CPU
-  host runs with no peer scan through the same gates.
-- sched_ext cannot schedule RT and DL tasks. The
-  kernel resolves them to the rt and dl classes before
-  sched_ext, so this scheduler handles SCHED_NORMAL,
-  SCHED_BATCH and SCHED_IDLE tasks only.
-- Needs a kernel with sched_ext enabled.
 
 ## Tiers
 
@@ -128,7 +96,7 @@ the burst with saturation.
 
 ## Insert and dispatch
 
-Enqueue keeps tier zero in per CPU local DSQs and tier
+Enqueue keeps tier zero in per-CPU local DSQs and tier
 one in the shared DSQ. New tasks start in tier zero.
 Each new insert joins the target tier count. A runnable
 requeue keeps the count and may move tiers on burn, so
@@ -146,7 +114,7 @@ the asking CPU, plus park tasks whose head may run on
 the asking CPU. Each pass tries once with no spin. An
 idle kick is sent only to a CPU in the task mask. A
 busy preemption is sent only for tier zero wakeups
-against tier one runners inside the per CPU gap and
+against tier one runners inside the per-CPU gap and
 only to a CPU in the wakee mask.
 
 ## CPU choice
@@ -176,3 +144,35 @@ busy preemptions and inserts without state.
 Deficit serves count batch moves in dispatch. Kicks
 count idle wakeup kicks. Preempts count busy
 preemptions for batch runners.
+
+## Measuring Wakeup Latency
+
+To measure the wakeup latency the scheduler delivers
+with cyclictest, pin the measurement threads to
+dedicated CPUs with `-a`, use the monotonic clock
+(`-c 0`), a realtime priority (`-p 99`), and the
+performance governor, and move the device IRQs off the
+measured CPUs. For percentiles, run schbench with two
+message threads (`-m 2`) on an otherwise quiet
+machine.
+
+## Limitations
+
+- Idle wakeup kick. Wakeups join tier zero at the head
+  and kick an idle target to collect at once.
+- Tiers share the machine. Idle CPUs collect batch
+  work through the deficit gate only when the head may
+  run on the idle CPU.
+- The topology is snapshotted at attach, so a CPU
+  hotplug needs a restart.
+- Unknown frequency stays unknown. Hosts that report
+  zero show freq unknown on the dashboard and in the
+  start log, with no effect on placement.
+- Machines with one thread per core run plain per-CPU
+  with no sibling step and no SMT badge. A single CPU
+  host runs with no peer scan through the same gates.
+- sched_ext cannot schedule RT and DL tasks. The
+  kernel resolves them to the rt and dl classes before
+  sched_ext, so this scheduler handles SCHED_NORMAL,
+  SCHED_BATCH and SCHED_IDLE tasks only.
+- Needs a kernel with sched_ext enabled.
