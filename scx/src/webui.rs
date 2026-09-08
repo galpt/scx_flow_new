@@ -61,8 +61,6 @@ fn merged(snap: &WebMetrics) -> Value {
     json!({
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
-        "quanta_per_tier": jv(&snap.quanta_per_tier),
-        "waiting_per_tier": jv(&snap.waiting_per_tier),
     })
 }
 
@@ -238,48 +236,60 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Dashboard keeps the tier array names. */
+    /* Dashboard keeps the per CPU array names. */
     #[test]
-    fn merged_keeps_tier_array_fields() {
+    fn merged_keeps_per_cpu_fields() {
         let snap = WebMetrics::default();
         let v = merged(&snap);
         assert!(v.get("stats").is_some());
         assert!(v.get("per_cpu").is_some());
-        assert!(v.get("quanta_per_tier").is_some());
-        assert!(v.get("waiting_per_tier").is_some());
-        assert!(v.get("quanta_per_queue").is_none());
-        assert!(v.get("queued_per_queue").is_none());
-        assert!(v.get("head_age_per_queue").is_none());
-        assert!(v.get("depth_per_cpu").is_none());
+        assert_eq!(v.as_object().map(|o| o.len()), Some(2));
     }
 
     /* Old snapshots without new fields still decode. */
     #[test]
     fn web_metrics_missing_fields_default() {
         let txt = "{\"stats\":{\"on_cpu\":1,\"total_runtime\":0,\
-            \"uptime_ns\":0,\"enq_tier0\":0,\
-            \"enq_tier1\":0,\"demotions\":0,\
-            \"promotions\":0,\"serves_tier0\":0,\
-            \"serves_tier1\":0,\"deficit_serves\":0,\
-            \"enq_no_tctx\":0}}";
+            \"uptime_ns\":0,\"inserts\":0,\
+            \"requeues\":0,\"completions\":0,\
+            \"park_moves\":0,\"steal_moves\":0,\
+            \"kicks\":0,\"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.quanta_per_tier, [0, 0]);
-        assert_eq!(m.waiting_per_tier, [0, 0]);
         assert!(m.per_cpu.is_empty());
+        let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
+        let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
+        assert_eq!(m2.per_cpu[0].id, 0);
+        assert_eq!(m2.per_cpu[0].tq_ns, 0);
+        assert_eq!(m2.per_cpu[0].depth, 0);
     }
 
     /* Full snapshot round trips through JSON. */
     #[test]
     fn web_metrics_round_trip() {
         let snap = WebMetrics {
-            quanta_per_tier: [500_000, 8_000_000],
-            waiting_per_tier: [3, 1],
-            ..Default::default()
+            stats: crate::stats::Metrics {
+                inserts: 3,
+                requeues: 1,
+                completions: 2,
+                park_moves: 1,
+                steal_moves: 0,
+                kicks: 4,
+                ..Default::default()
+            },
+            per_cpu: vec![crate::stats::PerCpuMetrics {
+                id: 0,
+                tq_ns: 8_000_000,
+                depth: 2,
+                running_est_ns: 1_000_000,
+                running_pid: 7,
+                ..Default::default()
+            }],
         };
         let txt = serde_json::to_string(&snap).unwrap();
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
-        assert_eq!(back.quanta_per_tier, [500_000, 8_000_000]);
-        assert_eq!(back.waiting_per_tier, [3, 1]);
+        assert_eq!(back.stats.inserts, 3);
+        assert_eq!(back.per_cpu[0].tq_ns, 8_000_000);
+        assert_eq!(back.per_cpu[0].depth, 2);
     }
 }

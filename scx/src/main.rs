@@ -100,7 +100,7 @@ struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
     /* Dashboard sender. None when disabled. */
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
-    /* Static per-CPU cards seeded at attach. */
+    /* Static per CPU cards seeded at attach. */
     cpu_static: Vec<stats::PerCpuMetrics>,
     /* Live frequency cache for the cards. */
     cur_freq_khz: Vec<u64>,
@@ -175,35 +175,31 @@ impl<'a> Scheduler<'a> {
             on_cpu: s.on_cpu,
             total_runtime: s.total_runtime,
             uptime_ns: self.started_at.elapsed().as_nanos() as u64,
-            enq_tier0: s.enq_tier0,
-            enq_tier1: s.enq_tier1,
-            demotions: s.demotions,
-            promotions: s.promotions,
-            serves_tier0: s.serves_tier0,
-            serves_tier1: s.serves_tier1,
-            deficit_serves: s.deficit_serves,
+            inserts: s.inserts,
+            requeues: s.requeues,
+            completions: s.completions,
+            park_moves: s.park_moves,
+            steal_moves: s.steal_moves,
             kicks: s.kicks,
-            preempts: s.preempts,
             enq_no_tctx: s.enq_no_tctx,
         }
     }
 
     /*
      * Read one CPU state without heap use. Failed
-     * lookups yield an idle view.
+     * lookups yield an idle view with the seed mean.
      */
     fn read_cpu(&self, cpu: usize) -> flow_cpu_state {
         let idle = flow_cpu_state {
+            tq_ns: crate::flow::TQ_SEED_NS,
+            sum_est: 0,
+            nr: 0,
+            cursor: 0,
             running_est: 0,
             running_pid: 0,
-            running_tier: 0,
-            served0: 0,
-            last_preempt_at: 0,
+            pad: 0,
         };
         if cpu >= MAX_CPUS {
-            return idle;
-        }
-        if !crate::flow::tier_ok(0) {
             return idle;
         }
         let fd = self.skel.maps.cpu_state_stor.as_fd().as_raw_fd();
@@ -224,24 +220,10 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Fixed slices per tier. Each entry holds the slice
-     * of one tier in nanos.
-     */
-    fn read_quanta(&self) -> [u64; 2] {
-        [crate::flow::quantum_tier(0), crate::flow::quantum_tier(1)]
-    }
-
-    /* Read the joined task count per tier. */
-    fn read_waiting(&self) -> [u64; 2] {
-        let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
-        bss.flow_tier_nr
-    }
-
-    /*
      * Dashboard snapshot. Merges the static cards with
-     * live state and per tier slices. Gauges only, no
-     * deltas. Frequency stays display only and never
-     * feeds placement or division.
+     * live state. Gauges only, no deltas. Frequency
+     * stays display only and never feeds placement
+     * or division.
      */
     fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self
@@ -277,18 +259,12 @@ impl<'a> Scheduler<'a> {
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
-            e.running_tier = st.running_tier;
+            e.tq_ns = st.tq_ns;
+            e.depth = st.nr;
             per_cpu.push(e);
         }
         let stats = self.get_metrics();
-        let quanta_per_tier = self.read_quanta();
-        let waiting_per_tier = self.read_waiting();
-        stats::WebMetrics {
-            stats,
-            per_cpu,
-            quanta_per_tier,
-            waiting_per_tier,
-        }
+        stats::WebMetrics { stats, per_cpu }
     }
 
     fn exited(&self) -> bool {
@@ -316,13 +292,11 @@ impl<'a> Scheduler<'a> {
             }
         }
         let m = self.get_metrics();
-        let enq = m.enq_tier0 + m.enq_tier1;
-        let (run0, run1) = (m.serves_tier0, m.serves_tier1);
-        let deficit = m.deficit_serves;
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
-            "exit enq={} run={}/{} deficit={} runtime={} oncpu={}",
-            enq, run0, run1, deficit, runtime, oncpu,
+            "exit ins={} req={} done={} park={} steal={} \
+            runtime={} oncpu={}",
+            m.inserts, m.requeues, m.completions, m.park_moves, m.steal_moves, runtime, oncpu,
         );
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
@@ -411,50 +385,18 @@ mod tests {
     }
 
     #[test]
-    fn tiers_match_header() {
+    fn tq_matches_header() {
         assert_eq!(
-            crate::flow::NTIERS as u64,
-            crate::bpf_intf::flow_consts_FLOW_NTIERS as u64
+            crate::flow::TQ_SEED_NS,
+            crate::bpf_intf::flow_consts_FLOW_TQ_SEED_NS as u64
         );
         assert_eq!(
-            crate::flow::QUANTUM_TIER0_NS,
-            crate::bpf_intf::flow_consts_FLOW_QUANTUM_TIER0_NS as u64
+            crate::flow::TQ_MIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_TQ_MIN_NS as u64
         );
         assert_eq!(
-            crate::flow::QUANTUM_TIER1_NS,
-            crate::bpf_intf::flow_consts_FLOW_QUANTUM_TIER1_NS as u64
-        );
-        assert_eq!(
-            crate::flow::SHORT_BOUND_NS,
-            crate::bpf_intf::flow_consts_FLOW_SHORT_BOUND_NS as u64
-        );
-        assert_eq!(
-            crate::flow::PROMOTE_STREAK as u64,
-            crate::bpf_intf::flow_consts_FLOW_PROMOTE_STREAK as u64
-        );
-        assert_eq!(
-            crate::flow::STREAK_CAP as u64,
-            crate::bpf_intf::flow_consts_FLOW_STREAK_CAP as u64
-        );
-        assert_eq!(
-            crate::flow::DEFICIT_SERVES,
-            crate::bpf_intf::flow_consts_FLOW_DEFICIT_SERVES as u64
-        );
-    }
-
-    #[test]
-    fn dsq_and_gap_match_header() {
-        assert_eq!(
-            crate::flow::DSQ_BATCH,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_BATCH as u64
-        );
-        assert_eq!(
-            crate::flow::DSQ_PARK,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
-        );
-        assert_eq!(
-            crate::flow::PREEMPT_GAP_NS,
-            crate::bpf_intf::flow_consts_FLOW_PREEMPT_GAP_NS as u64
+            crate::flow::TQ_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_TQ_MAX_NS as u64
         );
         assert_eq!(
             crate::flow::EST_MIN_NS,
@@ -464,6 +406,18 @@ mod tests {
             crate::flow::EST_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
         );
+    }
+
+    #[test]
+    fn dsq_matches_header() {
+        assert_eq!(
+            crate::flow::DSQ_BASE,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_BASE as u64
+        );
+        assert_eq!(
+            crate::flow::DSQ_PARK,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+        );
         assert_eq!(
             crate::flow::LLC_UNKNOWN,
             crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN
@@ -471,11 +425,9 @@ mod tests {
     }
 
     #[test]
-    fn quanta_match_tier_helpers() {
-        assert_eq!(crate::flow::quantum_tier(0), 500_000);
-        assert_eq!(crate::flow::quantum_tier(1), 8_000_000);
-        assert!(crate::flow::tier_ok(0));
-        assert!(crate::flow::tier_ok(1));
-        assert!(!crate::flow::tier_ok(2));
+    fn mean_matches_helpers() {
+        assert_eq!(crate::flow::TQ_SEED_NS, 8_000_000);
+        assert_eq!(crate::flow::TQ_MIN_NS, 500_000);
+        assert_eq!(crate::flow::TQ_MAX_NS, 32_000_000);
     }
 }

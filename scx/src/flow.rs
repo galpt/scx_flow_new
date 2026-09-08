@@ -7,103 +7,103 @@
  * stays the same on both sides of the boundary.
  */
 
-/* Count of tiers kept by the scheduler. */
-pub const NTIERS: u32 = 2;
-/* Fixed slice of the interactive tier in nanos. */
-pub const QUANTUM_TIER0_NS: u64 = 500_000;
-/* Fixed slice of the batch tier in nanos. */
-pub const QUANTUM_TIER1_NS: u64 = 8_000_000;
-/* Burst length that counts as short in nanos. */
-pub const SHORT_BOUND_NS: u64 = 1_000_000;
-/* Short blocks that earn a move up. */
-pub const PROMOTE_STREAK: u32 = 3;
-/* Upper bound of the block streak. */
-pub const STREAK_CAP: u32 = 7;
-/* Interactive serves per batch serve. */
-pub const DEFICIT_SERVES: u64 = 8;
-/* Minimum gap between busy preemptions in nanos. */
-pub const PREEMPT_GAP_NS: u64 = 1_000_000;
-/* Bound of the moved tasks in one pass. */
+/* Lower bound of a per task estimate in nanos. */
+pub const EST_MIN_NS: u64 = 1;
+/* Upper bound of a per task estimate in nanos. */
+pub const EST_MAX_NS: u64 = 1_000_000_000;
+/* Seed of a per CPU mean in nanos. */
+pub const TQ_SEED_NS: u64 = 8_000_000;
+/* Floor of a per CPU mean in nanos. */
+pub const TQ_MIN_NS: u64 = 500_000;
+/* Ceiling of a per CPU mean in nanos. */
+pub const TQ_MAX_NS: u64 = 32_000_000;
+/* Bound of moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
 /* Unknown LLC id. Marks an empty table entry. */
 pub const LLC_UNKNOWN: u32 = 0xFFFF_FFFF;
-/* Shared DSQ of the batch tier. */
+/* Base id of the per CPU ordered queues. */
 #[cfg(test)]
-pub const DSQ_BATCH: u64 = 0x2000;
-/* Park DSQ for tasks with no target. */
+pub const DSQ_BASE: u64 = 0x4000;
+/* Park id for tasks with no allowed CPU. */
 #[cfg(test)]
-pub const DSQ_PARK: u64 = 0x2001;
-/* Lower bound of a per task estimate in nanos. */
+pub const DSQ_PARK: u64 = 0x5000;
+/* Bound of peers visited by one steal scan. */
 #[cfg(test)]
-pub const EST_MIN_NS: u64 = 1;
-/* Upper bound of a per task estimate in nanos. */
+pub const STEAL_BOUND: usize = 8;
+/* Hint used for short estimates. */
 #[cfg(test)]
-pub const EST_MAX_NS: u64 = 1_000_000_000;
+pub const CPUPERF_SHORT: u32 = 1024;
+/* Hint used for long estimates. */
+#[cfg(test)]
+pub const CPUPERF_LONG: u32 = 0;
 
 /*
- * Check that a tier index names a real tier. Used to
- * guard per tier array access.
+ * Clamp a per task estimate to the estimate range.
+ * The floor keeps the value positive. The ceiling
+ * keeps a single long run from shaping later choice.
  */
-pub fn tier_ok(tier: u32) -> bool {
-    tier < NTIERS
+#[cfg(test)]
+pub fn clamp_est(v: u64) -> u64 {
+    v.clamp(EST_MIN_NS, EST_MAX_NS)
 }
 
 /*
- * Fixed slice of one tier in nanos. Unknown tiers fall
- * back to the interactive slice, so the result stays
- * usable.
+ * Clamp a per CPU mean to the mean range. The floor
+ * keeps short means usable. The ceiling keeps long
+ * means bounded.
  */
-pub fn quantum_tier(tier: u32) -> u64 {
-    if tier == 1 {
-        QUANTUM_TIER1_NS
+#[cfg(test)]
+pub fn clamp_tq(v: u64) -> u64 {
+    v.clamp(TQ_MIN_NS, TQ_MAX_NS)
+}
+
+/*
+ * Mean of one CPU from sum and count. An empty CPU
+ * uses the seed. A populated CPU uses the quotient
+ * clamped to the mean range.
+ */
+#[cfg(test)]
+pub fn mean_tq(sum: u64, nr: u64) -> u64 {
+    if nr == 0 {
+        return TQ_SEED_NS;
+    }
+    clamp_tq(sum / nr)
+}
+
+/*
+ * Queue id of one CPU. Returns none for an out of
+ * range id, so callers fall back to the park queue.
+ */
+#[cfg(test)]
+pub fn dsq_for_cpu(cpu: u32, max: usize) -> Option<u64> {
+    if (cpu as usize) >= max {
+        return None;
+    }
+    if (cpu as u64) >= 1024 {
+        return None;
+    }
+    Some(DSQ_BASE + cpu as u64)
+}
+
+/*
+ * Hint for one estimate against the mean. Short
+ * estimates ask for the high hint. Long estimates
+ * restore the low hint. The choice uses only the
+ * estimate and the mean.
+ */
+#[cfg(test)]
+pub fn cpuperf_for_est(est: u64, tq: u64) -> u32 {
+    if est <= tq {
+        CPUPERF_SHORT
     } else {
-        QUANTUM_TIER0_NS
+        CPUPERF_LONG
     }
 }
 
 /*
- * True when a frequency value is known. Zero means
- * unknown, so callers use a plain fallback and never
- * divide by the value.
- */
-#[cfg(test)]
-pub fn freq_known(freq_khz: u64) -> bool {
-    freq_khz != 0
-}
-
-/*
- * True when any entry claims a sibling thread. False
- * means plain hardware with one thread per core, so
- * callers keep plain per-CPU behavior.
- */
-#[cfg(test)]
-pub fn topology_has_smt(smt: &[bool]) -> bool {
-    smt.iter().any(|v| *v)
-}
-
-/*
- * True when a sibling may be used. Needs sibling
- * hardware and an allowed peer, else plain per-CPU
- * choice stays.
- */
-#[cfg(test)]
-pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
-    if !has_smt {
-        return false;
-    }
-    if sibling < 0 {
-        return false;
-    }
-    if let Some(&ok) = allowed.get(sibling as usize) {
-        return ok;
-    }
-    false
-}
-
-/*
- * Next peer for a scan. Returns none with one or no
- * CPUs, so scans end at once with a single CPU and
- * no peers. Returns none for an out of range CPU.
+ * Next peer for a steal scan. Returns none with one
+ * or no CPUs, so scans end at once with a single CPU
+ * and no peers. Returns none for an out of range CPU.
  */
 #[cfg(test)]
 pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
@@ -119,14 +119,27 @@ pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
 /*
  * Bound of a peer scan. Zero with one or no CPUs, so
  * steal scans and rotation end at once with a single
- * CPU. Otherwise one less than the CPU count.
+ * CPU. Otherwise capped by the steal bound and by one
+ * less than the CPU count.
  */
 #[cfg(test)]
 pub fn scan_bound(nr_cpus: usize) -> usize {
     if nr_cpus <= 1 {
         return 0;
     }
-    nr_cpus - 1
+    (nr_cpus - 1).min(STEAL_BOUND)
+}
+
+/*
+ * Next steal cursor. The cursor rotates, so repeated
+ * scans spread across peers.
+ */
+#[cfg(test)]
+pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
+    if nr_cpus == 0 {
+        return 0;
+    }
+    (cursor + 1) % nr_cpus as u32
 }
 
 /*
@@ -261,161 +274,20 @@ pub fn select_cpu_model(
 }
 
 /*
- * Clamp a per task estimate to the estimate range. The
- * floor keeps the value positive. The ceiling keeps a
- * single long run from shaping later choice.
+ * Check that a CPU may run a task with the given
+ * mask. Mirrors the BPF head and kick guards. A
+ * negative CPU fails closed. An out of range CPU
+ * fails closed. A missing entry fails closed.
  */
 #[cfg(test)]
-pub fn clamp_est(v: u64) -> u64 {
-    v.clamp(EST_MIN_NS, EST_MAX_NS)
-}
-
-/*
- * Check that a burst burned the full grant. A zero
- * grant never counts as burned, so a missing grant
- * holds the tier.
- */
-#[cfg(test)]
-pub fn burned(grant: u64, delta: u64) -> bool {
-    if grant == 0 {
+pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
+    if cpu < 0 {
         return false;
     }
-    delta >= grant
-}
-
-/*
- * Check that a burst counts as short. Bursts below the
- * bound earn the streak. Bursts at or past the bound
- * reset the streak.
- */
-#[cfg(test)]
-pub fn is_short(delta: u64) -> bool {
-    delta < SHORT_BOUND_NS
-}
-
-/*
- * Next streak after one voluntary block. Short blocks
- * step forward with saturation at the cap. Long blocks
- * reset to zero.
- */
-#[cfg(test)]
-pub fn streak_next(streak: u32, delta: u64) -> u32 {
-    if !is_short(delta) {
-        return 0;
+    if let Some(&ok) = allowed.get(cpu as usize) {
+        return ok;
     }
-    if streak >= STREAK_CAP {
-        return STREAK_CAP;
-    }
-    streak + 1
-}
-
-/*
- * Check that a streak earns a move up. Streaks at or
- * past the bound earn the reward. Younger streaks
- * hold.
- */
-#[cfg(test)]
-pub fn should_promote(streak: u32) -> bool {
-    streak >= PROMOTE_STREAK
-}
-
-/*
- * Next tier after a run. A runnable task that burned
- * the full grant moves from interactive to batch. All
- * other tasks hold the tier.
- */
-#[cfg(test)]
-pub fn next_on_burn(tier: u32, runnable: bool, is_burned: bool) -> u32 {
-    if !runnable {
-        return tier;
-    }
-    if !is_burned {
-        return tier;
-    }
-    if tier == 0 {
-        return 1;
-    }
-    tier
-}
-
-/*
- * Check that the batch tier may be served now. An empty
- * batch tier never serves. An empty interactive tier
- * serves batch at once. A busy interactive tier serves
- * batch only after enough interactive serves.
- */
-#[cfg(test)]
-pub fn deficit_should_serve(s0: u64, w0: bool, w1: bool) -> bool {
-    if !w1 {
-        return false;
-    }
-    if !w0 {
-        return true;
-    }
-    s0 >= DEFICIT_SERVES
-}
-
-/*
- * Next deficit count after one run. Batch runs reset
- * to zero. Interactive runs step forward with
- * saturation at the bound.
- */
-#[cfg(test)]
-pub fn deficit_next(served0: u64, served_tier: u32) -> u64 {
-    if served_tier == 1 {
-        return 0;
-    }
-    if served0 >= DEFICIT_SERVES {
-        return DEFICIT_SERVES;
-    }
-    served0 + 1
-}
-
-/*
- * Check that one vruntime sorts before another. Used
- * to advance the floor with the smallest waiting
- * value.
- */
-#[cfg(test)]
-pub fn vruntime_before(a: u64, b: u64) -> bool {
-    a < b
-}
-
-/*
- * Advance a vruntime by one burst with saturation. The
- * top value sticks, so a burst cannot wrap the order.
- */
-#[cfg(test)]
-pub fn vruntime_advance(base: u64, delta: u64) -> u64 {
-    base.saturating_add(delta)
-}
-
-/*
- * Advance the floor to the smallest waiting value. The
- * floor only moves forward, so later joins never pass
- * waiting work.
- */
-#[cfg(test)]
-pub fn floor_advance(floor: u64, vtime: u64) -> u64 {
-    if vruntime_before(floor, vtime) {
-        vtime
-    } else {
-        floor
-    }
-}
-
-/*
- * Check that a busy preemption may be sent now. Gaps
- * at or past the bound allow the kick. Shorter gaps
- * hold the kick. A clock step back allows the kick, so
- * a skew never blocks progress for long.
- */
-#[cfg(test)]
-pub fn preempt_gap_ok(now: u64, last: u64) -> bool {
-    if now < last {
-        return true;
-    }
-    now - last >= PREEMPT_GAP_NS
+    false
 }
 
 /*
@@ -442,23 +314,6 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 }
 
 /*
- * Check that a CPU may run a task with the given
- * mask. Mirrors the BPF head and kick guards. A
- * negative CPU fails closed. An out of range CPU
- * fails closed. A missing entry fails closed.
- */
-#[cfg(test)]
-pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
-    if cpu < 0 {
-        return false;
-    }
-    if let Some(&ok) = allowed.get(cpu as usize) {
-        return ok;
-    }
-    false
-}
-
-/*
  * Target CPU for a task that cannot move. Mirrors
  * the BPF local path. An out of range CPU yields no
  * target for park use.
@@ -475,11 +330,181 @@ pub fn stay_target(task_cpu: i32, nr_cpus: usize) -> Option<u32> {
 }
 
 /*
+ * True when a frequency value is known. Zero means
+ * unknown, so callers use a plain fallback and never
+ * divide by the value.
+ */
+#[cfg(test)]
+pub fn freq_known(freq_khz: u64) -> bool {
+    freq_khz != 0
+}
+
+/*
+ * True when any entry claims a sibling thread. False
+ * means plain hardware with one thread per core, so
+ * callers keep plain per CPU behavior.
+ */
+#[cfg(test)]
+pub fn topology_has_smt(smt: &[bool]) -> bool {
+    smt.iter().any(|v| *v)
+}
+
+/*
+ * True when a sibling may be used. Needs sibling
+ * hardware and an allowed peer, else plain per CPU
+ * choice stays.
+ */
+#[cfg(test)]
+pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
+    if !has_smt {
+        return false;
+    }
+    if sibling < 0 {
+        return false;
+    }
+    if let Some(&ok) = allowed.get(sibling as usize) {
+        return ok;
+    }
+    false
+}
+
+/*
+ * Per CPU mean for tests. Holds the sum and the count
+ * of unfinished work including the running task. The
+ * mean is the quotient clamped to the mean range with
+ * the seed for an empty CPU.
+ */
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuMean {
+    /* Sum of clamped estimates of unfinished tasks. */
+    pub sum: u64,
+    /* Count of unfinished tasks with the running one. */
+    pub nr: u64,
+}
+
+/*
+ * Ordered entry for tests. The estimate orders the
+ * queue. The sequence keeps arrival order when
+ * estimates match.
+ */
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedEntry {
+    /* Clamped last burst used as the sort key. */
+    pub est: u64,
+    /* Arrival sequence used for ties. Lower is older. */
+    pub seq: u64,
+    /* Task id used only to name the entry. */
+    pub id: u64,
+}
+
+#[cfg(test)]
+impl CpuMean {
+    /*
+     * Empty mean with no work. The mean reads as the
+     * seed while empty.
+     */
+    pub fn empty() -> Self {
+        Self { sum: 0, nr: 0 }
+    }
+
+    /*
+     * Current mean. An empty CPU reads as the seed.
+     * A populated CPU reads as the clamped quotient.
+     */
+    pub fn tq(&self) -> u64 {
+        mean_tq(self.sum, self.nr)
+    }
+
+    /*
+     * Join one task with a fresh estimate. A fresh
+     * estimate reads as the current mean, so the join
+     * leaves the mean unchanged.
+     */
+    pub fn join_fresh(&mut self) -> u64 {
+        let est = self.tq();
+        self.sum = self.sum.saturating_add(est);
+        self.nr = self.nr.saturating_add(1);
+        est
+    }
+
+    /*
+     * Join one task with a known estimate. The estimate
+     * is clamped first, so out of range values never
+     * reach the sum.
+     */
+    pub fn join(&mut self, est: u64) -> u64 {
+        let e = clamp_est(est);
+        self.sum = self.sum.saturating_add(e);
+        self.nr = self.nr.saturating_add(1);
+        e
+    }
+
+    /*
+     * Leave one task with its estimate. The sum never
+     * wraps below zero. The count never wraps below
+     * zero.
+     */
+    pub fn leave(&mut self, est: u64) {
+        let e = clamp_est(est);
+        self.sum = self.sum.saturating_sub(e);
+        self.nr = self.nr.saturating_sub(1);
+    }
+
+    /*
+     * Replace one estimate with a new value. Used when
+     * a runnable task refreshes its last burst. The
+     * count stays fixed while the sum tracks the change.
+     */
+    pub fn replace(&mut self, old: u64, new: u64) {
+        let o = clamp_est(old);
+        let n = clamp_est(new);
+        self.sum = self.sum.saturating_sub(o);
+        self.sum = self.sum.saturating_add(n);
+    }
+}
+
+#[cfg(test)]
+impl OrderedEntry {
+    /*
+     * True when this entry sorts before the other. The
+     * smaller estimate wins. Equal estimates keep
+     * arrival order with the older sequence first.
+     */
+    pub fn before(&self, other: &Self) -> bool {
+        if self.est != other.est {
+            return self.est < other.est;
+        }
+        self.seq < other.seq
+    }
+}
+
+/*
+ * Insert one entry into an ordered queue. The queue
+ * stays sorted by estimate with arrival order for
+ * ties. Returns the position of the new entry.
+ */
+#[cfg(test)]
+pub fn ordered_insert(queue: &mut Vec<OrderedEntry>, entry: OrderedEntry) -> usize {
+    let mut pos = queue.len();
+    for (i, cur) in queue.iter().enumerate() {
+        if entry.before(cur) {
+            pos = i;
+            break;
+        }
+    }
+    queue.insert(pos, entry);
+    pos
+}
+
+/*
  * Pending task for dispatch models. The mask names
  * allowed CPUs. The exiting flag marks tasks in
  * exit. The live flag marks tasks with a trusted
  * reference. A cleared live flag models a NULL
- * lookup from the pid table.
+ * lookup from the pid table. The fail flag models a
+ * failed move that must be skipped with progress.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -490,14 +515,18 @@ pub struct PendingTask {
     pub exiting: bool,
     /* False models a NULL pid lookup. */
     pub live: bool,
+    /* True models a failed queue move. */
+    pub fail: bool,
 }
 
 /*
  * Drain up to budget tasks for one CPU. The scan
  * visits every queued task in order and moves each
- * live, non exiting task with the CPU in the mask.
- * Bad heads are skipped, so one head never blocks
- * later work. Returns the count moved.
+ * live and non exiting task with the CPU in the mask
+ * and with no move failure. Bad heads are skipped, so
+ * one head never blocks later work. Returns the count
+ * moved. A zero return means no movable work was
+ * present.
  */
 #[cfg(test)]
 pub fn drain_model(
@@ -508,7 +537,11 @@ pub fn drain_model(
     let mut moved = 0;
     let mut kept = std::collections::VecDeque::new();
     for task in queue.drain(..) {
-        let ok = moved < budget && task.live && !task.exiting && may_run_on(cpu, &task.allowed);
+        let ok = moved < budget
+            && task.live
+            && !task.exiting
+            && !task.fail
+            && may_run_on(cpu, &task.allowed);
         if ok {
             moved += 1;
         } else {
@@ -517,6 +550,64 @@ pub fn drain_model(
     }
     *queue = kept;
     moved
+}
+
+/*
+ * Steal up to budget tasks from peers for an idle CPU.
+ * The scan visits at most bound peers starting after
+ * the cursor with wrap. Only idle callers steal. Each
+ * peer offers its head only. A head that is dead,
+ * exiting, foreign, or failing moves the scan to the
+ * next peer with the head left in place for its owner.
+ * The cursor advances by the peers visited. Returns the
+ * count moved and the new cursor.
+ */
+#[cfg(test)]
+pub fn steal_model(
+    peers: &mut [std::collections::VecDeque<PendingTask>],
+    thief: usize,
+    cursor: u32,
+    budget: u32,
+    idle: bool,
+) -> (u32, u32) {
+    if !idle {
+        return (0, cursor);
+    }
+    if peers.len() <= 1 {
+        return (0, cursor);
+    }
+    if budget == 0 {
+        return (0, cursor);
+    }
+    let mut moved = 0;
+    let mut cur = cursor;
+    let mut visited = 0;
+    let bound = scan_bound(peers.len());
+    while visited < bound && moved < budget {
+        let next = match next_peer(cur, peers.len()) {
+            Some(v) => v,
+            None => break,
+        };
+        cur = next;
+        visited += 1;
+        if next as usize == thief {
+            continue;
+        }
+        if let Some(q) = peers.get_mut(next as usize) {
+            let head_ok = match q.front() {
+                Some(t) => t.live && !t.exiting && !t.fail && may_run_on(thief as i32, &t.allowed),
+                None => false,
+            };
+            if head_ok {
+                q.pop_front();
+                moved += 1;
+            }
+            if moved >= budget {
+                break;
+            }
+        }
+    }
+    (moved, cur)
 }
 
 /*
@@ -531,8 +622,18 @@ pub struct RunningView {
     pub est: u64,
     /* Pid now on the CPU. Zero when idle. */
     pub pid: u32,
-    /* Tier of the task now on the CPU. */
-    pub tier: u32,
+}
+
+/*
+ * Per CPU depth for tests. Each slot counts queued
+ * tasks on one CPU across all queues. The sum matches
+ * the queued total.
+ */
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuDepths {
+    /* Queued tasks per CPU. Index is the CPU. */
+    pub nr: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -542,11 +643,7 @@ impl RunningView {
      * cleared BPF state after stopping.
      */
     pub fn idle() -> Self {
-        Self {
-            est: 0,
-            pid: 0,
-            tier: 0,
-        }
+        Self { est: 0, pid: 0 }
     }
 
     /*
@@ -564,77 +661,46 @@ impl RunningView {
     pub fn clear(&mut self) {
         self.est = 0;
         self.pid = 0;
-        self.tier = 0;
     }
 }
 
-/*
- * Per tier counts for tests. Each slot counts joined
- * tasks in one tier across all CPUs. The sum matches
- * the joined total.
- */
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TierCounts {
-    /* Joined tasks per tier. Index is the tier. */
-    pub nr: [u64; 2],
-}
-
-#[cfg(test)]
-impl TierCounts {
+impl CpuDepths {
     /*
-     * Empty counts with both tiers at zero. Matches
-     * the BPF state after init.
+     * Empty depths with all CPUs at zero. Matches the
+     * BPF state after init.
      */
-    pub fn new() -> Self {
-        Self { nr: [0, 0] }
-    }
-
-    /*
-     * Join one task to a tier. Unknown tiers join the
-     * interactive tier, so the count stays balanced.
-     */
-    pub fn join(&mut self, tier: u32) {
-        let t = if tier_ok(tier) { tier as usize } else { 0 };
-        self.nr[t] = self.nr[t].saturating_add(1);
-    }
-
-    /*
-     * Leave one task from a tier. Counts never go below
-     * zero. Unknown tiers leave the interactive tier.
-     */
-    pub fn leave(&mut self, tier: u32) {
-        let t = if tier_ok(tier) { tier as usize } else { 0 };
-        self.nr[t] = self.nr[t].saturating_sub(1);
-    }
-
-    /*
-     * Move one task between tiers. A same tier move is
-     * a no op. Unknown tiers map to interactive.
-     */
-    pub fn shift(&mut self, old: u32, new: u32) {
-        let o = if tier_ok(old) { old } else { 0 };
-        let n = if tier_ok(new) { new } else { 0 };
-        if o == n {
-            return;
+    pub fn new(nr_cpus: usize) -> Self {
+        Self {
+            nr: vec![0; nr_cpus],
         }
-        self.leave(o);
-        self.join(n);
     }
 
     /*
-     * Sum of both tiers. Matches the joined total.
+     * Join one task to a CPU. Counts saturate at the
+     * top, so a burst of joins never wraps the gauge.
+     */
+    pub fn join(&mut self, cpu: usize) {
+        if let Some(v) = self.nr.get_mut(cpu) {
+            *v = v.saturating_add(1);
+        }
+    }
+
+    /*
+     * Leave one task from a CPU. Counts never go below
+     * zero, so a double leave stays safe.
+     */
+    pub fn leave(&mut self, cpu: usize) {
+        if let Some(v) = self.nr.get_mut(cpu) {
+            *v = v.saturating_sub(1);
+        }
+    }
+
+    /*
+     * Sum of all CPUs. Matches the queued total.
      */
     pub fn sum(&self) -> u64 {
-        self.nr[0].saturating_add(self.nr[1])
-    }
-}
-
-#[cfg(test)]
-impl Default for TierCounts {
-    /* Default counts match the empty state. */
-    fn default() -> Self {
-        Self::new()
+        self.nr.iter().fold(0, |a, &v| a.saturating_add(v))
     }
 }
 
@@ -642,36 +708,6 @@ impl Default for TierCounts {
 mod tests {
     use super::*;
     use std::collections::VecDeque;
-
-    #[test]
-    fn tier_ids_match_spec() {
-        assert!(tier_ok(0));
-        assert!(tier_ok(1));
-        assert!(!tier_ok(2));
-        assert_eq!(NTIERS, 2);
-        assert_eq!(DSQ_BATCH, 0x2000);
-        assert_eq!(DSQ_PARK, 0x2001);
-        assert_ne!(DSQ_BATCH, DSQ_PARK);
-    }
-
-    #[test]
-    fn quanta_match_spec() {
-        assert_eq!(QUANTUM_TIER0_NS, 500_000);
-        assert_eq!(QUANTUM_TIER1_NS, 8_000_000);
-        assert_eq!(quantum_tier(0), 500_000);
-        assert_eq!(quantum_tier(1), 8_000_000);
-        assert_eq!(quantum_tier(2), 500_000);
-        assert_eq!(quantum_tier(99), 500_000);
-    }
-
-    #[test]
-    fn short_bound_matches_spec() {
-        assert_eq!(SHORT_BOUND_NS, 1_000_000);
-        assert_eq!(PROMOTE_STREAK, 3);
-        assert_eq!(STREAK_CAP, 7);
-        assert_eq!(DEFICIT_SERVES, 8);
-        assert_eq!(PREEMPT_GAP_NS, 1_000_000);
-    }
 
     #[test]
     fn est_clamp_caps_at_one_second() {
@@ -691,260 +727,188 @@ mod tests {
     }
 
     #[test]
-    fn burn_boundary_holds_below_grant() {
-        let grant0 = QUANTUM_TIER0_NS;
-        assert!(!burned(grant0, grant0 - 1));
-        assert!(burned(grant0, grant0));
-        assert!(burned(grant0, grant0 + 1));
-        let grant1 = QUANTUM_TIER1_NS;
-        assert!(!burned(grant1, grant1 - 1));
-        assert!(burned(grant1, grant1));
-        assert!(burned(grant1, grant1 + 1));
-        assert!(!burned(0, 0));
-        assert!(!burned(0, 1_000_000));
+    fn tq_seed_floor_ceiling_match_spec() {
+        assert_eq!(TQ_SEED_NS, 8_000_000);
+        assert_eq!(TQ_MIN_NS, 500_000);
+        assert_eq!(TQ_MAX_NS, 32_000_000);
+        assert_eq!(mean_tq(0, 0), TQ_SEED_NS);
+        assert_eq!(clamp_tq(0), TQ_MIN_NS);
+        assert_eq!(clamp_tq(100), TQ_MIN_NS);
+        assert_eq!(clamp_tq(500_000), 500_000);
+        assert_eq!(clamp_tq(8_000_000), 8_000_000);
+        assert_eq!(clamp_tq(32_000_000), 32_000_000);
+        assert_eq!(clamp_tq(40_000_000), 32_000_000);
+        assert_eq!(clamp_tq(u64::MAX), 32_000_000);
     }
 
     #[test]
-    fn burn_uses_stored_grant_not_slice() {
-        let grant = QUANTUM_TIER0_NS;
-        let other = QUANTUM_TIER1_NS;
-        assert!(burned(grant, grant));
-        assert!(!burned(grant, grant - 1));
-        assert!(burned(other, other));
-        assert!(!burned(other, grant));
+    fn mean_uses_sum_over_nr() {
+        assert_eq!(mean_tq(8_000_000, 1), 8_000_000);
+        assert_eq!(mean_tq(16_000_000, 2), 8_000_000);
+        assert_eq!(mean_tq(1_000_000, 2), 500_000);
+        assert_eq!(mean_tq(100, 2), 500_000);
+        assert_eq!(mean_tq(100_000_000, 2), 32_000_000);
+        assert_eq!(mean_tq(0, 1), 500_000);
     }
 
     #[test]
-    fn demotion_moves_down_one_on_full_burn() {
-        assert_eq!(next_on_burn(0, true, true), 1);
-        assert_eq!(next_on_burn(1, true, true), 1);
-    }
-
-    #[test]
-    fn demotion_holds_on_block_or_short_run() {
-        assert_eq!(next_on_burn(0, false, true), 0);
-        assert_eq!(next_on_burn(1, false, true), 1);
-        assert_eq!(next_on_burn(0, true, false), 0);
-        assert_eq!(next_on_burn(1, true, false), 1);
-        assert_eq!(next_on_burn(1, false, false), 1);
-    }
-
-    #[test]
-    fn demotion_property_holds_or_moves_one() {
-        for tier in [0, 1] {
-            for runnable in [false, true] {
-                for delta in [0, 500_000, 8_000_000] {
-                    let grant = quantum_tier(tier);
-                    let hit = burned(grant, delta);
-                    let next = next_on_burn(tier, runnable, hit);
-                    if tier == 0 && runnable && hit {
-                        assert_eq!(next, 1);
-                    } else {
-                        assert_eq!(next, tier);
-                    }
+    fn mean_property_stays_in_range() {
+        for sum in [0, 1, 500_000, 8_000_000, 64_000_000] {
+            for nr in [0, 1, 2, 8] {
+                let tq = mean_tq(sum, nr);
+                if nr == 0 {
+                    assert_eq!(tq, TQ_SEED_NS);
+                } else {
+                    assert!(tq >= TQ_MIN_NS);
+                    assert!(tq <= TQ_MAX_NS);
                 }
             }
         }
     }
 
     #[test]
-    fn streak_short_boundary_needs_full_wait() {
-        assert!(!is_short(SHORT_BOUND_NS));
-        assert!(!is_short(SHORT_BOUND_NS + 1));
-        assert!(is_short(SHORT_BOUND_NS - 1));
-        assert!(is_short(0));
-        assert_eq!(streak_next(0, SHORT_BOUND_NS - 1), 1);
-        assert_eq!(streak_next(0, SHORT_BOUND_NS), 0);
-        assert_eq!(streak_next(2, SHORT_BOUND_NS), 0);
+    fn fresh_join_leaves_mean_unchanged() {
+        let mut m = CpuMean::empty();
+        assert_eq!(m.tq(), TQ_SEED_NS);
+        let e0 = m.join_fresh();
+        assert_eq!(e0, TQ_SEED_NS);
+        assert_eq!(m.tq(), TQ_SEED_NS);
+        let e1 = m.join_fresh();
+        assert_eq!(e1, TQ_SEED_NS);
+        assert_eq!(m.tq(), TQ_SEED_NS);
+        m.leave(e0);
+        assert_eq!(m.tq(), TQ_SEED_NS);
+        m.leave(e1);
+        assert_eq!(m.tq(), TQ_SEED_NS);
+        assert_eq!(m.nr, 0);
     }
 
     #[test]
-    fn streak_steps_with_saturation_at_cap() {
-        assert_eq!(streak_next(0, 100), 1);
-        assert_eq!(streak_next(2, 100), 3);
-        assert_eq!(streak_next(6, 100), 7);
-        assert_eq!(streak_next(7, 100), 7);
-        assert_eq!(streak_next(7, 5_000_000), 0);
-        assert_eq!(streak_next(3, 5_000_000), 0);
+    fn mean_tracks_join_leave_replace() {
+        let mut m = CpuMean::empty();
+        let a = m.join(2_000_000);
+        assert_eq!(a, 2_000_000);
+        assert_eq!(m.tq(), 2_000_000);
+        m.join(4_000_000);
+        assert_eq!(m.tq(), 3_000_000);
+        m.replace(2_000_000, 8_000_000);
+        assert_eq!(m.tq(), 6_000_000);
+        m.leave(8_000_000);
+        assert_eq!(m.tq(), 4_000_000);
+        m.leave(4_000_000);
+        assert_eq!(m.tq(), TQ_SEED_NS);
     }
 
     #[test]
-    fn promotion_needs_three_short_blocks() {
-        assert!(!should_promote(0));
-        assert!(!should_promote(1));
-        assert!(!should_promote(2));
-        assert!(should_promote(3));
-        assert!(should_promote(7));
+    fn mean_saturates_at_bounds() {
+        let mut m = CpuMean::empty();
+        m.sum = u64::MAX;
+        m.nr = 1;
+        assert_eq!(m.tq(), TQ_MAX_NS);
+        m.sum = 0;
+        m.nr = 1;
+        assert_eq!(m.tq(), TQ_MIN_NS);
+        let mut n = CpuMean::empty();
+        n.sum = u64::MAX - 1;
+        n.nr = 0;
+        n.join(1_000_000);
+        assert_eq!(n.sum, u64::MAX);
+        assert_eq!(n.nr, 1);
+        n.leave(1_000_000);
+        assert_eq!(n.sum, u64::MAX - 1_000_000);
+        assert_eq!(n.nr, 0);
+        let mut q = CpuMean::empty();
+        q.sum = 100;
+        q.nr = 1;
+        q.leave(1_000_000);
+        assert_eq!(q.sum, 0);
+        assert_eq!(q.nr, 0);
     }
 
     #[test]
-    fn streak_promotion_sequence() {
-        let mut streak = 0;
-        streak = streak_next(streak, 100_000);
-        assert_eq!(streak, 1);
-        assert!(!should_promote(streak));
-        streak = streak_next(streak, 200_000);
-        assert_eq!(streak, 2);
-        assert!(!should_promote(streak));
-        streak = streak_next(streak, 300_000);
-        assert_eq!(streak, 3);
-        assert!(should_promote(streak));
-        streak = streak_next(streak, 2_000_000);
-        assert_eq!(streak, 0);
-        assert!(!should_promote(streak));
+    fn dsq_ids_match_spec() {
+        assert_eq!(DSQ_BASE, 0x4000);
+        assert_eq!(DSQ_PARK, 0x5000);
+        assert_ne!(DSQ_BASE, DSQ_PARK);
+        assert_eq!(dsq_for_cpu(0, 8), Some(0x4000));
+        assert_eq!(dsq_for_cpu(7, 8), Some(0x4007));
+        assert_eq!(dsq_for_cpu(8, 8), None);
+        assert_eq!(dsq_for_cpu(1023, 1024), Some(0x43ff));
+        assert_eq!(dsq_for_cpu(1024, 2048), None);
     }
 
     #[test]
-    fn tier_transition_burn_then_streak() {
-        let mut tier = 0;
-        let grant = quantum_tier(tier);
-        let delta = grant;
-        assert!(burned(grant, delta));
-        tier = next_on_burn(tier, true, true);
-        assert_eq!(tier, 1);
-        let mut streak = 0;
-        for d in [100_000, 200_000, 300_000] {
-            streak = streak_next(streak, d);
+    fn ordered_insert_sorts_by_est() {
+        let mut q = Vec::new();
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                est: 8_000_000,
+                seq: 0,
+                id: 1,
+            },
+        );
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                est: 1_000_000,
+                seq: 1,
+                id: 2,
+            },
+        );
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                est: 4_000_000,
+                seq: 2,
+                id: 3,
+            },
+        );
+        assert_eq!(q[0].id, 2);
+        assert_eq!(q[1].id, 3);
+        assert_eq!(q[2].id, 1);
+    }
+
+    #[test]
+    fn ordered_insert_keeps_arrival_order_on_ties() {
+        let mut q = Vec::new();
+        for i in 0..4 {
+            ordered_insert(
+                &mut q,
+                OrderedEntry {
+                    est: 2_000_000,
+                    seq: i,
+                    id: i,
+                },
+            );
         }
-        assert!(should_promote(streak));
-        tier = 0;
-        assert!(tier_ok(tier));
+        assert_eq!(q[0].id, 0);
+        assert_eq!(q[1].id, 1);
+        assert_eq!(q[2].id, 2);
+        assert_eq!(q[3].id, 3);
     }
 
     #[test]
-    fn deficit_needs_batch_backlog() {
-        assert!(!deficit_should_serve(8, true, false));
-        assert!(!deficit_should_serve(0, true, false));
-        assert!(!deficit_should_serve(8, false, false));
-    }
-
-    #[test]
-    fn deficit_serves_eight_to_one() {
-        assert!(!deficit_should_serve(0, true, true));
-        assert!(!deficit_should_serve(7, true, true));
-        assert!(deficit_should_serve(8, true, true));
-        assert!(deficit_should_serve(8, false, true));
-        assert!(deficit_should_serve(0, false, true));
-    }
-
-    #[test]
-    fn deficit_next_tracks_interactive_serves() {
-        assert_eq!(deficit_next(0, 0), 1);
-        assert_eq!(deficit_next(7, 0), 8);
-        assert_eq!(deficit_next(8, 0), 8);
-        assert_eq!(deficit_next(8, 1), 0);
-        assert_eq!(deficit_next(3, 1), 0);
-    }
-
-    #[test]
-    fn deficit_sequence_holds_ratio() {
-        let mut served0 = 0;
-        for _ in 0..8 {
-            assert!(!deficit_should_serve(served0, true, true));
-            served0 = deficit_next(served0, 0);
-        }
-        assert_eq!(served0, 8);
-        assert!(deficit_should_serve(served0, true, true));
-        served0 = deficit_next(served0, 1);
-        assert_eq!(served0, 0);
-        assert!(!deficit_should_serve(served0, true, true));
-    }
-
-    #[test]
-    fn vruntime_order_sorts_by_service() {
-        assert!(vruntime_before(0, 1));
-        assert!(vruntime_before(100, 200));
-        assert!(!vruntime_before(200, 100));
-        assert!(!vruntime_before(5, 5));
-        assert_eq!(vruntime_advance(100, 50), 150);
-        assert_eq!(vruntime_advance(u64::MAX, 1), u64::MAX);
-        assert_eq!(vruntime_advance(u64::MAX - 1, 5), u64::MAX);
-    }
-
-    #[test]
-    fn vruntime_new_joins_at_floor() {
-        let floor = 1_000_000;
-        let joined = floor;
-        assert_eq!(joined, floor);
-        let later = vruntime_advance(joined, 500_000);
-        assert!(vruntime_before(joined, later));
-        let floor2 = floor_advance(floor, joined);
-        assert_eq!(floor2, floor);
-        let floor3 = floor_advance(floor, later);
-        assert_eq!(floor3, later);
-    }
-
-    #[test]
-    fn vruntime_property_advance_never_wraps() {
-        for base in [0, 1, 1_000_000, u64::MAX - 1, u64::MAX] {
-            for delta in [0, 1, 500_000, u64::MAX] {
-                let out = vruntime_advance(base, delta);
-                assert!(out >= base || out == u64::MAX);
-                if base != u64::MAX {
-                    assert!(out >= base);
-                }
+    fn ordered_property_holds_across_trials() {
+        for trial in 0..16u64 {
+            let mut q = Vec::new();
+            for i in 0..8u64 {
+                let est = (trial * 7 + i * 13) % 5 + 1;
+                ordered_insert(&mut q, OrderedEntry { est, seq: i, id: i });
+            }
+            for w in q.windows(2) {
+                assert!(!w[1].before(&w[0]));
             }
         }
     }
 
     #[test]
-    fn floor_only_moves_forward() {
-        assert_eq!(floor_advance(100, 50), 100);
-        assert_eq!(floor_advance(100, 100), 100);
-        assert_eq!(floor_advance(100, 150), 150);
-        assert_eq!(floor_advance(0, 0), 0);
-    }
-
-    #[test]
-    fn preempt_gap_gates_busy_kicks() {
-        assert!(preempt_gap_ok(2_000_000, 0));
-        assert!(preempt_gap_ok(1_000_000, 0));
-        assert!(!preempt_gap_ok(999_999, 0));
-        assert!(!preempt_gap_ok(1_500_000, 1_000_000));
-        assert!(preempt_gap_ok(2_000_000, 1_000_000));
-        assert!(preempt_gap_ok(0, 5_000_000));
-    }
-
-    #[test]
-    fn fifo_tail_preserves_arrival_order() {
-        let mut lane: VecDeque<u64> = VecDeque::new();
-        let arrivals = [5_000_000, 100, 1_000_000, 50];
-        for &id in &arrivals {
-            lane.push_back(id);
-        }
-        let mut served = Vec::new();
-        while let Some(id) = lane.pop_front() {
-            served.push(id);
-        }
-        assert_eq!(served, arrivals);
-    }
-
-    #[test]
-    fn fifo_property_holds_across_trials() {
-        for trial in 0..32 {
-            let mut lane: VecDeque<u64> = VecDeque::new();
-            let mut arrivals = Vec::new();
-            for i in 0..8 {
-                let id = trial * 100 + i;
-                arrivals.push(id);
-                lane.push_back(id);
-            }
-            for &want in &arrivals {
-                assert_eq!(lane.pop_front(), Some(want));
-            }
-            assert!(lane.is_empty());
-        }
-    }
-
-    #[test]
-    fn fifo_head_wakeup_jumps_ahead() {
-        let mut lane: VecDeque<u64> = VecDeque::new();
-        lane.push_back(1);
-        lane.push_back(2);
-        lane.push_front(3);
-        assert_eq!(lane.pop_front(), Some(3));
-        assert_eq!(lane.pop_front(), Some(1));
-        assert_eq!(lane.pop_front(), Some(2));
+    fn cpuperf_uses_est_against_tq_only() {
+        assert_eq!(cpuperf_for_est(500_000, 8_000_000), CPUPERF_SHORT);
+        assert_eq!(cpuperf_for_est(8_000_000, 8_000_000), CPUPERF_SHORT);
+        assert_eq!(cpuperf_for_est(8_000_001, 8_000_000), CPUPERF_LONG);
+        assert_eq!(cpuperf_for_est(32_000_000, 500_000), CPUPERF_LONG);
+        assert_eq!(cpuperf_for_est(1, 500_000), CPUPERF_SHORT);
     }
 
     #[test]
@@ -973,124 +937,6 @@ mod tests {
         assert_eq!(pick_target_cpu(2, &[false, false, true]), Some(2));
         assert_eq!(pick_target_cpu(0, &[false, false, true]), Some(2));
         assert_eq!(pick_target_cpu(-1, &[false, true, false]), Some(1));
-    }
-
-    #[test]
-    fn counts_balance_across_tier_moves() {
-        let mut c = TierCounts::new();
-        c.join(0);
-        c.join(0);
-        c.join(1);
-        assert_eq!(c.sum(), 3);
-        c.shift(0, 1);
-        assert_eq!(c.nr, [1, 2]);
-        assert_eq!(c.sum(), 3);
-        c.leave(1);
-        assert_eq!(c.sum(), 2);
-        c.leave(0);
-        c.leave(1);
-        assert_eq!(c.sum(), 0);
-    }
-
-    #[test]
-    fn counts_saturate_at_bounds() {
-        let mut c = TierCounts::new();
-        c.nr = [u64::MAX, u64::MAX];
-        c.join(0);
-        assert_eq!(c.nr[0], u64::MAX);
-        c.nr = [0, 0];
-        c.leave(0);
-        assert_eq!(c.nr[0], 0);
-    }
-
-    #[test]
-    fn default_counts_match_empty() {
-        assert_eq!(TierCounts::default(), TierCounts::new());
-    }
-
-    #[test]
-    fn cleared_running_view_reads_idle() {
-        let mut view = RunningView {
-            est: 100,
-            pid: 7,
-            tier: 1,
-        };
-        assert!(!view.is_idle());
-        view.clear();
-        assert_eq!(view, RunningView::idle());
-        assert!(view.is_idle());
-    }
-
-    #[test]
-    fn dispatch_burn_join_keeps_balance() {
-        let mut counts = TierCounts::new();
-        let mut tier = 0;
-        counts.join(tier);
-        assert_eq!(counts.sum(), 1);
-        let grant = quantum_tier(tier);
-        let delta = grant;
-        assert!(burned(grant, delta));
-        let next = next_on_burn(tier, true, true);
-        assert_eq!(next, 1);
-        counts.shift(tier, next);
-        tier = next;
-        assert_eq!(counts.nr, [0, 1]);
-        assert_eq!(counts.sum(), 1);
-        let v = vruntime_advance(0, delta);
-        assert!(v > 0);
-        assert!(tier_ok(tier));
-    }
-
-    #[test]
-    fn block_release_keeps_balance() {
-        let mut counts = TierCounts::new();
-        counts.join(0);
-        assert_eq!(counts.sum(), 1);
-        counts.leave(0);
-        assert_eq!(counts.sum(), 0);
-        counts.leave(0);
-        assert_eq!(counts.sum(), 0);
-    }
-
-    #[test]
-    fn pinned_single_cpu_never_leaves() {
-        let pinned = [false, false, true, false];
-        for sel in [-1, 0, 1, 2, 3, 5, 99] {
-            assert_eq!(pick_target_cpu(sel, &pinned), Some(2));
-        }
-        assert!(may_run_on(2, &pinned));
-        assert!(!may_run_on(0, &pinned));
-        assert!(!may_run_on(1, &pinned));
-        assert!(!may_run_on(3, &pinned));
-        assert!(!may_run_on(-1, &pinned));
-        assert!(!may_run_on(99, &pinned));
-    }
-
-    #[test]
-    fn narrow_mask_keeps_within_mask() {
-        let narrow = [false, false, true, true, false];
-        assert_eq!(pick_target_cpu(3, &narrow), Some(3));
-        assert_eq!(pick_target_cpu(2, &narrow), Some(2));
-        assert_eq!(pick_target_cpu(0, &narrow), Some(2));
-        assert_eq!(pick_target_cpu(4, &narrow), Some(2));
-        assert_eq!(pick_target_cpu(-1, &narrow), Some(2));
-        assert_eq!(pick_target_cpu(99, &narrow), Some(2));
-        assert!(may_run_on(2, &narrow));
-        assert!(may_run_on(3, &narrow));
-        assert!(!may_run_on(0, &narrow));
-        assert!(!may_run_on(4, &narrow));
-    }
-
-    #[test]
-    fn empty_mask_parks() {
-        let empty = [false, false, false];
-        assert_eq!(pick_target_cpu(0, &empty), None);
-        assert_eq!(pick_target_cpu(2, &empty), None);
-        assert_eq!(pick_target_cpu(-1, &empty), None);
-        assert!(!may_run_on(0, &empty));
-        assert!(!may_run_on(2, &empty));
-        assert_eq!(pick_target_cpu(-1, &[]), None);
-        assert!(!may_run_on(0, &[]));
     }
 
     #[test]
@@ -1124,22 +970,15 @@ mod tests {
     }
 
     #[test]
-    fn batch_serve_needs_allowed_head() {
-        let pinned = [false, false, true];
-        assert!(!may_run_on(0, &pinned));
-        assert!(may_run_on(2, &pinned));
-        assert!(deficit_should_serve(8, true, true));
-        assert!(!deficit_should_serve(0, true, true));
-    }
-
-    #[test]
-    fn park_fallback_tries_once() {
-        let pinned = [false, false, true];
-        let first_try = may_run_on(0, &pinned);
-        let second_try = may_run_on(0, &pinned);
-        assert!(!first_try);
-        assert_eq!(first_try, second_try);
-        assert_eq!(pick_target_cpu(0, &pinned), Some(2));
+    fn empty_mask_parks() {
+        let empty = [false, false, false];
+        assert_eq!(pick_target_cpu(0, &empty), None);
+        assert_eq!(pick_target_cpu(2, &empty), None);
+        assert_eq!(pick_target_cpu(-1, &empty), None);
+        assert!(!may_run_on(0, &empty));
+        assert!(!may_run_on(2, &empty));
+        assert_eq!(pick_target_cpu(-1, &[]), None);
+        assert!(!may_run_on(0, &[]));
     }
 
     #[test]
@@ -1180,6 +1019,7 @@ mod tests {
         assert_eq!(scan_bound(1), 0);
         assert_eq!(scan_bound(2), 1);
         assert_eq!(scan_bound(8), 7);
+        assert_eq!(scan_bound(64), STEAL_BOUND);
         assert_eq!(stay_target(0, 1), Some(0));
         assert_eq!(stay_target(1, 1), None);
         assert_eq!(stay_target(-1, 1), None);
@@ -1187,9 +1027,6 @@ mod tests {
         assert_eq!(pick_target_cpu(-1, &[true]), Some(0));
         assert_eq!(pick_target_cpu(5, &[true]), Some(0));
         assert_eq!(pick_target_cpu(0, &[false]), None);
-        assert!(!deficit_should_serve(0, true, false));
-        assert!(deficit_should_serve(0, false, true));
-        assert!(deficit_should_serve(8, true, true));
     }
 
     #[test]
@@ -1211,6 +1048,27 @@ mod tests {
         }
         assert_eq!(seen, 0);
         assert_eq!(at, 0);
+    }
+
+    #[test]
+    fn steal_cursor_rotates_across_peers() {
+        assert_eq!(steal_next(0, 4), 1);
+        assert_eq!(steal_next(3, 4), 0);
+        assert_eq!(steal_next(0, 1), 0);
+        assert_eq!(steal_next(5, 0), 0);
+        let mut cur = 0;
+        for want in [1, 2, 3, 0, 1] {
+            cur = steal_next(cur, 4);
+            assert_eq!(cur, want);
+        }
+    }
+
+    #[test]
+    fn steal_bound_caps_large_hosts() {
+        assert_eq!(scan_bound(2), 1);
+        assert_eq!(scan_bound(9), 8);
+        assert_eq!(scan_bound(16), 8);
+        assert_eq!(scan_bound(1024), 8);
     }
 
     #[test]
@@ -1313,12 +1171,14 @@ mod tests {
             allowed: vec![true, true],
             exiting: false,
             live: false,
+            fail: false,
         };
         /* Good tasks allow the asking CPU. */
         let good = PendingTask {
             allowed: vec![true, true],
             exiting: false,
             live: true,
+            fail: false,
         };
         let mut queue = VecDeque::from([dead.clone(), good.clone(), good.clone(), good.clone()]);
         let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
@@ -1328,13 +1188,36 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_skips_failed_move_with_progress() {
+        /* Failed head models a denied queue move. */
+        let failed = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: true,
+        };
+        /* Good tasks allow the asking CPU. */
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut queue = VecDeque::from([failed.clone(), good.clone(), good.clone()]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(moved > 0);
+        assert_eq!(moved, 2);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0], failed);
+    }
+
+    #[test]
     fn dispatch_batch_drains_within_passes() {
-        /* Idle CPUs serve a saturated batch at once. */
-        assert!(deficit_should_serve(0, false, true));
         let good = PendingTask {
             allowed: vec![true; 16],
             exiting: false,
             live: true,
+            fail: false,
         };
         let mut queue = VecDeque::new();
         for _ in 0..64 {
@@ -1355,22 +1238,26 @@ mod tests {
             allowed: vec![true, true],
             exiting: true,
             live: true,
+            fail: false,
         };
         /* Foreign head allows only the other CPU. */
         let foreign = PendingTask {
             allowed: vec![false, true],
             exiting: false,
             live: true,
+            fail: false,
         };
         /* Good tasks allow the asking CPU. */
         let good = PendingTask {
             allowed: vec![true, true],
             exiting: false,
             live: true,
+            fail: false,
         };
         let mut queue =
             VecDeque::from([exiting.clone(), foreign.clone(), good.clone(), good.clone()]);
         let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(moved > 0);
         assert_eq!(moved, 2);
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[0], exiting);
@@ -1378,10 +1265,134 @@ mod tests {
     }
 
     #[test]
+    fn progress_guarantee_moves_past_all_bad_heads() {
+        /* Every bad shape sits at the head at once. */
+        let dead = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: false,
+            fail: false,
+        };
+        let exiting = PendingTask {
+            allowed: vec![true, true],
+            exiting: true,
+            live: true,
+            fail: false,
+        };
+        let foreign = PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let failed = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: true,
+        };
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut queue = VecDeque::from([
+            dead.clone(),
+            exiting.clone(),
+            foreign.clone(),
+            failed.clone(),
+            good.clone(),
+        ]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(moved > 0);
+        assert_eq!(moved, 1);
+        assert_eq!(queue.len(), 4);
+    }
+
+    #[test]
+    fn progress_guarantee_property_holds() {
+        /* Any movable task behind bad heads must move. */
+        for trial in 0..32 {
+            let mut queue = VecDeque::new();
+            let bad = trial % 4;
+            for i in 0..8 {
+                let task = if i < 3 {
+                    match (bad + i) % 4 {
+                        0 => PendingTask {
+                            allowed: vec![true, true],
+                            exiting: false,
+                            live: false,
+                            fail: false,
+                        },
+                        1 => PendingTask {
+                            allowed: vec![true, true],
+                            exiting: true,
+                            live: true,
+                            fail: false,
+                        },
+                        2 => PendingTask {
+                            allowed: vec![false, true],
+                            exiting: false,
+                            live: true,
+                            fail: false,
+                        },
+                        _ => PendingTask {
+                            allowed: vec![true, true],
+                            exiting: false,
+                            live: true,
+                            fail: true,
+                        },
+                    }
+                } else {
+                    PendingTask {
+                        allowed: vec![true, true],
+                        exiting: false,
+                        live: true,
+                        fail: false,
+                    }
+                };
+                queue.push_back(task);
+            }
+            let moved = drain_model(&mut queue, 0, 8);
+            assert!(moved > 0);
+            assert_eq!(moved, 5);
+        }
+    }
+
+    #[test]
+    fn progress_guarantee_zero_means_no_movable_work() {
+        /* No movable work yields zero without failure. */
+        let dead = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: false,
+            fail: false,
+        };
+        let foreign = PendingTask {
+            allowed: vec![false, false],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut queue = VecDeque::from([dead.clone(), foreign.clone()]);
+        let moved = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert_eq!(moved, 0);
+        assert_eq!(queue.len(), 2);
+        /* Adding one movable task restores progress. */
+        queue.push_back(PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        });
+        let moved2 = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(moved2 > 0);
+        assert_eq!(moved2, 1);
+    }
+
+    #[test]
     fn incident_idle_cpu_progress_with_bad_heads() {
-        /* Idle CPUs serve batch at once through the gate. */
-        assert!(deficit_should_serve(0, false, true));
-        assert!(deficit_should_serve(8, true, true));
         /* Foreign tasks pin to the busy CPU. */
         let mut mask = vec![false; 16];
         mask[15] = true;
@@ -1389,52 +1400,217 @@ mod tests {
             allowed: mask,
             exiting: false,
             live: true,
+            fail: false,
         };
         /* Exiting tasks never run here. */
         let exiting = PendingTask {
             allowed: vec![true; 16],
             exiting: true,
             live: true,
+            fail: false,
         };
         /* Dead tasks model a NULL pid lookup. */
         let dead = PendingTask {
             allowed: vec![true; 16],
             exiting: false,
             live: false,
+            fail: false,
+        };
+        /* Failed tasks model a denied queue move. */
+        let failed = PendingTask {
+            allowed: vec![true; 16],
+            exiting: false,
+            live: true,
+            fail: true,
         };
         /* Good tasks allow the idle CPU. */
         let good = PendingTask {
             allowed: vec![true; 16],
             exiting: false,
             live: true,
+            fail: false,
         };
         let mut queue = VecDeque::new();
         queue.push_back(exiting.clone());
         queue.push_back(foreign.clone());
         queue.push_back(dead.clone());
+        queue.push_back(failed.clone());
         for _ in 0..40 {
             queue.push_back(good.clone());
         }
-        assert_eq!(queue.len(), 43);
+        assert_eq!(queue.len(), 44);
         /* First pass moves a full batch past bad heads. */
         let first = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(first > 0);
         assert_eq!(first, 32);
-        assert_eq!(queue.len(), 11);
+        assert_eq!(queue.len(), 12);
         assert_eq!(queue[0], exiting);
         assert_eq!(queue[1], foreign);
         assert_eq!(queue[2], dead);
+        assert_eq!(queue[3], failed);
         /* Second pass drains the rest past bad heads. */
         let second = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(second > 0);
         assert_eq!(second, 8);
-        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.len(), 4);
         /* Bad heads stay but never block new work. */
         queue.push_back(good.clone());
         queue.push_back(good.clone());
         let third = drain_model(&mut queue, 0, DISPATCH_BATCH);
+        assert!(third > 0);
         assert_eq!(third, 2);
-        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.len(), 4);
         assert_eq!(queue[0], exiting);
         assert_eq!(queue[1], foreign);
         assert_eq!(queue[2], dead);
+        assert_eq!(queue[3], failed);
+    }
+
+    #[test]
+    fn incident_steal_keeps_progress_with_bad_heads() {
+        let good = PendingTask {
+            allowed: vec![true, true, true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let bad = PendingTask {
+            allowed: vec![false, false, false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([bad.clone(), good.clone()]),
+            VecDeque::from([good.clone()]),
+        ];
+        let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert!(moved > 0);
+        assert_eq!(moved, 1);
+        assert_eq!(peers[1].len(), 2);
+    }
+
+    #[test]
+    fn steal_only_when_idle_and_bounded() {
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([good.clone(), good.clone()]),
+        ];
+        let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false);
+        assert_eq!(busy, 0);
+        let (idle, next) = steal_model(&mut peers, 0, 0, 8, true);
+        assert!(idle > 0);
+        assert_eq!(idle, 1);
+        assert_eq!(next, 1);
+        let mut wide: Vec<VecDeque<PendingTask>> = vec![VecDeque::new(); 16];
+        for q in wide.iter_mut().skip(1) {
+            q.push_back(good.clone());
+        }
+        let (capped, _) = steal_model(&mut wide, 0, 0, 32, true);
+        assert!(capped > 0);
+        assert!(capped <= 8);
+    }
+
+    #[test]
+    fn steal_checks_mask_and_skips_bad_heads() {
+        let foreign = PendingTask {
+            allowed: vec![false, false],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let exiting = PendingTask {
+            allowed: vec![true, true],
+            exiting: true,
+            live: true,
+            fail: false,
+        };
+        let good = PendingTask {
+            allowed: vec![true, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        };
+        let mut peers: Vec<VecDeque<PendingTask>> = vec![
+            VecDeque::new(),
+            VecDeque::from([foreign.clone(), exiting.clone(), good.clone()]),
+            VecDeque::from([good.clone()]),
+        ];
+        let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
+        assert!(moved > 0);
+        assert_eq!(moved, 1);
+        assert_eq!(peers[1].len(), 3);
+    }
+
+    #[test]
+    fn cleared_running_view_reads_idle() {
+        let mut view = RunningView { est: 100, pid: 7 };
+        assert!(!view.is_idle());
+        view.clear();
+        assert_eq!(view, RunningView::idle());
+        assert!(view.is_idle());
+    }
+
+    #[test]
+    fn depths_balance_across_join_leave() {
+        let mut d = CpuDepths::new(4);
+        d.join(0);
+        d.join(0);
+        d.join(1);
+        assert_eq!(d.sum(), 3);
+        d.leave(0);
+        assert_eq!(d.sum(), 2);
+        d.leave(0);
+        d.leave(1);
+        assert_eq!(d.sum(), 0);
+        d.leave(0);
+        assert_eq!(d.sum(), 0);
+    }
+
+    #[test]
+    fn depths_saturate_at_bounds() {
+        let mut d = CpuDepths::new(1);
+        d.nr[0] = u64::MAX;
+        d.join(0);
+        assert_eq!(d.nr[0], u64::MAX);
+        d.nr[0] = 0;
+        d.leave(0);
+        assert_eq!(d.nr[0], 0);
+    }
+
+    #[test]
+    fn pinned_single_cpu_never_leaves() {
+        let pinned = [false, false, true, false];
+        for sel in [-1, 0, 1, 2, 3, 5, 99] {
+            assert_eq!(pick_target_cpu(sel, &pinned), Some(2));
+        }
+        assert!(may_run_on(2, &pinned));
+        assert!(!may_run_on(0, &pinned));
+        assert!(!may_run_on(1, &pinned));
+        assert!(!may_run_on(3, &pinned));
+        assert!(!may_run_on(-1, &pinned));
+        assert!(!may_run_on(99, &pinned));
+    }
+
+    #[test]
+    fn narrow_mask_keeps_within_mask() {
+        let narrow = [false, false, true, true, false];
+        assert_eq!(pick_target_cpu(3, &narrow), Some(3));
+        assert_eq!(pick_target_cpu(2, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(0, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(4, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(-1, &narrow), Some(2));
+        assert_eq!(pick_target_cpu(99, &narrow), Some(2));
+        assert!(may_run_on(2, &narrow));
+        assert!(may_run_on(3, &narrow));
+        assert!(!may_run_on(0, &narrow));
+        assert!(!may_run_on(4, &narrow));
     }
 }

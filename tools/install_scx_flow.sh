@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/opencode/scx}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="4.0.5"
+VER="4.0.6"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {

@@ -2,15 +2,15 @@
 /*
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
- * Flow scheduler BPF core. Two tiers share the work.
- * The interactive tier serves short bursts with a small
- * fixed slice and direct placement to the target DSQ.
- * The batch tier serves long bursts with a large fixed
- * slice through one shared DSQ ordered by vruntime. New
- * tasks start in the interactive tier. Full burns move
- * down one tier. Short voluntary blocks build a streak
- * that moves up one tier. A deficit guard keeps the
- * batch tier from waiting too long.
+ * Flow scheduler BPF core. Each CPU keeps an ordered
+ * queue with a mean slice. Short estimates run first
+ * with arrival order for ties. The mean tracks the
+ * unfinished work on the CPU with the running task
+ * included. Fresh tasks join with the current mean so
+ * the mean stays neutral. Blocked tasks complete and
+ * release. Runnable tasks requeue ordered with a fresh
+ * estimate. Idle CPUs steal from peers with a bounded
+ * rotating scan. Kicks wake idle targets only.
  */
 #include <scx/common.bpf.h>
 #include <scx/user_exit_info.bpf.h>
@@ -32,8 +32,9 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 /*
- * Per-CPU state. Keyed by CPU id. Holds the running
- * view plus the deficit count and the preempt stamp.
+ * Per CPU state. Keyed by CPU id. Holds the mean with
+ * the sum and the count plus the steal cursor and the
+ * running view.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -45,17 +46,11 @@ struct {
 /* Number of possible CPUs. Written once at init. */
 volatile u64 nr_cpu_ids;
 
-/* Floor of batch vruntime. New batch tasks join here. */
-volatile u64 flow_min_vtime;
-
-/* Accounted tasks per tier. Index is the tier. */
-volatile u64 flow_tier_nr[2];
-
 /* Scheduler wide counters. Updated with atomics. */
 volatile struct flow_sched_stats flow_stats;
 
 /*
- * Per-CPU LLC ids. Seeded once by userspace from
+ * Per CPU LLC ids. Seeded once by userspace from
  * host topology. Unknown entries hold the unknown
  * value. The count holds distinct domains. Zero or
  * one means plain behavior with no LLC step.
@@ -64,6 +59,9 @@ volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
 
 /* Count of distinct LLC domains. Zero is unknown. */
 volatile u64 flow_llc_nr;
+
+/* Owner value for tasks with no accounting. */
+#define FLOW_OWNER_NONE 0xFFFFFFFFU
 
 /*
  * Current time source. The plain kernel time is used
@@ -112,10 +110,10 @@ static struct flow_cpu_state *flow_cpu(u32 cpu)
 }
 
 /*
- * Check that a CPU id names a real CPU. Used to guard
- * per-CPU state access.
+ * Check that a CPU id names a live CPU. Used to guard
+ * queue and state access.
  */
-static __always_inline bool flow_cpu_id_ok(u32 cpu)
+static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	if ((u64)cpu >= nr_cpu_ids)
 		return false;
@@ -141,19 +139,6 @@ static __always_inline bool flow_cpu_ok(
 }
 
 /*
- * LLC id of one CPU. Unknown ids fail open with no
- * LLC step, so out of range ids stay unknown.
- */
-static __always_inline u32 flow_llc_of(u32 cpu)
-{
-	if (cpu >= (u32)FLOW_MAX_CPUS)
-		return (u32)FLOW_LLC_UNKNOWN;
-	if ((u64)cpu >= nr_cpu_ids)
-		return (u32)FLOW_LLC_UNKNOWN;
-	return flow_cpu_llc[cpu];
-}
-
-/*
  * Idle CPU in the same LLC as the previous CPU.
  * Skips the second thread of a busy core when the
  * idle set marks fully idle cores. Returns minus
@@ -176,7 +161,7 @@ static s32 flow_llc_idle(const struct task_struct *p,
 		return -1;
 	if ((u64)prev_cpu >= nr_cpu_ids)
 		return -1;
-	want = flow_llc_of((u32)prev_cpu);
+	want = flow_cpu_llc[(u32)prev_cpu];
 	if (!flow_llc_known(want))
 		return -1;
 	idle_smt = scx_bpf_get_idle_smtmask();
@@ -210,108 +195,99 @@ static s32 flow_llc_idle(const struct task_struct *p,
 }
 
 /*
- * Forward floor advance. Defined below with the
- * counters, used here by the batch drain.
+ * Join one estimate to a CPU mean. The sum and the
+ * count grow by the estimate. The mean is refreshed
+ * from the new sum and count.
  */
-static __always_inline void flow_floor_advance(u64 vtime);
-
-/*
- * Drain one batch DSQ with skip past bad heads.
- * The iterator visits every queued task in order,
- * so one foreign, exiting, or unresolvable head
- * never blocks later work. Each eligible task moves
- * to the local DSQ of the asking CPU. The floor
- * moves forward with each moved task. Returns the
- * count moved, capped at the given budget.
- */
-static __always_inline u32 flow_drain_batch(s32 cpu,
-	u32 budget)
+static __always_inline void flow_join_cpu(u32 cpu,
+	u64 est)
 {
-	struct task_struct *p;
-	u32 moved = 0;
+	struct flow_cpu_state *st;
 
-	if (cpu < 0)
-		return 0;
-	if (budget == 0)
-		return 0;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, FLOW_DSQ_BATCH, 0) {
-		u64 vtime;
-
-		if (moved >= budget)
-			break;
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
-			continue;
-		if (p->flags & PF_EXITING) {
-			bpf_task_release(p);
-			continue;
-		}
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		vtime = p->scx.dsq_vtime;
-		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
-			bpf_task_release(p);
-			continue;
-		}
-		bpf_task_release(p);
-		flow_floor_advance(vtime);
-		__sync_fetch_and_add(
-		    &flow_stats.deficit_serves, 1);
-		moved++;
-	}
-	bpf_rcu_read_unlock();
-	return moved;
+	if (!flow_cpu_live(cpu))
+		return;
+	st = flow_cpu(cpu);
+	if (!st)
+		return;
+	__sync_fetch_and_add(&st->sum_est, est);
+	__sync_fetch_and_add(&st->nr, 1);
+	__sync_lock_test_and_set(&st->tq_ns,
+	    flow_mean_tq(st->sum_est, st->nr));
 }
 
 /*
- * Drain one park DSQ with skip past bad heads.
- * The iterator visits every parked task in order,
- * so one foreign, exiting, or unresolvable head
- * never blocks later work. Each eligible task moves
- * to the local DSQ of the asking CPU. Returns the
- * count moved, capped at the given budget.
+ * Leave one estimate from a CPU mean. A missing entry
+ * is a no op, so a double leave stays safe. The mean
+ * is refreshed from the new sum and count.
  */
-static __always_inline u32 flow_drain_park(s32 cpu,
-	u32 budget)
+static __always_inline void flow_leave_cpu(u32 cpu,
+	u64 est)
 {
-	struct task_struct *p;
-	u32 moved = 0;
+	struct flow_cpu_state *st;
+	s32 i;
 
-	if (cpu < 0)
-		return 0;
-	if (budget == 0)
-		return 0;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, FLOW_DSQ_PARK, 0) {
-		if (moved >= budget)
+	if (!flow_cpu_live(cpu))
+		return;
+	st = flow_cpu(cpu);
+	if (!st)
+		return;
+	bpf_for(i, 0, 4) {
+		u64 cur_n = st->nr;
+		u64 cur_s = st->sum_est;
+		u64 nxt_n;
+		u64 nxt_s;
+		u64 old_n;
+		u64 old_s;
+
+		if (cur_n == 0)
 			break;
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
+		if (cur_s < est)
+			nxt_s = 0;
+		else
+			nxt_s = cur_s - est;
+		nxt_n = cur_n - 1;
+		old_n = __sync_val_compare_and_swap(&st->nr,
+		    cur_n, nxt_n);
+		if (old_n != cur_n)
 			continue;
-		if (p->flags & PF_EXITING) {
-			bpf_task_release(p);
-			continue;
+		old_s = __sync_val_compare_and_swap(
+		    &st->sum_est, cur_s, nxt_s);
+		if (old_s != cur_s) {
+			__sync_fetch_and_add(&st->nr, 1);
+			__sync_lock_test_and_set(&st->sum_est,
+			    cur_s);
+			break;
 		}
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
-			bpf_task_release(p);
-			continue;
-		}
-		bpf_task_release(p);
-		moved++;
+		__sync_lock_test_and_set(&st->tq_ns,
+		    flow_mean_tq(nxt_s, nxt_n));
+		break;
 	}
-	bpf_rcu_read_unlock();
-	return moved;
+}
+
+/*
+ * Replace one estimate in a CPU mean. The count stays
+ * fixed while the sum tracks the change. The mean is
+ * refreshed from the new sum.
+ */
+static __always_inline void flow_replace_cpu(u32 cpu,
+	u64 old, u64 next)
+{
+	struct flow_cpu_state *st;
+
+	if (!flow_cpu_live(cpu))
+		return;
+	st = flow_cpu(cpu);
+	if (!st)
+		return;
+	if (old != next) {
+		if (st->sum_est >= old)
+			__sync_fetch_and_sub(&st->sum_est, old);
+		else
+			__sync_lock_test_and_set(&st->sum_est, 0);
+		__sync_fetch_and_add(&st->sum_est, next);
+	}
+	__sync_lock_test_and_set(&st->tq_ns,
+	    flow_mean_tq(st->sum_est, st->nr));
 }
 
 /*
@@ -341,59 +317,6 @@ static __always_inline void flow_on_cpu_dec(void)
 }
 
 /*
- * Drop one tier count without wrap. Zero stays at
- * zero, so a double release never wraps the gauge.
- */
-static __always_inline void flow_tier_dec(u32 tier)
-{
-	s32 i;
-
-	if (!flow_tier_ok(tier))
-		return;
-	bpf_for(i, 0, 4) {
-		u64 cur = flow_tier_nr[tier];
-		u64 nxt;
-		u64 old;
-
-		if (cur == 0)
-			break;
-		nxt = cur - 1;
-		old = __sync_val_compare_and_swap(
-		    &flow_tier_nr[tier], cur, nxt);
-		if (old == cur)
-			break;
-		if (i == 3)
-			__sync_lock_test_and_set(
-			    &flow_tier_nr[tier], 0);
-	}
-}
-
-/*
- * Raise the vruntime floor to the smallest waiting
- * value. The floor only moves forward, so later joins
- * never pass waiting work.
- */
-static __always_inline void flow_floor_advance(u64 vtime)
-{
-	s32 i;
-
-	bpf_for(i, 0, 4) {
-		u64 cur = flow_min_vtime;
-		u64 old;
-
-		if (!flow_vruntime_before(cur, vtime))
-			break;
-		old = __sync_val_compare_and_swap(
-		    &flow_min_vtime, cur, vtime);
-		if (old == cur)
-			break;
-		if (i == 3)
-			__sync_lock_test_and_set(
-			    &flow_min_vtime, vtime);
-	}
-}
-
-/*
  * Clear the running view of one CPU. Zero pid means
  * idle, so the dashboard sees idle at once.
  */
@@ -403,35 +326,33 @@ static __always_inline void flow_clear_running(s32 cpu)
 
 	if (cpu < 0)
 		return;
-	if (!flow_cpu_id_ok((u32)cpu))
+	if (!flow_cpu_live((u32)cpu))
 		return;
 	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
 	st->running_est = 0;
 	st->running_pid = 0;
-	st->running_tier = 0;
 }
 
 /*
- * Set the CPU hint of one tier. Interactive asks
- * for the max level. Batch restores the default,
- * so the hint tracks the task now on the CPU.
- * The hint is fixed per tier and never uses
- * frequency, so unknown frequency stays safe.
+ * Set the CPU hint from estimate against mean. Short
+ * estimates ask for the high hint. Long estimates
+ * restore the low hint. Unknown helpers stay safe
+ * with no hint change.
  */
 static __always_inline void flow_cpuperf_set(s32 cpu,
-	u32 tier)
+	u64 est, u64 tq)
 {
 	u32 perf;
 
 	if (cpu < 0)
 		return;
-	if (!flow_cpu_id_ok((u32)cpu))
+	if (!flow_cpu_live((u32)cpu))
 		return;
 	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
 		return;
-	perf = flow_cpuperf_tier(tier);
+	perf = flow_cpuperf_for_est(est, tq);
 	scx_bpf_cpuperf_set(cpu, perf);
 }
 
@@ -442,33 +363,147 @@ static __always_inline void flow_cpuperf_set(s32 cpu,
 static __always_inline void flow_release(
 	struct flow_task_ctx *tctx)
 {
-	u32 tier;
+	u32 owner;
+	u64 est;
 
 	if (!tctx)
 		return;
 	if (tctx->grant_ns == (u64)-1)
 		return;
-	tier = tctx->tier;
-	if (!flow_tier_ok(tier))
-		return;
-	flow_tier_dec(tier);
+	owner = tctx->owner;
+	est = tctx->est_ns;
+	if (owner != FLOW_OWNER_NONE && flow_cpu_live(owner))
+		flow_leave_cpu(owner, flow_clamp_est(est));
 	tctx->grant_ns = (u64)-1;
+	tctx->owner = FLOW_OWNER_NONE;
 }
 
 /*
- * Mark one accounted entry as joined. A joined entry
- * is counted once until release. The tier is stored
- * for the later release.
+ * Drain one per CPU queue with skip past bad heads.
+ * The iterator visits every queued task in order, so
+ * one foreign, exiting, or unresolvable head never
+ * blocks later work. Each eligible task moves to the
+ * local DSQ of the asking CPU. Returns the count
+ * moved, capped at the given budget.
  */
-static __always_inline void flow_acquire(
-	struct flow_task_ctx *tctx, u32 tier)
+static __always_inline u32 flow_drain_own(s32 cpu,
+	u32 budget)
 {
-	if (!tctx)
-		return;
-	if (!flow_tier_ok(tier))
-		tier = 0;
-	__sync_fetch_and_add(&flow_tier_nr[tier], 1);
-	tctx->tier = tier;
+	struct task_struct *p;
+	u64 dsq;
+	u32 moved = 0;
+
+	if (cpu < 0)
+		return 0;
+	if (!flow_cpu_live((u32)cpu))
+		return 0;
+	if (budget == 0)
+		return 0;
+	dsq = flow_dsq_for_cpu((u32)cpu);
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, dsq, 0) {
+		if (moved >= budget)
+			break;
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue;
+		if (p->flags & PF_EXITING) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(p);
+			continue;
+		}
+		bpf_task_release(p);
+		moved++;
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
+
+/*
+ * Drain the park queue with skip past bad heads. The
+ * iterator visits every parked task in order, so one
+ * foreign, exiting, or unresolvable head never blocks
+ * later work. Each eligible task moves to the local
+ * DSQ of the asking CPU. Returns the count moved,
+ * capped at the given budget.
+ */
+static __always_inline u32 flow_drain_park(s32 cpu,
+	u32 budget)
+{
+	struct task_struct *p;
+	u32 moved = 0;
+
+	if (cpu < 0)
+		return 0;
+	if (!flow_cpu_live((u32)cpu))
+		return 0;
+	if (budget == 0)
+		return 0;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, FLOW_DSQ_PARK, 0) {
+		if (moved >= budget)
+			break;
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue;
+		if (p->flags & PF_EXITING) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			continue;
+		}
+		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(p);
+			continue;
+		}
+		bpf_task_release(p);
+		__sync_fetch_and_add(&flow_stats.park_moves, 1);
+		moved++;
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
+
+/*
+ * Steal one task from a peer queue for an idle thief.
+ * Uses the local move helper, so mask and liveness
+ * are checked inside the helper. Returns one when a
+ * task moved and zero otherwise.
+ */
+static __always_inline u32 flow_drain_peer(s32 thief,
+	u32 peer)
+{
+	u64 dsq;
+
+	if (thief < 0)
+		return 0;
+	if (!flow_cpu_live((u32)thief))
+		return 0;
+	if (!flow_cpu_live(peer))
+		return 0;
+	if (thief == (s32)peer)
+		return 0;
+	dsq = flow_dsq_for_cpu(peer);
+	if (scx_bpf_dsq_nr_queued(dsq) == 0)
+		return 0;
+	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+		__sync_fetch_and_add(&flow_stats.steal_moves, 1);
+		return 1;
+	}
+	return 0;
 }
 
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
@@ -544,243 +579,169 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
 	struct flow_task_ctx *tctx;
+	struct flow_cpu_state *st;
 	s32 sel;
 	s32 cpu = -1;
 	bool cpu_valid = false;
 	bool is_requeue = false;
-	u32 tier = 0;
-	u64 grant;
-	u64 now;
 	bool is_fresh = false;
 	bool need_join = false;
+	u64 est = 0;
+	u64 tq = (u64)FLOW_TQ_SEED_NS;
 
 	if (enq_flags & SCX_ENQ_REENQ)
 		is_requeue = true;
 	tctx = flow_get(p);
 	sel = p->scx.selected_cpu;
-	now = flow_now();
 	if (!tctx) {
-		grant = flow_quantum_tier(0);
-		__sync_fetch_and_add(&flow_stats.enq_no_tctx,
-		    1);
-		/* Local keeps a task that cannot move. */
-		if (is_migration_disabled(p)) {
-			s32 here = scx_bpf_task_cpu(p);
-
-			if (here >= 0 &&
-			    flow_cpu_id_ok((u32)here)) {
-				scx_bpf_dsq_insert(p,
-				    (u64)SCX_DSQ_LOCAL, grant, 0);
-				return;
-			}
-		}
+		tq = (u64)FLOW_TQ_SEED_NS;
+		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		/* Park holds the task for a later move. */
 		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
-		    grant, 0);
+		    tq, 0);
 		return;
 	}
-	if (tctx->grant_ns == 0 && tctx->run_at == 0 &&
-	    tctx->est_ns == 0 && tctx->vruntime == 0 &&
-	    tctx->streak == 0)
+	if (tctx->est_ns == 0)
 		is_fresh = true;
-	if (tctx->grant_ns == (u64)-1 || is_fresh)
+	if (tctx->grant_ns == (u64)-1)
 		need_join = true;
-	/* Joining tasks start in the interactive tier. */
-	if (tctx->grant_ns == (u64)-1) {
-		/* Released state, tier holds the next tier. */
-		tier = tctx->tier;
-		if (!flow_tier_ok(tier))
-			tier = 0;
-	} else if (is_fresh) {
-		/* Fresh task with no history starts interactive. */
-		tier = 0;
-		tctx->tier = 0;
-	} else {
-		tier = tctx->tier;
-		if (!flow_tier_ok(tier))
-			tier = 0;
-	}
 	/* Tasks that cannot move stay on the current CPU. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
-		/* Local keeps the task where it may run. */
-		if (here >= 0 && flow_cpu_id_ok((u32)here)) {
-			if (need_join)
-				flow_acquire(tctx, tier);
-			grant = flow_quantum_tier(tier);
-			tctx->grant_ns = grant;
-			if (tier == (u32)FLOW_TIER_BATCH &&
-			    tctx->vruntime == 0)
-				tctx->vruntime = flow_min_vtime;
-			scx_bpf_dsq_insert(p, (u64)SCX_DSQ_LOCAL,
-			    grant, 0);
-			if (tier == 0)
-				__sync_fetch_and_add(
-				    &flow_stats.enq_tier0, 1);
-			else
-				__sync_fetch_and_add(
-				    &flow_stats.enq_tier1, 1);
-			scx_bpf_kick_cpu(here, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
-			return;
-		}
-		/* No usable CPU, fall through to park. */
-	}
-	if (flow_cpu_ok(p, sel)) {
-		cpu = sel;
-		cpu_valid = true;
-	} else {
-		s32 first;
-
-		first = (s32)bpf_cpumask_first(p->cpus_ptr);
-		if (flow_cpu_ok(p, first)) {
-			cpu = first;
+		if (here >= 0 && flow_cpu_live((u32)here)) {
+			cpu = here;
 			cpu_valid = true;
 		}
 	}
 	if (!cpu_valid) {
-		/* No target, park for a later move. */
-		if (need_join)
-			flow_acquire(tctx, tier);
-		grant = flow_quantum_tier(tier);
-		tctx->grant_ns = grant;
-		if (tier == (u32)FLOW_TIER_BATCH) {
-			u64 floor = flow_min_vtime;
-
-			if (tctx->vruntime == 0)
-				tctx->vruntime = floor;
-			scx_bpf_dsq_insert_vtime(p,
-			    (u64)FLOW_DSQ_PARK, grant,
-			    tctx->vruntime, 0);
+		if (flow_cpu_ok(p, sel)) {
+			cpu = sel;
+			cpu_valid = true;
 		} else {
-			scx_bpf_dsq_insert(p,
-			    (u64)FLOW_DSQ_PARK, grant, 0);
-		}
-		if (tier == 0)
-			__sync_fetch_and_add(
-			    &flow_stats.enq_tier0, 1);
-		else
-			__sync_fetch_and_add(
-			    &flow_stats.enq_tier1, 1);
-		return;
-	}
-	if (tier == (u32)FLOW_TIER_BATCH) {
-		u64 floor = flow_min_vtime;
-		u64 vtime;
+			s32 first;
 
-		if (need_join)
-			flow_acquire(tctx, tier);
-		grant = flow_quantum_tier(tier);
-		tctx->grant_ns = grant;
-		if (tctx->vruntime == 0)
-			tctx->vruntime = floor;
-		vtime = tctx->vruntime;
-		/* Shared holds batch work for an allowed CPU. */
-		scx_bpf_dsq_insert_vtime(p,
-		    (u64)FLOW_DSQ_BATCH, grant, vtime, 0);
-		__sync_fetch_and_add(&flow_stats.enq_tier1, 1);
-		/* Kick only a CPU in the mask. */
-		if (flow_cpu_ok(p, cpu)) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			first = (s32)bpf_cpumask_first(
+			    p->cpus_ptr);
+			if (flow_cpu_ok(p, first)) {
+				cpu = first;
+				cpu_valid = true;
+			}
 		}
+	}
+	if (!cpu_valid) {
+		/* No target, park for a later move. */
+		tq = (u64)FLOW_TQ_SEED_NS;
+		if (is_fresh) {
+			tctx->est_ns = tq;
+			__sync_fetch_and_add(&flow_stats.inserts,
+			    1);
+		} else if (is_requeue) {
+			__sync_fetch_and_add(&flow_stats.requeues,
+			    1);
+		} else if (need_join) {
+			__sync_fetch_and_add(&flow_stats.inserts,
+			    1);
+		}
+		tctx->grant_ns = tq;
+		tctx->owner = FLOW_OWNER_NONE;
+		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
+		    tq, 0);
 		return;
 	}
-	/* Interactive tasks place direct to the allowed target. */
-	if (need_join)
-		flow_acquire(tctx, tier);
-	grant = flow_quantum_tier(tier);
-	tctx->grant_ns = grant;
-	if (is_requeue) {
-		scx_bpf_dsq_insert(p,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, grant,
-		    0);
+	st = flow_cpu((u32)cpu);
+	tq = st ? st->tq_ns : (u64)FLOW_TQ_SEED_NS;
+	if (tq == 0)
+		tq = (u64)FLOW_TQ_SEED_NS;
+	if (is_fresh)
+		est = tq;
+	else
+		est = flow_clamp_est(tctx->est_ns);
+	tctx->est_ns = est;
+	if (need_join) {
+		flow_join_cpu((u32)cpu, est);
+		tctx->owner = (u32)cpu;
+		if (is_fresh)
+			__sync_fetch_and_add(&flow_stats.inserts,
+			    1);
+		else
+			__sync_fetch_and_add(&flow_stats.requeues,
+			    1);
+		st = flow_cpu((u32)cpu);
+		tq = st ? st->tq_ns : tq;
+		if (tq == 0)
+			tq = (u64)FLOW_TQ_SEED_NS;
 	} else {
-		scx_bpf_dsq_insert(p,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, grant,
-		    SCX_ENQ_HEAD);
+		tctx->owner = (u32)cpu;
+		if (is_requeue)
+			__sync_fetch_and_add(&flow_stats.requeues,
+			    1);
 	}
-	__sync_fetch_and_add(&flow_stats.enq_tier0, 1);
+	tctx->grant_ns = tq;
+	/* Ordered queue keeps short estimates first. */
+	scx_bpf_dsq_insert_vtime(p, flow_dsq_for_cpu((u32)cpu),
+	    tq, est, 0);
 	/* Kick only a CPU in the mask. */
 	if (flow_cpu_ok(p, cpu)) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		__sync_fetch_and_add(&flow_stats.kicks, 1);
-	}
-	/* Busy preemption stays narrow by design. */
-	if (!is_requeue) {
-		struct flow_cpu_state *st;
-
-		st = flow_cpu((u32)cpu);
-		if (st) {
-			bool busy_batch = false;
-
-			if (st->running_pid != 0 &&
-			    st->running_tier ==
-			    (u32)FLOW_TIER_BATCH)
-				busy_batch = true;
-			/* Preempt only a CPU in the mask. */
-			if (busy_batch &&
-			    flow_preempt_gap_ok(now,
-			    st->last_preempt_at) &&
-			    flow_cpu_ok(p, cpu)) {
-				scx_bpf_kick_cpu(cpu,
-				    SCX_KICK_PREEMPT);
-				__sync_lock_test_and_set(
-				    &st->last_preempt_at, now);
-				__sync_fetch_and_add(
-				    &flow_stats.preempts, 1);
-			}
-		}
 	}
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
-	struct flow_cpu_state *st;
-	u64 served0 = 0;
-	bool tier0_wait = false;
-	bool tier1_wait = false;
 	u32 budget = (u32)FLOW_DISPATCH_MAX_BATCH;
 	u32 moved = 0;
-	u32 batch = 0;
+	u32 own_left = 0;
 
 	(void)prev;
 	if (cpu < 0)
 		return;
-	if (!flow_cpu_id_ok((u32)cpu))
+	if (!flow_cpu_live((u32)cpu))
 		return;
-	/* No peer scan, single CPU ends with no peers. */
-	st = flow_cpu((u32)cpu);
-	if (st)
-		served0 = st->served0;
-	if (scx_bpf_dsq_nr_queued(
-	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu) > 0)
-		tier0_wait = true;
-	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_BATCH) > 0)
-		tier1_wait = true;
-	/* Gated batch serve keeps long waits bounded. */
-	if (flow_deficit_should_serve(served0, tier0_wait,
-	    tier1_wait)) {
-		/* Iterator skips bad heads, backlog drains. */
-		batch = flow_drain_batch(cpu, budget);
-		moved += batch;
-	}
+	/* Own queue drains first with skip past bad heads. */
+	moved += flow_drain_own(cpu, budget - moved);
+	if (moved >= budget)
+		return;
 	/* Parked tasks move when the mask allows. */
-	if (moved < budget &&
-	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0) {
-		/* Iterator skips bad heads, no wedge. */
+	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0)
 		moved += flow_drain_park(cpu, budget - moved);
+	if (moved >= budget)
+		return;
+	own_left = scx_bpf_dsq_nr_queued(
+	    flow_dsq_for_cpu((u32)cpu));
+	if (own_left > 0)
+		return;
+	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0)
+		return;
+	/* Idle thieves scan peers with a rotating cursor. */
+	{
+		struct flow_cpu_state *st;
+		u32 cur;
+		u32 i;
+
+		st = flow_cpu((u32)cpu);
+		cur = st ? (u32)st->cursor : 0;
+		bpf_for(i, 0, 8) {
+			u32 peer;
+
+			if (moved >= budget)
+				break;
+			if (i >= (u32)FLOW_STEAL_BOUND)
+				break;
+			peer = flow_steal_next(cur,
+			    (u32)nr_cpu_ids);
+			cur = peer;
+			if (!flow_cpu_live(peer))
+				continue;
+			if ((s32)peer == cpu)
+				continue;
+			moved += flow_drain_peer(cpu, peer);
+		}
+		if (st)
+			__sync_lock_test_and_set(&st->cursor, cur);
 	}
-	/* Batch runs restore default hint. */
-	if (batch > 0)
-		flow_cpuperf_set(cpu,
-		    (u32)FLOW_TIER_BATCH);
-	/* Interactive backlog asks for the max hint. */
-	else if (tier0_wait)
-		flow_cpuperf_set(cpu,
-		    (u32)FLOW_TIER_INTERACTIVE);
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -795,27 +756,20 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		tctx->run_at = flow_now();
 	if (cpu < 0)
 		goto inc;
-	if (!flow_cpu_id_ok((u32)cpu))
+	if (!flow_cpu_live((u32)cpu))
 		goto inc;
 	st = flow_cpu((u32)cpu);
 	if (st) {
-		u32 tier = 0;
+		u64 est = tctx ?
+		    flow_clamp_est(tctx->est_ns) : 0;
+		u64 tq = st->tq_ns;
 
-		if (tctx && flow_tier_ok(tctx->tier))
-			tier = tctx->tier;
-		st->running_est = tctx ? tctx->est_ns : 0;
+		if (tq == 0)
+			tq = (u64)FLOW_TQ_SEED_NS;
+		st->running_est = est;
 		st->running_pid = (u32)p->pid;
-		st->running_tier = tier;
-		st->served0 = flow_deficit_next(st->served0,
-		    tier);
-		if (tier == (u32)FLOW_TIER_BATCH)
-			__sync_fetch_and_add(
-			    &flow_stats.serves_tier1, 1);
-		else
-			__sync_fetch_and_add(
-			    &flow_stats.serves_tier0, 1);
-		/* The hint tracks the task now on the CPU. */
-		flow_cpuperf_set(cpu, tier);
+		/* The hint uses only estimate against mean. */
+		flow_cpuperf_set(cpu, est, tq);
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
@@ -842,8 +796,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 now;
 	u64 delta;
 	u64 est;
-	u64 grant;
-	bool is_burned;
+	u64 old;
 
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
@@ -859,74 +812,25 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	else
 		delta = 0;
 	est = flow_clamp_est(delta);
+	old = flow_clamp_est(tctx->est_ns);
 	tctx->est_ns = est;
-	grant = tctx->grant_ns;
-	if (grant == (u64)-1)
-		grant = 0;
-	is_burned = flow_burned(grant, delta);
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_clear_running(cpu);
 	flow_on_cpu_dec();
 	tctx->run_at = 0;
 	if (runnable) {
-		u32 tier = tctx->tier;
-		u32 next;
+		u32 owner = tctx->owner;
 
-		if (!flow_tier_ok(tier))
-			tier = 0;
-		next = flow_next_on_burn(tier, true,
-		    is_burned);
-		if (next != tier && flow_tier_ok(next)) {
-			/* Burns move down at once. */
-			flow_tier_dec(tier);
-			__sync_fetch_and_add(
-			    &flow_tier_nr[next], 1);
-			tctx->tier = next;
-			tctx->streak = 0;
-			if (next ==
-			    (u32)FLOW_TIER_BATCH) {
-				u64 floor = flow_min_vtime;
-
-				if (tctx->vruntime == 0 ||
-				    flow_vruntime_before(
-				    tctx->vruntime, floor))
-					tctx->vruntime = floor;
-			}
-			__sync_fetch_and_add(
-			    &flow_stats.demotions, 1);
-		} else {
-			if (tier ==
-			    (u32)FLOW_TIER_BATCH)
-				tctx->vruntime =
-				    flow_vruntime_advance(
-				    tctx->vruntime, delta);
-		}
+		/* Runnable tasks requeue ordered with new est. */
+		if (owner != FLOW_OWNER_NONE &&
+		    flow_cpu_live(owner))
+			flow_replace_cpu(owner, old, est);
+		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
 	}
-	/* Blocked tasks build the streak for promotion. */
-	{
-		u32 tier = tctx->tier;
-		u32 streak = tctx->streak;
-		u32 next_streak;
-		u32 next_tier;
-
-		if (!flow_tier_ok(tier))
-			tier = 0;
-		next_streak = flow_streak_next(streak, delta);
-		tctx->streak = next_streak;
-		if (tier == (u32)FLOW_TIER_BATCH)
-			tctx->vruntime = flow_vruntime_advance(
-			    tctx->vruntime, delta);
-		next_tier = tier;
-		if (tier == (u32)FLOW_TIER_BATCH &&
-		    flow_should_promote(next_streak)) {
-			next_tier = (u32)FLOW_TIER_INTERACTIVE;
-			__sync_fetch_and_add(
-			    &flow_stats.promotions, 1);
-		}
-		flow_release(tctx);
-		tctx->tier = next_tier;
-	}
+	/* Blocked tasks complete and release at once. */
+	__sync_fetch_and_add(&flow_stats.completions, 1);
+	flow_release(tctx);
 }
 
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
@@ -939,9 +843,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->est_ns = 0;
 	tctx->run_at = 0;
 	tctx->grant_ns = (u64)-1;
-	tctx->vruntime = 0;
-	tctx->tier = 0;
-	tctx->streak = 0;
+	tctx->owner = FLOW_OWNER_NONE;
+	tctx->pad = 0;
 }
 
 /*
@@ -956,6 +859,9 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	if (tctx->grant_ns == (u64)-1)
+		return;
+	__sync_fetch_and_add(&flow_stats.completions, 1);
 	flow_release(tctx);
 }
 
@@ -973,6 +879,9 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	if (tctx->grant_ns == (u64)-1)
+		return;
+	__sync_fetch_and_add(&flow_stats.completions, 1);
 	flow_release(tctx);
 }
 
@@ -980,6 +889,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	s32 ret;
 	u64 n;
+	s32 cpu;
 
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
@@ -991,21 +901,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	flow_min_vtime = 0;
-	flow_tier_nr[0] = 0;
-	flow_tier_nr[1] = 0;
-	/* Create the shared batch DSQ. */
-	if ((u64)FLOW_DSQ_BATCH >= SCX_DSQ_LOCAL_ON) {
-		scx_bpf_error("dsq id over bound");
-		return -EINVAL;
-	}
-	ret = scx_bpf_create_dsq((u64)FLOW_DSQ_BATCH, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("dsq create failed");
-		return ret;
+	/* Create one ordered queue per CPU. */
+	bpf_for(cpu, 0, 1024) {
+		u64 dsq;
+
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= n)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		dsq = flow_dsq_for_cpu((u32)cpu);
+		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
+			scx_bpf_error("dsq id over bound");
+			return -EINVAL;
+		}
+		ret = scx_bpf_create_dsq(dsq, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("dsq create failed");
+			return ret;
+		}
 	}
 	/* Create the park DSQ for tasks with no target. */
-	if ((u64)FLOW_DSQ_PARK >= SCX_DSQ_LOCAL_ON) {
+	if ((u64)FLOW_DSQ_PARK >= (u64)SCX_DSQ_LOCAL_ON) {
 		scx_bpf_error("dsq id over bound");
 		return -EINVAL;
 	}
@@ -1013,6 +931,29 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
 		return ret;
+	}
+	/* Seed each mean with the seed value. */
+	bpf_for(cpu, 0, 1024) {
+		struct flow_cpu_state *st;
+		u32 key;
+
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= n)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		key = (u32)cpu;
+		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
+		if (!st)
+			continue;
+		st->tq_ns = (u64)FLOW_TQ_SEED_NS;
+		st->sum_est = 0;
+		st->nr = 0;
+		st->cursor = (u64)cpu;
+		st->running_est = 0;
+		st->running_pid = 0;
+		st->pad = 0;
 	}
 	return 0;
 }

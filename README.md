@@ -5,13 +5,9 @@ installer in `tools` and this README at the root. The layout
 matches an overlay build. The `scx` dir copies into a
 workspace at `scheds/experimental/scx_flow` and builds there.
 
-> [!NOTE]
-> The `main` branch can be unstable. Stable versions
-> will use `archive/*` branch names.
-
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.5`
+- `scx/Cargo.toml` package `scx_flow` at `4.0.6`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` BPF core and ops table
@@ -27,32 +23,30 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Design
 
-Two tiers share the work. Tier zero is interactive with
-a 500µs slice and direct placement
-to the target DSQ. Head inserts carry wakeups and tail
-inserts carry requeues. Tier one is batch with an 8ms
-slice through one shared DSQ ordered by
-vruntime. The batch DSQ uses id `0x2000` and the park
-DSQ uses id `0x2001` for tasks with no allowed CPU. New
-tasks start in tier zero. Estimates hold the last burst
-clamped at 1ns to 1s with no
-smoothing. A runnable task that burns the full slice
-moves down one tier at once. The burn check compares
-the burst against the stored grant. Blocked tasks build
-a streak of short bursts below 1ms. Three
-short blocks move up one tier with the streak capped at
-seven. Dispatch serves eight tier zero runs per tier
-one run when both tiers hold work. An idle kick is sent
-on every insert with a valid target. A narrow busy
-preemption covers tier zero wakeups against tier one
-runners with a per-CPU gap of 1ms. New
-batch tasks join at the vruntime floor. Running batch
-tasks advance by the burst with saturation.
-Counts use atomics with saturation on gauges.
-Inserts and runs count per tier. Moves, gated serves,
-kicks and preemptions count across tiers.
-The watchdog is 30 seconds. Ops name
-is `flow`.
+Each CPU keeps an ordered queue with a per-CPU mean slice.
+Queues hold short estimates first with arrival order for ties.
+The per-CPU mean is the sum over unfinished work divided by
+the count with the running task included. The seed is 8ms
+with a floor of 500µs and a ceiling of 32ms. Fresh tasks join
+with the current mean so the mean stays neutral. Estimates
+hold the last burst clamped at 1ns to 1 second with no
+smoothing. Each grant stores the mean at insert time. Blocked tasks
+complete and release at once. Runnable tasks requeue ordered
+with a refreshed estimate. Dispatch drains the local queue
+first, then the park queue, then idle steals from peers. Each
+pass visits every queued task in the owned and park queues in
+order and skips past dead, exiting, foreign and failed heads,
+so every pass moves at least one task when movable work exists
+there. Idle steals visit at most 8 peers with a rotating
+cursor and take the head of a peer queue when the head
+allows the thief, moving on to the next peer otherwise.
+Kicks wake idle targets only with a mask
+check and no busy preemption. Hints use only estimate against
+mean. Counts cover inserts, requeues, completions, park moves,
+steal moves and kicks. Per-CPU queues use ids `0x4000` plus
+the CPU id with up to 1024 CPUs. The park queue uses id
+`0x5000` for tasks with no allowed CPU. The watchdog is 30
+seconds. Ops name is `flow`.
 
 ## Build
 
@@ -107,7 +101,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.5`, state `enabled` and ops containing `flow`. To
+`4.0.6`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

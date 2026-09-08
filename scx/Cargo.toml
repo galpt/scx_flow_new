@@ -1,9 +1,9 @@
 [package]
 name = "scx_flow"
-version = "4.0.5"
+version = "4.0.6"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
-description = "A two tier interactive and batch scheduler for sched_ext."
+description = "A per CPU ordered queue scheduler for sched_ext."
 license = "GPL-2.0-only"
 
 [dependencies]

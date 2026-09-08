@@ -3,11 +3,11 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Stats server and web snapshot for the flow scheduler.
- * Metrics mirrors the BPF counters plus uptime. Tier
- * inserts and serves count per tier. Moves count tier
- * changes in either direction. Web metrics adds per-CPU
- * cards with per tier slices and per tier waiting
- * counts.
+ * Metrics mirrors the BPF counters plus uptime. Inserts
+ * count fresh joins. Requeues count runnable slice ends.
+ * Completions count blocks and exits. Park and steal
+ * moves count dispatch moves. Kicks count idle wakeups.
+ * Web metrics adds per CPU cards with mean and depth.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -27,59 +27,72 @@ use serde::Serialize;
 #[stat(top)]
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
+    #[serde(default)]
     pub on_cpu: u64,
     #[stat(desc = "Total runtime in nanoseconds")]
+    #[serde(default)]
     pub total_runtime: u64,
     #[stat(desc = "Uptime since attach in nanoseconds")]
+    #[serde(default)]
     pub uptime_ns: u64,
-    #[stat(desc = "Inserts in tier zero")]
-    pub enq_tier0: u64,
-    #[stat(desc = "Inserts in tier one")]
-    pub enq_tier1: u64,
-    #[stat(desc = "Moves from tier zero to tier one")]
-    pub demotions: u64,
-    #[stat(desc = "Moves from tier one to tier zero")]
-    pub promotions: u64,
-    #[stat(desc = "Runs in tier zero")]
-    pub serves_tier0: u64,
-    #[stat(desc = "Runs in tier one")]
-    pub serves_tier1: u64,
-    #[stat(desc = "Gated batch serves in dispatch")]
-    pub deficit_serves: u64,
+    #[stat(desc = "Fresh joins with a new estimate")]
+    #[serde(default)]
+    pub inserts: u64,
+    #[stat(desc = "Runnable slice ends with requeue")]
+    #[serde(default)]
+    pub requeues: u64,
+    #[stat(desc = "Blocks and exits with release")]
+    #[serde(default)]
+    pub completions: u64,
+    #[stat(desc = "Moves from the park queue")]
+    #[serde(default)]
+    pub park_moves: u64,
+    #[stat(desc = "Moves from a peer queue")]
+    #[serde(default)]
+    pub steal_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
-    #[stat(desc = "Busy preemption kicks for batch runners")]
-    #[serde(default)]
-    pub preempts: u64,
     #[stat(desc = "Inserts without task state")]
+    #[serde(default)]
     pub enq_no_tctx: u64,
 }
 
 /*
- * One card of the per-CPU grid. Static fields come from
+ * One card of the per CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
- * per-CPU map on each poll.
+ * per CPU map on each poll. The mean holds the current
+ * slice. The depth holds unfinished work with running.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
     /* CPU id. */
+    #[serde(default)]
     pub id: u32,
     /* Max frequency in kilohertz. Zero when unknown. */
+    #[serde(default)]
     pub freq_khz: u64,
     /* Live frequency in kilohertz. Zero when unknown. */
+    #[serde(default)]
     pub cur_freq_khz: u64,
     /* Cache domain id. Zero when unknown. */
+    #[serde(default)]
     pub llc_id: u32,
     /* True for the second thread of a core. */
+    #[serde(default)]
     pub smt: bool,
     /* Estimate of the task now on the CPU. Zero idle. */
+    #[serde(default)]
     pub running_est_ns: u64,
     /* Pid now on the CPU. Zero when idle. */
-    pub running_pid: u32,
-    /* Tier of the task now on the CPU. Zero idle. */
     #[serde(default)]
-    pub running_tier: u32,
+    pub running_pid: u32,
+    /* Current mean slice in nanos. */
+    #[serde(default)]
+    pub tq_ns: u64,
+    /* Unfinished tasks with the running one. */
+    #[serde(default)]
+    pub depth: u64,
 }
 
 /*
@@ -94,34 +107,25 @@ pub struct WebMetrics {
     /* One entry per online CPU. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
-    /* Fixed slice per tier in nanoseconds. */
-    #[serde(default)]
-    pub quanta_per_tier: [u64; 2],
-    /* Joined tasks per tier. Index is the tier. */
-    #[serde(default)]
-    pub waiting_per_tier: [u64; 2],
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] run={} runtime={} uptime={} enq={}/{} \
-            move={}/{} run={}/{} deficit={} kick={} \
-            preempt={} noctx={}",
+            "[{}] run={} runtime={} uptime={} \
+            ins={} req={} done={} park={} steal={} \
+            kick={} noctx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
             self.uptime_ns,
-            self.enq_tier0,
-            self.enq_tier1,
-            self.demotions,
-            self.promotions,
-            self.serves_tier0,
-            self.serves_tier1,
-            self.deficit_serves,
+            self.inserts,
+            self.requeues,
+            self.completions,
+            self.park_moves,
+            self.steal_moves,
             self.kicks,
-            self.preempts,
             self.enq_no_tctx,
         )?;
         Ok(())
@@ -132,20 +136,16 @@ impl Metrics {
      * through unchanged.
      */
     pub fn delta(&self, rhs: &Self) -> Self {
-        let deficit = self.deficit_serves.wrapping_sub(rhs.deficit_serves);
         Self {
             on_cpu: self.on_cpu,
             total_runtime: self.total_runtime.wrapping_sub(rhs.total_runtime),
             uptime_ns: self.uptime_ns,
-            enq_tier0: self.enq_tier0.wrapping_sub(rhs.enq_tier0),
-            enq_tier1: self.enq_tier1.wrapping_sub(rhs.enq_tier1),
-            demotions: self.demotions.wrapping_sub(rhs.demotions),
-            promotions: self.promotions.wrapping_sub(rhs.promotions),
-            serves_tier0: self.serves_tier0.wrapping_sub(rhs.serves_tier0),
-            serves_tier1: self.serves_tier1.wrapping_sub(rhs.serves_tier1),
-            deficit_serves: deficit,
+            inserts: self.inserts.wrapping_sub(rhs.inserts),
+            requeues: self.requeues.wrapping_sub(rhs.requeues),
+            completions: self.completions.wrapping_sub(rhs.completions),
+            park_moves: self.park_moves.wrapping_sub(rhs.park_moves),
+            steal_moves: self.steal_moves.wrapping_sub(rhs.steal_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
-            preempts: self.preempts.wrapping_sub(rhs.preempts),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
         }
     }
