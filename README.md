@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.0.10`
+- `scx/Cargo.toml` package `scx_flow` at `4.1.0`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -36,26 +36,37 @@ the count with the running task included. The seed is 8ms
 with a floor of 500µs and a ceiling of 32ms. Fresh tasks join
 with the current mean so the mean stays neutral. Estimates
 hold the last burst clamped at 1ns to 1 second with no
-smoothing. Each grant stores the mean at insert time. Blocked tasks
+smoothing. Mean accounting caps each sample at 32ms so one
+long burst never dominates the mean while order still uses
+the full estimate. Tiny bursts at most one quarter of the
+mean run at once on the local queue when the target is idle
+and empty. A run just past its grant and within one eighth
+above it earns one ordered head start with no chain. Each
+grant stores the mean at insert time. Blocked tasks
 complete and release at once. Runnable tasks requeue ordered
-with a refreshed estimate. Dispatch drains the local queue
-first, then the park queue, then idle steals from peers. Each
-pass visits every queued task in the owned and park queues in
-order and moves live tasks with no move failure when allowed,
-including exiting tasks so they run to exit, and skips past
-dead, foreign and failed heads, so every pass moves at least
-one task when movable work exists there. An idle CPU with no
-moved work steals past unmovable leftovers, while a busy CPU
-with moved work steals only when both queues are empty. Idle
-steals visit at most 8 peers with a rotating cursor and take
-the first task in a peer queue that allows the thief, moving
-past dead, foreign and failed heads to rescue movable work
-behind a bad head. Kicks wake idle targets only with a mask
-check and no busy preemption. Hints use only estimate against
-mean. Stops restore the low hint when the CPU goes idle.
-Counts cover inserts, requeues, completions, park moves,
-steal moves and kicks. Per-CPU queues use ids `0x4000` plus
-the CPU id with up to 1024 CPUs. The park queue uses id
+with a refreshed estimate. Placement reuses the idle prior
+CPU first with a reuse count, then the LLC idle CPU, then
+any idle CPU, then the prior and current CPUs. Dispatch
+drains the local queue first, then the park queue, then
+idle steals from peers. Each pass visits every queued task
+in the owned and park queues in order and moves live tasks
+with no move failure when allowed, including exiting tasks
+so they run to exit, and skips past dead, foreign and failed
+heads, so every pass moves at least one task when movable
+work exists there. An idle CPU with no moved work steals past
+unmovable leftovers, while a busy CPU with moved work steals
+only when both queues are empty. Idle steals visit at most
+8 peers with a rotating cursor and take the first task in a
+peer queue that allows the thief when the donor holds at
+least two tasks, moving past dead, foreign and failed heads
+to rescue movable work behind a bad head. Kicks wake idle
+targets only when the queue was empty with a mask check and
+no busy preemption. Equal estimates skip the mean write.
+Hints use only estimate against mean. Stops restore the low
+hint when the CPU goes idle. Counts cover inserts, requeues,
+completions, park moves, steal moves, kicks, fast hits,
+linger boosts and reuse hits. Per-CPU queues use ids `0x4000`
+plus the CPU id with up to 1024 CPUs. The park queue uses id
 `0x5000` for tasks with no allowed CPU. The watchdog is 30
 seconds. Ops name is `flow`.
 
@@ -112,7 +123,7 @@ The script overlays `scx` into
 `scheds/experimental/scx_flow`, builds in release mode
 and installs to `/usr/local/bin`. Without root it copies
 the binary to the repo dir instead. Expect version
-`4.0.10`, state `enabled` and ops containing `flow`. To
+`4.1.0`, state `enabled` and ops containing `flow`. To
 roll back, stop the loader, restore the prior binary
 and start the loader again.
 

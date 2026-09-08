@@ -8,8 +8,11 @@
  * Fresh tasks join with the current mean. Known tasks
  * requeue with a clamped estimate. Tasks with no
  * target wait in the park queue. Inserts use ordered
- * time with the estimate as the key. Kicks wake idle
- * targets only.
+ * time with the estimate as the key. Tiny bursts on
+ * an idle and empty target run at once on the local
+ * queue with a fast count. A slight overrun earns one
+ * ordered head start with a linger count and no chain.
+ * Kicks wake idle targets only.
  */
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
@@ -82,6 +85,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		tctx->grant_ns = tq;
 		tctx->owner = FLOW_OWNER_NONE;
+		tctx->linger = 0;
 		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
 		    tq, 0);
 		return;
@@ -115,12 +119,59 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    1);
 	}
 	tctx->grant_ns = tq;
+	/* Tiny bursts on an idle and empty target run local. */
+	if ((u64)FLOW_GATE_FAST && flow_fast_ok(est, tq)) {
+		u64 dsq = flow_dsq_for_cpu((u32)cpu);
+
+		if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
+		    scx_bpf_dsq_nr_queued(
+			(u64)SCX_DSQ_LOCAL_ON | (u64)cpu) == 0 &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
+			scx_bpf_dsq_insert(p,
+			    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu,
+			    tq, 0);
+			__sync_fetch_and_add(
+			    &flow_stats.fast_hits, 1);
+			if (flow_cpu_ok(p, cpu)) {
+				scx_bpf_kick_cpu(cpu,
+				    SCX_KICK_IDLE);
+				__sync_fetch_and_add(
+				    &flow_stats.kicks, 1);
+			}
+			return;
+		}
+	}
+	/* A pending boost earns one ordered head start. */
+	if ((u64)FLOW_GATE_LINGER && tctx->linger != 0) {
+		u64 dsq = flow_dsq_for_cpu((u32)cpu);
+
+		scx_bpf_dsq_insert_vtime(p, dsq, tq, 0, 0);
+		__sync_fetch_and_add(&flow_stats.linger_boosts,
+		    1);
+		if ((u64)FLOW_GATE_CUTS) {
+			if (scx_bpf_dsq_nr_queued(dsq) > 1)
+				return;
+		}
+		if (flow_cpu_ok(p, cpu)) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks,
+			    1);
+		}
+		return;
+	}
+	tctx->linger = 0;
 	/* Ordered queue keeps short estimates first. */
-	scx_bpf_dsq_insert_vtime(p, flow_dsq_for_cpu((u32)cpu),
-	    tq, est, 0);
-	/* Kick only a CPU in the mask. */
-	if (flow_cpu_ok(p, cpu)) {
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		__sync_fetch_and_add(&flow_stats.kicks, 1);
+	/* Kicks run only when the queue was empty. */
+	{
+		u64 dsq = flow_dsq_for_cpu((u32)cpu);
+
+		scx_bpf_dsq_insert_vtime(p, dsq, tq, est, 0);
+		if ((u64)FLOW_GATE_CUTS &&
+		    scx_bpf_dsq_nr_queued(dsq) > 1)
+			return;
+		if (flow_cpu_ok(p, cpu)) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
+		}
 	}
 }

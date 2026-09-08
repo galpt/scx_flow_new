@@ -15,19 +15,28 @@ unfinished work divided by the count with the running task
 included. The seed is 8ms with a floor of 500µs and a ceiling
 of 32ms. Fresh tasks join with the current mean so the mean
 stays neutral. Estimates hold the last burst clamped at 1ns
-to 1 second with no smoothing. Blocked tasks complete and release
-at once. Runnable tasks requeue ordered with a refreshed
-estimate. Dispatch drains the local queue first, then the park
-queue, then idle steals from peers. Each pass visits every
-queued task in the owned and park queues in order and moves
-live tasks with no move failure when allowed, including
-exiting tasks so they run to exit, and skips past dead,
-foreign and failed heads, so every pass moves at least one
-task when movable work exists there. An idle CPU with no
-moved work steals past unmovable leftovers, while a busy CPU
-with moved work steals only when both queues are empty. Idle
-steals scan past bad heads to rescue movable work. Idle
-targets are kicked at once with a mask check and no busy preemption.
+to 1 second with no smoothing. Mean accounting caps each
+sample at 32ms so one long burst never dominates the mean
+while order still uses the full estimate. Tiny bursts at most
+one quarter of the mean run at once on the local queue when
+the target is idle and empty. A run just past its grant and
+within one eighth above it earns one ordered head start with
+no chain. Blocked tasks complete and release at once.
+Runnable tasks requeue ordered with a refreshed estimate.
+Placement reuses the idle prior CPU first, then the LLC idle
+CPU, then any idle CPU. Dispatch drains the local queue
+first, then the park queue, then idle steals from peers.
+Each pass visits every queued task in the owned and park
+queues in order and moves live tasks with no move failure
+when allowed, including exiting tasks so they run to exit,
+and skips past dead, foreign and failed heads, so every pass
+moves at least one task when movable work exists there. An
+idle CPU with no moved work steals past unmovable leftovers,
+while a busy CPU with moved work steals only when both queues
+are empty. Idle steals scan past bad heads to rescue movable
+work when the donor holds at least two tasks. Idle targets
+are kicked only when the queue was empty with a mask check
+and no busy preemption.
 
 The mean math and the queue rules live in
 `src/bpf/intf.h`, insert, accounting, dispatch and the
@@ -65,18 +74,21 @@ only on the reporting options, which are `--stats`,
 `--monitor` and `--no-webui`. See `src/config.rs` and
 `src/flow.rs` for the checked values and the unit tests
 for mean range, fresh neutral joins, estimate clamp,
-ordered inserts, progress guarantee, steal bounds, LLC
-choice and config checks.
+accounting cap, fast lane, linger discipline, ordered
+inserts, progress guarantee, steal bounds, donor depth,
+sticky reuse, kick gating, LLC choice and config checks.
 
 ## Web UI
 
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
 summary line and a per-CPU grid with running estimates,
-per-CPU means and per-CPU depths, with no
+per-CPU means and per-CPU depths, plus system tiles for
+fast hits, linger boosts and reuse hits, with no
 authentication, since the loopback address is the trust
-boundary. `--no-webui` disables it. Empty states show
-an empty CPU data card when no data has arrived.
+boundary.
+`--no-webui` disables it. Empty states show an empty CPU
+data card when no data has arrived.
 
 ## Queues
 
@@ -90,40 +102,50 @@ Each CPU serves its mean. The seed is 8ms. The floor is
 500µs. The ceiling is 32ms. Each grant is fixed at
 insert time and stores the mean. Per task
 estimates hold the last burst clamped at 1ns
-to 1 second with no smoothing. Fresh tasks join
-with the current mean, so the mean stays neutral.
+to 1 second with no smoothing. Mean accounting caps each
+sample at 32ms while order still uses the full estimate.
+Fresh tasks join with the current mean, so the mean stays
+neutral. A run just past its grant and within one eighth
+above it earns one ordered head start with no chain.
 
 ## Insert and dispatch
 
 Enqueue places each task on the selected CPU when allowed,
 then the first allowed CPU, then the park. Pinned
 tasks use their CPU or the park. Tasks that cannot
-move stay on the current CPU. Each fresh join adds the
-estimate to the target mean. Each runnable requeue refreshes
-the estimate in the mean with no count change. Running keeps
-the entry. Blocking releases it at once. Disable and exit
-release exactly once. Dispatch drains the local queue first,
-then the park queue, then idle steals from peers. Each
-pass moves up to 32 tasks across local, park and steal. Each
-move in the local and park queues moves live tasks with no
-move failure when allowed, including exiting tasks so they
-run to exit, and skips dead, foreign and failed tasks, so one
-head never blocks later work there. Steals take the first
-task in a peer queue that allows the thief and move past bad
-heads to rescue movable work behind them. An idle CPU with
-no moved work steals past unmovable leftovers, while a busy
-CPU with moved work steals only when both queues are empty. An
-idle kick is sent only to a CPU in the task mask with no
-busy preemption.
+move stay on the current CPU. Tiny bursts at most one
+quarter of the mean run at once on the local queue when
+the target is idle and empty with a fast count. A pending
+boost runs once at the ordered head with a linger count
+and no chain. Each fresh join adds the estimate to the
+target mean with the capped value. Each runnable requeue
+refreshes the estimate in the mean with no count change
+and skips the write when the estimate is unchanged.
+Running keeps the entry. Blocking releases it at once.
+Disable and exit release exactly once. Dispatch drains the
+local queue first, then the park queue, then idle steals
+from peers. Each pass moves up to 32 tasks across local,
+park and steal. Each move in the local and park queues
+moves live tasks with no move failure when allowed,
+including exiting tasks so they run to exit, and skips
+dead, foreign and failed tasks, so one head never blocks
+later work there. Steals take the first task in a peer
+queue that allows the thief when the donor holds at least
+two tasks and move past bad heads to rescue movable work
+behind them. An idle CPU with no moved work steals past
+unmovable leftovers, while a busy CPU with moved work
+steals only when both queues are empty. An idle kick is
+sent only when the queue was empty to a CPU in the task
+mask with no busy preemption.
 
 ## CPU choice
 
-CPU choice prefers an idle CPU in the previous CPU
-LLC domain, then an idle CPU in the task mask, then
-the prior CPU when allowed, then the current CPU
-when allowed, then the first allowed CPU. Pinned
-tasks stay in place. Tasks that cannot move stay on
-the current CPU. The LLC step skips the second
+CPU choice prefers the idle prior CPU with a reuse count,
+then an idle CPU in the previous CPU LLC domain, then an
+idle CPU in the task mask, then the prior CPU when allowed,
+then the current CPU when allowed, then the first allowed
+CPU. Pinned tasks stay in place. Tasks that cannot move
+stay on the current CPU. The LLC step skips the second
 thread of a busy core and is skipped on single LLC
 and unknown topology hosts, which stay plain. Idle
 choice is rechecked in the mask. A final hint
@@ -138,10 +160,14 @@ needed.
 
 `--stats` prints deltas. `--monitor` runs the printer
 only. Counters cover inserts, requeues, completions,
-park moves, steal moves, idle kicks and inserts without
-state. Park moves count dispatch moves from the park queue.
-Steal moves count dispatch moves from peer queues. Kicks
-count idle wakeup kicks.
+park moves, steal moves, idle kicks, inserts without
+state, fast hits, linger boosts and reuse hits. Park moves
+count dispatch moves from the park queue. Steal moves count
+dispatch moves from peer queues. Kicks count idle wakeup
+kicks sent only when the queue was empty. Fast hits count
+direct local inserts for tiny bursts. Linger boosts count
+ordered head starts for slight overruns. Reuse hits count
+idle prior CPU reuse.
 
 ## Measuring Wakeup Latency
 
@@ -157,11 +183,14 @@ machine.
 ## Limitations
 
 - Idle wakeup kick. Wakeups join ordered and kick an
-  idle target to collect at once.
+  idle target only when the queue was empty to collect
+  at once. Tiny bursts on idle empty targets run local
+  at once.
 - Queues stay per-CPU. Idle CPUs collect park work and
-  steal peer work with a scan past bad heads, so movable
-  work behind a dead, foreign or failed head is rescued
-  when the task allows the idle CPU.
+  steal peer work with a scan past bad heads when the
+  donor holds at least two tasks, so movable work behind
+  a dead, foreign or failed head is rescued when the task
+  allows the idle CPU.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report

@@ -256,6 +256,9 @@ mod tests {
             \"kicks\":0,\"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
+        assert_eq!(m.stats.fast_hits, 0);
+        assert_eq!(m.stats.linger_boosts, 0);
+        assert_eq!(m.stats.reuse_hits, 0);
         assert!(m.per_cpu.is_empty());
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
@@ -275,6 +278,9 @@ mod tests {
                 park_moves: 1,
                 steal_moves: 0,
                 kicks: 4,
+                fast_hits: 5,
+                linger_boosts: 6,
+                reuse_hits: 7,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -289,6 +295,9 @@ mod tests {
         let txt = serde_json::to_string(&snap).unwrap();
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
+        assert_eq!(back.stats.fast_hits, 5);
+        assert_eq!(back.stats.linger_boosts, 6);
+        assert_eq!(back.stats.reuse_hits, 7);
         assert_eq!(back.per_cpu[0].tq_ns, 8_000_000);
         assert_eq!(back.per_cpu[0].depth, 2);
     }

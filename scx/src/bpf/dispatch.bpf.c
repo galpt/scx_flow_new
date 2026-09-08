@@ -113,8 +113,9 @@ static __always_inline u32 flow_drain_park(s32 cpu,
  * later work. The first allowed task moves to the
  * local DSQ of the thief. Exiting tasks move when
  * allowed, so they run to exit on the owner or on a
- * thief. Returns one when a task moved and zero
- * otherwise.
+ * thief. Thin donors keep their last task, so steals
+ * need at least two queued tasks. Returns one when a
+ * task moved and zero otherwise.
  */
 static __always_inline u32 flow_drain_peer(s32 thief,
 	u32 peer)
@@ -133,6 +134,10 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 		return 0;
 	dsq = flow_dsq_for_cpu(peer);
 	if (scx_bpf_dsq_nr_queued(dsq) == 0)
+		return 0;
+	if ((u64)FLOW_GATE_STICKY &&
+	    scx_bpf_dsq_nr_queued(dsq) <
+	    (u64)FLOW_STEAL_MIN_DEPTH)
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {

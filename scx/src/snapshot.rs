@@ -29,6 +29,9 @@ impl<'a> Scheduler<'a> {
             steal_moves: s.steal_moves,
             kicks: s.kicks,
             enq_no_tctx: s.enq_no_tctx,
+            fast_hits: s.fast_hits,
+            linger_boosts: s.linger_boosts,
+            reuse_hits: s.reuse_hits,
         }
     }
 

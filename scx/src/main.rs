@@ -196,8 +196,17 @@ impl<'a> Scheduler<'a> {
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
             "exit ins={} req={} done={} park={} steal={} \
-            runtime={} oncpu={}",
-            m.inserts, m.requeues, m.completions, m.park_moves, m.steal_moves, runtime, oncpu,
+            fast={} linger={} reuse={} runtime={} oncpu={}",
+            m.inserts,
+            m.requeues,
+            m.completions,
+            m.park_moves,
+            m.steal_moves,
+            m.fast_hits,
+            m.linger_boosts,
+            m.reuse_hits,
+            runtime,
+            oncpu,
         );
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
@@ -330,5 +339,46 @@ mod tests {
         assert_eq!(crate::flow::TQ_SEED_NS, 8_000_000);
         assert_eq!(crate::flow::TQ_MIN_NS, 500_000);
         assert_eq!(crate::flow::TQ_MAX_NS, 32_000_000);
+    }
+
+    #[test]
+    fn acct_matches_header() {
+        assert_eq!(
+            crate::flow::ACCT_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_ACCT_MAX_NS as u64
+        );
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CLAMP as u64, 1);
+    }
+
+    #[test]
+    fn fast_matches_header() {
+        assert_eq!(
+            crate::flow::FAST_DIV,
+            crate::bpf_intf::flow_consts_FLOW_FAST_DIV as u64
+        );
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_FAST as u64, 1);
+    }
+
+    #[test]
+    fn linger_matches_header() {
+        assert_eq!(
+            crate::flow::LINGER_DIV,
+            crate::bpf_intf::flow_consts_FLOW_LINGER_DIV as u64
+        );
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_LINGER as u64, 1);
+    }
+
+    #[test]
+    fn sticky_matches_header() {
+        assert_eq!(
+            crate::flow::STEAL_MIN_DEPTH,
+            crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_DEPTH as u64
+        );
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_STICKY as u64, 1);
+    }
+
+    #[test]
+    fn cuts_matches_header() {
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CUTS as u64, 1);
     }
 }

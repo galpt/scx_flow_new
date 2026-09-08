@@ -36,6 +36,18 @@ pub const CPUPERF_SHORT: u32 = 1024;
 /* Hint used for long estimates. */
 #[cfg(test)]
 pub const CPUPERF_LONG: u32 = 0;
+/* Cap of one sample in mean accounting in nanos. */
+#[cfg(test)]
+pub const ACCT_MAX_NS: u64 = 32_000_000;
+/* Divisor for the fast lane bound. */
+#[cfg(test)]
+pub const FAST_DIV: u64 = 4;
+/* Divisor for the linger bound. */
+#[cfg(test)]
+pub const LINGER_DIV: u64 = 8;
+/* Least donor depth that allows a steal. */
+#[cfg(test)]
+pub const STEAL_MIN_DEPTH: u64 = 2;
 
 /*
  * Clamp a per task estimate to the estimate range.
@@ -45,6 +57,17 @@ pub const CPUPERF_LONG: u32 = 0;
 #[cfg(test)]
 pub fn clamp_est(v: u64) -> u64 {
     v.clamp(EST_MIN_NS, EST_MAX_NS)
+}
+
+/*
+ * Cap one sample for mean accounting. The order key
+ * keeps the full clamped estimate. The accounting
+ * value keeps the tighter cap, so a single long run
+ * never moves the mean by more than the cap.
+ */
+#[cfg(test)]
+pub fn clamp_acct(v: u64) -> u64 {
+    clamp_est(v).min(ACCT_MAX_NS)
 }
 
 /*
@@ -97,6 +120,119 @@ pub fn cpuperf_for_est(est: u64, tq: u64) -> u32 {
         CPUPERF_SHORT
     } else {
         CPUPERF_LONG
+    }
+}
+
+/*
+ * True when an estimate is tiny against the mean.
+ * Tiny means at most one quarter of the mean, so
+ * short bursts run at once on an idle target.
+ */
+#[cfg(test)]
+pub fn fast_ok(est: u64, tq: u64) -> bool {
+    if tq == 0 {
+        return false;
+    }
+    est <= (tq >> 2)
+}
+
+/*
+ * True when a fast lane insert may run. Needs a tiny
+ * estimate with an idle and empty target, so only
+ * short bursts on quiet CPUs run local at once.
+ */
+#[cfg(test)]
+pub fn may_fast(est: u64, tq: u64, idle: bool, empty: bool) -> bool {
+    if !fast_ok(est, tq) {
+        return false;
+    }
+    if !idle {
+        return false;
+    }
+    if !empty {
+        return false;
+    }
+    true
+}
+
+/*
+ * True when a run slightly overran its grant. Slight
+ * means above the grant and within one eighth above
+ * it, so only near misses earn a single extra turn.
+ */
+#[cfg(test)]
+pub fn linger_ok(delta: u64, grant: u64) -> bool {
+    if grant == 0 {
+        return false;
+    }
+    if delta <= grant {
+        return false;
+    }
+    let limit = grant.saturating_add(grant >> 3);
+    delta <= limit
+}
+
+/*
+ * Linger flag for tests. Zero is plain. One is a
+ * pending boost. The flag clears after one boosted
+ * slice with no chain, so only one head start follows
+ * a near miss.
+ */
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Linger {
+    /* Pending boost flag. Zero plain, one pending. */
+    pub flag: u32,
+    /* Counted boosts. Grows only on head starts. */
+    pub boosts: u64,
+}
+
+#[cfg(test)]
+impl Linger {
+    /*
+     * Plain linger with no pending boost. Matches the
+     * cleared task state after enable.
+     */
+    pub fn plain() -> Self {
+        Self { flag: 0, boosts: 0 }
+    }
+
+    /*
+     * Step a runnable stop. A pending flag clears with
+     * no new boost. A near miss with no pending flag
+     * sets the flag with no count yet. Counts happen
+     * only on head starts, so park drops stay honest.
+     */
+    pub fn stop(&mut self, delta: u64, grant: u64) {
+        if self.flag != 0 {
+            self.flag = 0;
+            return;
+        }
+        if linger_ok(delta, grant) {
+            self.flag = 1;
+        }
+    }
+
+    /*
+     * Step an ordered insert. A pending flag earns one
+     * head start with a count and keeps the flag for
+     * the non chaining clear on the next stop. A plain
+     * flag stays plain with no count.
+     */
+    pub fn insert(&mut self) -> bool {
+        if self.flag != 0 {
+            self.boosts = self.boosts.saturating_add(1);
+            return true;
+        }
+        false
+    }
+
+    /*
+     * Step a block or park drop. Clears the flag with
+     * no count, so a dropped boost never counts.
+     */
+    pub fn clear(&mut self) {
+        self.flag = 0;
     }
 }
 
@@ -311,6 +447,77 @@ pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
 }
 
 /*
+ * True when the prior CPU may be reused at once.
+ * Needs an allowed prior CPU that is idle, so busy
+ * priors never preempt and only quiet reuse counts.
+ */
+#[cfg(test)]
+pub fn sticky_prior_ok(prev: i32, allowed: &[bool], idle: &[bool]) -> bool {
+    if !may_run_on(prev, allowed) {
+        return false;
+    }
+    if prev < 0 {
+        return false;
+    }
+    matches!(idle.get(prev as usize), Some(true))
+}
+
+/*
+ * True when a donor queue may lose one task. Needs at
+ * least two queued tasks, so thin donors keep their
+ * last task for the owner.
+ */
+#[cfg(test)]
+pub fn donor_ok(depth: u64) -> bool {
+    depth >= STEAL_MIN_DEPTH
+}
+
+/*
+ * Full select model with sticky prior reuse. Mirrors
+ * the BPF order of idle prior, LLC idle, any idle,
+ * previous, current and first. Returns none for park
+ * use when no CPU allows.
+ */
+#[cfg(test)]
+pub fn select_sticky_model(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    llc_ids: &[u32],
+    full: &[bool],
+    nr: u64,
+) -> (Option<u32>, bool) {
+    if sticky_prior_ok(prev, allowed, idle) {
+        return (Some(prev as u32), true);
+    }
+    (
+        select_cpu_model(prev, cur, allowed, idle, llc_ids, full, nr),
+        false,
+    )
+}
+
+/*
+ * True when a kick may run. Needs a queue that held
+ * at most one task after insert, so first arrivals
+ * wake idle targets while queued work stays quiet.
+ */
+#[cfg(test)]
+pub fn may_kick(queue_len: u64) -> bool {
+    queue_len <= 1
+}
+
+/*
+ * True when a mean replace may run. Needs distinct
+ * clamped estimates, so equal bursts skip the sum and
+ * mean write at once.
+ */
+#[cfg(test)]
+pub fn should_replace(old: u64, new: u64) -> bool {
+    clamp_est(old) != clamp_est(new)
+}
+
+/*
  * Target CPU from the selected CPU. A valid allowed
  * selected CPU wins. Otherwise the first allowed CPU
  * wins. No allowed CPU yields no target for park use.
@@ -401,7 +608,7 @@ pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuMean {
-    /* Sum of clamped estimates of unfinished tasks. */
+    /* Sum of capped estimates of unfinished tasks. */
     pub sum: u64,
     /* Count of unfinished tasks with the running one. */
     pub nr: u64,
@@ -454,36 +661,47 @@ impl CpuMean {
     }
 
     /*
-     * Join one task with a known estimate. The estimate
-     * is clamped first, so out of range values never
-     * reach the sum.
+     * Join one task with a known estimate. The order
+     * key keeps the full clamped estimate. The sum
+     * keeps the capped value, so outliers never
+     * dominate the mean.
      */
     pub fn join(&mut self, est: u64) -> u64 {
         let e = clamp_est(est);
-        self.sum = self.sum.saturating_add(e);
+        let a = clamp_acct(est);
+        self.sum = self.sum.saturating_add(a);
         self.nr = self.nr.saturating_add(1);
         e
     }
 
     /*
-     * Leave one task with its estimate. The sum never
-     * wraps below zero. The count never wraps below
-     * zero.
+     * Leave one task with its estimate. The sum uses
+     * the capped value to match the join path. The sum
+     * never wraps below zero. The count never wraps
+     * below zero.
      */
     pub fn leave(&mut self, est: u64) {
-        let e = clamp_est(est);
-        self.sum = self.sum.saturating_sub(e);
+        let a = clamp_acct(est);
+        self.sum = self.sum.saturating_sub(a);
         self.nr = self.nr.saturating_sub(1);
     }
 
     /*
      * Replace one estimate with a new value. Used when
      * a runnable task refreshes its last burst. The
-     * count stays fixed while the sum tracks the change.
+     * count stays fixed while the sum tracks the capped
+     * change. Equal estimates skip at once with no sum
+     * change. The order key still uses the full values.
      */
     pub fn replace(&mut self, old: u64, new: u64) {
-        let o = clamp_est(old);
-        let n = clamp_est(new);
+        if !should_replace(old, new) {
+            return;
+        }
+        let o = clamp_acct(old);
+        let n = clamp_acct(new);
+        if o == n {
+            return;
+        }
         self.sum = self.sum.saturating_sub(o);
         self.sum = self.sum.saturating_add(n);
     }
@@ -881,6 +1099,382 @@ mod tests {
         q.leave(1_000_000);
         assert_eq!(q.sum, 0);
         assert_eq!(q.nr, 0);
+    }
+
+    #[test]
+    fn acct_cap_bounds_match_spec() {
+        /* Small values pass through with no change. */
+        assert_eq!(clamp_acct(1), 1);
+        assert_eq!(clamp_acct(500_000), 500_000);
+        assert_eq!(clamp_acct(8_000_000), 8_000_000);
+        assert_eq!(clamp_acct(32_000_000), 32_000_000);
+        /* Large values cap at the accounting bound. */
+        assert_eq!(clamp_acct(32_000_001), ACCT_MAX_NS);
+        assert_eq!(clamp_acct(100_000_000), ACCT_MAX_NS);
+        assert_eq!(clamp_acct(1_000_000_000), ACCT_MAX_NS);
+        assert_eq!(clamp_acct(u64::MAX), ACCT_MAX_NS);
+        /* The order key keeps the full range. */
+        assert_eq!(clamp_est(1_000_000_000), EST_MAX_NS);
+        assert_eq!(ACCT_MAX_NS, 32_000_000);
+    }
+
+    #[test]
+    fn acct_misfire_small_values_stay_exact() {
+        /* Values below the cap never misfire. */
+        for v in [1, 1000, 500_000, 8_000_000, 32_000_000] {
+            assert_eq!(clamp_acct(v), clamp_est(v));
+        }
+        /* A fresh mean with small joins stays exact. */
+        let mut m = CpuMean::empty();
+        let e = m.join(2_000_000);
+        assert_eq!(e, 2_000_000);
+        assert_eq!(m.sum, 2_000_000);
+        m.leave(2_000_000);
+        assert_eq!(m.sum, 0);
+        assert_eq!(m.nr, 0);
+    }
+
+    #[test]
+    fn acct_outlier_keeps_mean_bounded() {
+        /* One outlier adds only the cap to the sum. */
+        let mut m = CpuMean::empty();
+        let e = m.join(1_000_000_000);
+        assert_eq!(e, 1_000_000_000);
+        assert_eq!(m.sum, ACCT_MAX_NS);
+        assert_eq!(m.tq(), ACCT_MAX_NS);
+        /* Order still sees the full value. */
+        let mut q = Vec::new();
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                est: e,
+                seq: 0,
+                id: 1,
+            },
+        );
+        assert_eq!(q[0].est, 1_000_000_000);
+        /* Leaving the outlier restores the seed. */
+        m.leave(1_000_000_000);
+        assert_eq!(m.sum, 0);
+        assert_eq!(m.tq(), TQ_SEED_NS);
+    }
+
+    #[test]
+    fn acct_property_holds_across_trials() {
+        /* Capped sums keep means in range with outliers. */
+        for trial in 0..16u64 {
+            let mut m = CpuMean::empty();
+            let big = 100_000_000 + trial * 1_000_000;
+            let small = 1_000_000 + trial * 1000;
+            m.join(big);
+            assert_eq!(m.sum, ACCT_MAX_NS);
+            m.join(small);
+            let want = (ACCT_MAX_NS + clamp_est(small)) / 2;
+            let want = want.clamp(TQ_MIN_NS, TQ_MAX_NS);
+            assert_eq!(m.tq(), want);
+            m.replace(big, small);
+            assert_eq!(m.sum, clamp_est(small) * 2);
+            m.leave(small);
+            m.leave(small);
+            assert_eq!(m.sum, 0);
+            assert_eq!(m.tq(), TQ_SEED_NS);
+        }
+    }
+
+    #[test]
+    fn fast_lane_bounds_match_quarter_mean() {
+        /* Tiny means at most one quarter of the mean. */
+        assert_eq!(FAST_DIV, 4);
+        assert!(fast_ok(2_000_000, 8_000_000));
+        assert!(fast_ok(1_000_000, 8_000_000));
+        assert!(fast_ok(125_000, 500_000));
+        /* The bound is inclusive at the quarter. */
+        assert!(fast_ok(2_000_000, 8_000_000));
+        assert!(!fast_ok(2_000_001, 8_000_000));
+        assert!(!fast_ok(8_000_000, 8_000_000));
+        assert!(!fast_ok(500_001, 500_000));
+        assert!(!fast_ok(1, 0));
+    }
+
+    #[test]
+    fn fast_lane_misfire_cases_stay_ordered() {
+        /* Fresh tasks never run fast with mean equal. */
+        assert!(!fast_ok(8_000_000, 8_000_000));
+        assert!(!may_fast(8_000_000, 8_000_000, true, true));
+        /* Busy targets never run fast. */
+        assert!(!may_fast(1_000_000, 8_000_000, false, true));
+        /* Queued targets never run fast. */
+        assert!(!may_fast(1_000_000, 8_000_000, true, false));
+        assert!(!may_fast(1_000_000, 8_000_000, false, false));
+        /* Large estimates never run fast when idle. */
+        assert!(!may_fast(4_000_000, 8_000_000, true, true));
+    }
+
+    #[test]
+    fn fast_lane_property_holds_across_trials() {
+        /* Only tiny idle and empty inserts run fast. */
+        for trial in 0..16u64 {
+            let tq = 8_000_000;
+            let tiny = 1_000_000 + trial * 10_000;
+            let big = 4_000_000 + trial * 10_000;
+            let idle = trial % 2 == 0;
+            let empty = trial % 3 == 0;
+            let want_tiny = tiny <= (tq >> 2) && idle && empty;
+            assert_eq!(may_fast(tiny, tq, idle, empty), want_tiny);
+            assert!(!may_fast(big, tq, idle, empty));
+            assert!(!may_fast(tiny, tq, false, empty));
+            assert!(!may_fast(tiny, tq, idle, false));
+        }
+    }
+
+    #[test]
+    fn linger_bounds_match_eighth_grant() {
+        /* Near misses sit just above the grant. */
+        assert_eq!(LINGER_DIV, 8);
+        assert!(linger_ok(8_800_000, 8_000_000));
+        assert!(linger_ok(9_000_000, 8_000_000));
+        assert!(linger_ok(512_500, 500_000));
+        /* The bound is inclusive at the eighth. */
+        assert!(linger_ok(9_000_000, 8_000_000));
+        assert!(!linger_ok(9_000_001, 8_000_000));
+        assert!(!linger_ok(8_000_000, 8_000_000));
+        assert!(!linger_ok(7_000_000, 8_000_000));
+        assert!(!linger_ok(1, 0));
+    }
+
+    #[test]
+    fn linger_misfire_cases_stay_plain() {
+        /* Exact grants never boost. */
+        assert!(!linger_ok(8_000_000, 8_000_000));
+        /* Short runs never boost. */
+        assert!(!linger_ok(4_000_000, 8_000_000));
+        /* Far overruns never boost. */
+        assert!(!linger_ok(16_000_000, 8_000_000));
+        assert!(!linger_ok(10_000_000, 8_000_000));
+        /* Empty grants never boost. */
+        assert!(!linger_ok(1, 0));
+        assert!(!linger_ok(0, 0));
+        /* Plain flags never insert with a head start. */
+        let mut l = Linger::plain();
+        assert!(!l.insert());
+        assert_eq!(l.boosts, 0);
+    }
+
+    #[test]
+    fn linger_single_boost_discipline_holds() {
+        /* One near miss sets the flag with no count. */
+        let mut l = Linger::plain();
+        l.stop(8_800_000, 8_000_000);
+        assert_eq!(l.flag, 1);
+        assert_eq!(l.boosts, 0);
+        /* One head start counts and keeps the flag. */
+        assert!(l.insert());
+        assert_eq!(l.boosts, 1);
+        assert_eq!(l.flag, 1);
+        /* The next stop clears with no new boost. */
+        l.stop(8_800_000, 8_000_000);
+        assert_eq!(l.flag, 0);
+        assert_eq!(l.boosts, 1);
+        /* A plain insert after the clear stays plain. */
+        assert!(!l.insert());
+        assert_eq!(l.boosts, 1);
+        /* A second near miss may boost again. */
+        l.stop(8_800_000, 8_000_000);
+        assert_eq!(l.flag, 1);
+        assert!(l.insert());
+        assert_eq!(l.boosts, 2);
+    }
+
+    #[test]
+    fn linger_property_holds_across_trials() {
+        /* Only near misses set the flag, once each. */
+        for trial in 0..16u64 {
+            let grant = 8_000_000;
+            let delta = grant + trial * 100_000;
+            let want = delta > grant && delta <= grant + (grant >> 3);
+            assert_eq!(linger_ok(delta, grant), want);
+            let mut l = Linger::plain();
+            l.stop(delta, grant);
+            assert_eq!(l.flag != 0, want);
+            assert_eq!(l.boosts, 0);
+            if want {
+                assert!(l.insert());
+                assert_eq!(l.boosts, 1);
+                l.stop(delta, grant);
+                assert_eq!(l.flag, 0);
+                assert_eq!(l.boosts, 1);
+                assert!(!l.insert());
+            } else {
+                assert!(!l.insert());
+                assert_eq!(l.boosts, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn linger_drop_stays_honest() {
+        /* A dropped boost never counts. */
+        let mut l = Linger::plain();
+        l.stop(8_800_000, 8_000_000);
+        assert_eq!(l.flag, 1);
+        l.clear();
+        assert_eq!(l.flag, 0);
+        assert_eq!(l.boosts, 0);
+        assert!(!l.insert());
+    }
+
+    #[test]
+    fn sticky_prior_bounds_match_idle_prior() {
+        /* Idle priors reuse at once with a count. */
+        assert_eq!(STEAL_MIN_DEPTH, 2);
+        let allowed = [true, true, true, true];
+        let idle = [false, true, false, false];
+        assert!(sticky_prior_ok(1, &allowed, &idle));
+        assert!(!sticky_prior_ok(0, &allowed, &idle));
+        assert!(!sticky_prior_ok(2, &allowed, &idle));
+        /* Busy priors never preempt. */
+        let busy = [false, false, false, false];
+        assert!(!sticky_prior_ok(1, &allowed, &busy));
+        /* Foreign priors never reuse. */
+        let narrow = [false, false, true, false];
+        assert!(!sticky_prior_ok(1, &narrow, &idle));
+        assert!(sticky_prior_ok(2, &narrow, &[false, false, true]));
+        assert!(!sticky_prior_ok(-1, &allowed, &idle));
+    }
+
+    #[test]
+    fn sticky_misfire_cases_stay_plain() {
+        /* Empty masks never reuse. */
+        let empty = [false, false];
+        let idle = [true, true];
+        assert!(!sticky_prior_ok(0, &empty, &idle));
+        assert!(!sticky_prior_ok(-1, &empty, &idle));
+        /* Missing idle entries never reuse. */
+        let allowed = [true, true];
+        let none: [bool; 0] = [];
+        assert!(!sticky_prior_ok(0, &allowed, &none));
+        /* Thin donors never lose work. */
+        assert!(!donor_ok(0));
+        assert!(!donor_ok(1));
+        assert!(donor_ok(2));
+        assert!(donor_ok(8));
+    }
+
+    #[test]
+    fn sticky_donor_gate_keeps_last_task() {
+        /* Donors with one task keep it for the owner. */
+        assert!(!donor_ok(0));
+        assert!(!donor_ok(1));
+        /* Donors with two or more may share one. */
+        for depth in [2, 3, 8, 32] {
+            assert!(donor_ok(depth));
+        }
+        /* Sticky select prefers idle prior first. */
+        let allowed = [true, true, true, true];
+        let idle = [false, true, false, false];
+        let llc = [0, 0, 1, 1];
+        let full: [bool; 0] = [];
+        let (got, reused) = select_sticky_model(1, 0, &allowed, &idle, &llc, &full, 2);
+        assert_eq!(got, Some(1));
+        assert!(reused);
+        let idle2 = [false, false, false, true];
+        let (got2, reused2) = select_sticky_model(1, 0, &allowed, &idle2, &llc, &full, 2);
+        assert_eq!(got2, Some(3));
+        assert!(!reused2);
+    }
+
+    #[test]
+    fn sticky_property_holds_across_trials() {
+        /* Only idle allowed priors reuse. */
+        for trial in 0..16u64 {
+            let idx = (trial % 4) as usize;
+            let mut allowed = [true, true, true, true];
+            let mut idle = [false, false, false, false];
+            idle[idx] = trial % 2 == 0;
+            if trial % 5 == 0 {
+                allowed[idx] = false;
+            }
+            let prev = idx as i32;
+            let want = allowed[idx] && idle[idx];
+            assert_eq!(sticky_prior_ok(prev, &allowed, &idle), want);
+            let (got, reused) =
+                select_sticky_model(prev, 0, &allowed, &idle, &[0, 0, 1, 1], &[], 2);
+            assert_eq!(reused, want);
+            if want {
+                assert_eq!(got, Some(idx as u32));
+            }
+            /* Donor depths below two never steal. */
+            let depth = trial % 4;
+            assert_eq!(donor_ok(depth), depth >= 2);
+        }
+    }
+
+    #[test]
+    fn cuts_kick_bounds_match_empty_only() {
+        /* First arrivals wake idle targets. */
+        assert!(may_kick(0));
+        assert!(may_kick(1));
+        /* Queued work stays quiet with no kick. */
+        assert!(!may_kick(2));
+        assert!(!may_kick(8));
+        assert!(!may_kick(u64::MAX));
+    }
+
+    #[test]
+    fn cuts_replace_bounds_match_equal_skip() {
+        /* Equal bursts skip the mean write. */
+        assert!(!should_replace(2_000_000, 2_000_000));
+        assert!(!should_replace(8_000_000, 8_000_000));
+        assert!(!should_replace(0, 1));
+        /* Distinct bursts run the mean write. */
+        assert!(should_replace(2_000_000, 8_000_000));
+        assert!(should_replace(8_000_000, 2_000_000));
+        /* Clamp keeps equal skip honest. */
+        let mut m = CpuMean::empty();
+        m.join(2_000_000);
+        let sum = m.sum;
+        m.replace(2_000_000, 2_000_000);
+        assert_eq!(m.sum, sum);
+        m.replace(2_000_000, 4_000_000);
+        assert_ne!(m.sum, sum);
+    }
+
+    #[test]
+    fn cuts_misfire_cases_stay_quiet() {
+        /* Busy queues never kick. */
+        assert!(!may_kick(2));
+        assert!(!may_kick(32));
+        /* Equal estimates never replace. */
+        let mut m = CpuMean::empty();
+        m.join(4_000_000);
+        let sum = m.sum;
+        let nr = m.nr;
+        m.replace(4_000_000, 4_000_000);
+        assert_eq!(m.sum, sum);
+        assert_eq!(m.nr, nr);
+        /* Distinct estimates always replace. */
+        m.replace(4_000_000, 5_000_000);
+        assert_ne!(m.sum, sum);
+    }
+
+    #[test]
+    fn cuts_property_holds_across_trials() {
+        /* Only empty queues kick, only distinct replace. */
+        for trial in 0..16u64 {
+            let len = trial % 4;
+            assert_eq!(may_kick(len), len <= 1);
+            let a = 1_000_000 + trial * 1000;
+            let b = 1_000_000 + (trial + 1) * 1000;
+            assert!(!should_replace(a, a));
+            assert!(should_replace(a, b));
+            let mut m = CpuMean::empty();
+            m.join(a);
+            let sum = m.sum;
+            m.replace(a, a);
+            assert_eq!(m.sum, sum);
+            m.replace(a, b);
+            assert_ne!(m.sum, sum);
+        }
     }
 
     #[test]

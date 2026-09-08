@@ -57,6 +57,32 @@ enum flow_consts {
 	FLOW_CPUPERF_SHORT = 1024ULL,
 	/* Hint used for long estimates. */
 	FLOW_CPUPERF_LONG = 0ULL,
+	/* Cap of one sample in mean accounting. */
+	FLOW_ACCT_MAX_NS = (32ULL * 1000ULL * 1000ULL),
+	/* Divisor for the fast lane bound. */
+	FLOW_FAST_DIV = 4ULL,
+	/* Divisor for the linger bound. */
+	FLOW_LINGER_DIV = 8ULL,
+	/* Least donor depth that allows a steal. */
+	FLOW_STEAL_MIN_DEPTH = 2ULL,
+};
+
+/*
+ * Gating flags for the new paths. Each flag keeps one
+ * path enabled when set. Setting a flag to zero
+ * reverts that path alone with no effect on the rest.
+ */
+enum flow_gates {
+	/* Tighter per sample cap for accounting. */
+	FLOW_GATE_CLAMP = 1ULL,
+	/* Short burst fast lane. */
+	FLOW_GATE_FAST = 1ULL,
+	/* Single non chaining linger boost. */
+	FLOW_GATE_LINGER = 1ULL,
+	/* Sticky placement with guarded steals. */
+	FLOW_GATE_STICKY = 1ULL,
+	/* Idle gated kicks with equal skip. */
+	FLOW_GATE_CUTS = 1ULL,
 };
 
 /*
@@ -65,14 +91,15 @@ enum flow_consts {
  * with no smoothing. The run stamp marks the start of
  * the current run. The grant holds the slice given at
  * insert time. The owner names the CPU that accounts
- * the task in its mean.
+ * the task in its mean. The linger flag marks a single
+ * pending boost with no chaining.
  */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
 	u64 grant_ns;
 	u32 owner;
-	u32 pad;
+	u32 linger;
 };
 
 /*
@@ -99,7 +126,10 @@ struct flow_cpu_state {
  * count covers voluntary blocks and exits. The park
  * count covers moves from the park queue. The steal
  * count covers moves from a peer queue. The kick count
- * covers idle wakeups.
+ * covers idle wakeups. The fast count covers direct
+ * local inserts for tiny bursts. The linger count
+ * covers single pending boosts for slight overruns.
+ * The reuse count covers sticky prior CPU reuse.
  */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -111,6 +141,9 @@ struct flow_sched_stats {
 	u64 steal_moves;
 	u64 kicks;
 	u64 enq_no_tctx;
+	u64 fast_hits;
+	u64 linger_boosts;
+	u64 reuse_hits;
 };
 
 /*
@@ -125,6 +158,21 @@ static __always_inline u64 flow_clamp_est(u64 v)
 	if (v > (u64)FLOW_EST_MAX_NS)
 		return (u64)FLOW_EST_MAX_NS;
 	return v;
+}
+
+/*
+ * Cap one sample for mean accounting. The order key
+ * keeps the full clamped estimate. The accounting
+ * value keeps the tighter cap, so a single long run
+ * never moves the mean by more than the cap.
+ */
+static __always_inline u64 flow_clamp_acct(u64 v)
+{
+	u64 e = flow_clamp_est(v);
+
+	if (e > (u64)FLOW_ACCT_MAX_NS)
+		return (u64)FLOW_ACCT_MAX_NS;
+	return e;
 }
 
 /*
@@ -197,6 +245,37 @@ static __always_inline u32 flow_cpuperf_for_est(u64 est,
 	if (est <= tq)
 		return (u32)FLOW_CPUPERF_SHORT;
 	return (u32)FLOW_CPUPERF_LONG;
+}
+
+/*
+ * Check that an estimate is tiny against the mean.
+ * Tiny means at most one quarter of the mean, so
+ * short bursts run at once on an idle target.
+ */
+static __always_inline bool flow_fast_ok(u64 est,
+	u64 tq)
+{
+	if (tq == 0)
+		return false;
+	return est <= (tq >> 2);
+}
+
+/*
+ * Check that a run slightly overran its grant. Slight
+ * means above the grant and within one eighth above
+ * it, so only near misses earn a single extra turn.
+ */
+static __always_inline bool flow_linger_ok(u64 delta,
+	u64 grant)
+{
+	u64 limit;
+
+	if (grant == 0)
+		return false;
+	if (delta <= grant)
+		return false;
+	limit = grant + (grant >> 3);
+	return delta <= limit;
 }
 
 /*

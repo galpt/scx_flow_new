@@ -7,7 +7,10 @@
  * count fresh joins. Requeues count runnable slice ends.
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
- * Web metrics adds per CPU cards with mean and depth.
+ * Fast hits count direct local inserts for tiny bursts.
+ * Linger boosts count ordered head starts for near
+ * misses. Reuse hits count sticky prior CPU reuse. Web
+ * metrics adds per CPU cards with mean and depth.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -56,6 +59,15 @@ pub struct Metrics {
     #[stat(desc = "Inserts without task state")]
     #[serde(default)]
     pub enq_no_tctx: u64,
+    #[stat(desc = "Direct local inserts for tiny bursts")]
+    #[serde(default)]
+    pub fast_hits: u64,
+    #[stat(desc = "Ordered head starts for near misses")]
+    #[serde(default)]
+    pub linger_boosts: u64,
+    #[stat(desc = "Sticky prior CPU reuse")]
+    #[serde(default)]
+    pub reuse_hits: u64,
 }
 
 /*
@@ -115,7 +127,7 @@ impl Metrics {
             w,
             "[{}] run={} runtime={} uptime={} \
             ins={} req={} done={} park={} steal={} \
-            kick={} noctx={}",
+            kick={} noctx={} fast={} linger={} reuse={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -127,6 +139,9 @@ impl Metrics {
             self.steal_moves,
             self.kicks,
             self.enq_no_tctx,
+            self.fast_hits,
+            self.linger_boosts,
+            self.reuse_hits,
         )?;
         Ok(())
     }
@@ -147,6 +162,9 @@ impl Metrics {
             steal_moves: self.steal_moves.wrapping_sub(rhs.steal_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
+            fast_hits: self.fast_hits.wrapping_sub(rhs.fast_hits),
+            linger_boosts: self.linger_boosts.wrapping_sub(rhs.linger_boosts),
+            reuse_hits: self.reuse_hits.wrapping_sub(rhs.reuse_hits),
         }
     }
 }

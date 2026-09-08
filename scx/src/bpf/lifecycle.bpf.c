@@ -6,9 +6,10 @@
  *
  * Running records the stamp and the running view.
  * Stopping refreshes the estimate from the last burst
- * and releases or requeues. Enable clears state.
- * Disable and exit release once. Dequeue keeps the
- * entry across dispatch to run.
+ * and releases or requeues. A slight overrun earns a
+ * single pending boost with no chaining. Enable clears
+ * state. Disable and exit release once. Dequeue keeps
+ * the entry across dispatch to run.
  */
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -89,9 +90,22 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (runnable) {
 		u32 owner = tctx->owner;
 
+		/* A boosted slice clears with no new boost. */
+		if ((u64)FLOW_GATE_LINGER) {
+			if (tctx->linger != 0) {
+				tctx->linger = 0;
+			} else if (flow_linger_ok(delta,
+			    tctx->grant_ns)) {
+				tctx->linger = 1;
+			}
+		} else {
+			tctx->linger = 0;
+		}
 		/* Runnable tasks requeue ordered with new est. */
+		/* Equal estimates skip the mean write. */
 		if (owner != FLOW_OWNER_NONE &&
-		    flow_cpu_live(owner))
+		    flow_cpu_live(owner) &&
+		    !((u64)FLOW_GATE_CUTS && old == est))
 			flow_replace_cpu(owner, old, est);
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
@@ -113,7 +127,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->run_at = 0;
 	tctx->grant_ns = (u64)-1;
 	tctx->owner = FLOW_OWNER_NONE;
-	tctx->pad = 0;
+	tctx->linger = 0;
 }
 
 /*

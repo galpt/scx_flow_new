@@ -152,21 +152,25 @@ static __always_inline bool flow_cpu_ok(
 }
 
 /*
- * Join one estimate to a CPU mean. The sum and the
- * count grow by the estimate. The mean is refreshed
- * from the new sum and count.
+ * Join one estimate to a CPU mean. The sum uses the
+ * capped value when the gate is set, so one long run
+ * never dominates the mean. The count grows by one.
+ * The mean is refreshed from the new sum and count.
  */
 static __always_inline void flow_join_cpu(u32 cpu,
 	u64 est)
 {
 	struct flow_cpu_state *st;
+	u64 acct = est;
 
 	if (!flow_cpu_live(cpu))
 		return;
 	st = flow_cpu(cpu);
 	if (!st)
 		return;
-	__sync_fetch_and_add(&st->sum_est, est);
+	if ((u64)FLOW_GATE_CLAMP)
+		acct = flow_clamp_acct(est);
+	__sync_fetch_and_add(&st->sum_est, acct);
 	__sync_fetch_and_add(&st->nr, 1);
 	__sync_lock_test_and_set(&st->tq_ns,
 	    flow_mean_tq(st->sum_est, st->nr));
@@ -174,20 +178,25 @@ static __always_inline void flow_join_cpu(u32 cpu,
 
 /*
  * Leave one estimate from a CPU mean. A missing entry
- * is a no op, so a double leave stays safe. The mean
- * is refreshed from the new sum and count.
+ * is a no op, so a double leave stays safe. The sum
+ * uses the capped value when the gate is set, to match
+ * the join path. The mean is refreshed from the new
+ * sum and count.
  */
 static __always_inline void flow_leave_cpu(u32 cpu,
 	u64 est)
 {
 	struct flow_cpu_state *st;
 	s32 i;
+	u64 acct = est;
 
 	if (!flow_cpu_live(cpu))
 		return;
 	st = flow_cpu(cpu);
 	if (!st)
 		return;
+	if ((u64)FLOW_GATE_CLAMP)
+		acct = flow_clamp_acct(est);
 	bpf_for(i, 0, 4) {
 		u64 cur_n = st->nr;
 		u64 cur_s = st->sum_est;
@@ -198,10 +207,10 @@ static __always_inline void flow_leave_cpu(u32 cpu,
 
 		if (cur_n == 0)
 			break;
-		if (cur_s < est)
+		if (cur_s < acct)
 			nxt_s = 0;
 		else
-			nxt_s = cur_s - est;
+			nxt_s = cur_s - acct;
 		nxt_n = cur_n - 1;
 		old_n = __sync_val_compare_and_swap(&st->nr,
 		    cur_n, nxt_n);
@@ -223,26 +232,39 @@ static __always_inline void flow_leave_cpu(u32 cpu,
 
 /*
  * Replace one estimate in a CPU mean. The count stays
- * fixed while the sum tracks the change. The mean is
- * refreshed from the new sum.
+ * fixed while the sum tracks the change. The sum uses
+ * the capped values when the gate is set, so outliers
+ * never dominate the mean. Equal estimates skip at
+ * once with no sum or mean write. The mean is
+ * refreshed from the new sum otherwise.
  */
 static __always_inline void flow_replace_cpu(u32 cpu,
 	u64 old, u64 next)
 {
 	struct flow_cpu_state *st;
+	u64 old_a = old;
+	u64 next_a = next;
 
+	if ((u64)FLOW_GATE_CUTS && old == next)
+		return;
 	if (!flow_cpu_live(cpu))
 		return;
 	st = flow_cpu(cpu);
 	if (!st)
 		return;
-	if (old != next) {
-		if (st->sum_est >= old)
-			__sync_fetch_and_sub(&st->sum_est, old);
-		else
-			__sync_lock_test_and_set(&st->sum_est, 0);
-		__sync_fetch_and_add(&st->sum_est, next);
+	if ((u64)FLOW_GATE_CLAMP) {
+		old_a = flow_clamp_acct(old);
+		next_a = flow_clamp_acct(next);
+		if (old_a == next_a)
+			return;
+	} else if (old_a == next_a) {
+		return;
 	}
+	if (st->sum_est >= old_a)
+		__sync_fetch_and_sub(&st->sum_est, old_a);
+	else
+		__sync_lock_test_and_set(&st->sum_est, 0);
+	__sync_fetch_and_add(&st->sum_est, next_a);
 	__sync_lock_test_and_set(&st->tq_ns,
 	    flow_mean_tq(st->sum_est, st->nr));
 }
@@ -361,6 +383,7 @@ static __always_inline void flow_release(
 		flow_leave_cpu(owner, flow_clamp_est(est));
 	tctx->grant_ns = (u64)-1;
 	tctx->owner = FLOW_OWNER_NONE;
+	tctx->linger = 0;
 }
 
 #include "select_cpu.bpf.c"
