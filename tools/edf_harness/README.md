@@ -86,6 +86,46 @@ Report topology plus variance with each run. Use
 `stress-ng` only as background load plus `cyclictest`
 plus `schbench` as cross checks with no gate.
 
+## Results (4.2.4 vs 4.2.5)
+
+Comparison of `4.2.4` against `4.2.5` with the
+same workload plus the same host CPUs plus the same
+governor. Light protocol uses `DURATION=15` plus
+`REPEATS=2` on 16 CPUs with governor `performance`
+and seeds `1` plus `2` where repeat equals seed plus `n=2`.
+Each row holds one target use with repeat count plus
+means plus build plus seeds. Topology plus variance
+ship with each run in `topology.txt` plus the stats
+CSV.
+
+| target_u | n | mean_completion ± ci95 | mean_exact | mean_effective | governor | build | seeds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.5 | 2 | 1.0000 ± 0.0000 | 0.5425 | 0.4957 | performance | 4.2.4 | 1,2 |
+| 0.75 | 2 | 1.0000 ± 0.0000 | 0.8095 | 0.7412 | performance | 4.2.4 | 1,2 |
+| 0.95 | 2 | 1.0000 ± 0.0000 | 1.0279 | 0.9337 | performance | 4.2.4 | 1,2 |
+| 1.0 | 2 | 0.9661 ± 0.0202 | 1.0804 | 0.9364 | performance | 4.2.4 | 1,2 |
+| 1.2 | 2 | 0.6584 ± 0.0056 | 1.2989 | 0.6426 | performance | 4.2.4 | 1,2 |
+| 1.5 | 2 | 0.5532 ± 0.0000 | 1.6222 | 0.5402 | performance | 4.2.4 | 1,2 |
+| 0.5 | 2 | 1.0000 ± 0.0000 | 0.5425 | 0.4941 | performance | 4.2.5 | 1,2 |
+| 0.75 | 2 | 1.0000 ± 0.0000 | 0.8094 | 0.7382 | performance | 4.2.5 | 1,2 |
+| 0.95 | 2 | 1.0000 ± 0.0000 | 1.0281 | 0.9357 | performance | 4.2.5 | 1,2 |
+| 1.0 | 2 | 0.9782 ± 0.0081 | 1.0804 | 0.9493 | performance | 4.2.5 | 1,2 |
+| 1.2 | 2 | 0.6571 ± 0.0030 | 1.2985 | 0.6400 | performance | 4.2.5 | 1,2 |
+| 1.5 | 2 | 0.5482 ± 0.0013 | 1.6228 | 0.5327 | performance | 4.2.5 | 1,2 |
+
+At target use at or below 0.95 both builds complete
+all jobs with a measured rate of 100 percent. At 1.0
+the means are 0.9661 plus 0.9782 with overlapping
+intervals so the gap is noise at `n=2`. Overload
+falls the same way in both builds to near 0.66 at
+1.2 plus near 0.55 at 1.5. Switches stay comparable
+across targets on 16 CPUs with governor
+`performance`. Build `4.2.5` is a non regression
+plus reads neutral against build `4.2.4`.
+
+A value of 100 percent is a measured rate at feasible
+use only with no guarantee. There is no gate on 98.5.
+
 ## Files
 
 - `harness.c` periodic worker plus CSV plus JSON
