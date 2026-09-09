@@ -9,34 +9,36 @@ It is deliberately knob-free.
 ## Overview
 
 Tasks wait in per-CPU ordered queues, plus one park queue for
-tasks with no allowed CPU. Queues hold short estimates first
-with arrival order for ties. The per-CPU mean is the sum over
-unfinished work divided by the count with the running task
-included. The seed is 8ms with a floor of 500µs and a ceiling
-of 32ms. Fresh tasks join with the current mean so the mean
-stays neutral. Estimates hold the last burst clamped at 1ns
-to 1 second with no smoothing. Mean accounting caps each
-sample at 32ms so one long burst never dominates the mean
-while order still uses the full estimate. Tiny bursts at most
-one quarter of the mean run at once on the local queue when
-the target is idle and empty. A run just past its grant and
-within one eighth above it earns one ordered head start with
-no chain. Blocked tasks complete and release at once.
-Runnable tasks requeue ordered with a refreshed estimate.
-Placement reuses the idle prior CPU first, then the LLC idle
-CPU, then any idle CPU. Dispatch drains the local queue
-first, then the park queue, then idle steals from peers.
-Each pass visits every queued task in the owned and park
-queues in order and moves live tasks with no move failure
-when allowed, including exiting tasks so they run to exit,
-and skips past dead, foreign and failed heads, so every pass
-moves at least one task when movable work exists there. An
-idle CPU with no moved work steals past unmovable leftovers,
-while a busy CPU with moved work steals only when both queues
-are empty. Idle steals scan past bad heads to rescue movable
-work when the donor holds at least two tasks. Idle targets
-are kicked only when the queue was empty with a mask check
-and no busy preemption.
+tasks with no allowed CPU. Queues hold EDF order first with
+arrival order for ties. The deadline adds clamped virtual time
+and scaled estimate with a fixed weight of 1024 and no custom
+heap. The kernel queue orders by deadline with the mean as the
+slice. The per-CPU mean is the sum over unfinished work divided
+by the count with the running task included. The seed is 8ms
+with a floor of 500us and a ceiling of 32ms. Fresh tasks join
+with the current mean so the mean stays neutral. Estimates hold
+the last burst clamped at 1ns to 1 second with no smoothing.
+Mean accounting caps each sample at 32ms so one long burst never
+dominates the mean while the deadline still uses the full
+estimate. Sleeper lag is capped at one slice behind the frontier,
+so a waking task gains at most one slice of advantage with wrap
+safe order. Virtual time moves forward by scaled runtime and the
+frontier moves forward while work stays queued. An idle reset
+bounds to waking virtual time with no zero use. Blocked tasks
+complete and release at once. Runnable tasks requeue ordered with
+a refreshed estimate. Placement reuses the idle prior CPU first
+with no count, then the LLC idle CPU, then any idle CPU. Dispatch
+drains the local queue first, then the park queue, then idle
+steals from peers. Each pass visits every queued task in the owned
+and park queues in order and moves live tasks with no move failure
+when allowed, including exiting tasks so they run to exit, and skips
+past dead, foreign and failed heads, so every pass moves at least
+one task when movable work exists there. An idle CPU with no moved
+work steals past unmovable leftovers, while a busy CPU with moved
+work steals only when both queues are empty. Idle steals scan past
+bad heads to rescue movable work when the donor holds at least two
+tasks. Idle targets are kicked only when the queue was empty with
+a mask check and no busy preemption.
 
 The mean math and the queue rules live in
 `src/bpf/intf.h`, insert, accounting, dispatch and the
@@ -50,9 +52,8 @@ Ops name is `flow` with a 30 second watchdog.
 
 ## Typical Use Cases
 
-- Gaming and other latency-sensitive applications.
-  Short bursts run first with small means, so wakeups and
-  frame work rarely wait behind long work.
+- Latency-sensitive applications. Short deadlines run first,
+  so wakeups and frame work rarely wait behind long work.
 - General desktop use. The session stays responsive
   while long bursts serve larger means without blocking
   short arrivals.
@@ -74,9 +75,12 @@ only on the reporting options, which are `--stats`,
 `--monitor` and `--no-webui`. See `src/config.rs` and
 `src/flow.rs` for the checked values and the unit tests
 for mean range, fresh neutral joins, estimate clamp,
-accounting cap, fast lane, linger discipline, ordered
-inserts, progress guarantee, steal bounds, donor depth,
-sticky reuse, kick gating, LLC choice and config checks.
+accounting cap, EDF order, sleeper cap, frontier order,
+ordered inserts, progress guarantee, steal bounds, donor
+depth, sticky reuse, kick gating, LLC choice and config
+checks. For A/B comparison, install one build, measure the
+same workload, then install the other build and compare
+with no other change.
 
 ## Web UI
 
@@ -84,7 +88,8 @@ The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
 summary line and a per-CPU grid with running estimates,
 per-CPU means and per-CPU depths, plus system tiles for
-fast hits, linger boosts and reuse hits, with no
+frozen fast hits, frozen linger boosts, frozen reuse hits,
+EDF enqueued, EDF clamped and EDF ordered, with no
 authentication, since the loopback address is the trust
 boundary.
 `--no-webui` disables it. Empty states show an empty CPU
@@ -99,39 +104,39 @@ uses id `0x5000` and holds tasks with no allowed CPU.
 ## Slices
 
 Each CPU serves its mean. The seed is 8ms. The floor is
-500µs. The ceiling is 32ms. Each grant is fixed at
+500us. The ceiling is 32ms. Each grant is fixed at
 insert time and stores the mean. Per task
 estimates hold the last burst clamped at 1ns
 to 1 second with no smoothing. Mean accounting caps each
-sample at 32ms while order still uses the full estimate.
-Fresh tasks join with the current mean, so the mean stays
-neutral. A run just past its grant and within one eighth
-above it earns one ordered head start with no chain.
+sample at 32ms while the deadline still uses the full
+estimate. Fresh tasks join with the current mean, so the
+mean stays neutral. Sleeper lag is capped at one slice
+behind the frontier with wrap safe order.
 
 ## Insert and dispatch
 
 Enqueue places each task on the selected CPU when allowed,
 then the first allowed CPU, then the park. Pinned
 tasks use their CPU or the park. Tasks that cannot
-move stay on the current CPU. Tiny bursts at most one
-quarter of the mean run at once on the local queue when
-the target is idle and empty with a fast count. A pending
-boost runs once at the ordered head with a linger count
-and no chain. Each fresh join adds the estimate to the
-target mean with the capped value. Each runnable requeue
-refreshes the estimate in the mean with no count change
-and skips the write when the estimate is unchanged.
-Running keeps the entry. Blocking releases it at once.
-Disable and exit release exactly once. Dispatch drains the
-local queue first, then the park queue, then idle steals
-from peers. Each pass moves up to 32 tasks across local,
-park and steal. Each move in the local and park queues
-moves live tasks with no move failure when allowed,
-including exiting tasks so they run to exit, and skips
-dead, foreign and failed tasks, so one head never blocks
-later work there. Steals take the first task in a peer
-queue that allows the thief when the donor holds at least
-two tasks and move past bad heads to rescue movable work
+move stay on the current CPU. Each insert computes the
+frontier and the slice, clamps virtual time to at most
+one slice behind the frontier with wrap safety, scales
+the estimate with a fixed weight of 1024, and stores the
+deadline for the kernel queue with the mean as the slice.
+Each fresh join adds the estimate to the target mean with
+the capped value. Each runnable requeue refreshes the
+estimate in the mean with no count change and skips the
+write when the estimate is unchanged. Running keeps the
+entry. Blocking releases it at once. Disable and exit
+release exactly once. Dispatch drains the local queue first,
+then the park queue, then idle steals from peers. Each pass
+moves up to 32 tasks across local, park and steal. Each move
+in the local and park queues moves live tasks with no move
+failure when allowed, including exiting tasks so they run to
+exit, and skips dead, foreign and failed tasks, so one head
+never blocks later work there. Steals take the first task in
+a peer queue that allows the thief when the donor holds at
+least two tasks and move past bad heads to rescue movable work
 behind them. An idle CPU with no moved work steals past
 unmovable leftovers, while a busy CPU with moved work
 steals only when both queues are empty. An idle kick is
@@ -140,7 +145,7 @@ mask with no busy preemption.
 
 ## CPU choice
 
-CPU choice prefers the idle prior CPU with a reuse count,
+CPU choice prefers the idle prior CPU with no count,
 then an idle CPU in the previous CPU LLC domain, then an
 idle CPU in the task mask, then the prior CPU when allowed,
 then the current CPU when allowed, then the first allowed
@@ -161,13 +166,15 @@ needed.
 `--stats` prints deltas. `--monitor` runs the printer
 only. Counters cover inserts, requeues, completions,
 park moves, steal moves, idle kicks, inserts without
-state, fast hits, linger boosts and reuse hits. Park moves
+state, frozen fast hits, frozen linger boosts, frozen reuse
+hits, EDF enqueued, EDF clamped and EDF ordered. Park moves
 count dispatch moves from the park queue. Steal moves count
 dispatch moves from peer queues. Kicks count idle wakeup
-kicks sent only when the queue was empty. Fast hits count
-direct local inserts for tiny bursts. Linger boosts count
-ordered head starts for slight overruns. Reuse hits count
-idle prior CPU reuse.
+kicks sent only when the queue was empty. Fast hits, linger
+boosts and reuse hits stay frozen at zero for compat. EDF
+enqueued counts deadline inserts. EDF clamped counts sleeper
+caps to one slice. EDF ordered counts kernel queue inserts
+in order.
 
 ## Measuring Wakeup Latency
 
@@ -182,9 +189,8 @@ machine.
 
 ## Limitations
 
-- Idle wakeup kick. Wakeups join ordered and kick an
+- Idle wakeup kick. Wakeups join in EDF order and kick an
   idle target only when the queue was empty to collect
-  at once. Tiny bursts on idle empty targets run local
   at once.
 - Queues stay per-CPU. Idle CPUs collect park work and
   steal peer work with a scan past bad heads when the

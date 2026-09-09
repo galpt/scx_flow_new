@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.1.0`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.0`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -30,22 +30,27 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 ## Design
 
 Each CPU keeps an ordered queue with a per-CPU mean slice.
-Queues hold short estimates first with arrival order for ties.
-The per-CPU mean is the sum over unfinished work divided by
+Queues hold EDF order first with arrival order for ties.
+The deadline adds clamped virtual time and scaled estimate.
+The weight is fixed at 1024 with no custom heap. The kernel
+queue orders by deadline with the mean as the slice. The
+per-CPU mean is the sum over unfinished work divided by
 the count with the running task included. The seed is 8ms
-with a floor of 500µs and a ceiling of 32ms. Fresh tasks join
+with a floor of 500us and a ceiling of 32ms. Fresh tasks join
 with the current mean so the mean stays neutral. Estimates
 hold the last burst clamped at 1ns to 1 second with no
 smoothing. Mean accounting caps each sample at 32ms so one
-long burst never dominates the mean while order still uses
-the full estimate. Tiny bursts at most one quarter of the
-mean run at once on the local queue when the target is idle
-and empty. A run just past its grant and within one eighth
-above it earns one ordered head start with no chain. Each
-grant stores the mean at insert time. Blocked tasks
-complete and release at once. Runnable tasks requeue ordered
-with a refreshed estimate. Placement reuses the idle prior
-CPU first with a reuse count, then the LLC idle CPU, then
+long burst never dominates the mean while the deadline still
+uses the full estimate. The sleeper cap keeps lag at one slice
+behind the frontier, so a waking task gains at most one
+slice of advantage with wrap safe order. Each grant stores
+the mean at insert time. Blocked tasks complete and release
+at once. Runnable tasks requeue ordered with a refreshed
+estimate. Virtual time moves forward by scaled runtime and
+the frontier moves forward while work stays queued. An idle
+reset bounds to waking virtual time with no zero use, so new
+arrivals never inherit stale time. Placement reuses the idle
+prior CPU first with no count, then the LLC idle CPU, then
 any idle CPU, then the prior and current CPUs. Dispatch
 drains the local queue first, then the park queue, then
 idle steals from peers. Each pass visits every queued task
@@ -64,11 +69,14 @@ targets only when the queue was empty with a mask check and
 no busy preemption. Equal estimates skip the mean write.
 Hints use only estimate against mean. Stops restore the low
 hint when the CPU goes idle. Counts cover inserts, requeues,
-completions, park moves, steal moves, kicks, fast hits,
-linger boosts and reuse hits. Per-CPU queues use ids `0x4000`
-plus the CPU id with up to 1024 CPUs. The park queue uses id
-`0x5000` for tasks with no allowed CPU. The watchdog is 30
-seconds. Ops name is `flow`.
+completions, park moves, steal moves, kicks, frozen fast hits,
+frozen linger boosts and frozen reuse hits at zero, plus EDF
+enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
+`0x4000` plus the CPU id with up to 1024 CPUs. The park queue
+uses id `0x5000` for tasks with no allowed CPU. The watchdog
+is 30 seconds. Ops name is `flow`. For A/B comparison, install
+one build, measure the same workload, then install the other
+build and compare with no other change.
 
 ## Build
 
@@ -128,7 +136,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.1.0`, state `enabled` and ops
+Expect version `4.2.0`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 
