@@ -201,16 +201,12 @@ impl<'a> Scheduler<'a> {
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
             "exit ins={} req={} done={} park={} steal={} \
-            fast={} linger={} reuse={} edfenq={} edfclamp={} \
-            edford={} runtime={} oncpu={}",
+            edfenq={} edfclamp={} edford={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
             m.park_moves,
             m.steal_moves,
-            m.fast_hits,
-            m.linger_boosts,
-            m.reuse_hits,
             m.edf_enqueued,
             m.edf_clamped,
             m.edf_ordered,
@@ -395,5 +391,10 @@ mod tests {
         assert_eq!(crate::flow_edf::BATCH_EPS_NS, 96_000);
         assert_eq!(crate::flow_edf::GRACE_NS, 50_000);
         assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_IEDF as u64, 1);
+    }
+
+    #[test]
+    fn sched_stats_size_is_96() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(), 96);
     }
 }

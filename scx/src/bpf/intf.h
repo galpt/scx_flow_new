@@ -134,11 +134,8 @@ struct flow_cpu_state {
  * count covers voluntary blocks and exits. The park
  * count covers moves from the park queue. The steal
  * count covers moves from a peer queue. The kick count
- * covers idle wakeups. The fast count stays zero for
- * compat with no fast path. The linger count stays
- * zero for compat with no linger path. The reuse count
- * stays zero for compat with no reuse count. The EDF
- * counts cover ordered inserts with clamp detail.
+ * covers idle wakeups. The EDF counts cover ordered
+ * inserts with clamp detail.
  */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -150,9 +147,6 @@ struct flow_sched_stats {
 	u64 steal_moves;
 	u64 kicks;
 	u64 enq_no_tctx;
-	u64 fast_hits;
-	u64 linger_boosts;
-	u64 reuse_hits;
 	u64 edf_enqueued;
 	u64 edf_clamped;
 	u64 edf_ordered;

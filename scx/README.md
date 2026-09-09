@@ -51,7 +51,7 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.5` in 4.2 line with no Pi path. Pi is deferred
+is `4.2.6` in 4.2 line with no Pi path. Pi is deferred
 with no kill and no Pi use. Weight stays 1024 with no
 knob and no new maps plus no new queue ids plus no new
 option. The revert gate is `FLOW_GATE_IEDF` with batch
@@ -109,7 +109,6 @@ The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
 summary line and a per-CPU grid with running estimates,
 per-CPU means and per-CPU depths, plus system tiles for
-frozen fast hits, frozen linger boosts, frozen reuse hits,
 EDF enqueued, EDF clamped and EDF ordered, with no
 authentication, since the loopback address is the trust
 boundary.
@@ -187,12 +186,10 @@ needed.
 `--stats` prints deltas. `--monitor` runs the printer
 only. Counters cover inserts, requeues, completions,
 park moves, steal moves, idle kicks, inserts without
-state, frozen fast hits, frozen linger boosts, frozen reuse
-hits, EDF enqueued, EDF clamped and EDF ordered. Park moves
+state, EDF enqueued, EDF clamped and EDF ordered. Park moves
 count dispatch moves from the park queue. Steal moves count
 dispatch moves from peer queues. Kicks count idle wakeup
-kicks sent only when the queue was empty. Fast hits, linger
-boosts and reuse hits stay frozen at zero for compat. EDF
+kicks sent only when the queue was empty. EDF
 enqueued counts deadline inserts. EDF clamped counts sleeper
 caps to one slice. EDF ordered counts kernel queue inserts
 in order.

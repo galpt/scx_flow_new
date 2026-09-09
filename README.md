@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.5`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.6`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -101,8 +101,7 @@ hint when the CPU goes idle.
 ### Counts and queues
 
 Counts cover inserts, requeues,
-completions, park moves, steal moves, kicks, frozen fast hits,
-frozen linger boosts and frozen reuse hits at zero, plus EDF
+completions, park moves, steal moves and kicks, plus EDF
 enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
 `0x4000` plus the CPU id with up to 1024 CPUs. The park queue
 uses id `0x5000` for tasks with no allowed CPU. The watchdog
@@ -146,7 +145,10 @@ holds refactor content plus behavior content in one diff
 with no struct size change in the refactor part and the
 gate plus M1 to M4 in the behavior part with no new maps
 plus no new queue ids plus no new option. The map is
-`M1=batch/M2=grace/M3=shed/M4=guard`.
+`M1=batch/M2=grace/M3=shed/M4=guard`. The `4.2.6`
+cleanup removes frozen `fast_hits`, `linger_boosts` and
+`reuse_hits` with no behavior change, shrinking
+`flow_stats` from `120B` to `96B`.
 
 ## Build
 
@@ -206,7 +208,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.5`, state `enabled` and ops
+Expect version `4.2.6`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

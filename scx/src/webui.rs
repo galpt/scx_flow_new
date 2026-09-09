@@ -256,9 +256,6 @@ mod tests {
             \"kicks\":0,\"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.stats.fast_hits, 0);
-        assert_eq!(m.stats.linger_boosts, 0);
-        assert_eq!(m.stats.reuse_hits, 0);
         assert_eq!(m.stats.edf_enqueued, 0);
         assert_eq!(m.stats.edf_clamped, 0);
         assert_eq!(m.stats.edf_ordered, 0);
@@ -268,28 +265,6 @@ mod tests {
         assert_eq!(m2.per_cpu[0].id, 0);
         assert_eq!(m2.per_cpu[0].tq_ns, 0);
         assert_eq!(m2.per_cpu[0].depth, 0);
-    }
-
-    /* Frozen fields stay zero with new counts. */
-    #[test]
-    fn web_metrics_frozen_fields_stay_zero() {
-        let snap = WebMetrics {
-            stats: crate::stats::Metrics {
-                edf_enqueued: 10,
-                edf_clamped: 2,
-                edf_ordered: 10,
-                ..Default::default()
-            },
-            per_cpu: vec![],
-        };
-        let txt = serde_json::to_string(&snap).unwrap();
-        let back: WebMetrics = serde_json::from_str(&txt).unwrap();
-        assert_eq!(back.stats.fast_hits, 0);
-        assert_eq!(back.stats.linger_boosts, 0);
-        assert_eq!(back.stats.reuse_hits, 0);
-        assert_eq!(back.stats.edf_enqueued, 10);
-        assert_eq!(back.stats.edf_clamped, 2);
-        assert_eq!(back.stats.edf_ordered, 10);
     }
 
     /* Full snapshot round trips through JSON. */
@@ -303,9 +278,6 @@ mod tests {
                 park_moves: 1,
                 steal_moves: 0,
                 kicks: 4,
-                fast_hits: 0,
-                linger_boosts: 0,
-                reuse_hits: 0,
                 edf_enqueued: 8,
                 edf_clamped: 1,
                 edf_ordered: 8,
@@ -323,9 +295,6 @@ mod tests {
         let txt = serde_json::to_string(&snap).unwrap();
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
-        assert_eq!(back.stats.fast_hits, 0);
-        assert_eq!(back.stats.linger_boosts, 0);
-        assert_eq!(back.stats.reuse_hits, 0);
         assert_eq!(back.stats.edf_enqueued, 8);
         assert_eq!(back.stats.edf_clamped, 1);
         assert_eq!(back.stats.edf_ordered, 8);

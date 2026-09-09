@@ -295,18 +295,6 @@
           <span class="stat-value" id="no-tctx">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Fast hits:</span>
-          <span class="stat-value" id="fast">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Linger boosts:</span>
-          <span class="stat-value" id="linger">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Reuse hits:</span>
-          <span class="stat-value" id="reuse">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           EDF enqueued:</span>
           <span class="stat-value" id="edf-enq">0</span>
         </div>
@@ -506,12 +494,6 @@
         fmt(s.kicks || 0);
       el('no-tctx').textContent =
         fmt(s.enq_no_tctx || 0);
-      el('fast').textContent =
-        fmt(s.fast_hits || 0);
-      el('linger').textContent =
-        fmt(s.linger_boosts || 0);
-      el('reuse').textContent =
-        fmt(s.reuse_hits || 0);
       el('edf-enq').textContent =
         fmt(s.edf_enqueued || 0);
       el('edf-clamp').textContent =
