@@ -9,6 +9,9 @@
 
 /* Bound of moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
+/* Cap of shed tasks in park at twice one batch. */
+#[cfg(test)]
+pub const SHED_PARK_MAX: u64 = 64;
 /* Owner value for tasks with no accounting. */
 #[cfg(test)]
 pub const OWNER_NONE: u32 = 0xFFFF_FFFF;
@@ -200,6 +203,21 @@ pub fn edf_insert_and_step(
 #[cfg(test)]
 pub fn should_shed(queue_len: u64) -> bool {
     queue_len >= DISPATCH_BATCH as u64
+}
+
+/*
+ * True when an overload should shed to park with a
+ * park cap. Needs a target queue at one full batch
+ * and a park queue below the cap, so only excess
+ * sheds while park stays bounded at twice one batch.
+ * A full park falls through to the target with no
+ * drop and no kill. The shed keeps the target
+ * frontier with owner none and no kill and no Pi use.
+ * Park keeps order by deadline.
+ */
+#[cfg(test)]
+pub fn should_shed_cap(queue_len: u64, park_len: u64) -> bool {
+    queue_len >= DISPATCH_BATCH as u64 && park_len < SHED_PARK_MAX
 }
 
 /*

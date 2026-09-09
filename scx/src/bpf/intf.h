@@ -47,6 +47,8 @@ enum flow_consts {
 	FLOW_DSQ_PARK = 0x5000ULL,
 	/* Bound of moved tasks in one pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
+	/* Cap of shed tasks in park at twice one batch. */
+	FLOW_SHED_PARK_MAX = 64ULL,
 	/* Bound of peers visited by one steal scan. */
 	FLOW_STEAL_BOUND = 8ULL,
 	/* Unknown LLC id. Marks an empty table entry. */

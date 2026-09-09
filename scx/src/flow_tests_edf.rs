@@ -1616,6 +1616,45 @@ fn shed_keeps_one_batch_then_parks() {
 }
 
 #[test]
+fn shed_cap_bound_matches_twice_batch() {
+    /* The cap holds twice one batch with no knob. */
+    assert_eq!(SHED_PARK_MAX, 64);
+    assert_eq!(SHED_PARK_MAX, DISPATCH_BATCH as u64 * 2);
+    assert_eq!(DISPATCH_BATCH as u64, 32);
+    /* Below the cap still sheds when the target is full. */
+    assert!(should_shed_cap(32, 0));
+    assert!(should_shed_cap(32, 63));
+    /* At the cap the shed stops with no drop. */
+    assert!(!should_shed_cap(32, 64));
+    assert!(!should_shed_cap(64, 64));
+}
+
+#[test]
+fn shed_cap_fallback_keeps_target() {
+    /* A full park falls through to the target with no drop. */
+    /* The plain shed still wants park, but the cap stops it. */
+    assert!(should_shed(32));
+    assert!(!should_shed_cap(32, 64));
+    assert!(!should_shed_cap(64, 64));
+    assert!(!should_shed_cap(64, 100));
+    /* An overfull park also falls through with no kill. */
+    assert!(!should_shed_cap(32, 65));
+    assert!(!should_shed_cap(u64::MAX, u64::MAX));
+}
+
+#[test]
+fn shed_cap_unsaturated_keeps_target() {
+    /* An unsaturated target never sheds even with empty park. */
+    assert!(!should_shed_cap(0, 0));
+    assert!(!should_shed_cap(31, 0));
+    assert!(!should_shed_cap(0, 63));
+    /* A saturated target sheds only while park stays below the cap. */
+    assert!(should_shed_cap(32, 0));
+    assert!(should_shed_cap(64, 0));
+    assert!(!should_shed_cap(31, 63));
+}
+
+#[test]
 fn batch_sticky_keeps_near_deadlines() {
     let allowed = [true, true, true, true];
     assert!(sticky_batch_ok(1, &allowed, 1_000_000, 1_000_000));

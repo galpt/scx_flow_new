@@ -187,10 +187,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The deadline still uses the target frontier */
 	/* with owner none and no kill and no Pi use. */
 	/* The window holds one batch, so only excess */
-	/* sheds while the owner stays fair. */
+	/* sheds while the owner stays fair. The park */
+	/* cap holds twice one batch, so a full park */
+	/* falls through to the target with no drop. */
 	if ((u64)FLOW_GATE_IEDF &&
 	    scx_bpf_dsq_nr_queued(flow_dsq_for_cpu((u32)cpu)) >=
-	    (u64)FLOW_DISPATCH_MAX_BATCH) {
+	    (u64)FLOW_DISPATCH_MAX_BATCH &&
+	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) <
+	    (u64)FLOW_SHED_PARK_MAX) {
 		u64 shed_frontier = 0;
 		u64 shed_slice = tq;
 		u64 shed_v;
