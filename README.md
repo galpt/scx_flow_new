@@ -100,6 +100,7 @@ is needed on a fresh machine.
 sudo systemctl stop scx_loader 2>/dev/null || true
 
 # 2. Run the installer, it fetches the workspace when missing
+# (first run downloads the upstream tree, takes a while)
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 
 # 3. Confirm the version
