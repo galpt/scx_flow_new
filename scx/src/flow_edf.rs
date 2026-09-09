@@ -372,9 +372,9 @@ pub fn drain_model(
  * and steal bound at eight. The gate keeps revert
  * exact, so zero restores 4.2.0 order. Always reserve
  * would also work, gate documents the shed link. The
- * BPF side uses one cached park read with a branchless
- * subtract, this test form keeps the same conditional
- * result with no behavior change.
+ * BPF side uses the original fork two park reads with
+ * a conditional reserve, this test form keeps the
+ * same result with no behavior change.
  */
 #[cfg(test)]
 pub fn own_budget_for_dispatch(budget: u32, park_queued: u64, iedf: bool) -> u32 {

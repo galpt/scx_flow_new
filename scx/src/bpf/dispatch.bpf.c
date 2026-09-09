@@ -178,31 +178,26 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 budget = (u32)FLOW_DISPATCH_MAX_BATCH;
 	u32 moved = 0;
 	u32 own_left = 0;
-	u64 park_q = 0;
-	bool park_has = false;
-	bool park_reserve = false;
-	u32 own_budget = 0;
+	u32 own_budget = budget;
 
 	(void)prev;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
-	/* Single park read with branchless reserve. */
+	/* Reserve one slot for park when park holds work. */
 	/* The reserve keeps batch total at 32 with donor */
 	/* depth at two and steal bound at eight. The gate */
 	/* keeps revert exact, so zero restores 4.2.0 order. */
-	park_q = scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK);
-	park_has = park_q > 0;
-	park_reserve = (u64)FLOW_GATE_IEDF && park_has;
-	own_budget = budget - (u32)(park_reserve && budget > 0);
+	if ((u64)FLOW_GATE_IEDF &&
+	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
+	    own_budget > 0)
+		own_budget -= 1;
 	/* Own queue drains first with skip past bad heads. */
 	moved += flow_drain_own(cpu, own_budget);
 	/* Parked tasks move when the mask allows. */
-	/* The cached park flag drops the second park load */
-	/* with no behavior change, since own drain leaves */
-	/* park length unchanged. */
-	if (park_has && moved < budget)
+	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
+	    moved < budget)
 		moved += flow_drain_park(cpu, budget - moved);
 	if (moved >= budget)
 		return;
