@@ -36,19 +36,28 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Design
 
+### Order and deadlines
+
 Each CPU keeps an ordered queue with a per-CPU mean slice.
 Queues hold EDF order first with arrival order for ties.
 The deadline adds clamped virtual time and scaled estimate.
 The weight is fixed at 1024 with no custom heap. The kernel
-queue orders by deadline with the mean as the slice. The
-per-CPU mean is the sum over unfinished work divided by
+queue orders by deadline with the mean as the slice.
+
+### Mean slice
+
+The per-CPU mean is the sum over unfinished work divided by
 the count with the running task included. The seed is 8ms
 with a floor of 500us and a ceiling of 32ms. Fresh tasks join
 with the current mean so the mean stays neutral. Estimates
 hold the last burst clamped at 1ns to 1 second with no
 smoothing. Mean accounting caps each sample at 32ms so one
 long burst never dominates the mean while the deadline still
-uses the full estimate. The sleeper cap keeps lag at one slice
+uses the full estimate.
+
+### Fairness
+
+The sleeper cap keeps lag at one slice
 behind the frontier, so a waking task gains at most one
 slice of advantage with wrap safe order. Each grant stores
 the mean at insert time. Blocked tasks complete and release
@@ -56,9 +65,17 @@ at once. Runnable tasks requeue ordered with a refreshed
 estimate. Virtual time moves forward by scaled runtime and
 the frontier moves forward while work stays queued. An idle
 reset bounds to waking virtual time with no zero use, so new
-arrivals never inherit stale time. Placement reuses the idle
+arrivals never inherit stale time.
+
+### Placement
+
+Placement reuses the idle
 prior CPU first with no count, then the LLC idle CPU, then
-any idle CPU, then the prior and current CPUs. Dispatch
+any idle CPU, then the prior and current CPUs.
+
+### Dispatch
+
+Dispatch
 drains the local queue first, then the park queue, then
 idle steals from peers. Each pass visits every queued task
 in the owned and park queues in order and moves live tasks
@@ -71,22 +88,42 @@ only when both queues are empty. Idle steals visit at most
 8 peers with a rotating cursor and take the first task in a
 peer queue that allows the thief when the donor holds at
 least two tasks, moving past dead, foreign and failed heads
-to rescue movable work behind a bad head. Kicks wake idle
+to rescue movable work behind a bad head.
+
+### Kicks and hints
+
+Kicks wake idle
 targets only when the queue was empty with a mask check and
 no busy preemption. Equal estimates skip the mean write.
 Hints use only estimate against mean. Stops restore the low
-hint when the CPU goes idle. Counts cover inserts, requeues,
+hint when the CPU goes idle.
+
+### Counts and queues
+
+Counts cover inserts, requeues,
 completions, park moves, steal moves, kicks, frozen fast hits,
 frozen linger boosts and frozen reuse hits at zero, plus EDF
 enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
 `0x4000` plus the CPU id with up to 1024 CPUs. The park queue
 uses id `0x5000` for tasks with no allowed CPU. The watchdog
-is 30 seconds. Ops name is `flow`. For A/B comparison, install
+is 30 seconds. Ops name is `flow`.
+
+### Measurement
+
+For A/B comparison, install
 one build, measure the same workload, then install the other
-build and compare with no other change. Version stays in
+build and compare with no other change.
+
+### Limits
+
+Version stays in
 4.2 line with no Pi path. Pi is deferred with no kill and
 no Pi use. Weight stays 1024 with no knob and no new maps
-plus no new queue ids plus no new option. The revert gate
+plus no new queue ids plus no new option.
+
+### iEDF++
+
+The revert gate
 is `FLOW_GATE_IEDF` with batch plus grace plus shed plus
 guard behind it. The paper improved EDF is `iEDF`, this
 release proposes `iEDF++` with `M1` same deadline batching,
@@ -100,7 +137,11 @@ cancels, the scheduler never kills. Shed keeps order in park
 with owner none plus grant plus frontier and no kill. Guard
 keeps old on zero with no stale zero use. A value of 100
 percent is a measured rate at feasible use only with no
-guarantee. There is no gate on 98.5. The 4.2.2 landing
+guarantee. There is no gate on 98.5.
+
+### History
+
+The 4.2.2 landing
 holds refactor content plus behavior content in one diff
 with no struct size change in the refactor part and the
 gate plus M1 to M4 in the behavior part with no new maps
