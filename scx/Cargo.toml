@@ -1,6 +1,6 @@
 [package]
 name = "scx_flow"
-version = "4.2.3"
+version = "4.2.4"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2021"
 description = "A per-CPU ordered queue scheduler for sched_ext."

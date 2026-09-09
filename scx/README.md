@@ -51,7 +51,7 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.3` in 4.2 line with no Pi path. Pi is deferred
+is `4.2.4` in 4.2 line with no Pi path. Pi is deferred
 with no kill and no Pi use. Weight stays 1024 with no
 knob and no new maps plus no new queue ids plus no new
 option. The revert gate is `FLOW_GATE_IEDF` with batch
@@ -227,3 +227,7 @@ allows the idle CPU.
 with no sibling step and no SMT badge. A single CPU
   host runs with no peer scan through the same gates.
 - Needs a kernel with sched_ext enabled.
+
+## References
+
+1. Xiaojie Li and Xianbo He, The improved EDF scheduling algorithm for embedded real-time system in the uncertain environment, Proc. ICACTE, 2010, pp. V4-563 to V4-566. Read online at [ResearchGate](https://www.researchgate.net/publication/251952726_The_improved_EDF_scheduling_algorithm_for_embedded_real-time_system_in_the_uncertain_environment).

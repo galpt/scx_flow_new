@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.3`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.4`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -165,7 +165,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.3`, state `enabled` and ops
+Expect version `4.2.4`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir
@@ -224,3 +224,7 @@ cargo test
 ## License
 
 See `LICENSE`.
+
+## References
+
+1. Xiaojie Li and Xianbo He, The improved EDF scheduling algorithm for embedded real-time system in the uncertain environment, Proc. ICACTE, 2010, pp. V4-563 to V4-566. Read online at [ResearchGate](https://www.researchgate.net/publication/251952726_The_improved_EDF_scheduling_algorithm_for_embedded_real-time_system_in_the_uncertain_environment).
