@@ -28,26 +28,23 @@ need clang
 need rsync
 need git
 
-# Fetch the upstream workspace when missing.
-if [ ! -d "${WS}/rust" ]; then
-    echo "fetching upstream workspace at ${WS}"
-    mkdir -p "${WS}"
-    # Init a fresh dir and point it upstream.
-    if [ ! -d "${WS}/.git" ]; then
-        git init -q "${WS}"
-    fi
-    # A half made dir may lack the remote, so ensure it.
-    if ! git -C "${WS}" remote get-url origin >/dev/null 2>&1; then
-        git -C "${WS}" remote remove origin 2>/dev/null || true
-        git -C "${WS}" remote add origin "${UPSTREAM}"
-    fi
-    # Fetch the pinned ref by SHA and checkout the result.
-    if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
-        echo "fetch failed, check network access to ${UPSTREAM}" >&2
-        exit 1
-    fi
-    git -C "${WS}" checkout FETCH_HEAD
+# Always start from a fresh workspace so no run reuses
+# a stale tree. Guard the remove against empty or root.
+if [ -z "${WS}" ] || [ "${WS}" = "/" ]; then
+    echo "refusing to clean an empty or root path" >&2
+    exit 1
 fi
+echo "cleaning workspace at ${WS} for a fresh rebuild"
+rm -rf "${WS}"
+mkdir -p "${WS}"
+# Fetch the pinned upstream ref by SHA and checkout the result.
+git init -q "${WS}"
+git -C "${WS}" remote add origin "${UPSTREAM}"
+if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
+    echo "fetch failed, check network access to ${UPSTREAM}" >&2
+    exit 1
+fi
+git -C "${WS}" checkout FETCH_HEAD
 
 if [ ! -d "${WS}/rust" ]; then
     echo "workspace rust dir not found at ${WS}/rust" >&2

@@ -90,16 +90,16 @@ builds in release mode and installs the binary.
 
 `tools/install_scx_flow.sh` takes the workspace checkout
 path and defaults to `/tmp/scx-workspace`. It needs
-`cargo`, `clang`, `rsync` and `git`. If the workspace
-has no `rust` dir, the script fetches the upstream
-workspace at the pinned ref first, so no manual clone
-is needed on a fresh machine.
+`cargo`, `clang`, `rsync` and `git`. The script always
+starts fresh. It removes the workspace path, fetches the
+upstream workspace at the pinned ref, so no stale tree is
+ever reused on any run.
 
 ```bash
 # 1. Stop the loader before replacing the binary
 sudo systemctl stop scx_loader 2>/dev/null || true
 
-# 2. Run the installer, it fetches the workspace when missing
+# 2. Run the installer, it rebuilds the workspace fresh
 # (first run downloads the upstream tree, takes a while)
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 
