@@ -35,10 +35,17 @@ if [ ! -d "${WS}/rust" ]; then
     # Init a fresh dir and point it upstream.
     if [ ! -d "${WS}/.git" ]; then
         git init -q "${WS}"
+    fi
+    # A half made dir may lack the remote, so ensure it.
+    if ! git -C "${WS}" remote get-url origin >/dev/null 2>&1; then
+        git -C "${WS}" remote remove origin 2>/dev/null || true
         git -C "${WS}" remote add origin "${UPSTREAM}"
     fi
     # Fetch the pinned ref by SHA and checkout the result.
-    git -C "${WS}" fetch origin "${SCX_REF}"
+    if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
+        echo "fetch failed, check network access to ${UPSTREAM}" >&2
+        exit 1
+    fi
     git -C "${WS}" checkout FETCH_HEAD
 fi
 
