@@ -1640,15 +1640,18 @@ fn idle_guard_keeps_old_on_zero() {
 }
 
 #[test]
-fn park_reserve_drains_under_own_saturation() {
-    /* Own budget reserves one slot when park holds work. */
+fn park_waits_behind_saturated_own() {
+    /* No reserve remains, so own keeps full budget. */
     assert_eq!(own_budget_for_dispatch(32, 0, true), 32);
-    assert_eq!(own_budget_for_dispatch(32, 1, true), 31);
-    assert_eq!(own_budget_for_dispatch(32, 5, true), 31);
+    assert_eq!(own_budget_for_dispatch(32, 1, true), 32);
+    assert_eq!(own_budget_for_dispatch(32, 5, true), 32);
     assert_eq!(own_budget_for_dispatch(32, 1, false), 32);
     assert_eq!(own_budget_for_dispatch(0, 1, true), 0);
-    assert_eq!(own_budget_for_dispatch(1, 1, true), 0);
-    /* Sustained own saturation still drains park each pass. */
+    assert_eq!(own_budget_for_dispatch(1, 1, true), 1);
+    /* Saturated own leaves park waiting in 4.2.0 order. */
+    /* The CI 1M verifier limit forces this baseline, so the */
+    /* park starve bound is dropped. Shed backpressure is */
+    /* future work. */
     let good = PendingTask {
         allowed: vec![true, true],
         exiting: false,
@@ -1664,15 +1667,44 @@ fn park_reserve_drains_under_own_saturation() {
         park.push_back(good.clone());
     }
     let (moved_own, moved_park) = dispatch_own_park_model(&mut own, &mut park, 0, 32, true);
-    assert_eq!(moved_own, 31);
-    assert_eq!(moved_park, 1);
+    assert_eq!(moved_own, 32);
+    assert_eq!(moved_park, 0);
     assert_eq!(moved_own + moved_park, 32);
-    assert_eq!(own.len(), 33);
-    assert_eq!(park.len(), 3);
-    /* Second pass keeps draining park with no starve. */
+    assert_eq!(own.len(), 32);
+    assert_eq!(park.len(), 4);
+    /* Second pass still waits while own stays saturated. */
     let (moved_own2, moved_park2) = dispatch_own_park_model(&mut own, &mut park, 0, 32, true);
-    assert_eq!(moved_own2, 31);
-    assert_eq!(moved_park2, 1);
+    assert_eq!(moved_own2, 32);
+    assert_eq!(moved_park2, 0);
+    /* Unsaturated own drains park on the remainder. */
+    let mut own_small = VecDeque::new();
+    let mut park_small = VecDeque::new();
+    for _ in 0..10 {
+        own_small.push_back(good.clone());
+    }
+    for _ in 0..4 {
+        park_small.push_back(good.clone());
+    }
+    let (small_own, small_park) =
+        dispatch_own_park_model(&mut own_small, &mut park_small, 0, 32, true);
+    assert_eq!(small_own, 10);
+    assert_eq!(small_park, 4);
+    assert!(own_small.is_empty());
+    assert!(park_small.is_empty());
+    /* A tight remainder caps park at the budget left. */
+    let mut own_tight = VecDeque::new();
+    let mut park_tight = VecDeque::new();
+    for _ in 0..30 {
+        own_tight.push_back(good.clone());
+    }
+    for _ in 0..4 {
+        park_tight.push_back(good.clone());
+    }
+    let (tight_own, tight_park) =
+        dispatch_own_park_model(&mut own_tight, &mut park_tight, 0, 32, true);
+    assert_eq!(tight_own, 30);
+    assert_eq!(tight_park, 2);
+    assert_eq!(park_tight.len(), 2);
     /* Empty park keeps full own budget with no loss. */
     let mut own2 = VecDeque::new();
     let mut park2 = VecDeque::new();
@@ -1682,7 +1714,7 @@ fn park_reserve_drains_under_own_saturation() {
     let (a, b) = dispatch_own_park_model(&mut own2, &mut park2, 0, 32, true);
     assert_eq!(a, 32);
     assert_eq!(b, 0);
-    /* Gate off restores full own budget with park wait. */
+    /* Gate off keeps the same baseline order with park wait. */
     let mut own3 = VecDeque::new();
     let mut park3 = VecDeque::new();
     for _ in 0..64 {
@@ -1829,19 +1861,25 @@ fn mean_migration_never_leaks() {
 
 #[test]
 fn donor_gated_matches_guard() {
-    /* Ungated depths below two never steal. */
+    /* Sticky depths below two never steal. */
     assert!(!donor_ok(0));
     assert!(!donor_ok(1));
     assert!(donor_ok(2));
-    /* Gated with no gate allows all with no guard. */
+    /* Gated with no sticky gate allows all with no guard. */
+    /* The IEDF flag keeps no guard after the 4.2.0 revert. */
     assert!(donor_ok_gated(0, false, false));
     assert!(donor_ok_gated(1, false, false));
-    /* Gated with either gate keeps the guard. */
+    assert!(donor_ok_gated(0, false, true));
+    assert!(donor_ok_gated(1, false, true));
+    /* Gated with the sticky gate keeps the guard. */
+    assert!(!donor_ok_gated(0, true, false));
     assert!(!donor_ok_gated(1, true, false));
-    assert!(!donor_ok_gated(1, false, true));
+    assert!(!donor_ok_gated(0, true, true));
+    assert!(!donor_ok_gated(1, true, true));
     assert!(donor_ok_gated(2, true, false));
-    assert!(donor_ok_gated(2, false, true));
     assert!(donor_ok_gated(2, true, true));
+    assert!(donor_ok_gated(2, false, true));
+    assert!(donor_ok_gated(2, false, false));
 }
 
 #[test]

@@ -365,32 +365,28 @@ pub fn drain_model(
 }
 
 /*
- * Own budget with one slot reserved for park. When
- * the gate is set and park holds work, own keeps one
- * slot free so park always drains one task per pass.
- * The total stays at batch with donor depth at two
- * and steal bound at eight. The gate keeps revert
- * exact, so zero restores 4.2.0 order. Always reserve
- * would also work, gate documents the shed link. The
- * BPF side uses the original fork two park reads with
- * a conditional reserve, this test form keeps the
- * same result with no behavior change.
+ * Own budget for dispatch with no reserve. Returns the
+ * full budget, so own drains first and park drains on
+ * the remainder. The park reserve was dropped for the
+ * 1M verifier limit under 4.2.4, so park can wait behind
+ * saturated own. This is the 4.2.0 baseline order with
+ * no per-pass bound and no starve bound. Shed
+ * backpressure is future work. The gate keeps no
+ * reserve, so set and clear both keep 4.2.0 order.
  */
 #[cfg(test)]
 pub fn own_budget_for_dispatch(budget: u32, park_queued: u64, iedf: bool) -> u32 {
-    if iedf && park_queued > 0 && budget > 0 {
-        budget - 1
-    } else {
-        budget
-    }
+    let _ = (park_queued, iedf);
+    budget
 }
 
 /*
- * Dispatch own then park with the park reserve. Drains
- * own with the reserved budget, then drains park with
- * the rest, so park moves one task per pass even when
- * own stays saturated. The total never exceeds budget.
- * Mirrors the BPF dispatch order with no new path.
+ * Dispatch own then park in 4.2.0 order. Drains own
+ * with the full budget, returns early when saturated,
+ * then drains park with the rest when park holds work.
+ * The total never exceeds budget. A saturated own
+ * leaves park waiting, which matches the BPF dispatch
+ * order with no reserve and no new path.
  */
 #[cfg(test)]
 pub fn dispatch_own_park_model(
@@ -402,11 +398,13 @@ pub fn dispatch_own_park_model(
 ) -> (u32, u32) {
     let own_budget = own_budget_for_dispatch(budget, park.len() as u64, iedf);
     let moved_own = drain_model(own, cpu, own_budget);
-    let moved_park = if (park.len() as u64) > 0 && moved_own < budget {
-        drain_model(park, cpu, budget - moved_own)
-    } else {
-        0
-    };
+    if moved_own >= budget {
+        return (moved_own, 0);
+    }
+    if park.is_empty() {
+        return (moved_own, 0);
+    }
+    let moved_park = drain_model(park, cpu, budget - moved_own);
     (moved_own, moved_park)
 }
 

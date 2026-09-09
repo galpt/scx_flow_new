@@ -310,9 +310,9 @@ pub fn sticky_batch_ok(prev: i32, allowed: &[bool], deadline: u64, frontier: u64
  * True when a donor queue may lose one task. Needs at
  * least two queued tasks, so thin donors keep their
  * last task for the owner. The test form assumes the
- * gates are set. The gated form mirrors the BPF guard
- * with sticky or IEDF set, so one zero still guards
- * through the other with one revert.
+ * sticky gate is set. The gated form mirrors the BPF
+ * guard with sticky only, so the IEDF flag keeps no
+ * guard after the 4.2.0 revert.
  */
 #[cfg(test)]
 pub fn donor_ok(depth: u64) -> bool {
@@ -321,13 +321,16 @@ pub fn donor_ok(depth: u64) -> bool {
 
 /*
  * True when a donor may lose one task with gates.
- * Needs a set gate plus depth at two or more, so thin
- * donors keep their last task for the owner. Either
- * gate alone keeps the guard in BPF with no extra map.
+ * Needs the sticky gate plus depth at two or more, so
+ * thin donors keep their last task for the owner. The
+ * IEDF flag keeps no guard in BPF after the 4.2.0
+ * revert for the 1M verifier limit, so it stays ignored
+ * here to keep callers stable.
  */
 #[cfg(test)]
 pub fn donor_ok_gated(depth: u64, sticky: bool, iedf: bool) -> bool {
-    if !(sticky || iedf) {
+    let _ = iedf;
+    if !sticky {
         return true;
     }
     donor_ok(depth)
