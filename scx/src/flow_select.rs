@@ -9,7 +9,7 @@
 
 /* Unknown LLC id. Marks an empty table entry. */
 pub const LLC_UNKNOWN: u32 = 0xFFFF_FFFF;
-/* Compile time Cpu bound. Mirrors the BPF header. */
+/* Compile time CPU bound. Mirrors the BPF header. */
 #[cfg(test)]
 pub const MAX_CPUS: u32 = 1024;
 /* Bound of peers visited by one steal scan. */
@@ -20,7 +20,7 @@ pub const STEAL_BOUND: usize = 8;
 pub const STEAL_MIN_DEPTH: u64 = 2;
 
 /*
- * Queue id of one Cpu. Returns none for an out of
+ * Queue id of one CPU. Returns none for an out of
  * range id, so callers fall back to the park queue.
  */
 #[cfg(test)]
@@ -36,8 +36,8 @@ pub fn dsq_for_cpu(cpu: u32, max: usize) -> Option<u64> {
 
 /*
  * Next peer for a steal scan. Returns none with one
- * or no Cpus, so scans end at once with a single Cpu
- * and no peers. Returns none for an out of range Cpu.
+ * or no CPUs, so scans end at once with a single CPU
+ * and no peers. Returns none for an out of range CPU.
  */
 #[cfg(test)]
 pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
@@ -51,10 +51,10 @@ pub fn next_peer(cpu: u32, nr_cpus: usize) -> Option<u32> {
 }
 
 /*
- * Bound of a peer scan. Zero with one or no Cpus, so
+ * Bound of a peer scan. Zero with one or no CPUs, so
  * steal scans and rotation end at once with a single
- * Cpu. Otherwise capped by the steal bound and by one
- * less than the Cpu count.
+ * CPU. Otherwise capped by the steal bound and by one
+ * less than the CPU count.
  */
 #[cfg(test)]
 pub fn scan_bound(nr_cpus: usize) -> usize {
@@ -97,8 +97,8 @@ pub fn llc_ok(nr: u64) -> bool {
 }
 
 /*
- * LLC id of one Cpu. Unknown ids fail open, so an
- * out of range Cpu yields no domain.
+ * LLC id of one CPU. Unknown ids fail open, so an
+ * out of range CPU yields no domain.
  */
 #[cfg(test)]
 pub fn llc_of(cpu: usize, llc_ids: &[u32]) -> Option<u32> {
@@ -110,11 +110,11 @@ pub fn llc_of(cpu: usize, llc_ids: &[u32]) -> Option<u32> {
 }
 
 /*
- * Idle Cpu in the same LLC as the previous Cpu.
+ * Idle CPU in the same LLC as the previous CPU.
  * Skips the second thread of a busy core when the
  * full set marks fully idle cores. Empty full set
  * means no SMT preference. Returns none when no
- * LLC idle Cpu is found. Single and unknown hosts
+ * LLC idle CPU is found. Single and unknown hosts
  * return none at once with no scan.
  */
 #[cfg(test)]
@@ -159,8 +159,8 @@ pub fn pick_llc_idle(
 }
 
 /*
- * First idle Cpu in the mask. Models the any idle
- * step. Returns none when no allowed Cpu is idle.
+ * First idle CPU in the mask. Models the any idle
+ * step. Returns none when no allowed CPU is idle.
  */
 #[cfg(test)]
 pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -178,7 +178,7 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 /*
  * Full select model. Mirrors the BPF order of LLC
  * idle, any idle, previous, current and first.
- * Returns none for park use when no Cpu allows.
+ * Returns none for park use when no CPU allows.
  */
 #[cfg(test)]
 pub fn select_cpu_model(
@@ -211,12 +211,12 @@ pub fn select_cpu_model(
 }
 
 /*
- * Check that a Cpu may run a task with the given
+ * Check that a CPU may run a task with the given
  * mask. Mirrors the BPF live plus range plus mask
- * check. A negative Cpu fails closed. A Cpu at or
+ * check. A negative CPU fails closed. A CPU at or
  * past 1024 fails closed as test only bound. Live
- * Cpus are modelled by the mask length in tests, so
- * callers keep the mask sized to live Cpus. A missing
+ * CPUs are modelled by the mask length in tests, so
+ * callers keep the mask sized to live CPUs. A missing
  * entry fails closed.
  */
 #[cfg(test)]
@@ -234,9 +234,9 @@ pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
 }
 
 /*
- * Check that a Cpu is live for tests. Needs a Cpu at
+ * Check that a CPU is live for tests. Needs a CPU at
  * zero or past zero and below live count and below
- * 1024, so out of range Cpus fail closed with no
+ * 1024, so out of range CPUs fail closed with no
  * queue use. Mirrors the BPF live check with no mask.
  */
 #[cfg(test)]
@@ -251,9 +251,9 @@ pub fn cpu_live(cpu: i32, nr_cpus: usize) -> bool {
 }
 
 /*
- * Check that a Cpu is live and allowed for tests.
- * Needs a live Cpu with the mask set, so dead Cpus
- * and foreign Cpus fail closed at once. Mirrors the
+ * Check that a CPU is live and allowed for tests.
+ * Needs a live CPU with the mask set, so dead CPUs
+ * and foreign CPUs fail closed at once. Mirrors the
  * BPF live plus range plus mask check in one call.
  */
 #[cfg(test)]
@@ -265,8 +265,8 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
 }
 
 /*
- * True when the prior Cpu may be reused at once.
- * Needs an allowed prior Cpu that is idle, so busy
+ * True when the prior CPU may be reused at once.
+ * Needs an allowed prior CPU that is idle, so busy
  * priors never preempt and only quiet reuse counts.
  * The negative check stays explicit with no behavior
  * change, since the mask check already fails closed.
@@ -283,7 +283,7 @@ pub fn sticky_prior_ok(prev: i32, allowed: &[bool], idle: &[bool]) -> bool {
 }
 
 /*
- * True when a batch may stay on the prior Cpu. Needs
+ * True when a batch may stay on the prior CPU. Needs
  * an allowed prior with a known deadline within the
  * batch window of the prior frontier. Fresh tasks
  * with no deadline skip batch at once. The window
@@ -339,7 +339,7 @@ pub fn donor_ok_gated(depth: u64, sticky: bool, iedf: bool) -> bool {
  * LLC idle, any idle, previous, current and first.
  * Batch needs a known deadline near the frontier with
  * the gate set, so fresh tasks skip batch at once.
- * Returns none for park use when no Cpu allows.
+ * Returns none for park use when no CPU allows.
  */
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -378,10 +378,10 @@ pub fn may_kick(queue_len: u64) -> bool {
 }
 
 /*
- * Target Cpu from the selected Cpu. A valid allowed
- * selected Cpu wins. Otherwise the first allowed Cpu
- * wins. No allowed Cpu yields no target for park use.
- * Pinned tasks resolve to the single allowed Cpu here.
+ * Target CPU from the selected CPU. A valid allowed
+ * selected CPU wins. Otherwise the first allowed CPU
+ * wins. No allowed CPU yields no target for park use.
+ * Pinned tasks resolve to the single allowed CPU here.
  */
 #[cfg(test)]
 pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
@@ -401,9 +401,9 @@ pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
 }
 
 /*
- * Target Cpu for a task that cannot move. Mirrors
+ * Target CPU for a task that cannot move. Mirrors
  * the BPF local path with a mask check. An out of
- * range Cpu yields no target for park use. A Cpu
+ * range CPU yields no target for park use. A CPU
  * outside the mask yields no target for park use.
  */
 #[cfg(test)]
@@ -433,7 +433,7 @@ pub fn freq_known(freq_khz: u64) -> bool {
 /*
  * True when any entry claims a sibling thread. False
  * means plain hardware with one thread per core, so
- * callers keep plain per Cpu behavior.
+ * callers keep plain per-CPU behavior.
  */
 #[cfg(test)]
 pub fn topology_has_smt(smt: &[bool]) -> bool {
@@ -442,7 +442,7 @@ pub fn topology_has_smt(smt: &[bool]) -> bool {
 
 /*
  * True when a sibling may be used. Needs sibling
- * hardware and an allowed peer, else plain per Cpu
+ * hardware and an allowed peer, else plain per-CPU
  * choice stays.
  */
 #[cfg(test)]
@@ -461,7 +461,7 @@ pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
 
 /*
  * Pending task for dispatch models. The mask names
- * allowed Cpus. The exiting flag marks tasks in
+ * allowed CPUs. The exiting flag marks tasks in
  * exit. The live flag marks tasks with a trusted
  * reference. A cleared live flag models a NULL
  * lookup from the pid table. The fail flag models a
@@ -470,7 +470,7 @@ pub fn sibling_ok(has_smt: bool, sibling: i32, allowed: &[bool]) -> bool {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingTask {
-    /* Allowed Cpus. Index is the Cpu. */
+    /* Allowed CPUs. Index is the CPU. */
     pub allowed: Vec<bool>,
     /* True when the task is exiting. */
     pub exiting: bool,
@@ -499,7 +499,7 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
 }
 
 /*
- * Steal up to budget tasks from peers for an idle Cpu.
+ * Steal up to budget tasks from peers for an idle CPU.
  * The scan visits at most bound peers starting after
  * the cursor with wrap. Only idle callers steal. Each
  * peer is scanned in order past dead, foreign, and
@@ -561,10 +561,10 @@ pub fn steal_model(
 }
 
 /*
- * True when a Cpu may steal after draining own and
- * park. An idle Cpu with no moved work steals past
+ * True when a CPU may steal after draining own and
+ * park. An idle CPU with no moved work steals past
  * unmovable leftovers, so only unmovable work never
- * blocks a steal. A busy Cpu with moved work steals
+ * blocks a steal. A busy CPU with moved work steals
  * only when both queues are empty.
  */
 #[cfg(test)]

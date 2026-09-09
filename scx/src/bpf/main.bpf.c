@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
- * Flow scheduler BPF core. Each Cpu keeps an ordered
+ * Flow scheduler BPF core. Each CPU keeps an ordered
  * queue with a mean slice. Deadlines run first with
  * arrival order for ties. The deadline adds clamped
  * virtual time and scaled estimate with a sleeper cap
@@ -10,7 +10,7 @@
  * the running task included. Fresh tasks join with the
  * current mean so the mean stays neutral. Blocked
  * tasks complete and release. Runnable tasks requeue
- * ordered with a fresh estimate. Idle Cpus steal from
+ * ordered with a fresh estimate. Idle CPUs steal from
  * peers with a bounded rotating scan. Kicks wake idle
  * targets only.
  */
@@ -47,7 +47,7 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 /*
- * Per Cpu state. Keyed by Cpu id. Holds the mean with
+ * Per-CPU state. Keyed by CPU id. Holds the mean with
  * the sum and the count plus the steal cursor and the
  * running view.
  */
@@ -58,14 +58,14 @@ struct {
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
 
-/* Number of possible Cpus. Written once at init. */
+/* Number of possible CPUs. Written once at init. */
 volatile u64 nr_cpu_ids;
 
 /* Scheduler wide counters. Updated with atomics. */
 volatile struct flow_sched_stats flow_stats;
 
 /*
- * Per Cpu LLC ids. Seeded once by userspace from
+ * Per-CPU LLC ids. Seeded once by userspace from
  * host topology. Unknown entries hold the unknown
  * value. The count holds distinct domains. Zero or
  * one means plain behavior with no LLC step.
@@ -112,7 +112,7 @@ static struct flow_task_ctx *flow_get(
 }
 
 /*
- * Look up the Cpu state for one Cpu. Returns null for
+ * Look up the CPU state for one CPU. Returns null for
  * out of range ids.
  */
 static struct flow_cpu_state *flow_cpu(u32 cpu)
@@ -125,7 +125,7 @@ static struct flow_cpu_state *flow_cpu(u32 cpu)
 }
 
 /*
- * Check that a Cpu id names a live Cpu. Used to guard
+ * Check that a CPU id names a live CPU. Used to guard
  * queue and state access.
  */
 static __always_inline bool flow_cpu_live(u32 cpu)
@@ -138,7 +138,7 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 }
 
 /*
- * Check that a Cpu may run a task. The id must be in
+ * Check that a CPU may run a task. The id must be in
  * range and present in the task mask.
  */
 static __always_inline bool flow_cpu_ok(
@@ -154,7 +154,7 @@ static __always_inline bool flow_cpu_ok(
 }
 
 /*
- * Join one estimate to a Cpu mean. The sum uses the
+ * Join one estimate to a CPU mean. The sum uses the
  * capped value when the gate is set, so one long run
  * never dominates the mean. The count grows by one.
  * The mean is refreshed from the new sum and count.
@@ -179,7 +179,7 @@ static __always_inline void flow_join_cpu(u32 cpu,
 }
 
 /*
- * Leave one estimate from a Cpu mean. A missing entry
+ * Leave one estimate from a CPU mean. A missing entry
  * is a no op, so a double leave stays safe. The sum
  * uses the capped value when the gate is set, to match
  * the join path. The mean is refreshed from the new
@@ -233,7 +233,7 @@ static __always_inline void flow_leave_cpu(u32 cpu,
 }
 
 /*
- * Replace one estimate in a Cpu mean. The count stays
+ * Replace one estimate in a CPU mean. The count stays
  * fixed while the sum tracks the change. The sum uses
  * the capped values when the gate is set, so outliers
  * never dominate the mean. Equal estimates skip at
@@ -272,7 +272,7 @@ static __always_inline void flow_replace_cpu(u32 cpu,
 }
 
 /*
- * Drop the on Cpu count without wrap. Zero stays at
+ * Drop the on-CPU count without wrap. Zero stays at
  * zero, so a double stop never wraps the gauge.
  */
 static __always_inline void flow_on_cpu_dec(void)
@@ -298,7 +298,7 @@ static __always_inline void flow_on_cpu_dec(void)
 }
 
 /*
- * Clear the running view of one Cpu. Zero pid means
+ * Clear the running view of one CPU. Zero pid means
  * idle, so the dashboard sees idle at once.
  */
 static __always_inline void flow_clear_running(s32 cpu)
@@ -317,7 +317,7 @@ static __always_inline void flow_clear_running(s32 cpu)
 }
 
 /*
- * Set the Cpu hint from estimate against mean. Short
+ * Set the CPU hint from estimate against mean. Short
  * estimates ask for the high hint. Long estimates
  * restore the low hint. Unknown helpers stay safe
  * with no hint change.
@@ -338,7 +338,7 @@ static __always_inline void flow_cpuperf_set(s32 cpu,
 }
 
 /*
- * Restore the low hint when a stop leaves the Cpu
+ * Restore the low hint when a stop leaves the CPU
  * idle. Runnable stops keep their work, so they
  * never restore. Queued work also keeps the hint,
  * so restore runs once per idle change.
@@ -400,15 +400,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
-		scx_bpf_error("Cpu count over bound");
+		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
 	if (n == 0) {
-		scx_bpf_error("no Cpus found");
+		scx_bpf_error("no CPUs found");
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	/* Create one ordered queue per Cpu. */
+	/* Create one ordered queue per-CPU. */
 	bpf_for(cpu, 0, 1024) {
 		u64 dsq;
 

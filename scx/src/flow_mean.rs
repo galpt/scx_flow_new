@@ -11,11 +11,11 @@
 pub const EST_MIN_NS: u64 = 1;
 /* Upper bound of a per task estimate in nanos. */
 pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Seed of a per Cpu mean in nanos. */
+/* Seed of a per-CPU mean in nanos. */
 pub const TQ_SEED_NS: u64 = 8_000_000;
-/* Floor of a per Cpu mean in nanos. */
+/* Floor of a per-CPU mean in nanos. */
 pub const TQ_MIN_NS: u64 = 500_000;
-/* Ceiling of a per Cpu mean in nanos. */
+/* Ceiling of a per-CPU mean in nanos. */
 pub const TQ_MAX_NS: u64 = 32_000_000;
 /* Hint used for short estimates. */
 #[cfg(test)]
@@ -52,7 +52,7 @@ pub fn clamp_acct(v: u64) -> u64 {
 }
 
 /*
- * Clamp a per Cpu mean to the mean range. The floor
+ * Clamp a per-CPU mean to the mean range. The floor
  * keeps short means usable. The ceiling keeps long
  * means bounded.
  */
@@ -62,8 +62,8 @@ pub fn clamp_tq(v: u64) -> u64 {
 }
 
 /*
- * Mean of one Cpu from sum and count. An empty Cpu
- * uses the seed. A populated Cpu uses the quotient
+ * Mean of one CPU from sum and count. An empty CPU
+ * uses the seed. A populated CPU uses the quotient
  * clamped to the mean range.
  */
 #[cfg(test)]
@@ -106,10 +106,10 @@ pub fn scale_by_weight(est: u64, weight: u32) -> u64 {
 }
 
 /*
- * Per Cpu mean for tests. Holds the sum and the count
+ * Per-CPU mean for tests. Holds the sum and the count
  * of unfinished work including the running task. The
  * mean is the quotient clamped to the mean range with
- * the seed for an empty Cpu.
+ * the seed for an empty CPU.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,8 +131,8 @@ impl CpuMean {
     }
 
     /*
-     * Current mean. An empty Cpu reads as the seed.
-     * A populated Cpu reads as the clamped quotient.
+     * Current mean. An empty CPU reads as the seed.
+     * A populated CPU reads as the clamped quotient.
      */
     pub fn tq(&self) -> u64 {
         mean_tq(self.sum, self.nr)

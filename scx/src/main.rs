@@ -52,7 +52,7 @@ use stats::Metrics;
 
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
-/* Cpu bound shared with the BPF header. */
+/* CPU bound shared with the BPF header. */
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
 
 fn full_version() -> String {
@@ -105,7 +105,7 @@ pub(crate) struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
     /* Dashboard sender. None when disabled. */
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
-    /* Static per Cpu cards seeded at attach. */
+    /* Static per-CPU cards seeded at attach. */
     cpu_static: Vec<stats::PerCpuMetrics>,
     /* Live frequency cache for the cards. */
     cur_freq_khz: Vec<u64>,

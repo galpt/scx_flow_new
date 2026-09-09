@@ -75,7 +75,7 @@ static uint64_t uniform_ns(unsigned int *seed, uint64_t lo, uint64_t hi)
     return lo + (r % span);
 }
 
-/* Burn Cpu for given nanos with no sleep. */
+/* Burn CPU for given nanos with no sleep. */
 static void burn_ns(uint64_t ns)
 {
     uint64_t start = now_ns();

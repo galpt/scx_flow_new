@@ -961,7 +961,7 @@ fn dispatch_skips_dead_head() {
         live: false,
         fail: false,
     };
-    /* Good tasks allow the asking Cpu. */
+    /* Good tasks allow the asking CPU. */
     let good = PendingTask {
         allowed: vec![true, true],
         exiting: false,
@@ -984,7 +984,7 @@ fn dispatch_skips_failed_move_with_progress() {
         live: true,
         fail: true,
     };
-    /* Good tasks allow the asking Cpu. */
+    /* Good tasks allow the asking CPU. */
     let good = PendingTask {
         allowed: vec![true, true],
         exiting: false,
@@ -1028,14 +1028,14 @@ fn dispatch_park_moves_exiting_head() {
         live: true,
         fail: false,
     };
-    /* Foreign head allows only the other Cpu. */
+    /* Foreign head allows only the other CPU. */
     let foreign = PendingTask {
         allowed: vec![false, true],
         exiting: false,
         live: true,
         fail: false,
     };
-    /* Good tasks allow the asking Cpu. */
+    /* Good tasks allow the asking CPU. */
     let good = PendingTask {
         allowed: vec![true, true],
         exiting: false,
@@ -1189,7 +1189,7 @@ fn progress_guarantee_zero_means_no_movable_work() {
 
 #[test]
 fn incident_idle_cpu_progress_with_bad_heads() {
-    /* Foreign tasks pin to the busy Cpu. */
+    /* Foreign tasks pin to the busy CPU. */
     let mut mask = vec![false; 16];
     mask[15] = true;
     let foreign = PendingTask {
@@ -1219,7 +1219,7 @@ fn incident_idle_cpu_progress_with_bad_heads() {
         live: true,
         fail: true,
     };
-    /* Good tasks allow the idle Cpu. */
+    /* Good tasks allow the idle CPU. */
     let good = PendingTask {
         allowed: vec![true; 16],
         exiting: false,
@@ -1269,7 +1269,7 @@ fn incident_steal_keeps_progress_with_bad_heads() {
         live: true,
         fail: false,
     };
-    /* Bad head allows only the far Cpu. */
+    /* Bad head allows only the far CPU. */
     let bad = PendingTask {
         allowed: vec![false, false, false, true],
         exiting: false,
@@ -1318,7 +1318,7 @@ fn steal_only_when_idle_and_bounded() {
 
 #[test]
 fn steal_checks_mask_and_skips_bad_heads() {
-    /* Foreign tasks allow no Cpu here. */
+    /* Foreign tasks allow no CPU here. */
     let foreign = PendingTask {
         allowed: vec![false, false],
         exiting: false,
@@ -1438,7 +1438,7 @@ fn exiting_task_eventually_runs() {
         live: true,
         fail: false,
     };
-    /* Good tasks allow the asking Cpu. */
+    /* Good tasks allow the asking CPU. */
     let good = PendingTask {
         allowed: vec![true, true],
         exiting: false,
@@ -1473,16 +1473,16 @@ fn exiting_task_eventually_runs() {
 
 #[test]
 fn idle_steals_past_unmovable_leftovers() {
-    /* An idle Cpu steals past unmovable leftovers. */
+    /* An idle CPU steals past unmovable leftovers. */
     assert!(may_steal(2, 0, 0));
     assert!(may_steal(0, 1, 0));
     assert!(may_steal(5, 3, 0));
     assert!(may_steal(0, 0, 0));
-    /* A busy Cpu with local work stays home. */
+    /* A busy CPU with local work stays home. */
     assert!(!may_steal(1, 0, 1));
     assert!(!may_steal(0, 1, 1));
     assert!(!may_steal(2, 3, 2));
-    /* A busy Cpu with empty queues may steal. */
+    /* A busy CPU with empty queues may steal. */
     assert!(may_steal(0, 0, 1));
     assert!(may_steal(0, 0, 5));
     /* Own queue with only foreign work stays idle. */
@@ -1729,16 +1729,16 @@ fn grace_step_matches_stopping_path() {
 
 #[test]
 fn mask_range_and_live_fail_closed() {
-    /* Negative Cpus fail closed. */
+    /* Negative CPUs fail closed. */
     assert!(!may_run_on(-1, &[true, true]));
     assert!(!cpu_live(-1, 2));
     assert!(!may_run_on_live(-1, &[true, true], 2));
-    /* Cpu past 1024 fails closed as test only bound. */
+    /* CPU past 1024 fails closed as test only bound. */
     assert!(!may_run_on(1024, &[true; 2048]));
     assert!(!cpu_live(1024, 2048));
     assert!(!may_run_on_live(1024, &[true; 2048], 2048));
     assert!(!may_run_on(2048, &[true; 4096]));
-    /* Live count bounds the Cpu with no queue use. */
+    /* Live count bounds the CPU with no queue use. */
     assert!(cpu_live(0, 2));
     assert!(cpu_live(1, 2));
     assert!(!cpu_live(2, 2));
@@ -1789,7 +1789,7 @@ fn sticky_batch_keeps_prior_when_near() {
 
 #[test]
 fn mean_migration_never_leaks() {
-    /* Join on first Cpu then migrate with leave plus join. */
+    /* Join on first CPU then migrate with leave plus join. */
     let mut a = CpuMean::empty();
     let mut b = CpuMean::empty();
     let e = a.join(2_000_000);

@@ -42,7 +42,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 
 		/* Reference frontier keeps the deadline fair. */
 		/* Park has no target, so the selected or first */
-		/* allowed Cpu gives the frontier with no stale */
+		/* allowed CPU gives the frontier with no stale */
 		/* zero use when a reference exists. */
 		if (!flow_cpu_ok(p, ref_cpu)) {
 			s32 first;
@@ -83,7 +83,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		is_fresh = true;
 	if (tctx->grant_ns == (u64)-1)
 		need_join = true;
-	/* Tasks that cannot move stay on the current Cpu. */
+	/* Tasks that cannot move stay on the current CPU. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 

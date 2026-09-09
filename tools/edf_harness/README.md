@@ -35,10 +35,10 @@ and 1 repeat at target 1.0 only.
 
 Average burst 9ms over average period 220ms gives per
 thread use near 0.0409. Thread count follows target
-use times Cpu count over per thread use. On 16 Cpus
+use times CPU count over per thread use. On 16 CPUs
 the counts are near 196 for 0.5 plus 293 for 0.75 plus
 372 for 0.95 plus 391 for 1.0 plus 469 for 1.2 plus
-587 for 1.5. The script reads host Cpus with `nproc`
+587 for 1.5. The script reads host CPUs with `nproc`
 so other hosts scale the same way.
 
 ```bash
@@ -70,13 +70,13 @@ when count is one. Topology dump holds `nproc` plus
 Variance is the per target CI in the stats CSV.
 
 Metrics use offered use equal to released execution
-over wall over Cpu count plus exact use equal to mean
+over wall over CPU count plus exact use equal to mean
 per job execution over period times thread count over
-Cpu count plus completion equal to completed over
+CPU count plus completion equal to completed over
 released plus effective use equal to completed execution
-over wall over Cpu count plus switches from voluntary
+over wall over CPU count plus switches from voluntary
 switches summed over threads. Exact use is mean per job
-ratio times thread count over Cpu count with no wall
+ratio times thread count over CPU count with no wall
 sampling. Offered use matches exact use on average with
 no extra sampling.
 

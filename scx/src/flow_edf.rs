@@ -18,10 +18,10 @@ pub const BATCH_EPS_NS: u64 = 96_000;
 /* Grace after deadline in nanos for accounting. */
 #[cfg(test)]
 pub const GRACE_NS: u64 = 50_000;
-/* Base id of the per Cpu ordered queues. */
+/* Base id of the per-CPU ordered queues. */
 #[cfg(test)]
 pub const DSQ_BASE: u64 = 0x4000;
-/* Park id for tasks with no allowed Cpu. */
+/* Park id for tasks with no allowed CPU. */
 #[cfg(test)]
 pub const DSQ_PARK: u64 = 0x5000;
 
@@ -95,7 +95,7 @@ pub fn frontier_max(old: u64, next: u64) -> u64 {
 }
 
 /*
- * Frontier for an idle Cpu from the waking virtual
+ * Frontier for an idle CPU from the waking virtual
  * time. The waking value bounds the reset with no
  * zero use, so a new arrival never inherits stale
  * time while queued work never moves backward.
@@ -332,9 +332,9 @@ pub fn ordered_insert(queue: &mut Vec<OrderedEntry>, entry: OrderedEntry) -> usi
 }
 
 /*
- * Drain up to budget tasks for one Cpu. The scan
+ * Drain up to budget tasks for one CPU. The scan
  * visits every queued task in order and moves each
- * live task with the Cpu in the mask and with no
+ * live task with the CPU in the mask and with no
  * move failure. Exiting tasks move when allowed, so
  * they run to exit on the owner or on a thief. Dead,
  * foreign, and failed heads are skipped, so one head
@@ -371,7 +371,10 @@ pub fn drain_model(
  * The total stays at batch with donor depth at two
  * and steal bound at eight. The gate keeps revert
  * exact, so zero restores 4.2.0 order. Always reserve
- * would also work, gate documents the shed link.
+ * would also work, gate documents the shed link. The
+ * BPF side uses one cached park read with a branchless
+ * subtract, this test form keeps the same conditional
+ * result with no behavior change.
  */
 #[cfg(test)]
 pub fn own_budget_for_dispatch(budget: u32, park_queued: u64, iedf: bool) -> u32 {
@@ -408,28 +411,28 @@ pub fn dispatch_own_park_model(
 }
 
 /*
- * Running view of one Cpu for tests. Mirrors the BPF
- * Cpu state fields used by the dashboard. Zero pid
+ * Running view of one CPU for tests. Mirrors the BPF
+ * CPU state fields used by the dashboard. Zero pid
  * means idle.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunningView {
-    /* Estimate of the task now on the Cpu. */
+    /* Estimate of the task now on the CPU. */
     pub est: u64,
-    /* Pid now on the Cpu. Zero when idle. */
+    /* Pid now on the CPU. Zero when idle. */
     pub pid: u32,
 }
 
 /*
- * Per Cpu depth for tests. Each slot counts queued
- * tasks on one Cpu across all queues. The sum matches
+ * Per-CPU depth for tests. Each slot counts queued
+ * tasks on one CPU across all queues. The sum matches
  * the queued total.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuDepths {
-    /* Queued tasks per Cpu. Index is the Cpu. */
+    /* Queued tasks per-CPU. Index is the CPU. */
     pub nr: Vec<u64>,
 }
 
@@ -444,7 +447,7 @@ impl RunningView {
     }
 
     /*
-     * True when no task runs on the Cpu. The dashboard
+     * True when no task runs on the CPU. The dashboard
      * uses the pid for this check.
      */
     pub fn is_idle(&self) -> bool {
@@ -464,7 +467,7 @@ impl RunningView {
 #[cfg(test)]
 impl CpuDepths {
     /*
-     * Empty depths with all Cpus at zero. Matches the
+     * Empty depths with all CPUs at zero. Matches the
      * BPF state after init.
      */
     pub fn new(nr_cpus: usize) -> Self {
@@ -474,7 +477,7 @@ impl CpuDepths {
     }
 
     /*
-     * Join one task to a Cpu. Counts saturate at the
+     * Join one task to a CPU. Counts saturate at the
      * top, so a burst of joins never wraps the gauge.
      */
     pub fn join(&mut self, cpu: usize) {
@@ -484,7 +487,7 @@ impl CpuDepths {
     }
 
     /*
-     * Leave one task from a Cpu. Counts never go below
+     * Leave one task from a CPU. Counts never go below
      * zero, so a double leave stays safe.
      */
     pub fn leave(&mut self, cpu: usize) {
@@ -494,7 +497,7 @@ impl CpuDepths {
     }
 
     /*
-     * Sum of all Cpus. Matches the queued total.
+     * Sum of all CPUs. Matches the queued total.
      */
     pub fn sum(&self) -> u64 {
         self.nr.iter().fold(0, |a, &v| a.saturating_add(v))

@@ -4,19 +4,19 @@
  *
  * Placement, included by main.bpf.c via include.
  *
- * Idle choice prefers the idle prior Cpu with no
+ * Idle choice prefers the idle prior CPU with no
  * count, then the previous LLC domain, then any idle
- * Cpu, then the previous Cpu, the current Cpu, and
- * the first allowed Cpu. Pinned tasks and tasks that
- * cannot move stay local with a park hint when no Cpu
+ * CPU, then the previous CPU, the current CPU, and
+ * the first allowed CPU. Pinned tasks and tasks that
+ * cannot move stay local with a park hint when no CPU
  * allows.
  */
 
 /*
- * Idle Cpu in the same LLC as the previous Cpu.
+ * Idle CPU in the same LLC as the previous CPU.
  * Skips the second thread of a busy core when the
  * idle set marks fully idle cores. Returns minus
- * one when no LLC idle Cpu is found. Single and
+ * one when no LLC idle CPU is found. Single and
  * unknown hosts return at once with no scan.
  */
 static s32 flow_llc_idle(const struct task_struct *p,
@@ -80,8 +80,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 llc_pick;
 
 	this_cpu = (s32)bpf_get_smp_processor_id();
-	/* Single Cpu ends at the first allowed Cpu. */
-	/* Tasks that cannot move stay on the current Cpu. */
+	/* Single CPU ends at the first allowed CPU. */
+	/* Tasks that cannot move stay on the current CPU. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
@@ -92,7 +92,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		first = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (flow_cpu_ok(p, first))
 			return first;
-		/* No allowed Cpu, park hint for enqueue. */
+		/* No allowed CPU, park hint for enqueue. */
 		return prev_cpu;
 	}
 	/* Pinned tasks stay where they are. */
@@ -104,11 +104,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			return here;
 		if (flow_cpu_ok(p, prev_cpu))
 			return prev_cpu;
-		/* The single allowed Cpu is the valid hint. */
+		/* The single allowed CPU is the valid hint. */
 		allow = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (flow_cpu_ok(p, allow))
 			return allow;
-		/* No allowed Cpu, park hint for enqueue. */
+		/* No allowed CPU, park hint for enqueue. */
 		return prev_cpu;
 	}
 	/* Sticky idle prior reuse with no count. */
@@ -132,7 +132,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				return prev_cpu;
 		}
 	}
-	/* Prefer an idle Cpu in the previous LLC domain. */
+	/* Prefer an idle CPU in the previous LLC domain. */
 	/* Single and unknown hosts skip the LLC step. */
 	llc_pick = flow_llc_idle(p, prev_cpu);
 	if (llc_pick >= 0) {
@@ -140,23 +140,23 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		if (flow_cpu_ok(p, llc_pick))
 			return llc_pick;
 	}
-	/* Prefer an idle Cpu inside the mask. */
+	/* Prefer an idle CPU inside the mask. */
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0) {
 		/* Idle choice honors the mask, recheck is safe. */
 		if (flow_cpu_ok(p, picked))
 			return picked;
 	}
-	/* Fall back to the previous Cpu when allowed. */
+	/* Fall back to the previous CPU when allowed. */
 	if (flow_cpu_ok(p, prev_cpu))
 		return prev_cpu;
-	/* Fall back to the current Cpu when allowed. */
+	/* Fall back to the current CPU when allowed. */
 	if (flow_cpu_ok(p, this_cpu))
 		return this_cpu;
-	/* Try the first allowed Cpu when allowed. */
+	/* Try the first allowed CPU when allowed. */
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;
-	/* No allowed Cpu, park hint for enqueue. */
+	/* No allowed CPU, park hint for enqueue. */
 	return prev_cpu;
 }

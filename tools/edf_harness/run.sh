@@ -4,7 +4,7 @@
 #
 # Run the periodic EDF harness across load levels.
 # Each level calibrates thread count for a target use
-# on the host Cpu count with average burst plus period.
+# on the host CPU count with average burst plus period.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +30,7 @@ echo "building harness"
 gcc -O2 -Wall -Wextra -pthread "${HARNESS_C}" -o "${HARNESS_BIN}"
 
 NCPU="$(nproc)"
-echo "host Cpus ${NCPU}"
+echo "host CPUs ${NCPU}"
 mkdir -p "${OUTDIR}"
 
 # Topology dump for variance context.
@@ -44,7 +44,7 @@ mkdir -p "${OUTDIR}"
 
 # Average burst 9ms over average period 220ms gives
 # per thread use near 0.0409. Thread count follows
-# target use times Cpu count over per thread use.
+# target use times CPU count over per thread use.
 calc_n() {
     local target="$1"
     python3 -c "import math; print(int(round(float('${target}') * ${NCPU} * 220.0 / 9.0)))"

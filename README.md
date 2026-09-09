@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.2`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.3`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -25,7 +25,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow_tests_edf.rs` tests only with S1 to S3
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
-- `scx/src/topology.rs` trimmed per Cpu cards
+- `scx/src/topology.rs` trimmed per-CPU cards
 - `scx/src/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
 - `tools/install_scx_flow.sh` overlay build installer
@@ -36,12 +36,12 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Design
 
-Each Cpu keeps an ordered queue with a per Cpu mean slice.
+Each CPU keeps an ordered queue with a per-CPU mean slice.
 Queues hold EDF order first with arrival order for ties.
 The deadline adds clamped virtual time and scaled estimate.
 The weight is fixed at 1024 with no custom heap. The kernel
 queue orders by deadline with the mean as the slice. The
-per Cpu mean is the sum over unfinished work divided by
+per-CPU mean is the sum over unfinished work divided by
 the count with the running task included. The seed is 8ms
 with a floor of 500us and a ceiling of 32ms. Fresh tasks join
 with the current mean so the mean stays neutral. Estimates
@@ -57,16 +57,16 @@ estimate. Virtual time moves forward by scaled runtime and
 the frontier moves forward while work stays queued. An idle
 reset bounds to waking virtual time with no zero use, so new
 arrivals never inherit stale time. Placement reuses the idle
-prior Cpu first with no count, then the LLC idle Cpu, then
-any idle Cpu, then the prior and current Cpus. Dispatch
+prior CPU first with no count, then the LLC idle CPU, then
+any idle CPU, then the prior and current CPUs. Dispatch
 drains the local queue first, then the park queue, then
 idle steals from peers. Each pass visits every queued task
 in the owned and park queues in order and moves live tasks
 with no move failure when allowed, including exiting tasks
 so they run to exit, and skips past dead, foreign and failed
 heads, so every pass moves at least one task when movable
-work exists there. An idle Cpu with no moved work steals past
-unmovable leftovers, while a busy Cpu with moved work steals
+work exists there. An idle CPU with no moved work steals past
+unmovable leftovers, while a busy CPU with moved work steals
 only when both queues are empty. Idle steals visit at most
 8 peers with a rotating cursor and take the first task in a
 peer queue that allows the thief when the donor holds at
@@ -75,12 +75,12 @@ to rescue movable work behind a bad head. Kicks wake idle
 targets only when the queue was empty with a mask check and
 no busy preemption. Equal estimates skip the mean write.
 Hints use only estimate against mean. Stops restore the low
-hint when the Cpu goes idle. Counts cover inserts, requeues,
+hint when the CPU goes idle. Counts cover inserts, requeues,
 completions, park moves, steal moves, kicks, frozen fast hits,
 frozen linger boosts and frozen reuse hits at zero, plus EDF
-enqueued, EDF clamped and EDF ordered. Per Cpu queues use ids
-`0x4000` plus the Cpu id with up to 1024 Cpus. The park queue
-uses id `0x5000` for tasks with no allowed Cpu. The watchdog
+enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
+`0x4000` plus the CPU id with up to 1024 CPUs. The park queue
+uses id `0x5000` for tasks with no allowed CPU. The watchdog
 is 30 seconds. Ops name is `flow`. For A/B comparison, install
 one build, measure the same workload, then install the other
 build and compare with no other change. Version stays in
@@ -165,7 +165,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.2`, state `enabled` and ops
+Expect version `4.2.3`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

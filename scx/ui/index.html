@@ -2,8 +2,8 @@
   SPDX-License-Identifier: GPL-2.0
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-  Flow web UI. A live view of per Cpu queues,
-  per Cpu running tasks and system counters, served by
+  Flow web UI. A live view of per-CPU queues,
+  per-CPU running tasks and system counters, served by
   the dashboard server over loopback with a unix socket
   fallback. Offline first with no external assets.
 -->
@@ -63,7 +63,7 @@
       font-weight: 600;
       font-feature-settings: "tnum";
     }
-    /* Per Cpu card grid. Dense small chips that
+    /* Per-CPU card grid. Dense small chips that
      * wrap across the page. No inner scroll: the
      * page scrolls as one page so 20+ cores fit
      * without a nested scroll container. */
@@ -144,7 +144,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Running badge on each Cpu card. Running tasks
+    /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. */
     .run-badge {
       display: inline-block;
@@ -223,7 +223,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per Cpu queues, mean slices and placement
+          per-CPU queues, mean slices and placement
         </p>
       </div>
       <div id="status-badge" style="font-size:0.75rem;
@@ -235,7 +235,7 @@
       </div>
     </header>
 
-    <!-- Per Cpu cards -->
+    <!-- Per-CPU cards -->
     <div id="core-cards" class="core-grid"></div>
 
     <!-- Summary -->
@@ -255,7 +255,7 @@
       <p class="section-label">System</p>
       <div class="sys-grid">
         <div><span style="color:var(--text-muted)">
-          On Cpu:</span>
+          On-CPU:</span>
           <span class="stat-value" id="on-cpu">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
@@ -369,7 +369,7 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per Cpu cards with mean and depth plus the
+    /* Per-CPU cards with mean and depth plus the
      * running estimate and the pid. Freq unknown
      * stays plain with no zero print. No sibling
      * stays plain with no badge. */
@@ -380,7 +380,7 @@
         container.innerHTML = '<div class="card" ' +
           'style="grid-column:1/-1;text-align:center;' +
           'color:var(--text-muted)">' +
-          'No Cpu data yet</div>';
+          'No CPU data yet</div>';
         return;
       }
       container.innerHTML = perCpu.map(function(cpu) {
@@ -422,7 +422,7 @@
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
-          '<div class="core-id">Cpu ' + cpu.id +
+          '<div class="core-id">CPU ' + cpu.id +
           smtLabel + '</div>' +
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel +

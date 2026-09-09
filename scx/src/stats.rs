@@ -11,7 +11,7 @@
  * Linger boosts stay zero for compat with no linger
  * path. Reuse hits stay zero for compat with no reuse
  * count. EDF counts cover ordered inserts with clamp
- * detail. Web metrics adds per Cpu cards with mean and
+ * detail. Web metrics adds per-CPU cards with mean and
  * depth.
  */
 use std::io::Write;
@@ -31,7 +31,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Tasks now on a Cpu")]
+    #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
     pub on_cpu: u64,
     #[stat(desc = "Total runtime in nanoseconds")]
@@ -82,14 +82,14 @@ pub struct Metrics {
 }
 
 /*
- * One card of the per Cpu grid. Static fields come from
+ * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
- * per Cpu map on each poll. The mean holds the current
+ * per-CPU map on each poll. The mean holds the current
  * slice. The depth holds unfinished work with running.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
-    /* Cpu id. */
+    /* CPU id. */
     #[serde(default)]
     pub id: u32,
     /* Max frequency in kilohertz. Zero when unknown. */
@@ -104,10 +104,10 @@ pub struct PerCpuMetrics {
     /* True for the second thread of a core. */
     #[serde(default)]
     pub smt: bool,
-    /* Estimate of the task now on the Cpu. Zero idle. */
+    /* Estimate of the task now on the CPU. Zero idle. */
     #[serde(default)]
     pub running_est_ns: u64,
-    /* Pid now on the Cpu. Zero when idle. */
+    /* Pid now on the CPU. Zero when idle. */
     #[serde(default)]
     pub running_pid: u32,
     /* Current mean slice in nanos. */
@@ -127,7 +127,7 @@ pub struct PerCpuMetrics {
 pub struct WebMetrics {
     /* Scheduler wide counters. Raw values. */
     pub stats: Metrics,
-    /* One entry per online Cpu. */
+    /* One entry per online CPU. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
 }
