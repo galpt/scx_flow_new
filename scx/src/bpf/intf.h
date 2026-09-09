@@ -33,17 +33,17 @@ enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	/* Upper bound of a per task estimate. */
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
-	/* Seed of a per CPU mean when no task is present. */
+	/* Seed of a per Cpu mean when no task is present. */
 	FLOW_TQ_SEED_NS = (8ULL * 1000ULL * 1000ULL),
-	/* Floor of a per CPU mean. */
+	/* Floor of a per Cpu mean. */
 	FLOW_TQ_MIN_NS = (500ULL * 1000ULL),
-	/* Ceiling of a per CPU mean. */
+	/* Ceiling of a per Cpu mean. */
 	FLOW_TQ_MAX_NS = (32ULL * 1000ULL * 1000ULL),
-	/* Compile time bound of supported CPUs. */
+	/* Compile time bound of supported Cpus. */
 	FLOW_MAX_CPUS = 1024ULL,
-	/* Base id of the per CPU ordered queues. */
+	/* Base id of the per Cpu ordered queues. */
 	FLOW_DSQ_BASE = 0x4000ULL,
-	/* Park id for tasks with no allowed CPU. */
+	/* Park id for tasks with no allowed Cpu. */
 	FLOW_DSQ_PARK = 0x5000ULL,
 	/* Bound of moved tasks in one pass. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
@@ -63,6 +63,10 @@ enum flow_consts {
 	FLOW_WEIGHT = 1024ULL,
 	/* Least donor depth that allows a steal. */
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
+	/* Batch window for sticky batching in nanos. */
+	FLOW_IEDF_BATCH_EPS_NS = (96ULL * 1000ULL),
+	/* Grace after deadline in nanos for accounting. */
+	FLOW_IEDF_GRACE_NS = (50ULL * 1000ULL),
 };
 
 /*
@@ -77,6 +81,8 @@ enum flow_gates {
 	FLOW_GATE_STICKY = 1ULL,
 	/* Idle gated kicks with equal skip. */
 	FLOW_GATE_CUTS = 1ULL,
+	/* Incremental EDF batching with grace and shed. */
+	FLOW_GATE_IEDF = 1ULL,
 };
 
 /*
@@ -84,7 +90,7 @@ enum flow_gates {
  * holds the last burst clamped to the estimate range
  * with no smoothing. The run stamp marks the start of
  * the current run. The grant holds the slice given at
- * insert time. The owner names the CPU that accounts
+ * insert time. The owner names the Cpu that accounts
  * the task in its mean. The virtual time orders fair
  * sharing across sleeps with a bounded lag. The
  * deadline orders the kernel queue with no extra heap.
@@ -100,11 +106,11 @@ struct flow_task_ctx {
 };
 
 /*
- * Per CPU state kept in an array map. The mean holds
- * the current slice for the CPU. The sum and the count
+ * Per Cpu state kept in an array map. The mean holds
+ * the current slice for the Cpu. The sum and the count
  * hold the unfinished work including the running task.
  * The cursor rotates the steal scan. The running view
- * describes the task now on the CPU. The frontier
+ * describes the task now on the Cpu. The frontier
  * tracks virtual time with monotonic growth while work
  * stays queued.
  */
@@ -180,7 +186,7 @@ static __always_inline u64 flow_clamp_acct(u64 v)
 }
 
 /*
- * Clamp a per CPU mean to the mean range. The floor
+ * Clamp a per Cpu mean to the mean range. The floor
  * keeps short means usable. The ceiling keeps long
  * means bounded.
  */
@@ -194,8 +200,8 @@ static __always_inline u64 flow_clamp_tq(u64 v)
 }
 
 /*
- * Mean of one CPU from sum and count. An empty CPU
- * uses the seed. A populated CPU uses the quotient
+ * Mean of one Cpu from sum and count. An empty Cpu
+ * uses the seed. A populated Cpu uses the quotient
  * clamped to the mean range.
  */
 static __always_inline u64 flow_mean_tq(u64 sum, u64 nr)
@@ -209,7 +215,7 @@ static __always_inline u64 flow_mean_tq(u64 sum, u64 nr)
 }
 
 /*
- * Queue id of one CPU. Callers check the id range
+ * Queue id of one Cpu. Callers check the id range
  * before use, so out of range ids stay local.
  */
 static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
@@ -329,7 +335,7 @@ static __always_inline u64 flow_frontier_max(u64 old,
 }
 
 /*
- * Frontier for an idle CPU from the waking virtual
+ * Frontier for an idle Cpu from the waking virtual
  * time. The waking value bounds the reset with no
  * zero use, so a new arrival never inherits stale
  * time while queued work never moves backward.
@@ -337,6 +343,37 @@ static __always_inline u64 flow_frontier_max(u64 old,
 static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;
+}
+
+/*
+ * True when two deadlines fall in one batch window.
+ * The window is tiny against the mean floor, so a
+ * batch keeps cache warmth with no fair loss. Wrap
+ * safe with unsigned distance and no signed negate.
+ */
+static __always_inline bool flow_batch_within(u64 a,
+	u64 b)
+{
+	u64 d = a >= b ? a - b : b - a;
+
+	return d <= (u64)FLOW_IEDF_BATCH_EPS_NS;
+}
+
+/*
+ * True when now is still within grace past deadline.
+ * Grace is tiny against the least period, so late
+ * accounting stays prompt with no kill. The harness
+ * cancels, the scheduler never kills. Wrap safe with
+ * no extra branch beyond the before check.
+ */
+static __always_inline bool flow_grace_ok(u64 now,
+	u64 deadline)
+{
+	u64 limit = deadline + (u64)FLOW_IEDF_GRACE_NS;
+
+	if (now == limit)
+		return true;
+	return flow_time_before(now, limit);
 }
 
 /*

@@ -42,7 +42,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 
 		/* Reference frontier keeps the deadline fair. */
 		/* Park has no target, so the selected or first */
-		/* allowed CPU gives the frontier with no stale */
+		/* allowed Cpu gives the frontier with no stale */
 		/* zero use when a reference exists. */
 		if (!flow_cpu_ok(p, ref_cpu)) {
 			s32 first;
@@ -83,7 +83,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		is_fresh = true;
 	if (tctx->grant_ns == (u64)-1)
 		need_join = true;
-	/* Tasks that cannot move stay on the current CPU. */
+	/* Tasks that cannot move stay on the current Cpu. */
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 
@@ -124,16 +124,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			est = tq;
 		else
 			est = flow_clamp_est(tctx->est_ns);
+		/* Owner change leaves old mean with no leak. */
+		/* Blocked wake counts as requeue to match */
+		/* the normal path with no diverge. */
+		if (!need_join &&
+		    tctx->owner != FLOW_OWNER_NONE)
+			flow_leave_cpu(tctx->owner,
+			    flow_clamp_est(tctx->est_ns));
 		tctx->est_ns = est;
 		if (is_fresh) {
 			tctx->vruntime = 0;
 			__sync_fetch_and_add(&flow_stats.inserts,
 			    1);
-		} else if (is_requeue) {
+		} else if (is_requeue || need_join) {
 			__sync_fetch_and_add(&flow_stats.requeues,
-			    1);
-		} else if (need_join) {
-			__sync_fetch_and_add(&flow_stats.inserts,
 			    1);
 		}
 		v = tctx->vruntime;
@@ -175,31 +179,109 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	st = flow_cpu((u32)cpu);
 	tq = st ? st->tq_ns : (u64)FLOW_TQ_SEED_NS;
+	/* Zero guard stays for empty map reads with */
+	/* no behavior change in the normal path. */
 	if (tq == 0)
 		tq = (u64)FLOW_TQ_SEED_NS;
+	/* Fair overload shed keeps order in park. */
+	/* The deadline still uses the target frontier */
+	/* with owner none and no kill and no Pi use. */
+	/* The window holds one batch, so only excess */
+	/* sheds while the owner stays fair. */
+	if ((u64)FLOW_GATE_IEDF &&
+	    scx_bpf_dsq_nr_queued(flow_dsq_for_cpu((u32)cpu)) >=
+	    (u64)FLOW_DISPATCH_MAX_BATCH) {
+		u64 shed_frontier = 0;
+		u64 shed_slice = tq;
+		u64 shed_v;
+		u64 shed_clamped;
+		u64 shed_scaled;
+		u64 shed_dl;
+		struct flow_cpu_state *shed_st;
+
+		if (is_fresh)
+			est = tq;
+		else
+			est = flow_clamp_est(tctx->est_ns);
+		/* Fresh tasks start at zero with no stale time. */
+		/* Owner change leaves old mean with no leak. */
+		/* Blocked wake counts as requeue to match */
+		/* the normal path with no diverge. */
+		if (is_fresh)
+			tctx->vruntime = 0;
+		if (!need_join &&
+		    tctx->owner != FLOW_OWNER_NONE)
+			flow_leave_cpu(tctx->owner,
+			    flow_clamp_est(tctx->est_ns));
+		tctx->est_ns = est;
+		if (is_fresh)
+			__sync_fetch_and_add(&flow_stats.inserts, 1);
+		else if (is_requeue || need_join)
+			__sync_fetch_and_add(&flow_stats.requeues, 1);
+		shed_v = tctx->vruntime;
+		shed_st = flow_cpu((u32)cpu);
+		if (shed_st)
+			shed_frontier = shed_st->frontier;
+		/* Zero guard stays for empty map reads with */
+		/* no behavior change in the normal path. */
+		if (shed_slice == 0)
+			shed_slice = (u64)FLOW_TQ_SEED_NS;
+		shed_clamped = flow_clamp_vruntime(shed_v,
+		    shed_frontier, shed_slice);
+		shed_scaled = flow_scale_by_weight(est,
+		    (u32)FLOW_WEIGHT);
+		shed_dl = flow_deadline(shed_clamped,
+		    shed_scaled);
+		tctx->deadline = shed_dl;
+		tctx->grant_ns = tq;
+		tctx->owner = FLOW_OWNER_NONE;
+		__sync_fetch_and_add(&flow_stats.edf_enqueued, 1);
+		if (shed_clamped != shed_v)
+			__sync_fetch_and_add(&flow_stats.edf_clamped, 1);
+		__sync_fetch_and_add(&flow_stats.edf_ordered, 1);
+		scx_bpf_dsq_insert_vtime(p, (u64)FLOW_DSQ_PARK,
+		    tq, shed_dl, 0);
+		return;
+	}
 	if (is_fresh)
 		est = tq;
 	else
 		est = flow_clamp_est(tctx->est_ns);
-	tctx->est_ns = est;
-	if (need_join) {
-		flow_join_cpu((u32)cpu, est);
-		tctx->owner = (u32)cpu;
-		if (is_fresh)
-			__sync_fetch_and_add(&flow_stats.inserts,
-			    1);
-		else
-			__sync_fetch_and_add(&flow_stats.requeues,
-			    1);
-		st = flow_cpu((u32)cpu);
-		tq = st ? st->tq_ns : tq;
-		if (tq == 0)
-			tq = (u64)FLOW_TQ_SEED_NS;
-	} else {
-		tctx->owner = (u32)cpu;
-		if (is_requeue)
-			__sync_fetch_and_add(&flow_stats.requeues,
-			    1);
+	{
+		u32 old_owner = tctx->owner;
+		u64 old_est = tctx->est_ns;
+
+		if (need_join) {
+			flow_join_cpu((u32)cpu, est);
+			tctx->owner = (u32)cpu;
+			if (is_fresh)
+				__sync_fetch_and_add(&flow_stats.inserts,
+				    1);
+			else
+				__sync_fetch_and_add(&flow_stats.requeues,
+				    1);
+			st = flow_cpu((u32)cpu);
+			tq = st ? st->tq_ns : tq;
+			/* Zero guard stays for empty map reads with */
+			/* no behavior change in the normal path. */
+			if (tq == 0)
+				tq = (u64)FLOW_TQ_SEED_NS;
+		} else {
+			/* Migrate accounting when owner changes. */
+			/* Leave old mean and join new mean, so */
+			/* migration never leaks with no bound. */
+			if (old_owner != FLOW_OWNER_NONE &&
+			    old_owner != (u32)cpu) {
+				flow_leave_cpu(old_owner,
+				    flow_clamp_est(old_est));
+				flow_join_cpu((u32)cpu, est);
+			}
+			tctx->owner = (u32)cpu;
+			if (is_requeue)
+				__sync_fetch_and_add(&flow_stats.requeues,
+				    1);
+		}
+		tctx->est_ns = est;
 	}
 	tctx->grant_ns = tq;
 	/* Ordered queue keeps deadlines first. */
@@ -216,6 +298,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		st = flow_cpu((u32)cpu);
 		if (st)
 			frontier = st->frontier;
+		/* Zero guard stays for empty map reads with */
+		/* no behavior change in the normal path. */
 		if (slice == 0)
 			slice = (u64)FLOW_TQ_SEED_NS;
 		clamped = flow_clamp_vruntime(v, frontier,

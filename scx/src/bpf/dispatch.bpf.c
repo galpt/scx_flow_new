@@ -12,13 +12,13 @@
  */
 
 /*
- * Drain one per CPU queue with skip past bad heads.
+ * Drain one per Cpu queue with skip past bad heads.
  * The iterator visits every queued task in order, so
  * one dead, foreign, or failed head never blocks
  * later work. Exiting tasks move to the local DSQ to
  * run to exit, so they never wedge behind a skip.
  * Each eligible task moves to the local DSQ of the
- * asking CPU. Returns the count moved, capped at the
+ * asking Cpu. Returns the count moved, capped at the
  * given budget.
  */
 static __always_inline u32 flow_drain_own(s32 cpu,
@@ -66,7 +66,7 @@ static __always_inline u32 flow_drain_own(s32 cpu,
  * work. Exiting tasks move to the local DSQ to run
  * to exit, so they never wedge behind a skip. Each
  * eligible task moves to the local DSQ of the asking
- * CPU. Returns the count moved, capped at the given
+ * Cpu. Returns the count moved, capped at the given
  * budget.
  */
 static __always_inline u32 flow_drain_park(s32 cpu,
@@ -135,7 +135,13 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	dsq = flow_dsq_for_cpu(peer);
 	if (scx_bpf_dsq_nr_queued(dsq) == 0)
 		return 0;
-	if ((u64)FLOW_GATE_STICKY &&
+	/* Thin donors keep the last task for the owner. */
+	/* The IEDF gate keeps the same guard with no */
+	/* extra map and no kill, so shed park work still */
+	/* needs two queued tasks to move one. */
+	/* Either gate alone keeps the guard, so one zero */
+	/* still guards through the other with one revert. */
+	if (((u64)FLOW_GATE_STICKY || (u64)FLOW_GATE_IEDF) &&
 	    scx_bpf_dsq_nr_queued(dsq) <
 	    (u64)FLOW_STEAL_MIN_DEPTH)
 		return 0;
@@ -172,25 +178,33 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 budget = (u32)FLOW_DISPATCH_MAX_BATCH;
 	u32 moved = 0;
 	u32 own_left = 0;
+	u32 own_budget = budget;
 
 	(void)prev;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
+	/* Reserve one slot for park when park holds work. */
+	/* The reserve keeps batch total at 32 with donor */
+	/* depth at two and steal bound at eight. The gate */
+	/* keeps revert exact, so zero restores 4.2.0 order. */
+	if ((u64)FLOW_GATE_IEDF &&
+	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
+	    own_budget > 0)
+		own_budget -= 1;
 	/* Own queue drains first with skip past bad heads. */
-	moved += flow_drain_own(cpu, budget - moved);
-	if (moved >= budget)
-		return;
+	moved += flow_drain_own(cpu, own_budget);
 	/* Parked tasks move when the mask allows. */
-	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0)
+	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
+	    moved < budget)
 		moved += flow_drain_park(cpu, budget - moved);
 	if (moved >= budget)
 		return;
 	own_left = scx_bpf_dsq_nr_queued(
 	    flow_dsq_for_cpu((u32)cpu));
-	/* An idle CPU steals past unmovable leftovers. */
-	/* A busy CPU with local work stays home. */
+	/* An idle Cpu steals past unmovable leftovers. */
+	/* A busy Cpu with local work stays home. */
 	if (own_left > 0 && moved > 0)
 		return;
 	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&

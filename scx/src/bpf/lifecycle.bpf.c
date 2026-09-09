@@ -34,6 +34,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		    flow_clamp_est(tctx->est_ns) : 0;
 		u64 tq = st->tq_ns;
 
+		/* Zero guard stays for empty map reads with */
+		/* no behavior change in the normal path. */
 		if (tq == 0)
 			tq = (u64)FLOW_TQ_SEED_NS;
 		st->running_est = est;
@@ -107,13 +109,35 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
 				    scx_bpf_dsq_nr_queued(
 				    (u64)SCX_DSQ_LOCAL_ON |
-				    (u64)cpu) == 0)
-					st->frontier =
-					    flow_frontier_idle(nv);
-				else
+				    (u64)cpu) == 0) {
+					/* Idle reset bounds to waking time. */
+					/* Grace miss still completes with */
+					/* max accounting and never kills. */
+					/* The harness cancels, the owner */
+					/* never kills. Zero never wins. */
+					if ((u64)FLOW_GATE_IEDF) {
+						if (nv == 0) {
+							/* Keep old, no zero use. */
+						} else if (tctx->deadline != 0 &&
+						    !flow_grace_ok(now,
+						    tctx->deadline)) {
+							st->frontier =
+							    flow_frontier_max(
+							    st->frontier, nv);
+						} else {
+							st->frontier =
+							    flow_frontier_idle(
+							    nv);
+						}
+					} else {
+						st->frontier =
+						    flow_frontier_idle(nv);
+					}
+				} else {
 					st->frontier =
 					    flow_frontier_max(
 					    st->frontier, nv);
+				}
 			} else {
 				st->frontier = flow_frontier_max(
 				    st->frontier, nv);
