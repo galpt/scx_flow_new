@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="4.2.0"
+VER="4.2.2"
 # Pinned upstream ref, same as repo CI.
 SCX_REF="7cec98c51376a9d38b05a1e39e30cf7e5909cf16"
 UPSTREAM="https://github.com/sched-ext/scx"
@@ -64,7 +64,7 @@ fi
 
 echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
-rsync -a --delete "${SRC_DIR}/" "${DEST}/"
+rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
 echo "building ${BIN} in workspace"
 cargo build --manifest-path "${DEST}/Cargo.toml" --release
@@ -75,5 +75,16 @@ install -m 0755 "${WS}/target/release/${BIN}" \
     echo "copying binary to current dir"
     cp "${WS}/target/release/${BIN}" "${REPO_DIR}/${BIN}"
 }
+
+# Opt in workspace clean only after install wins.
+# Set CLEAN to 1 to remove the workspace target dir
+# after a good install. Never runs on failure since
+# the script exits early on any fault. Rebuild after
+# a clean fetches plus builds from scratch and takes
+# a while on first run with a fresh download.
+if [ "${CLEAN:-0}" = "1" ]; then
+    echo "cleaning workspace target to save space"
+    rm -rf "${WS}/target"
+fi
 
 echo "done"
