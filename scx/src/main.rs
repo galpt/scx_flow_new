@@ -12,6 +12,11 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 mod config;
 mod flow;
+mod flow_edf;
+mod flow_mean;
+mod flow_select;
+#[cfg(test)]
+mod flow_tests_edf;
 mod snapshot;
 mod stats;
 mod topology;
@@ -47,7 +52,7 @@ use stats::Metrics;
 
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
-/* CPU bound shared with the BPF header. */
+/* Cpu bound shared with the BPF header. */
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
 
 fn full_version() -> String {
@@ -100,7 +105,7 @@ pub(crate) struct Scheduler<'a> {
     stats_server: StatsServer<(), Metrics>,
     /* Dashboard sender. None when disabled. */
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
-    /* Static per CPU cards seeded at attach. */
+    /* Static per Cpu cards seeded at attach. */
     cpu_static: Vec<stats::PerCpuMetrics>,
     /* Live frequency cache for the cards. */
     cur_freq_khz: Vec<u64>,
@@ -293,7 +298,7 @@ mod tests {
     #[test]
     fn batch_matches_header() {
         assert_eq!(
-            crate::flow::DISPATCH_BATCH as u64,
+            crate::flow_edf::DISPATCH_BATCH as u64,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
         );
     }
@@ -301,23 +306,23 @@ mod tests {
     #[test]
     fn tq_matches_header() {
         assert_eq!(
-            crate::flow::TQ_SEED_NS,
+            crate::flow_mean::TQ_SEED_NS,
             crate::bpf_intf::flow_consts_FLOW_TQ_SEED_NS as u64
         );
         assert_eq!(
-            crate::flow::TQ_MIN_NS,
+            crate::flow_mean::TQ_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_TQ_MIN_NS as u64
         );
         assert_eq!(
-            crate::flow::TQ_MAX_NS,
+            crate::flow_mean::TQ_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_TQ_MAX_NS as u64
         );
         assert_eq!(
-            crate::flow::EST_MIN_NS,
+            crate::flow_mean::EST_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
         );
         assert_eq!(
-            crate::flow::EST_MAX_NS,
+            crate::flow_mean::EST_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
         );
     }
@@ -325,30 +330,30 @@ mod tests {
     #[test]
     fn dsq_matches_header() {
         assert_eq!(
-            crate::flow::DSQ_BASE,
+            crate::flow_edf::DSQ_BASE,
             crate::bpf_intf::flow_consts_FLOW_DSQ_BASE as u64
         );
         assert_eq!(
-            crate::flow::DSQ_PARK,
+            crate::flow_edf::DSQ_PARK,
             crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
         );
         assert_eq!(
-            crate::flow::LLC_UNKNOWN,
+            crate::flow_select::LLC_UNKNOWN,
             crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN
         );
     }
 
     #[test]
     fn mean_matches_helpers() {
-        assert_eq!(crate::flow::TQ_SEED_NS, 8_000_000);
-        assert_eq!(crate::flow::TQ_MIN_NS, 500_000);
-        assert_eq!(crate::flow::TQ_MAX_NS, 32_000_000);
+        assert_eq!(crate::flow_mean::TQ_SEED_NS, 8_000_000);
+        assert_eq!(crate::flow_mean::TQ_MIN_NS, 500_000);
+        assert_eq!(crate::flow_mean::TQ_MAX_NS, 32_000_000);
     }
 
     #[test]
     fn acct_matches_header() {
         assert_eq!(
-            crate::flow::ACCT_MAX_NS,
+            crate::flow_mean::ACCT_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_ACCT_MAX_NS as u64
         );
         assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CLAMP as u64, 1);
@@ -357,7 +362,7 @@ mod tests {
     #[test]
     fn edf_matches_header() {
         assert_eq!(
-            crate::flow::WEIGHT,
+            crate::flow_mean::WEIGHT,
             crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64
         );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64, 1024);
@@ -366,7 +371,7 @@ mod tests {
     #[test]
     fn sticky_matches_header() {
         assert_eq!(
-            crate::flow::STEAL_MIN_DEPTH,
+            crate::flow_select::STEAL_MIN_DEPTH,
             crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_DEPTH as u64
         );
         assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_STICKY as u64, 1);
@@ -375,5 +380,20 @@ mod tests {
     #[test]
     fn cuts_matches_header() {
         assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CUTS as u64, 1);
+    }
+
+    #[test]
+    fn iedf_matches_header() {
+        assert_eq!(
+            crate::flow_edf::BATCH_EPS_NS,
+            crate::bpf_intf::flow_consts_FLOW_IEDF_BATCH_EPS_NS as u64
+        );
+        assert_eq!(
+            crate::flow_edf::GRACE_NS,
+            crate::bpf_intf::flow_consts_FLOW_IEDF_GRACE_NS as u64
+        );
+        assert_eq!(crate::flow_edf::BATCH_EPS_NS, 96_000);
+        assert_eq!(crate::flow_edf::GRACE_NS, 50_000);
+        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_IEDF as u64, 1);
     }
 }

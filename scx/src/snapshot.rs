@@ -39,7 +39,7 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Read one CPU state without heap use. Failed
+     * Read one Cpu state without heap use. Failed
      * lookups yield an idle view with the seed mean.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {

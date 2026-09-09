@@ -236,7 +236,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Dashboard keeps the per CPU array names. */
+    /* Dashboard keeps the per Cpu array names. */
     #[test]
     fn merged_keeps_per_cpu_fields() {
         let snap = WebMetrics::default();

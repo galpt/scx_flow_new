@@ -15,11 +15,11 @@ use crate::flow::TQ_SEED_NS;
 use anyhow::bail;
 use anyhow::Result;
 
-/* Default seed of the per CPU mean in nanos. */
+/* Default seed of the per Cpu mean in nanos. */
 const DEF_SEED_NS: u64 = TQ_SEED_NS;
-/* Default floor of the per CPU mean in nanos. */
+/* Default floor of the per Cpu mean in nanos. */
 const DEF_MIN_NS: u64 = TQ_MIN_NS;
-/* Default ceiling of the per CPU mean in nanos. */
+/* Default ceiling of the per Cpu mean in nanos. */
 const DEF_MAX_NS: u64 = TQ_MAX_NS;
 /* Default tasks moved in one dispatch pass. */
 const DEF_BATCH: u32 = DISPATCH_BATCH;
@@ -27,11 +27,11 @@ const DEF_BATCH: u32 = DISPATCH_BATCH;
 /* Validated scheduling constants. */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /* Seed of the per CPU mean in nanos. */
+    /* Seed of the per Cpu mean in nanos. */
     pub tq_seed_ns: u64,
-    /* Floor of the per CPU mean in nanos. */
+    /* Floor of the per Cpu mean in nanos. */
     pub tq_min_ns: u64,
-    /* Ceiling of the per CPU mean in nanos. */
+    /* Ceiling of the per Cpu mean in nanos. */
     pub tq_max_ns: u64,
     /* Tasks moved in one dispatch pass. */
     pub dispatch_batch: u32,
@@ -183,9 +183,9 @@ mod tests {
 
     #[test]
     fn seed_floor_ceiling_match_flow() {
-        assert_eq!(Config::default().tq_seed_ns, crate::flow::TQ_SEED_NS);
-        assert_eq!(Config::default().tq_min_ns, crate::flow::TQ_MIN_NS);
-        assert_eq!(Config::default().tq_max_ns, crate::flow::TQ_MAX_NS);
+        assert_eq!(Config::default().tq_seed_ns, crate::flow_mean::TQ_SEED_NS);
+        assert_eq!(Config::default().tq_min_ns, crate::flow_mean::TQ_MIN_NS);
+        assert_eq!(Config::default().tq_max_ns, crate::flow_mean::TQ_MAX_NS);
     }
 
     #[test]
