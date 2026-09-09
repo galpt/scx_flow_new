@@ -4,7 +4,7 @@
  *
  * Placement, included by main.bpf.c via include.
  *
- * Idle choice prefers the idle prior CPU with a reuse
+ * Idle choice prefers the idle prior CPU with no
  * count, then the previous LLC domain, then any idle
  * CPU, then the previous CPU, the current CPU, and
  * the first allowed CPU. Pinned tasks and tasks that
@@ -108,13 +108,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		/* No allowed CPU, park hint for enqueue. */
 		return prev_cpu;
 	}
-	/* Sticky idle prior reuse with a reuse count. */
+	/* Sticky idle prior reuse with no count. */
 	if ((u64)FLOW_GATE_STICKY && flow_cpu_ok(p, prev_cpu)) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			__sync_fetch_and_add(&flow_stats.reuse_hits,
-			    1);
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
-		}
 	}
 	/* Prefer an idle CPU in the previous LLC domain. */
 	/* Single and unknown hosts skip the LLC step. */

@@ -6,9 +6,9 @@
  *
  * Own queue drains first, then the park queue, then
  * idle steals from peers. Each drain visits every
- * queued task in order and moves allowed tasks past
- * bad heads. Steals scan peers with a rotating cursor
- * bounded per pass.
+ * queued task in deadline order and moves allowed
+ * tasks past bad heads. Steals scan peers with a
+ * rotating cursor bounded per pass.
  */
 
 /*

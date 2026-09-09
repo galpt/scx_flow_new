@@ -59,10 +59,8 @@ enum flow_consts {
 	FLOW_CPUPERF_LONG = 0ULL,
 	/* Cap of one sample in mean accounting. */
 	FLOW_ACCT_MAX_NS = (32ULL * 1000ULL * 1000ULL),
-	/* Divisor for the fast lane bound. */
-	FLOW_FAST_DIV = 4ULL,
-	/* Divisor for the linger bound. */
-	FLOW_LINGER_DIV = 8ULL,
+	/* Fixed weight used for virtual time scaling. */
+	FLOW_WEIGHT = 1024ULL,
 	/* Least donor depth that allows a steal. */
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 };
@@ -75,10 +73,6 @@ enum flow_consts {
 enum flow_gates {
 	/* Tighter per sample cap for accounting. */
 	FLOW_GATE_CLAMP = 1ULL,
-	/* Short burst fast lane. */
-	FLOW_GATE_FAST = 1ULL,
-	/* Single non chaining linger boost. */
-	FLOW_GATE_LINGER = 1ULL,
 	/* Sticky placement with guarded steals. */
 	FLOW_GATE_STICKY = 1ULL,
 	/* Idle gated kicks with equal skip. */
@@ -91,15 +85,18 @@ enum flow_gates {
  * with no smoothing. The run stamp marks the start of
  * the current run. The grant holds the slice given at
  * insert time. The owner names the CPU that accounts
- * the task in its mean. The linger flag marks a single
- * pending boost with no chaining.
+ * the task in its mean. The virtual time orders fair
+ * sharing across sleeps with a bounded lag. The
+ * deadline orders the kernel queue with no extra heap.
  */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
 	u64 grant_ns;
 	u32 owner;
-	u32 linger;
+	u32 pad;
+	u64 vruntime;
+	u64 deadline;
 };
 
 /*
@@ -107,7 +104,9 @@ struct flow_task_ctx {
  * the current slice for the CPU. The sum and the count
  * hold the unfinished work including the running task.
  * The cursor rotates the steal scan. The running view
- * describes the task now on the CPU.
+ * describes the task now on the CPU. The frontier
+ * tracks virtual time with monotonic growth while work
+ * stays queued.
  */
 struct flow_cpu_state {
 	u64 tq_ns;
@@ -117,6 +116,7 @@ struct flow_cpu_state {
 	u64 running_est;
 	u32 running_pid;
 	u32 pad;
+	u64 frontier;
 };
 
 /*
@@ -126,10 +126,11 @@ struct flow_cpu_state {
  * count covers voluntary blocks and exits. The park
  * count covers moves from the park queue. The steal
  * count covers moves from a peer queue. The kick count
- * covers idle wakeups. The fast count covers direct
- * local inserts for tiny bursts. The linger count
- * covers single pending boosts for slight overruns.
- * The reuse count covers sticky prior CPU reuse.
+ * covers idle wakeups. The fast count stays zero for
+ * compat with no fast path. The linger count stays
+ * zero for compat with no linger path. The reuse count
+ * stays zero for compat with no reuse count. The EDF
+ * counts cover ordered inserts with clamp detail.
  */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -144,6 +145,9 @@ struct flow_sched_stats {
 	u64 fast_hits;
 	u64 linger_boosts;
 	u64 reuse_hits;
+	u64 edf_enqueued;
+	u64 edf_clamped;
+	u64 edf_ordered;
 };
 
 /*
@@ -161,7 +165,7 @@ static __always_inline u64 flow_clamp_est(u64 v)
 }
 
 /*
- * Cap one sample for mean accounting. The order key
+ * Cap one sample for mean accounting. The deadline
  * keeps the full clamped estimate. The accounting
  * value keeps the tighter cap, so a single long run
  * never moves the mean by more than the cap.
@@ -248,34 +252,91 @@ static __always_inline u32 flow_cpuperf_for_est(u64 est,
 }
 
 /*
- * Check that an estimate is tiny against the mean.
- * Tiny means at most one quarter of the mean, so
- * short bursts run at once on an idle target.
+ * Scale an estimate by weight for virtual time. The
+ * fixed weight keeps the value unchanged while the
+ * signature allows future weights with no call change.
  */
-static __always_inline bool flow_fast_ok(u64 est,
-	u64 tq)
+static __always_inline u64 flow_scale_by_weight(u64 est,
+	u32 weight)
 {
-	if (tq == 0)
-		return false;
-	return est <= (tq >> 2);
+	if (weight == 0)
+		return est;
+	if (weight == (u32)FLOW_WEIGHT)
+		return est;
+	return (est * 1024ULL) / (u64)weight;
 }
 
 /*
- * Check that a run slightly overran its grant. Slight
- * means above the grant and within one eighth above
- * it, so only near misses earn a single extra turn.
+ * True when the first time is before the second with
+ * wrap safety. The signed diff keeps order across the
+ * u64 wrap with no extra branch.
  */
-static __always_inline bool flow_linger_ok(u64 delta,
-	u64 grant)
+static __always_inline bool flow_time_before(u64 a,
+	u64 b)
 {
-	u64 limit;
+	return (s64)(a - b) < 0;
+}
 
-	if (grant == 0)
-		return false;
-	if (delta <= grant)
-		return false;
-	limit = grant + (grant >> 3);
-	return delta <= limit;
+/*
+ * Clamp virtual time to a bounded lag behind the
+ * frontier. The floor is the frontier minus one slice
+ * with wrap. A lagging value moves forward to the
+ * floor with a clamp count. A fresh value stays.
+ */
+static __always_inline u64 flow_clamp_vruntime(u64 v,
+	u64 frontier, u64 slice)
+{
+	u64 floor = frontier - slice;
+
+	if (flow_time_before(v, floor))
+		return floor;
+	return v;
+}
+
+/*
+ * Deadline from clamped virtual time and scaled
+ * estimate. The sum wraps with the clock with no
+ * extra check, so order stays correct across wrap.
+ */
+static __always_inline u64 flow_deadline(u64 clamped_v,
+	u64 scaled)
+{
+	return clamped_v + scaled;
+}
+
+/*
+ * Advance virtual time by scaled runtime. The sum
+ * wraps with the clock, so long runs stay ordered
+ * across wrap with no extra check.
+ */
+static __always_inline u64 flow_vruntime_add(u64 v,
+	u64 delta)
+{
+	return v + delta;
+}
+
+/*
+ * Max of two virtual times with wrap safety. The later
+ * time wins, so the frontier never moves backward
+ * while work stays queued.
+ */
+static __always_inline u64 flow_frontier_max(u64 old,
+	u64 next)
+{
+	if (flow_time_before(old, next))
+		return next;
+	return old;
+}
+
+/*
+ * Frontier for an idle CPU from the waking virtual
+ * time. The waking value bounds the reset with no
+ * zero use, so a new arrival never inherits stale
+ * time while queued work never moves backward.
+ */
+static __always_inline u64 flow_frontier_idle(u64 waking_v)
+{
+	return waking_v;
 }
 
 /*

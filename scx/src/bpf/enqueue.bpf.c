@@ -8,11 +8,10 @@
  * Fresh tasks join with the current mean. Known tasks
  * requeue with a clamped estimate. Tasks with no
  * target wait in the park queue. Inserts use ordered
- * time with the estimate as the key. Tiny bursts on
- * an idle and empty target run at once on the local
- * queue with a fast count. A slight overrun earns one
- * ordered head start with a linger count and no chain.
- * Kicks wake idle targets only.
+ * time with the deadline as the key and the mean as
+ * the slice. The deadline adds clamped virtual time
+ * and scaled estimate with a sleeper cap of one
+ * slice. Kicks wake idle targets only.
  */
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
@@ -34,11 +33,50 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx = flow_get(p);
 	sel = p->scx.selected_cpu;
 	if (!tctx) {
-		tq = (u64)FLOW_TQ_SEED_NS;
+		u64 seed = (u64)FLOW_TQ_SEED_NS;
+		u64 frontier = 0;
+		u64 clamped;
+		u64 scaled;
+		u64 dl;
+		s32 ref_cpu = sel;
+
+		/* Reference frontier keeps the deadline fair. */
+		/* Park has no target, so the selected or first */
+		/* allowed CPU gives the frontier with no stale */
+		/* zero use when a reference exists. */
+		if (!flow_cpu_ok(p, ref_cpu)) {
+			s32 first;
+
+			first = (s32)bpf_cpumask_first(
+			    p->cpus_ptr);
+			if (flow_cpu_ok(p, first))
+				ref_cpu = first;
+			else
+				ref_cpu = -1;
+		}
+		if (ref_cpu >= 0) {
+			struct flow_cpu_state *rst;
+
+			rst = flow_cpu((u32)ref_cpu);
+			if (rst)
+				frontier = rst->frontier;
+		}
+		clamped = flow_clamp_vruntime(0, frontier,
+		    seed);
+		scaled = flow_scale_by_weight(
+		    flow_clamp_est(seed),
+		    (u32)FLOW_WEIGHT);
+		dl = flow_deadline(clamped, scaled);
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
-		/* Park holds the task for a later move. */
-		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
-		    tq, 0);
+		__sync_fetch_and_add(&flow_stats.edf_enqueued,
+		    1);
+		if (clamped != 0)
+			__sync_fetch_and_add(
+			    &flow_stats.edf_clamped, 1);
+		__sync_fetch_and_add(&flow_stats.edf_ordered,
+		    1);
+		scx_bpf_dsq_insert_vtime(p, (u64)FLOW_DSQ_PARK,
+		    seed, dl, 0);
 		return;
 	}
 	if (tctx->est_ns == 0)
@@ -70,10 +108,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 	}
 	if (!cpu_valid) {
-		/* No target, park for a later move. */
-		tq = (u64)FLOW_TQ_SEED_NS;
+		u64 seed = (u64)FLOW_TQ_SEED_NS;
+		u64 frontier = 0;
+		u64 v;
+		u64 clamped;
+		u64 scaled;
+		u64 dl;
+		s32 ref_cpu = sel;
+
+		/* No target, park with clamped deadline. */
+		/* Reference frontier keeps the deadline fair. */
+		/* Park keeps vruntime with no writeback. */
+		tq = seed;
+		if (is_fresh)
+			est = tq;
+		else
+			est = flow_clamp_est(tctx->est_ns);
+		tctx->est_ns = est;
 		if (is_fresh) {
-			tctx->est_ns = tq;
+			tctx->vruntime = 0;
 			__sync_fetch_and_add(&flow_stats.inserts,
 			    1);
 		} else if (is_requeue) {
@@ -83,11 +136,41 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(&flow_stats.inserts,
 			    1);
 		}
+		v = tctx->vruntime;
+		if (!flow_cpu_ok(p, ref_cpu)) {
+			s32 first;
+
+			first = (s32)bpf_cpumask_first(
+			    p->cpus_ptr);
+			if (flow_cpu_ok(p, first))
+				ref_cpu = first;
+			else
+				ref_cpu = -1;
+		}
+		if (ref_cpu >= 0) {
+			struct flow_cpu_state *rst;
+
+			rst = flow_cpu((u32)ref_cpu);
+			if (rst)
+				frontier = rst->frontier;
+		}
+		clamped = flow_clamp_vruntime(v, frontier,
+		    seed);
+		scaled = flow_scale_by_weight(est,
+		    (u32)FLOW_WEIGHT);
+		dl = flow_deadline(clamped, scaled);
+		tctx->deadline = dl;
 		tctx->grant_ns = tq;
 		tctx->owner = FLOW_OWNER_NONE;
-		tctx->linger = 0;
-		scx_bpf_dsq_insert(p, (u64)FLOW_DSQ_PARK,
-		    tq, 0);
+		__sync_fetch_and_add(&flow_stats.edf_enqueued,
+		    1);
+		if (clamped != v)
+			__sync_fetch_and_add(
+			    &flow_stats.edf_clamped, 1);
+		__sync_fetch_and_add(&flow_stats.edf_ordered,
+		    1);
+		scx_bpf_dsq_insert_vtime(p, (u64)FLOW_DSQ_PARK,
+		    tq, dl, 0);
 		return;
 	}
 	st = flow_cpu((u32)cpu);
@@ -119,53 +202,38 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    1);
 	}
 	tctx->grant_ns = tq;
-	/* Tiny bursts on an idle and empty target run local. */
-	if ((u64)FLOW_GATE_FAST && flow_fast_ok(est, tq)) {
-		u64 dsq = flow_dsq_for_cpu((u32)cpu);
-
-		if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
-		    scx_bpf_dsq_nr_queued(
-			(u64)SCX_DSQ_LOCAL_ON | (u64)cpu) == 0 &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			scx_bpf_dsq_insert(p,
-			    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu,
-			    tq, 0);
-			__sync_fetch_and_add(
-			    &flow_stats.fast_hits, 1);
-			if (flow_cpu_ok(p, cpu)) {
-				scx_bpf_kick_cpu(cpu,
-				    SCX_KICK_IDLE);
-				__sync_fetch_and_add(
-				    &flow_stats.kicks, 1);
-			}
-			return;
-		}
-	}
-	/* A pending boost earns one ordered head start. */
-	if ((u64)FLOW_GATE_LINGER && tctx->linger != 0) {
-		u64 dsq = flow_dsq_for_cpu((u32)cpu);
-
-		scx_bpf_dsq_insert_vtime(p, dsq, tq, 0, 0);
-		__sync_fetch_and_add(&flow_stats.linger_boosts,
-		    1);
-		if ((u64)FLOW_GATE_CUTS) {
-			if (scx_bpf_dsq_nr_queued(dsq) > 1)
-				return;
-		}
-		if (flow_cpu_ok(p, cpu)) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks,
-			    1);
-		}
-		return;
-	}
-	tctx->linger = 0;
-	/* Ordered queue keeps short estimates first. */
+	/* Ordered queue keeps deadlines first. */
 	/* Kicks run only when the queue was empty. */
 	{
-		u64 dsq = flow_dsq_for_cpu((u32)cpu);
+		u64 frontier = 0;
+		u64 slice = tq;
+		u64 v = tctx->vruntime;
+		u64 clamped;
+		u64 scaled;
+		u64 dl;
+		u64 dsq;
 
-		scx_bpf_dsq_insert_vtime(p, dsq, tq, est, 0);
+		st = flow_cpu((u32)cpu);
+		if (st)
+			frontier = st->frontier;
+		if (slice == 0)
+			slice = (u64)FLOW_TQ_SEED_NS;
+		clamped = flow_clamp_vruntime(v, frontier,
+		    slice);
+		scaled = flow_scale_by_weight(est,
+		    (u32)FLOW_WEIGHT);
+		dl = flow_deadline(clamped, scaled);
+		tctx->vruntime = clamped;
+		tctx->deadline = dl;
+		__sync_fetch_and_add(&flow_stats.edf_enqueued,
+		    1);
+		if (clamped != v)
+			__sync_fetch_and_add(
+			    &flow_stats.edf_clamped, 1);
+		__sync_fetch_and_add(&flow_stats.edf_ordered,
+		    1);
+		dsq = flow_dsq_for_cpu((u32)cpu);
+		scx_bpf_dsq_insert_vtime(p, dsq, tq, dl, 0);
 		if ((u64)FLOW_GATE_CUTS &&
 		    scx_bpf_dsq_nr_queued(dsq) > 1)
 			return;

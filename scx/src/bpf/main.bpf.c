@@ -3,14 +3,16 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Flow scheduler BPF core. Each CPU keeps an ordered
- * queue with a mean slice. Short estimates run first
- * with arrival order for ties. The mean tracks the
- * unfinished work on the CPU with the running task
- * included. Fresh tasks join with the current mean so
- * the mean stays neutral. Blocked tasks complete and
- * release. Runnable tasks requeue ordered with a fresh
- * estimate. Idle CPUs steal from peers with a bounded
- * rotating scan. Kicks wake idle targets only.
+ * queue with a mean slice. Deadlines run first with
+ * arrival order for ties. The deadline adds clamped
+ * virtual time and scaled estimate with a sleeper cap
+ * of one slice. The mean tracks unfinished work with
+ * the running task included. Fresh tasks join with the
+ * current mean so the mean stays neutral. Blocked
+ * tasks complete and release. Runnable tasks requeue
+ * ordered with a fresh estimate. Idle CPUs steal from
+ * peers with a bounded rotating scan. Kicks wake idle
+ * targets only.
  */
 
 /*
@@ -383,7 +385,6 @@ static __always_inline void flow_release(
 		flow_leave_cpu(owner, flow_clamp_est(est));
 	tctx->grant_ns = (u64)-1;
 	tctx->owner = FLOW_OWNER_NONE;
-	tctx->linger = 0;
 }
 
 #include "select_cpu.bpf.c"
@@ -460,6 +461,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->running_est = 0;
 		st->running_pid = 0;
 		st->pad = 0;
+		st->frontier = 0;
 	}
 	return 0;
 }
@@ -482,5 +484,5 @@ SCX_OPS_DEFINE(flow_ops,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
-	       .timeout_ms		= 30000,
+	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");

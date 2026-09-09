@@ -39,12 +39,9 @@ pub const CPUPERF_LONG: u32 = 0;
 /* Cap of one sample in mean accounting in nanos. */
 #[cfg(test)]
 pub const ACCT_MAX_NS: u64 = 32_000_000;
-/* Divisor for the fast lane bound. */
+/* Fixed weight used for virtual time scaling. */
 #[cfg(test)]
-pub const FAST_DIV: u64 = 4;
-/* Divisor for the linger bound. */
-#[cfg(test)]
-pub const LINGER_DIV: u64 = 8;
+pub const WEIGHT: u64 = 1024;
 /* Least donor depth that allows a steal. */
 #[cfg(test)]
 pub const STEAL_MIN_DEPTH: u64 = 2;
@@ -60,7 +57,7 @@ pub fn clamp_est(v: u64) -> u64 {
 }
 
 /*
- * Cap one sample for mean accounting. The order key
+ * Cap one sample for mean accounting. The deadline
  * keeps the full clamped estimate. The accounting
  * value keeps the tighter cap, so a single long run
  * never moves the mean by more than the cap.
@@ -124,115 +121,128 @@ pub fn cpuperf_for_est(est: u64, tq: u64) -> u32 {
 }
 
 /*
- * True when an estimate is tiny against the mean.
- * Tiny means at most one quarter of the mean, so
- * short bursts run at once on an idle target.
+ * Scale an estimate by weight for virtual time. The
+ * fixed weight keeps the value unchanged while the
+ * signature allows future weights with no call change.
  */
 #[cfg(test)]
-pub fn fast_ok(est: u64, tq: u64) -> bool {
-    if tq == 0 {
-        return false;
+pub fn scale_by_weight(est: u64, weight: u32) -> u64 {
+    if weight == 0 {
+        return est;
     }
-    est <= (tq >> 2)
+    if weight == 1024 {
+        return est;
+    }
+    ((est as u128 * 1024) / weight as u128) as u64
 }
 
 /*
- * True when a fast lane insert may run. Needs a tiny
- * estimate with an idle and empty target, so only
- * short bursts on quiet CPUs run local at once.
+ * True when the first time is before the second with
+ * wrap safety. The signed diff keeps order across the
+ * u64 wrap with no extra branch.
  */
 #[cfg(test)]
-pub fn may_fast(est: u64, tq: u64, idle: bool, empty: bool) -> bool {
-    if !fast_ok(est, tq) {
-        return false;
-    }
-    if !idle {
-        return false;
-    }
-    if !empty {
-        return false;
-    }
-    true
+pub fn time_before(a: u64, b: u64) -> bool {
+    (a.wrapping_sub(b) as i64) < 0
 }
 
 /*
- * True when a run slightly overran its grant. Slight
- * means above the grant and within one eighth above
- * it, so only near misses earn a single extra turn.
+ * Clamp virtual time to a bounded lag behind the
+ * frontier. The floor is the frontier minus one slice
+ * with wrap. A lagging value moves forward to the
+ * floor with a clamp count. A fresh value stays.
  */
 #[cfg(test)]
-pub fn linger_ok(delta: u64, grant: u64) -> bool {
-    if grant == 0 {
-        return false;
+pub fn clamp_vruntime(v: u64, frontier: u64, slice: u64) -> u64 {
+    let floor = frontier.wrapping_sub(slice);
+    if time_before(v, floor) {
+        floor
+    } else {
+        v
     }
-    if delta <= grant {
-        return false;
-    }
-    let limit = grant.saturating_add(grant >> 3);
-    delta <= limit
 }
 
 /*
- * Linger flag for tests. Zero is plain. One is a
- * pending boost. The flag clears after one boosted
- * slice with no chain, so only one head start follows
- * a near miss.
+ * True when virtual time was clamped forward. Needs a
+ * lag beyond one slice, so only sleepers count.
  */
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Linger {
-    /* Pending boost flag. Zero plain, one pending. */
-    pub flag: u32,
-    /* Counted boosts. Grows only on head starts. */
-    pub boosts: u64,
+pub fn was_clamped(v: u64, frontier: u64, slice: u64) -> bool {
+    clamp_vruntime(v, frontier, slice) != v
 }
 
+/*
+ * Deadline from clamped virtual time and scaled
+ * estimate. The sum wraps with the clock with no
+ * extra check, so order stays correct across wrap.
+ */
 #[cfg(test)]
-impl Linger {
-    /*
-     * Plain linger with no pending boost. Matches the
-     * cleared task state after enable.
-     */
-    pub fn plain() -> Self {
-        Self { flag: 0, boosts: 0 }
-    }
+pub fn deadline(clamped_v: u64, scaled: u64) -> u64 {
+    clamped_v.wrapping_add(scaled)
+}
 
-    /*
-     * Step a runnable stop. A pending flag clears with
-     * no new boost. A near miss with no pending flag
-     * sets the flag with no count yet. Counts happen
-     * only on head starts, so park drops stay honest.
-     */
-    pub fn stop(&mut self, delta: u64, grant: u64) {
-        if self.flag != 0 {
-            self.flag = 0;
-            return;
-        }
-        if linger_ok(delta, grant) {
-            self.flag = 1;
-        }
-    }
+/*
+ * Advance virtual time by scaled runtime. The sum
+ * wraps with the clock, so long runs stay ordered
+ * across wrap with no extra check.
+ */
+#[cfg(test)]
+pub fn vruntime_add(v: u64, delta: u64) -> u64 {
+    v.wrapping_add(delta)
+}
 
-    /*
-     * Step an ordered insert. A pending flag earns one
-     * head start with a count and keeps the flag for
-     * the non chaining clear on the next stop. A plain
-     * flag stays plain with no count.
-     */
-    pub fn insert(&mut self) -> bool {
-        if self.flag != 0 {
-            self.boosts = self.boosts.saturating_add(1);
-            return true;
-        }
-        false
+/*
+ * Max of two virtual times with wrap safety. The later
+ * time wins, so the frontier never moves backward
+ * while work stays queued.
+ */
+#[cfg(test)]
+pub fn frontier_max(old: u64, next: u64) -> u64 {
+    if time_before(old, next) {
+        next
+    } else {
+        old
     }
+}
 
-    /*
-     * Step a block or park drop. Clears the flag with
-     * no count, so a dropped boost never counts.
-     */
-    pub fn clear(&mut self) {
-        self.flag = 0;
+/*
+ * Frontier for an idle CPU from the waking virtual
+ * time. The waking value bounds the reset with no
+ * zero use, so a new arrival never inherits stale
+ * time while queued work never moves backward.
+ */
+#[cfg(test)]
+pub fn frontier_idle(waking_v: u64) -> u64 {
+    waking_v
+}
+
+/*
+ * Full EDF insert model. Clamps the virtual time to a
+ * bounded lag, scales the estimate, and adds the
+ * deadline with wrap. Returns the clamped time, the
+ * deadline, and the clamp flag for counts.
+ */
+#[cfg(test)]
+pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (u64, u64, bool) {
+    let clamped = clamp_vruntime(v, frontier, slice);
+    let flag = clamped != v;
+    let scaled = scale_by_weight(clamp_est(est), weight);
+    let dl = deadline(clamped, scaled);
+    (clamped, dl, flag)
+}
+
+/*
+ * Frontier step for a stop. A runnable stop or queued
+ * work keeps the max, so time never moves backward
+ * while work stays queued. An idle block resets to the
+ * waking virtual time with no zero use.
+ */
+#[cfg(test)]
+pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
+    if !runnable && queued == 0 {
+        frontier_idle(new_v)
+    } else {
+        frontier_max(old, new_v)
     }
 }
 
@@ -615,15 +625,15 @@ pub struct CpuMean {
 }
 
 /*
- * Ordered entry for tests. The estimate orders the
+ * Ordered entry for tests. The deadline orders the
  * queue. The sequence keeps arrival order when
- * estimates match.
+ * deadlines match.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderedEntry {
-    /* Clamped last burst used as the sort key. */
-    pub est: u64,
+    /* Clamped virtual time plus scaled estimate. */
+    pub deadline: u64,
     /* Arrival sequence used for ties. Lower is older. */
     pub seq: u64,
     /* Task id used only to name the entry. */
@@ -661,10 +671,10 @@ impl CpuMean {
     }
 
     /*
-     * Join one task with a known estimate. The order
-     * key keeps the full clamped estimate. The sum
-     * keeps the capped value, so outliers never
-     * dominate the mean.
+     * Join one task with a known estimate. The deadline
+     * keeps the full clamped estimate. The sum keeps
+     * the capped value, so outliers never dominate
+     * the mean.
      */
     pub fn join(&mut self, est: u64) -> u64 {
         let e = clamp_est(est);
@@ -691,7 +701,7 @@ impl CpuMean {
      * a runnable task refreshes its last burst. The
      * count stays fixed while the sum tracks the capped
      * change. Equal estimates skip at once with no sum
-     * change. The order key still uses the full values.
+     * change. The deadline still uses full values.
      */
     pub fn replace(&mut self, old: u64, new: u64) {
         if !should_replace(old, new) {
@@ -711,12 +721,12 @@ impl CpuMean {
 impl OrderedEntry {
     /*
      * True when this entry sorts before the other. The
-     * smaller estimate wins. Equal estimates keep
+     * smaller deadline wins. Equal deadlines keep
      * arrival order with the older sequence first.
      */
     pub fn before(&self, other: &Self) -> bool {
-        if self.est != other.est {
-            return self.est < other.est;
+        if self.deadline != other.deadline {
+            return time_before(self.deadline, other.deadline);
         }
         self.seq < other.seq
     }
@@ -724,7 +734,7 @@ impl OrderedEntry {
 
 /*
  * Insert one entry into an ordered queue. The queue
- * stays sorted by estimate with arrival order for
+ * stays sorted by deadline with arrival order for
  * ties. Returns the position of the new entry.
  */
 #[cfg(test)]
@@ -1113,7 +1123,7 @@ mod tests {
         assert_eq!(clamp_acct(100_000_000), ACCT_MAX_NS);
         assert_eq!(clamp_acct(1_000_000_000), ACCT_MAX_NS);
         assert_eq!(clamp_acct(u64::MAX), ACCT_MAX_NS);
-        /* The order key keeps the full range. */
+        /* The deadline keeps the full range. */
         assert_eq!(clamp_est(1_000_000_000), EST_MAX_NS);
         assert_eq!(ACCT_MAX_NS, 32_000_000);
     }
@@ -1142,17 +1152,18 @@ mod tests {
         assert_eq!(e, 1_000_000_000);
         assert_eq!(m.sum, ACCT_MAX_NS);
         assert_eq!(m.tq(), ACCT_MAX_NS);
-        /* Order still sees the full value. */
+        /* Deadline still sees the full value. */
         let mut q = Vec::new();
+        let dl = deadline(0, e);
         ordered_insert(
             &mut q,
             OrderedEntry {
-                est: e,
+                deadline: dl,
                 seq: 0,
                 id: 1,
             },
         );
-        assert_eq!(q[0].est, 1_000_000_000);
+        assert_eq!(q[0].deadline, 1_000_000_000);
         /* Leaving the outlier restores the seed. */
         m.leave(1_000_000_000);
         assert_eq!(m.sum, 0);
@@ -1182,145 +1193,188 @@ mod tests {
     }
 
     #[test]
-    fn fast_lane_bounds_match_quarter_mean() {
-        /* Tiny means at most one quarter of the mean. */
-        assert_eq!(FAST_DIV, 4);
-        assert!(fast_ok(2_000_000, 8_000_000));
-        assert!(fast_ok(1_000_000, 8_000_000));
-        assert!(fast_ok(125_000, 500_000));
-        /* The bound is inclusive at the quarter. */
-        assert!(fast_ok(2_000_000, 8_000_000));
-        assert!(!fast_ok(2_000_001, 8_000_000));
-        assert!(!fast_ok(8_000_000, 8_000_000));
-        assert!(!fast_ok(500_001, 500_000));
-        assert!(!fast_ok(1, 0));
+    fn edf_weight_matches_fixed() {
+        /* Fixed weight keeps the value unchanged. */
+        assert_eq!(WEIGHT, 1024);
+        assert_eq!(scale_by_weight(1_000_000, 1024), 1_000_000);
+        assert_eq!(scale_by_weight(8_000_000, 1024), 8_000_000);
+        /* Zero weight falls back to the estimate. */
+        assert_eq!(scale_by_weight(1_000_000, 0), 1_000_000);
+        /* Future weights scale with no overflow. */
+        assert_eq!(scale_by_weight(1_000_000, 512), 2_000_000);
+        assert_eq!(scale_by_weight(2_000_000, 2048), 1_000_000);
     }
 
     #[test]
-    fn fast_lane_misfire_cases_stay_ordered() {
-        /* Fresh tasks never run fast with mean equal. */
-        assert!(!fast_ok(8_000_000, 8_000_000));
-        assert!(!may_fast(8_000_000, 8_000_000, true, true));
-        /* Busy targets never run fast. */
-        assert!(!may_fast(1_000_000, 8_000_000, false, true));
-        /* Queued targets never run fast. */
-        assert!(!may_fast(1_000_000, 8_000_000, true, false));
-        assert!(!may_fast(1_000_000, 8_000_000, false, false));
-        /* Large estimates never run fast when idle. */
-        assert!(!may_fast(4_000_000, 8_000_000, true, true));
+    fn edf_clamp_bounds_match_slice() {
+        /* Lagging values move forward to the floor. */
+        assert_eq!(clamp_vruntime(0, 100_000_000, 8_000_000), 92_000_000);
+        assert!(was_clamped(0, 100_000_000, 8_000_000));
+        /* Values at the floor stay with no count. */
+        assert_eq!(
+            clamp_vruntime(92_000_000, 100_000_000, 8_000_000),
+            92_000_000
+        );
+        assert!(!was_clamped(92_000_000, 100_000_000, 8_000_000));
+        /* Fresh values near the frontier stay. */
+        assert_eq!(
+            clamp_vruntime(99_000_000, 100_000_000, 8_000_000),
+            99_000_000
+        );
+        assert!(!was_clamped(99_000_000, 100_000_000, 8_000_000));
+        /* Ahead values stay with no clamp. */
+        assert_eq!(
+            clamp_vruntime(110_000_000, 100_000_000, 8_000_000),
+            110_000_000
+        );
+        assert!(!was_clamped(110_000_000, 100_000_000, 8_000_000));
     }
 
     #[test]
-    fn fast_lane_property_holds_across_trials() {
-        /* Only tiny idle and empty inserts run fast. */
-        for trial in 0..16u64 {
-            let tq = 8_000_000;
-            let tiny = 1_000_000 + trial * 10_000;
-            let big = 4_000_000 + trial * 10_000;
-            let idle = trial % 2 == 0;
-            let empty = trial % 3 == 0;
-            let want_tiny = tiny <= (tq >> 2) && idle && empty;
-            assert_eq!(may_fast(tiny, tq, idle, empty), want_tiny);
-            assert!(!may_fast(big, tq, idle, empty));
-            assert!(!may_fast(tiny, tq, false, empty));
-            assert!(!may_fast(tiny, tq, idle, false));
-        }
+    fn edf_deadline_wraps_safe() {
+        /* Deadline adds with wrap and keeps order. */
+        assert_eq!(deadline(100, 50), 150);
+        assert_eq!(deadline(u64::MAX - 10, 20), 9);
+        assert!(time_before(u64::MAX - 10, 9));
+        assert!(!time_before(9, u64::MAX - 10));
+        /* Equal times are never before. */
+        assert!(!time_before(100, 100));
+        assert!(!time_before(u64::MAX, u64::MAX));
+        /* Vruntimes advance with wrap. */
+        assert_eq!(vruntime_add(100, 50), 150);
+        assert_eq!(vruntime_add(u64::MAX, 1), 0);
     }
 
     #[test]
-    fn linger_bounds_match_eighth_grant() {
-        /* Near misses sit just above the grant. */
-        assert_eq!(LINGER_DIV, 8);
-        assert!(linger_ok(8_800_000, 8_000_000));
-        assert!(linger_ok(9_000_000, 8_000_000));
-        assert!(linger_ok(512_500, 500_000));
-        /* The bound is inclusive at the eighth. */
-        assert!(linger_ok(9_000_000, 8_000_000));
-        assert!(!linger_ok(9_000_001, 8_000_000));
-        assert!(!linger_ok(8_000_000, 8_000_000));
-        assert!(!linger_ok(7_000_000, 8_000_000));
-        assert!(!linger_ok(1, 0));
-    }
-
-    #[test]
-    fn linger_misfire_cases_stay_plain() {
-        /* Exact grants never boost. */
-        assert!(!linger_ok(8_000_000, 8_000_000));
-        /* Short runs never boost. */
-        assert!(!linger_ok(4_000_000, 8_000_000));
-        /* Far overruns never boost. */
-        assert!(!linger_ok(16_000_000, 8_000_000));
-        assert!(!linger_ok(10_000_000, 8_000_000));
-        /* Empty grants never boost. */
-        assert!(!linger_ok(1, 0));
-        assert!(!linger_ok(0, 0));
-        /* Plain flags never insert with a head start. */
-        let mut l = Linger::plain();
-        assert!(!l.insert());
-        assert_eq!(l.boosts, 0);
-    }
-
-    #[test]
-    fn linger_single_boost_discipline_holds() {
-        /* One near miss sets the flag with no count. */
-        let mut l = Linger::plain();
-        l.stop(8_800_000, 8_000_000);
-        assert_eq!(l.flag, 1);
-        assert_eq!(l.boosts, 0);
-        /* One head start counts and keeps the flag. */
-        assert!(l.insert());
-        assert_eq!(l.boosts, 1);
-        assert_eq!(l.flag, 1);
-        /* The next stop clears with no new boost. */
-        l.stop(8_800_000, 8_000_000);
-        assert_eq!(l.flag, 0);
-        assert_eq!(l.boosts, 1);
-        /* A plain insert after the clear stays plain. */
-        assert!(!l.insert());
-        assert_eq!(l.boosts, 1);
-        /* A second near miss may boost again. */
-        l.stop(8_800_000, 8_000_000);
-        assert_eq!(l.flag, 1);
-        assert!(l.insert());
-        assert_eq!(l.boosts, 2);
-    }
-
-    #[test]
-    fn linger_property_holds_across_trials() {
-        /* Only near misses set the flag, once each. */
-        for trial in 0..16u64 {
-            let grant = 8_000_000;
-            let delta = grant + trial * 100_000;
-            let want = delta > grant && delta <= grant + (grant >> 3);
-            assert_eq!(linger_ok(delta, grant), want);
-            let mut l = Linger::plain();
-            l.stop(delta, grant);
-            assert_eq!(l.flag != 0, want);
-            assert_eq!(l.boosts, 0);
-            if want {
-                assert!(l.insert());
-                assert_eq!(l.boosts, 1);
-                l.stop(delta, grant);
-                assert_eq!(l.flag, 0);
-                assert_eq!(l.boosts, 1);
-                assert!(!l.insert());
-            } else {
-                assert!(!l.insert());
-                assert_eq!(l.boosts, 0);
+    fn s1_bounded_lag_holds_across_trials() {
+        /* S1 bounded lag keeps sleepers near frontier. */
+        for trial in 0..32u64 {
+            let slice = TQ_SEED_NS;
+            let frontier = 100_000_000 + trial * 1_000_000;
+            let lags = [0, 1, slice - 1, slice, slice + 1, 50_000_000];
+            for lag in lags {
+                let v = frontier.wrapping_sub(lag);
+                let clamped = clamp_vruntime(v, frontier, slice);
+                if time_before(v, frontier) {
+                    let held = frontier.wrapping_sub(clamped);
+                    assert!(held <= slice);
+                } else {
+                    assert_eq!(clamped, v);
+                }
+                let (c2, dl, flag) = edf_insert(v, frontier, slice, 1_000_000, 1024);
+                assert_eq!(c2, clamped);
+                assert_eq!(flag, was_clamped(v, frontier, slice));
+                assert_eq!(dl, deadline(c2, scale_by_weight(1_000_000, 1024)));
             }
         }
     }
 
     #[test]
-    fn linger_drop_stays_honest() {
-        /* A dropped boost never counts. */
-        let mut l = Linger::plain();
-        l.stop(8_800_000, 8_000_000);
-        assert_eq!(l.flag, 1);
-        l.clear();
-        assert_eq!(l.flag, 0);
-        assert_eq!(l.boosts, 0);
-        assert!(!l.insert());
+    fn s2_sleeper_cap_one_slice_holds() {
+        /* S2 sleeper cap bounds advantage to one slice. */
+        for trial in 0..16u64 {
+            let slice = TQ_SEED_NS;
+            let frontier = 200_000_000 + trial * 1_000_000;
+            let est = 1_000_000 + trial * 100_000;
+            let (clamped, dl, flag) = edf_insert(0, frontier, slice, est, 1024);
+            assert_eq!(clamped, frontier.wrapping_sub(slice));
+            assert!(flag);
+            assert_eq!(dl, clamped.wrapping_add(clamp_est(est)));
+            if clamp_est(est) <= slice {
+                assert!(!time_before(frontier, dl));
+                let early = frontier.wrapping_sub(dl);
+                assert!(early <= slice);
+            }
+            /* A fresh value near frontier earns no cap. */
+            let near = frontier.wrapping_sub(1_000_000);
+            let (_, _, flag2) = edf_insert(near, frontier, slice, est, 1024);
+            assert!(!flag2);
+        }
+    }
+
+    #[test]
+    fn s3_frontier_monotonic_with_wrap_holds() {
+        /* S3 frontier never moves backward while queued. */
+        for trial in 0..16u64 {
+            let old = 1_000_000 + trial * 1_000_000;
+            let next = old.wrapping_add(500_000);
+            assert_eq!(frontier_max(old, next), next);
+            assert_eq!(frontier_max(next, old), next);
+            assert_eq!(frontier_step(old, next, true, 0), next);
+            assert_eq!(frontier_step(old, next, true, 2), next);
+            assert_eq!(frontier_step(old, next, false, 1), next);
+            /* Idle blocks reset to the waking value. */
+            assert_eq!(frontier_step(old, next, false, 0), next);
+            assert_eq!(frontier_idle(next), next);
+        }
+        /* Wrap keeps order across the u64 top. */
+        let old = u64::MAX - 100;
+        let next = 50u64;
+        assert!(time_before(old, next));
+        assert_eq!(frontier_max(old, next), next);
+        assert_eq!(frontier_max(next, old), next);
+        assert_eq!(frontier_step(old, next, true, 1), next);
+        assert_eq!(frontier_step(old, next, false, 0), next);
+        /* Lagging value near the top clamps forward. */
+        let lag = u64::MAX - 20_000_000;
+        let top = u64::MAX - 1_000_000;
+        assert_eq!(
+            clamp_vruntime(lag, top, 8_000_000),
+            top.wrapping_sub(8_000_000)
+        );
+        /* Fresh zero near the top stays with no clamp. */
+        assert_eq!(clamp_vruntime(0, top, 8_000_000), 0);
+        /* Small frontier with wrap floor keeps zero. */
+        assert_eq!(clamp_vruntime(0, 5_000_000, 8_000_000), 0);
+    }
+
+    #[test]
+    fn edf_insert_counts_clamp_and_order() {
+        /* Clamped inserts count once with ordered keys. */
+        let slice = TQ_SEED_NS;
+        let frontier = 100_000_000;
+        let (c1, dl1, f1) = edf_insert(0, frontier, slice, 2_000_000, 1024);
+        assert!(f1);
+        assert_eq!(c1, frontier.wrapping_sub(slice));
+        assert_eq!(dl1, c1.wrapping_add(2_000_000));
+        /* Plain inserts count zero with later keys. */
+        let (c2, dl2, f2) = edf_insert(frontier, frontier, slice, 1_000_000, 1024);
+        assert!(!f2);
+        assert_eq!(c2, frontier);
+        assert!(time_before(dl2, dl1) || dl2 == dl1 || time_before(dl1, dl2));
+        let mut q = Vec::new();
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                deadline: dl1,
+                seq: 0,
+                id: 1,
+            },
+        );
+        ordered_insert(
+            &mut q,
+            OrderedEntry {
+                deadline: dl2,
+                seq: 1,
+                id: 2,
+            },
+        );
+        assert_eq!(q.len(), 2);
+        assert!(!q[1].before(&q[0]));
+    }
+
+    #[test]
+    fn edf_frontier_step_idle_bounded() {
+        /* Idle resets bound to waking time with no zero. */
+        let waking = 50_000_000;
+        assert_eq!(frontier_step(100_000_000, waking, false, 0), waking);
+        assert_ne!(frontier_step(100_000_000, waking, false, 0), 0);
+        /* Queued work never moves backward. */
+        assert_eq!(frontier_step(100_000_000, waking, false, 1), 100_000_000);
+        assert_eq!(frontier_step(100_000_000, waking, true, 0), 100_000_000);
+        /* Forward steps always win while busy. */
+        assert_eq!(frontier_step(10, 20, true, 5), 20);
+        assert_eq!(frontier_step(10, 20, false, 3), 20);
     }
 
     #[test]
@@ -1490,12 +1544,12 @@ mod tests {
     }
 
     #[test]
-    fn ordered_insert_sorts_by_est() {
+    fn ordered_insert_sorts_by_deadline() {
         let mut q = Vec::new();
         ordered_insert(
             &mut q,
             OrderedEntry {
-                est: 8_000_000,
+                deadline: 8_000_000,
                 seq: 0,
                 id: 1,
             },
@@ -1503,7 +1557,7 @@ mod tests {
         ordered_insert(
             &mut q,
             OrderedEntry {
-                est: 1_000_000,
+                deadline: 1_000_000,
                 seq: 1,
                 id: 2,
             },
@@ -1511,7 +1565,7 @@ mod tests {
         ordered_insert(
             &mut q,
             OrderedEntry {
-                est: 4_000_000,
+                deadline: 4_000_000,
                 seq: 2,
                 id: 3,
             },
@@ -1528,7 +1582,7 @@ mod tests {
             ordered_insert(
                 &mut q,
                 OrderedEntry {
-                    est: 2_000_000,
+                    deadline: 2_000_000,
                     seq: i,
                     id: i,
                 },
@@ -1545,8 +1599,15 @@ mod tests {
         for trial in 0..16u64 {
             let mut q = Vec::new();
             for i in 0..8u64 {
-                let est = (trial * 7 + i * 13) % 5 + 1;
-                ordered_insert(&mut q, OrderedEntry { est, seq: i, id: i });
+                let deadline = (trial * 7 + i * 13) % 5 + 1;
+                ordered_insert(
+                    &mut q,
+                    OrderedEntry {
+                        deadline,
+                        seq: i,
+                        id: i,
+                    },
+                );
             }
             for w in q.windows(2) {
                 assert!(!w[1].before(&w[0]));

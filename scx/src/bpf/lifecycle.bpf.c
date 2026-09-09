@@ -6,10 +6,12 @@
  *
  * Running records the stamp and the running view.
  * Stopping refreshes the estimate from the last burst
- * and releases or requeues. A slight overrun earns a
- * single pending boost with no chaining. Enable clears
- * state. Disable and exit release once. Dequeue keeps
- * the entry across dispatch to run.
+ * and moves virtual time forward with a bounded
+ * frontier. Runnable tasks requeue ordered with a new
+ * estimate. Idle resets bound to waking virtual time
+ * with no zero use. Enable clears state. Disable and
+ * exit release once. Dequeue keeps the entry across
+ * dispatch to run.
  */
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -65,6 +67,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 delta;
 	u64 est;
 	u64 old;
+	u64 scaled;
+	u64 nv;
 
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
@@ -87,20 +91,38 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running(cpu);
 	flow_on_cpu_dec();
 	tctx->run_at = 0;
+	scaled = flow_scale_by_weight(est,
+	    (u32)FLOW_WEIGHT);
+	nv = flow_vruntime_add(tctx->vruntime, scaled);
+	tctx->vruntime = nv;
+	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
+		struct flow_cpu_state *st;
+
+		st = flow_cpu((u32)cpu);
+		if (st) {
+			if (!runnable) {
+				u64 dsq;
+
+				dsq = flow_dsq_for_cpu((u32)cpu);
+				if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
+				    scx_bpf_dsq_nr_queued(
+				    (u64)SCX_DSQ_LOCAL_ON |
+				    (u64)cpu) == 0)
+					st->frontier =
+					    flow_frontier_idle(nv);
+				else
+					st->frontier =
+					    flow_frontier_max(
+					    st->frontier, nv);
+			} else {
+				st->frontier = flow_frontier_max(
+				    st->frontier, nv);
+			}
+		}
+	}
 	if (runnable) {
 		u32 owner = tctx->owner;
 
-		/* A boosted slice clears with no new boost. */
-		if ((u64)FLOW_GATE_LINGER) {
-			if (tctx->linger != 0) {
-				tctx->linger = 0;
-			} else if (flow_linger_ok(delta,
-			    tctx->grant_ns)) {
-				tctx->linger = 1;
-			}
-		} else {
-			tctx->linger = 0;
-		}
 		/* Runnable tasks requeue ordered with new est. */
 		/* Equal estimates skip the mean write. */
 		if (owner != FLOW_OWNER_NONE &&
@@ -127,7 +149,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->run_at = 0;
 	tctx->grant_ns = (u64)-1;
 	tctx->owner = FLOW_OWNER_NONE;
-	tctx->linger = 0;
+	tctx->vruntime = 0;
+	tctx->deadline = 0;
 }
 
 /*
