@@ -1900,25 +1900,51 @@ fn mean_migration_never_leaks() {
 
 #[test]
 fn donor_gated_matches_guard() {
-    /* Sticky depths below two never steal. */
+    /* Ungated depths below two never steal. */
     assert!(!donor_ok(0));
     assert!(!donor_ok(1));
     assert!(donor_ok(2));
-    /* Gated with no sticky gate allows all with no guard. */
-    /* The IEDF flag keeps no guard after the 4.2.0 revert. */
+    /* Gated with no gate allows all with no guard. */
     assert!(donor_ok_gated(0, false, false));
     assert!(donor_ok_gated(1, false, false));
-    assert!(donor_ok_gated(0, false, true));
-    assert!(donor_ok_gated(1, false, true));
-    /* Gated with the sticky gate keeps the guard. */
+    /* Gated with either gate keeps the guard. */
     assert!(!donor_ok_gated(0, true, false));
     assert!(!donor_ok_gated(1, true, false));
+    assert!(!donor_ok_gated(0, false, true));
+    assert!(!donor_ok_gated(1, false, true));
     assert!(!donor_ok_gated(0, true, true));
     assert!(!donor_ok_gated(1, true, true));
     assert!(donor_ok_gated(2, true, false));
-    assert!(donor_ok_gated(2, true, true));
     assert!(donor_ok_gated(2, false, true));
+    assert!(donor_ok_gated(2, true, true));
     assert!(donor_ok_gated(2, false, false));
+}
+
+#[test]
+fn donor_gated_both_set_guards() {
+    /* Both gates set keep the guard for thin donors. */
+    assert!(!donor_ok_gated(0, true, true));
+    assert!(!donor_ok_gated(1, true, true));
+    assert!(donor_ok_gated(2, true, true));
+    assert!(donor_ok_gated(8, true, true));
+}
+
+#[test]
+fn donor_gated_sticky_clear_iedf_set_still_guards() {
+    /* IEDF alone keeps the guard with no extra map. */
+    assert!(!donor_ok_gated(0, false, true));
+    assert!(!donor_ok_gated(1, false, true));
+    assert!(donor_ok_gated(2, false, true));
+    assert!(donor_ok_gated(8, false, true));
+}
+
+#[test]
+fn donor_gated_both_clear_open() {
+    /* No gate leaves all depths open with no guard. */
+    assert!(donor_ok_gated(0, false, false));
+    assert!(donor_ok_gated(1, false, false));
+    assert!(donor_ok_gated(2, false, false));
+    assert!(donor_ok_gated(8, false, false));
 }
 
 #[test]

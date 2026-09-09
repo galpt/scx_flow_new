@@ -135,7 +135,13 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	dsq = flow_dsq_for_cpu(peer);
 	if (scx_bpf_dsq_nr_queued(dsq) == 0)
 		return 0;
-	if ((u64)FLOW_GATE_STICKY &&
+	/* Thin donors keep the last task for the owner. */
+	/* The IEDF gate keeps the same guard with no */
+	/* extra map and no kill, so shed park work still */
+	/* needs two queued tasks to move one. */
+	/* Either gate alone keeps the guard, so one zero */
+	/* still guards through the other with one revert. */
+	if (((u64)FLOW_GATE_STICKY || (u64)FLOW_GATE_IEDF) &&
 	    scx_bpf_dsq_nr_queued(dsq) <
 	    (u64)FLOW_STEAL_MIN_DEPTH)
 		return 0;
