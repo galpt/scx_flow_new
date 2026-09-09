@@ -12,13 +12,13 @@
  */
 
 /*
- * Drain one per Cpu queue with skip past bad heads.
+ * Drain one per-CPU queue with skip past bad heads.
  * The iterator visits every queued task in order, so
  * one dead, foreign, or failed head never blocks
  * later work. Exiting tasks move to the local DSQ to
  * run to exit, so they never wedge behind a skip.
  * Each eligible task moves to the local DSQ of the
- * asking Cpu. Returns the count moved, capped at the
+ * asking CPU. Returns the count moved, capped at the
  * given budget.
  */
 static __always_inline u32 flow_drain_own(s32 cpu,
@@ -66,7 +66,7 @@ static __always_inline u32 flow_drain_own(s32 cpu,
  * work. Exiting tasks move to the local DSQ to run
  * to exit, so they never wedge behind a skip. Each
  * eligible task moves to the local DSQ of the asking
- * Cpu. Returns the count moved, capped at the given
+ * CPU. Returns the count moved, capped at the given
  * budget.
  */
 static __always_inline u32 flow_drain_park(s32 cpu,
@@ -178,33 +178,38 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 budget = (u32)FLOW_DISPATCH_MAX_BATCH;
 	u32 moved = 0;
 	u32 own_left = 0;
-	u32 own_budget = budget;
+	u64 park_q = 0;
+	bool park_has = false;
+	bool park_reserve = false;
+	u32 own_budget = 0;
 
 	(void)prev;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
-	/* Reserve one slot for park when park holds work. */
+	/* Single park read with branchless reserve. */
 	/* The reserve keeps batch total at 32 with donor */
 	/* depth at two and steal bound at eight. The gate */
 	/* keeps revert exact, so zero restores 4.2.0 order. */
-	if ((u64)FLOW_GATE_IEDF &&
-	    scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
-	    own_budget > 0)
-		own_budget -= 1;
+	park_q = scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK);
+	park_has = park_q > 0;
+	park_reserve = (u64)FLOW_GATE_IEDF && park_has;
+	own_budget = budget - (u32)(park_reserve && budget > 0);
 	/* Own queue drains first with skip past bad heads. */
 	moved += flow_drain_own(cpu, own_budget);
 	/* Parked tasks move when the mask allows. */
-	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
-	    moved < budget)
+	/* The cached park flag drops the second park load */
+	/* with no behavior change, since own drain leaves */
+	/* park length unchanged. */
+	if (park_has && moved < budget)
 		moved += flow_drain_park(cpu, budget - moved);
 	if (moved >= budget)
 		return;
 	own_left = scx_bpf_dsq_nr_queued(
 	    flow_dsq_for_cpu((u32)cpu));
-	/* An idle Cpu steals past unmovable leftovers. */
-	/* A busy Cpu with local work stays home. */
+	/* An idle CPU steals past unmovable leftovers. */
+	/* A busy CPU with local work stays home. */
 	if (own_left > 0 && moved > 0)
 		return;
 	if (scx_bpf_dsq_nr_queued((u64)FLOW_DSQ_PARK) > 0 &&
