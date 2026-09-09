@@ -8,10 +8,13 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="${REPO_DIR}/scx"
-WS="${1:-/tmp/opencode/scx}"
+WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
 VER="4.1.0"
+# Pinned upstream ref, same as repo CI.
+SCX_REF="7cec98c51376a9d38b05a1e39e30cf7e5909cf16"
+UPSTREAM="https://github.com/sched-ext/scx"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -23,6 +26,21 @@ need() {
 need cargo
 need clang
 need rsync
+need git
+
+# Fetch the upstream workspace when missing.
+if [ ! -d "${WS}/rust" ]; then
+    echo "fetching upstream workspace at ${WS}"
+    mkdir -p "${WS}"
+    # Init a fresh dir and point it upstream.
+    if [ ! -d "${WS}/.git" ]; then
+        git init -q "${WS}"
+        git -C "${WS}" remote add origin "${UPSTREAM}"
+    fi
+    # Fetch the pinned ref by SHA and checkout the result.
+    git -C "${WS}" fetch origin "${SCX_REF}"
+    git -C "${WS}" checkout FETCH_HEAD
+fi
 
 if [ ! -d "${WS}/rust" ]; then
     echo "workspace rust dir not found at ${WS}/rust" >&2

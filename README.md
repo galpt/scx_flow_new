@@ -89,15 +89,17 @@ builds in release mode and installs the binary.
 ## Installer
 
 `tools/install_scx_flow.sh` takes the workspace checkout
-path and defaults to `/tmp/opencode/scx`. It needs
-`cargo`, `clang` and `rsync`, plus a workspace with a
-`rust` dir.
+path and defaults to `/tmp/scx-workspace`. It needs
+`cargo`, `clang`, `rsync` and `git`. If the workspace
+has no `rust` dir, the script fetches the upstream
+workspace at the pinned ref first, so no manual clone
+is needed on a fresh machine.
 
 ```bash
 # 1. Stop the loader before replacing the binary
 sudo systemctl stop scx_loader 2>/dev/null || true
 
-# 2. Run the installer with a workspace checkout
+# 2. Run the installer, it fetches the workspace when missing
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 
 # 3. Confirm the version
@@ -119,13 +121,15 @@ cat /sys/kernel/sched_ext/root/ops
 journalctl -u scx_loader -f
 ```
 
-The script overlays `scx` into
-`scheds/experimental/scx_flow`, builds in release mode
-and installs to `/usr/local/bin`. Without root it copies
-the binary to the repo dir instead. Expect version
-`4.1.0`, state `enabled` and ops containing `flow`. To
-roll back, stop the loader, restore the prior binary
-and start the loader again.
+The script downloads the `sched-ext/scx` workspace at
+the pinned ref `7cec98c51376a9d38b05a1e39e30cf7e5909cf16`
+into the workspace path when missing, then overlays
+`scx` into `scheds/experimental/scx_flow`, builds in
+release mode and installs to `/usr/local/bin`. Without
+root it copies the binary to the repo dir instead.
+Expect version `4.1.0`, state `enabled` and ops
+containing `flow`. To roll back, stop the loader,
+restore the prior binary and start the loader again.
 
 ## Run
 
