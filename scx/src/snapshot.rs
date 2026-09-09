@@ -32,6 +32,9 @@ impl<'a> Scheduler<'a> {
             fast_hits: s.fast_hits,
             linger_boosts: s.linger_boosts,
             reuse_hits: s.reuse_hits,
+            edf_enqueued: s.edf_enqueued,
+            edf_clamped: s.edf_clamped,
+            edf_ordered: s.edf_ordered,
         }
     }
 
@@ -48,6 +51,7 @@ impl<'a> Scheduler<'a> {
             running_est: 0,
             running_pid: 0,
             pad: 0,
+            frontier: 0,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;

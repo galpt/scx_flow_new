@@ -7,10 +7,12 @@
  * count fresh joins. Requeues count runnable slice ends.
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
- * Fast hits count direct local inserts for tiny bursts.
- * Linger boosts count ordered head starts for near
- * misses. Reuse hits count sticky prior CPU reuse. Web
- * metrics adds per CPU cards with mean and depth.
+ * Fast hits stay zero for compat with no fast path.
+ * Linger boosts stay zero for compat with no linger
+ * path. Reuse hits stay zero for compat with no reuse
+ * count. EDF counts cover ordered inserts with clamp
+ * detail. Web metrics adds per CPU cards with mean and
+ * depth.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -59,15 +61,24 @@ pub struct Metrics {
     #[stat(desc = "Inserts without task state")]
     #[serde(default)]
     pub enq_no_tctx: u64,
-    #[stat(desc = "Direct local inserts for tiny bursts")]
+    #[stat(desc = "Frozen zero with no fast path")]
     #[serde(default)]
     pub fast_hits: u64,
-    #[stat(desc = "Ordered head starts for near misses")]
+    #[stat(desc = "Frozen zero with no linger path")]
     #[serde(default)]
     pub linger_boosts: u64,
-    #[stat(desc = "Sticky prior CPU reuse")]
+    #[stat(desc = "Frozen zero with no reuse count")]
     #[serde(default)]
     pub reuse_hits: u64,
+    #[stat(desc = "Ordered inserts with deadline")]
+    #[serde(default)]
+    pub edf_enqueued: u64,
+    #[stat(desc = "Sleeper clamps to one slice")]
+    #[serde(default)]
+    pub edf_clamped: u64,
+    #[stat(desc = "Kernel queue inserts in order")]
+    #[serde(default)]
+    pub edf_ordered: u64,
 }
 
 /*
@@ -127,7 +138,8 @@ impl Metrics {
             w,
             "[{}] run={} runtime={} uptime={} \
             ins={} req={} done={} park={} steal={} \
-            kick={} noctx={} fast={} linger={} reuse={}",
+            kick={} noctx={} fast={} linger={} reuse={} \
+            edfenq={} edfclamp={} edford={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -142,6 +154,9 @@ impl Metrics {
             self.fast_hits,
             self.linger_boosts,
             self.reuse_hits,
+            self.edf_enqueued,
+            self.edf_clamped,
+            self.edf_ordered,
         )?;
         Ok(())
     }
@@ -165,6 +180,9 @@ impl Metrics {
             fast_hits: self.fast_hits.wrapping_sub(rhs.fast_hits),
             linger_boosts: self.linger_boosts.wrapping_sub(rhs.linger_boosts),
             reuse_hits: self.reuse_hits.wrapping_sub(rhs.reuse_hits),
+            edf_enqueued: self.edf_enqueued.wrapping_sub(rhs.edf_enqueued),
+            edf_clamped: self.edf_clamped.wrapping_sub(rhs.edf_clamped),
+            edf_ordered: self.edf_ordered.wrapping_sub(rhs.edf_ordered),
         }
     }
 }

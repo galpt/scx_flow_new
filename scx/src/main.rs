@@ -196,7 +196,8 @@ impl<'a> Scheduler<'a> {
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
             "exit ins={} req={} done={} park={} steal={} \
-            fast={} linger={} reuse={} runtime={} oncpu={}",
+            fast={} linger={} reuse={} edfenq={} edfclamp={} \
+            edford={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -205,6 +206,9 @@ impl<'a> Scheduler<'a> {
             m.fast_hits,
             m.linger_boosts,
             m.reuse_hits,
+            m.edf_enqueued,
+            m.edf_clamped,
+            m.edf_ordered,
             runtime,
             oncpu,
         );
@@ -351,21 +355,12 @@ mod tests {
     }
 
     #[test]
-    fn fast_matches_header() {
+    fn edf_matches_header() {
         assert_eq!(
-            crate::flow::FAST_DIV,
-            crate::bpf_intf::flow_consts_FLOW_FAST_DIV as u64
+            crate::flow::WEIGHT,
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64
         );
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_FAST as u64, 1);
-    }
-
-    #[test]
-    fn linger_matches_header() {
-        assert_eq!(
-            crate::flow::LINGER_DIV,
-            crate::bpf_intf::flow_consts_FLOW_LINGER_DIV as u64
-        );
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_LINGER as u64, 1);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64, 1024);
     }
 
     #[test]

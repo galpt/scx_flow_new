@@ -306,6 +306,18 @@
           Reuse hits:</span>
           <span class="stat-value" id="reuse">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          EDF enqueued:</span>
+          <span class="stat-value" id="edf-enq">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          EDF clamped:</span>
+          <span class="stat-value" id="edf-clamp">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          EDF ordered:</span>
+          <span class="stat-value" id="edf-ord">0</span>
+        </div>
       </div>
     </div>
 
@@ -500,6 +512,12 @@
         fmt(s.linger_boosts || 0);
       el('reuse').textContent =
         fmt(s.reuse_hits || 0);
+      el('edf-enq').textContent =
+        fmt(s.edf_enqueued || 0);
+      el('edf-clamp').textContent =
+        fmt(s.edf_clamped || 0);
+      el('edf-ord').textContent =
+        fmt(s.edf_ordered || 0);
 
       renderCoreCards(data);
     }
