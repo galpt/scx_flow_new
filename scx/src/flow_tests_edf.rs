@@ -389,12 +389,24 @@ fn steal_cursor_rotates_across_peers() {
     }
 }
 
+/*
+ * Tier 0 model only for donor plus rescue. BPF ships
+ * thief idle only by construction due to verifier jump
+ * at 1000001 on asleep check, with donor asleep handled
+ * by idle kick.
+ */
 #[test]
 fn donor_keeps_last_task() {
-    assert!(!donor_ok(0));
-    assert!(!donor_ok(1));
+    assert!(!donor_ok(0, false, false));
+    assert!(!donor_ok(1, false, false));
+    assert!(!donor_ok(0, true, true));
+    assert!(donor_ok(1, true, false));
+    assert!(donor_ok(1, false, true));
+    assert!(donor_ok(1, true, true));
     for depth in [2, 3, 8, 32] {
-        assert!(donor_ok(depth));
+        assert!(donor_ok(depth, false, false));
+        assert!(donor_ok(depth, true, false));
+        assert!(donor_ok(depth, false, true));
     }
     assert_eq!(scan_bound(2), 1);
     assert_eq!(scan_bound(9), 8);
@@ -637,9 +649,9 @@ fn steal_only_when_idle_and_bounded() {
         VecDeque::new(),
         VecDeque::from([good.clone(), good.clone()]),
     ];
-    let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false);
+    let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false, false, &[]);
     assert_eq!(busy, 0);
-    let (idle, next) = steal_model(&mut peers, 0, 0, 8, true);
+    let (idle, next) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false]);
     assert_eq!(idle, 1);
     assert_eq!(next, 1);
     let mut wide: Vec<VecDeque<PendingTask>> = vec![VecDeque::new(); 16];
@@ -647,7 +659,7 @@ fn steal_only_when_idle_and_bounded() {
         q.push_back(good.clone());
         q.push_back(good.clone());
     }
-    let (capped, _) = steal_model(&mut wide, 0, 0, 32, true);
+    let (capped, _) = steal_model(&mut wide, 0, 0, 32, true, false, &[]);
     assert!(capped > 0);
     assert!(capped <= 8);
 }
@@ -677,10 +689,63 @@ fn steal_checks_mask_and_skips_bad_heads() {
         VecDeque::from([foreign.clone(), exiting.clone(), good.clone()]),
         VecDeque::from([good.clone()]),
     ];
-    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
+    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false, false]);
     assert_eq!(moved, 1);
     assert_eq!(peers[1].len(), 2);
     assert_eq!(peers[2].len(), 1);
+}
+
+#[test]
+fn idle_rescues_singleton() {
+    let good = PendingTask {
+        allowed: vec![true, true],
+        exiting: false,
+        live: true,
+        fail: false,
+    };
+    let mut peers: Vec<VecDeque<PendingTask>> =
+        vec![VecDeque::new(), VecDeque::from([good.clone()])];
+    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, true, &[false, false]);
+    assert_eq!(moved, 1);
+    assert!(peers[1].is_empty());
+}
+
+#[test]
+fn busy_refuses_singleton() {
+    let good = PendingTask {
+        allowed: vec![true, true],
+        exiting: false,
+        live: true,
+        fail: false,
+    };
+    let mut peers: Vec<VecDeque<PendingTask>> =
+        vec![VecDeque::new(), VecDeque::from([good.clone()])];
+    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false]);
+    assert_eq!(moved, 0);
+    assert_eq!(peers[1].len(), 1);
+    let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false, false, &[false, false]);
+    assert_eq!(busy, 0);
+}
+
+/*
+ * Tier 0 model only for donor asleep rescue. BPF ships
+ * thief idle only by construction due to verifier jump
+ * at 1000001 on asleep check, with donor asleep handled
+ * by idle kick.
+ */
+#[test]
+fn donor_asleep_rescues_singleton() {
+    let good = PendingTask {
+        allowed: vec![true, true],
+        exiting: false,
+        live: true,
+        fail: false,
+    };
+    let mut peers: Vec<VecDeque<PendingTask>> =
+        vec![VecDeque::new(), VecDeque::from([good.clone()])];
+    let (moved, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, true]);
+    assert_eq!(moved, 1);
+    assert!(peers[1].is_empty());
 }
 
 #[test]
@@ -707,7 +772,7 @@ fn exiting_task_eventually_runs() {
         VecDeque::from([exiting.clone(), good.clone()]),
         VecDeque::new(),
     ];
-    let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true);
+    let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true, false, &[false, false, false]);
     assert_eq!(stolen, 1);
     let far = PendingTask {
         allowed: vec![false, true],
@@ -788,7 +853,7 @@ fn dispatch_own_park_then_steal_gate() {
     assert_eq!(own.len(), 2);
     let moved = a + b;
     assert!(may_steal(own.len() as u64, park.len() as u64, moved));
-    let (stolen, _) = steal_model(&mut peers, 0, 0, 32 - moved, true);
+    let (stolen, _) = steal_model(&mut peers, 0, 0, 32 - moved, true, false, &[]);
     assert_eq!(stolen, 1);
     assert_eq!(a + b + stolen, 1);
     let mut own2 = VecDeque::from([good.clone(), good.clone()]);
@@ -804,7 +869,7 @@ fn dispatch_own_park_then_steal_gate() {
     assert!(own2.is_empty());
     let moved2 = c + d;
     assert!(may_steal(own2.len() as u64, park2.len() as u64, moved2));
-    let (stolen2, _) = steal_model(&mut peers2, 0, 0, 32 - moved2, true);
+    let (stolen2, _) = steal_model(&mut peers2, 0, 0, 32 - moved2, true, false, &[]);
     assert_eq!(stolen2, 1);
     assert!(c + d + stolen2 <= 32);
     let mut own3 = VecDeque::from([good.clone(), foreign.clone()]);

@@ -130,13 +130,25 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
 }
 
 /*
- * True when a donor queue may lose one task. Needs at
- * least two queued tasks, so thin donors keep their
- * last task.
+ * True when a donor queue may lose one task. Tier 0
+ * model only. Needs at least two queued tasks, or one
+ * queued task with a rescue when the thief is idle
+ * with no moved plus no own left plus no park left or
+ * when the donor is asleep with no running task. Busy
+ * thieves with a running donor keep the last task. BPF
+ * ships thief idle only by construction due to verifier
+ * jump at 1000001 on asleep check, with donor asleep
+ * handled by idle kick.
  */
 #[cfg(test)]
-pub fn donor_ok(depth: u64) -> bool {
-    depth >= STEAL_MIN_DEPTH
+pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
+    if depth >= STEAL_MIN_DEPTH {
+        return true;
+    }
+    if depth == 1 && (allow_single || donor_idle) {
+        return true;
+    }
+    false
 }
 
 /*
@@ -307,10 +319,17 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
 
 /*
  * Steal up to budget tasks from peers for an idle CPU.
- * The scan visits at most bound peers starting after
- * the cursor with wrap. Only idle callers steal. Each
- * peer needs at least two queued tasks, so thin donors
- * keep their last task. Each peer is scanned in order
+ * Tier 0 model only. The scan visits at most bound
+ * peers starting after the cursor with wrap. Only idle
+ * callers steal. Each peer needs at least two queued
+ * tasks, or one with a rescue when the thief is idle
+ * with no moved plus no own left plus no park left or
+ * when the donor is asleep with no running task, so
+ * thin running donors keep the last task while idle
+ * thieves plus asleep donors rescue singletons. BPF
+ * ships thief idle only by construction due to verifier
+ * jump at 1000001 on asleep check, with donor asleep
+ * handled by idle kick. Each peer is scanned in order
  * past dead, foreign, and failed heads, so movable work
  * behind a bad head is rescued. The cursor advances by
  * the peers visited. Returns the count moved and the
@@ -323,6 +342,8 @@ pub fn steal_model(
     cursor: u32,
     budget: u32,
     idle: bool,
+    allow_single: bool,
+    donor_idle: &[bool],
 ) -> (u32, u32) {
     if !idle {
         return (0, cursor);
@@ -348,7 +369,8 @@ pub fn steal_model(
             continue;
         }
         if let Some(q) = peers.get_mut(next as usize) {
-            if !donor_ok(q.len() as u64) {
+            let idle_donor = donor_idle.get(next as usize).copied().unwrap_or(false);
+            if !donor_ok(q.len() as u64, allow_single, idle_donor) {
                 continue;
             }
             let mut pos = None;

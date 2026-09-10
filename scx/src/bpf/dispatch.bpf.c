@@ -6,10 +6,15 @@
 /* where its mask allows with steal held by the mask. Park */
 /* drains the thief group park only with enqueue parking by */
 /* task group and no task recheck. Peer keeps mask plus */
-/* depth with no donor check and no task recheck, so steal */
-/* stays mask gated and best effort across groups. Tier 3 */
-/* holds park only by construction due to verifier jump at */
-/* 1000001 on donor check in the steal loop. Strict park on */
+/* depth with idle rescue and no task recheck, so a depth */
+/* 1 donor moves only when the thief is idle with no moved */
+/* plus no own left plus no park left. Busy thieves keep */
+/* depth 2. Tier 0 models also donor asleep rescue. BPF */
+/* ships thief idle only by construction due to verifier */
+/* jump at 1000001 on asleep check in the steal loop with */
+/* donor asleep handled by idle kick. Tier 3 holds park */
+/* only by construction due to verifier jump at 1000001 */
+/* on donor check in the steal loop. Strict park on */
 /* uniform hosts. Best effort peer plus hetero hosts. */
 /* Dispatch uses halves. Placement uses live table. */
 static __always_inline u32 flow_drain_own(s32 cpu,
@@ -83,7 +88,7 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 	return moved;
 }
 static __always_inline u32 flow_drain_peer(s32 thief,
-	u32 peer)
+	u32 peer, u64 min_depth)
 {
 	struct task_struct *p;
 	u64 dsq;
@@ -97,8 +102,7 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	if (thief == (s32)peer)
 		return 0;
 	dsq = flow_dsq_for_cpu(peer);
-	if (scx_bpf_dsq_nr_queued(dsq) <
-	    (u64)FLOW_STEAL_MIN_DEPTH)
+	if (scx_bpf_dsq_nr_queued(dsq) < min_depth)
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {
@@ -149,13 +153,20 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	    flow_dsq_for_cpu((u32)cpu));
 	if (own_left > 0 && moved > 0)
 		return;
-	if (scx_bpf_dsq_nr_queued(park) > 0 &&
-	    moved > 0)
-		return;
 	{
+		u64 park_left;
+		u64 min_depth;
 		struct flow_cpu_state *st;
 		u32 cur;
 		u32 i;
+		park_left = scx_bpf_dsq_nr_queued(park);
+		if (park_left > 0 && moved > 0)
+			return;
+		if (moved == 0 && own_left == 0 &&
+		    park_left == 0)
+			min_depth = 1;
+		else
+			min_depth = (u64)FLOW_STEAL_MIN_DEPTH;
 		st = flow_cpu((u32)cpu);
 		cur = st ? st->cursor : 0;
 		bpf_for(i, 0, 8) {
@@ -171,7 +182,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				continue;
 			if ((s32)peer == cpu)
 				continue;
-			moved += flow_drain_peer(cpu, peer);
+			moved += flow_drain_peer(cpu, peer,
+			    min_depth);
 		}
 		if (st)
 			__sync_lock_test_and_set(&st->cursor, cur);
