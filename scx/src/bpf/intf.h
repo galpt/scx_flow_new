@@ -56,6 +56,7 @@ enum flow_consts {
 	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
+	FLOW_KICK_COALESCE_NS = 50000ULL,
 };
 /* Weight fits u16 for the running repack. */
 /* Nice minus 20 to 19 fits s16 for repack. */
@@ -87,9 +88,9 @@ struct flow_cpu_state {
 	u8 delay_cur;
 	u16 delay_cnt;
 };
-/* Counters at 152B with group detail. */
+/* Counters at 160B with group plus coalesce. */
 /* Skipped lumps all fail-closed busy no-kicks. */
-/* Split needs 168B, so lumped keeps 152B. */
+/* Coalesced counts q2 idle skips in 50us. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -110,6 +111,7 @@ struct flow_sched_stats {
 	u64 group_wake_promote;
 	u64 preempt_kicks;
 	u64 preempt_skipped;
+	u64 kick_coalesced;
 };
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -506,5 +508,16 @@ static __always_inline bool flow_preempt_ok(bool armed,
 {
 	return armed && deserved && rate_clear &&
 	    same_group && mask_ok;
+}
+/* True when one idle kick is recent in 50us. */
+/* Zero last never counts as recent with wrap. */
+/* Diff wraps, so order holds across the wrap. */
+static __always_inline bool flow_kick_recent(u64 now,
+	u64 last)
+{
+	if (last == 0)
+		return false;
+	return now - last <
+	    (u64)FLOW_KICK_COALESCE_NS;
 }
 #endif

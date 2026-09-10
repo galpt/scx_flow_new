@@ -18,6 +18,9 @@ pub const STEAL_BOUND: usize = 8;
 /* Least donor depth that allows a steal. */
 #[cfg(test)]
 pub const STEAL_MIN_DEPTH: u64 = 2;
+/* Coalesce window in nanos at 50us. */
+#[cfg(test)]
+pub const KICK_COALESCE_NS: u64 = 50_000;
 
 /*
  * Queue id of one CPU. Returns none for an out of
@@ -472,6 +475,50 @@ pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
         return false;
     }
     running_pid == 0
+}
+
+/*
+ * True when one idle kick is recent in 50us. Zero last
+ * never counts as recent with wrap. Diff wraps, so
+ * order holds across the wrap with no extra check.
+ */
+#[cfg(test)]
+pub fn kick_recent(now: u64, last: u64) -> bool {
+    if last == 0 {
+        return false;
+    }
+    now.wrapping_sub(last) < KICK_COALESCE_NS
+}
+
+/*
+ * True when one idle kick coalesces with no kick. Needs
+ * q2 plus idle plus recent plus not pinned, so q1 always
+ * kicks and deep stays quiet with no count. Pinned never
+ * skips. No slide on skip, the caller keeps the old last.
+ * Park plus exiting stay out with no kick use.
+ */
+#[cfg(test)]
+pub fn kick_coalesced(
+    queue_len: u64,
+    running_pid: u32,
+    has_state: bool,
+    pinned: bool,
+    now: u64,
+    last: u64,
+) -> bool {
+    if queue_len != STEAL_MIN_DEPTH {
+        return false;
+    }
+    if running_pid != 0 {
+        return false;
+    }
+    if !has_state {
+        return false;
+    }
+    if pinned {
+        return false;
+    }
+    kick_recent(now, last)
 }
 
 /*

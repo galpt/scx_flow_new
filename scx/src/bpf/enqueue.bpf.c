@@ -276,6 +276,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
 		/* Kick idle plus busy preempt with delay. */
 		/* Idle fast path first with one queued read. */
+		/* Q2 idle in 50us coalesces when not pinned. */
+		/* Q1 always kicks, deep stays quiet, no slide. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
 		/* Needs latched arm 16 stand 8 plus deserved */
@@ -289,6 +291,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* running decays, delay shows stale idle. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
+			u64 now;
+			u64 last;
 			u8 sample;
 			u8 win;
 			u8 cur;
@@ -307,10 +311,38 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				if (q >
 				    (u64)FLOW_STEAL_MIN_DEPTH)
 					return;
+				if (q ==
+				    (u64)FLOW_STEAL_MIN_DEPTH &&
+				    !pinned &&
+				    (u32)cpu < 1024) {
+					now = flow_now();
+					last =
+					    flow_kick_at[
+					    (u32)cpu];
+					if (flow_kick_recent(
+					    now, last)) {
+						__sync_fetch_and_add(
+						    &flow_stats.kick_coalesced,
+						    1);
+						return;
+					}
+					scx_bpf_kick_cpu(cpu,
+					    SCX_KICK_IDLE);
+					__sync_fetch_and_add(
+					    &flow_stats.kicks,
+					    1);
+					flow_kick_at[
+					    (u32)cpu] = now;
+					return;
+				}
 				scx_bpf_kick_cpu(cpu,
 				    SCX_KICK_IDLE);
 				__sync_fetch_and_add(
 				    &flow_stats.kicks, 1);
+				if ((u32)cpu < 1024)
+					flow_kick_at[
+					    (u32)cpu] =
+					    flow_now();
 				return;
 			}
 			sample = flow_delay_from_queued(q);

@@ -40,6 +40,7 @@ impl<'a> Scheduler<'a> {
             group_wake_promote: s.group_wake_promote,
             preempt_kicks: s.preempt_kicks,
             preempt_skipped: s.preempt_skipped,
+            kick_coalesced: s.kick_coalesced,
         }
     }
 

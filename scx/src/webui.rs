@@ -283,6 +283,7 @@ mod tests {
         assert_eq!(m.stats.group_steal_skipped, 0);
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
+        assert_eq!(m.stats.kick_coalesced, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -325,6 +326,7 @@ mod tests {
                 group_steal_skipped: 5,
                 preempt_kicks: 6,
                 preempt_skipped: 7,
+                kick_coalesced: 2,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -339,7 +341,7 @@ mod tests {
                 delay_armed: true,
                 ..Default::default()
             }],
-            version: "4.2.15".to_string(),
+            version: "4.2.16".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -357,6 +359,7 @@ mod tests {
         assert!(txt.contains("group_wake_promote"));
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
+        assert!(txt.contains("kick_coalesced"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
@@ -373,13 +376,14 @@ mod tests {
         assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.stats.preempt_kicks, 6);
         assert_eq!(back.stats.preempt_skipped, 7);
+        assert_eq!(back.stats.kick_coalesced, 2);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
         assert_eq!(back.per_cpu[0].running_weight, 1218);
         assert_eq!(back.per_cpu[0].delay_win, 16);
         assert!(back.per_cpu[0].delay_armed);
-        assert_eq!(back.version, "4.2.15");
+        assert_eq!(back.version, "4.2.16");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
@@ -391,5 +395,14 @@ mod tests {
     fn dashboard_shows_stale_when_idle() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("(idle ? ' stale' : '')"));
+    }
+
+    /* Dashboard shows the coalesced cells. */
+    #[test]
+    fn dashboard_shows_coalesced_cells() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"kcoal\""));
+        assert!(html.contains("id=\"coalesce-rate\""));
+        assert!(html.contains("kick_coalesced"));
     }
 }

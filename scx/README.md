@@ -80,12 +80,17 @@ the deadline lead, net easiness is deadline math.
 Quarter bounds theft near 25% of a slice, floor
 at 64us covers switch cost. Uses woken weight only.
 One skipped count covers all fail-closed busy
-no-kicks at 152B. Delay persists across idle, delay
-shows stale when idle. A missed wakeup is rescued
-on the next insert while deep queues stay quiet.
-Park sends no kick and the next dispatch pass
-collects it. Disarmed stays idle only. See
-`src/bpf/intf.h` plus `src/bpf/enqueue.bpf.c`.
+no-kicks. One coalesced count covers q2 idle skips
+in 50us at 160B. Second queued to idle in 50us
+skips when not pinned with no slide, single queued
+always kicks, deep stays quiet, pinned never skips.
+Delay persists across idle, delay shows stale
+when idle. A missed wakeup is rescued on the next
+insert while deep queues stay quiet. Park sends
+no kick and the next dispatch pass collects it.
+Disarmed stays idle only. See `src/bpf/intf.h`
+plus `src/bpf/main.bpf.c` plus
+`src/bpf/enqueue.bpf.c` plus `src/flow_select.rs`.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is

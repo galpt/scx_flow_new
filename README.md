@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.15`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.16`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -110,22 +110,28 @@ the deadline lead, net easiness is deadline math.
 Quarter bounds theft near 25% of a slice, floor
 at 64us covers switch cost. Uses woken weight only.
 One skipped count covers all fail-closed busy
-no-kicks at 152B. Delay persists across idle, delay
-shows stale when idle. A missed wakeup is rescued
-on the next insert while deep queues stay quiet.
-Park sends no kick and the next pass collects it.
-Disarmed stays idle only. See `scx/src/bpf/intf.h`
-plus `scx/src/bpf/enqueue.bpf.c`.
+no-kicks. One coalesced count covers q2 idle skips
+in 50us at 160B. Second queued to idle in 50us
+skips when not pinned with no slide, single queued
+always kicks, deep stays quiet, pinned never skips.
+Delay persists across idle, delay shows stale
+when idle. A missed wakeup is rescued on the next
+insert while deep queues stay quiet. Park sends
+no kick and the next pass collects it. Disarmed
+stays idle only. See `scx/src/bpf/intf.h` plus
+`scx/src/bpf/main.bpf.c` plus
+`scx/src/bpf/enqueue.bpf.c` plus
+`scx/src/flow_select.rs`.
 
 ### Counts and queues
 
 Counters cover inserts, completions, steals, kicks,
-preempt kicks plus skips, EDF order events, group moves,
-and skips. The dashboard shows them per group and per CPU
-with delay dots plus rates and a one-click JSON log
-download at `/api/snapshot`. The payload lives in
-`scx/src/stats.rs`, `scx/src/webui.rs` and
-`scx/ui/index.html`.
+preempt kicks plus skips plus coalesced, EDF order
+events, group moves, and skips. The dashboard shows
+them per group and per CPU with delay dots plus rates
+and a one-click JSON log download at `/api/snapshot`.
+The payload lives in `scx/src/stats.rs`,
+`scx/src/webui.rs` and `scx/ui/index.html`.
 
 ### Measurement
 
@@ -201,7 +207,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.15`, state `enabled` and ops
+Expect version `4.2.16`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

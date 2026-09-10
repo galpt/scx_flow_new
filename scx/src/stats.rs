@@ -9,7 +9,7 @@
  * moves count dispatch moves. Kicks count idle wakeups.
  * Preempt counts cover busy kicks plus lumped skips.
  * One skipped count covers all fail-closed no-kicks.
- * Split needs 168B, so lumped keeps 152B.
+ * Coalesced counts q2 idle skips in 50us at 160B.
  * EDF counts cover ordered inserts with clamp detail.
  * Group counts cover demote plus promote plus wake
  * promote plus pinned inflate plus steal skips. Wake
@@ -96,6 +96,9 @@ pub struct Metrics {
     #[stat(desc = "All fail-closed busy no-kicks")]
     #[serde(default)]
     pub preempt_skipped: u64,
+    #[stat(desc = "Q2 idle kicks skipped in 50us")]
+    #[serde(default)]
+    pub kick_coalesced: u64,
 }
 
 /*
@@ -192,7 +195,7 @@ impl Metrics {
             ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
             demote={} promote={} wpromote={} pinfl={} gskip={} \
-            pkick={} pskip={}",
+            pkick={} pskip={} kcoal={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -214,6 +217,7 @@ impl Metrics {
             self.group_steal_skipped,
             self.preempt_kicks,
             self.preempt_skipped,
+            self.kick_coalesced,
         )?;
         Ok(())
     }
@@ -248,6 +252,7 @@ impl Metrics {
             group_wake_promote: self.group_wake_promote.wrapping_sub(rhs.group_wake_promote),
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
+            kick_coalesced: self.kick_coalesced.wrapping_sub(rhs.kick_coalesced),
         }
     }
 }

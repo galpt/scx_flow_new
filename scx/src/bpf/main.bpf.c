@@ -39,6 +39,10 @@ volatile u8 flow_group_ready;
 /* 0xffff means singleton with no sibling. */
 /* Placement only with no dispatch use. */
 volatile u16 flow_sibling_by_cpu[1024];
+/* Last idle kick time per CPU in nanos at 50us. */
+/* Zero init, so first kick always runs with wrap. */
+/* Enqueue only with no slide on skip, see enqueue. */
+volatile u64 flow_kick_at[1024];
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();

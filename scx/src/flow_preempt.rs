@@ -273,7 +273,7 @@ pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
  * deserved plus rate clear plus same group plus mask
  * with fail closed on any clear. One skipped count
  * covers all fail-closed no-kicks. Disarmed plus
- * rate plus isolation share one count at 152B.
+ * rate plus isolation share one count at 160B.
  */
 #[cfg(test)]
 pub fn preempt_ok(

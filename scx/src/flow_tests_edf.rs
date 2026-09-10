@@ -286,6 +286,115 @@ fn kick_idle_rescues_stale_queue() {
     assert!(!park_kick_ok());
 }
 
+/*
+ * Coalesce const matches the header at 50us with no
+ * space. Zero init keeps the first kick with wrap.
+ */
+#[test]
+fn kick_coalesce_const_matches_header() {
+    assert_eq!(
+        KICK_COALESCE_NS,
+        crate::bpf_intf::flow_consts_FLOW_KICK_COALESCE_NS as u64
+    );
+    assert_eq!(KICK_COALESCE_NS, 50_000);
+}
+
+/*
+ * Recent needs 50us with zero open plus wrap. Zero
+ * last never counts, 49999 counts, 50000 plus stays
+ * open. Wrap diff holds across the wrap with no check.
+ */
+#[test]
+fn kick_recent_needs_50us_with_zero_open() {
+    assert!(!kick_recent(1_000_000, 0));
+    assert!(!kick_recent(0, 0));
+    assert!(kick_recent(1_000_000, 999_999));
+    assert!(kick_recent(1_000_000, 950_001));
+    assert!(!kick_recent(1_000_000, 950_000));
+    assert!(!kick_recent(1_000_000, 949_999));
+    assert!(!kick_recent(1_000_000, 900_000));
+    assert!(kick_recent(5, u64::MAX - 10));
+    assert!(!kick_recent(60_000, u64::MAX - 10));
+    assert!(!kick_recent(100, 200));
+    assert!(!kick_recent(0, 1));
+}
+
+/*
+ * Coalesce needs q2 plus idle plus recent plus not
+ * pinned. Q1 plus busy plus missing plus pinned stay
+ * open with a kick. Park plus exiting stay out with
+ * no kick use, see park plus exiting helpers.
+ */
+#[test]
+fn kick_coalesce_needs_q2_idle_recent_unpinned() {
+    let now = 1_000_000u64;
+    let recent = now - 10_000;
+    let stale = now - 60_000;
+    assert!(kick_coalesced(2, 0, true, false, now, recent));
+    assert!(!kick_coalesced(2, 0, true, false, now, stale));
+    assert!(!kick_coalesced(2, 0, true, false, now, 0));
+    assert!(!kick_coalesced(1, 0, true, false, now, recent));
+    assert!(!kick_coalesced(0, 0, true, false, now, recent));
+    assert!(!kick_coalesced(3, 0, true, false, now, recent));
+    assert!(!kick_coalesced(2, 7, true, false, now, recent));
+    assert!(!kick_coalesced(2, 0, false, false, now, recent));
+    assert!(!kick_coalesced(2, 0, true, true, now, recent));
+    assert!(!kick_coalesced(2, 0, true, true, now, stale));
+    assert!(!park_kick_ok());
+}
+
+/*
+ * Q1 always kicks with no coalesce even when recent.
+ * Deep stays quiet with no coalesce count. Q0 stays
+ * open with a kick. Busy stays quiet with no coalesce.
+ */
+#[test]
+fn kick_q1_always_kicks_deep_stays_quiet() {
+    let now = 5_000_000u64;
+    let recent = now - 1_000;
+    assert!(kick_idle_ok(1, 0, true));
+    assert!(!kick_coalesced(1, 0, true, false, now, recent));
+    assert!(!kick_coalesced(1, 0, true, true, now, recent));
+    assert!(!kick_idle_ok(3, 0, true));
+    assert!(!kick_coalesced(3, 0, true, false, now, recent));
+    assert!(!kick_coalesced(8, 0, true, false, now, recent));
+    assert!(!kick_coalesced(u64::MAX, 0, true, false, now, recent));
+    assert!(kick_idle_ok(0, 0, true));
+    assert!(!kick_coalesced(0, 0, true, false, now, recent));
+    assert!(!kick_idle_ok(2, 9, true));
+    assert!(!kick_coalesced(2, 9, true, false, now, recent));
+}
+
+/*
+ * Pinned never skips with no coalesce even when recent.
+ * Skip keeps the old last with no slide, kick slides
+ * to now. Models the BPF last update with plain values.
+ */
+#[test]
+fn kick_pinned_never_skips_no_slide() {
+    let mut last = 1_000_000u64;
+    let now = last + 10_000;
+    assert!(!kick_coalesced(2, 0, true, true, now, last));
+    let kept = last;
+    let skip = kick_coalesced(2, 0, true, false, now, last);
+    assert!(skip);
+    if skip {
+    } else {
+        last = now;
+    }
+    assert_eq!(last, kept);
+    let stale = last + 60_000;
+    let kick = !kick_coalesced(2, 0, true, false, stale, last);
+    assert!(kick);
+    if kick {
+        last = stale;
+    }
+    assert_eq!(last, stale);
+    assert!(!kick_recent(last, kept));
+    assert!(!kick_recent(last + 60_000, last));
+    assert!(kick_recent(kept + 10_000, kept));
+}
+
 #[test]
 fn exiting_runs_at_once_on_allowed_current() {
     assert!(exiting_local_ok(true, true));
@@ -969,6 +1078,10 @@ fn facade_matches_helpers() {
         crate::flow_select::STEAL_MIN_DEPTH
     );
     assert_eq!(crate::flow::STEAL_BOUND, crate::flow_select::STEAL_BOUND);
+    assert_eq!(
+        crate::flow::KICK_COALESCE_NS,
+        crate::flow_select::KICK_COALESCE_NS
+    );
 }
 
 /*
