@@ -188,6 +188,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		park = flow_park_for_group(group);
 		scx_bpf_dsq_insert_vtime(p, park, slice,
 		    dl, 0);
+		/* Park sends no kick. Park holds tasks with */
+		/* no live allowed CPU after fallback, so no */
+		/* single idle target can run them. The next */
+		/* dispatch pass on any thief in the park */
+		/* group collects them when the mask allows. */
+		/* A target scan would need a loop with storm */
+		/* risk, so no kick is sent. */
 		return;
 	}
 	if (is_fresh)
@@ -234,8 +241,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
-		if (scx_bpf_dsq_nr_queued(dsq) > 1)
-			return;
+		/* Kick when the target is idle even with */
+		/* queued work, so a missed empty to 1 kick */
+		/* is rescued on later inserts. Gated on no */
+		/* running task with no storm. */
 		if (flow_cpu_ok(p, cpu)) {
 			if (!st)
 				return;

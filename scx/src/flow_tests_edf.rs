@@ -271,18 +271,18 @@ fn ordered_insert_keeps_arrival_order_on_ties() {
 }
 
 #[test]
-fn kick_bounds_match_empty_only() {
-    assert!(may_kick(0));
-    assert!(may_kick(1));
-    assert!(!may_kick(2));
-    assert!(!may_kick(8));
-    assert!(!may_kick(u64::MAX));
+fn kick_idle_rescues_stale_queue() {
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
+    assert!(kick_idle_ok(2, 0, true));
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(u64::MAX, 0, true));
     assert!(!kick_idle_ok(0, 7, true));
     assert!(!kick_idle_ok(1, 1, true));
+    assert!(!kick_idle_ok(2, 7, true));
     assert!(!kick_idle_ok(0, 0, false));
-    assert!(!kick_idle_ok(2, 0, true));
+    assert!(!kick_idle_ok(2, 0, false));
+    assert!(!park_kick_ok());
 }
 
 #[test]

@@ -197,32 +197,33 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 }
 
 /*
- * True when a kick may run on queue length alone.
- * Needs a queue that held at most one task after
- * insert, so first arrivals wake idle targets while
- * queued work stays quiet. The full gate also needs
- * an idle target with no running task.
- */
-#[cfg(test)]
-pub fn may_kick(queue_len: u64) -> bool {
-    queue_len <= 1
-}
-
-/*
- * True when an idle kick may run. Needs an empty
- * queue plus an idle target with no running task, so
- * busy targets stay quiet with no storm. A missing
- * state fails closed with no kick.
+ * True when an idle kick may run. Needs an idle target
+ * with no running task, even with queued work, so a
+ * missed empty to 1 kick is rescued on later inserts
+ * while busy targets stay quiet with no storm. Queue
+ * length no longer gates. A missing state fails closed
+ * with no kick.
  */
 #[cfg(test)]
 pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
-    if !may_kick(queue_len) {
-        return false;
-    }
+    let _ = queue_len;
     if !has_state {
         return false;
     }
     running_pid == 0
+}
+
+/*
+ * False for park inserts with no kick. Park holds tasks
+ * with no live allowed CPU after fallback, so no single
+ * idle target can run them. The next dispatch pass on
+ * any thief in the park group collects them when the
+ * mask allows. A target scan would need a loop with
+ * storm risk, so no kick is sent.
+ */
+#[cfg(test)]
+pub fn park_kick_ok() -> bool {
+    false
 }
 
 /*
