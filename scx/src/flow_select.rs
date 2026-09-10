@@ -290,10 +290,12 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
  * Steal up to budget tasks from peers for an idle CPU.
  * The scan visits at most bound peers starting after
  * the cursor with wrap. Only idle callers steal. Each
- * peer is scanned in order past dead, foreign, and
- * failed heads, so movable work behind a bad head is
- * rescued. The cursor advances by the peers visited.
- * Returns the count moved and the new cursor.
+ * peer needs at least two queued tasks, so thin donors
+ * keep their last task. Each peer is scanned in order
+ * past dead, foreign, and failed heads, so movable work
+ * behind a bad head is rescued. The cursor advances by
+ * the peers visited. Returns the count moved and the
+ * new cursor.
  */
 #[cfg(test)]
 pub fn steal_model(
@@ -327,6 +329,9 @@ pub fn steal_model(
             continue;
         }
         if let Some(q) = peers.get_mut(next as usize) {
+            if !donor_ok(q.len() as u64) {
+                continue;
+            }
             let mut pos = None;
             for (idx, task) in q.iter().enumerate() {
                 if peer_head_ok(thief as i32, Some(task)) {

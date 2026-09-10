@@ -636,6 +636,7 @@ fn steal_only_when_idle_and_bounded() {
     let mut wide: Vec<VecDeque<PendingTask>> = vec![VecDeque::new(); 16];
     for q in wide.iter_mut().skip(1) {
         q.push_back(good.clone());
+        q.push_back(good.clone());
     }
     let (capped, _) = steal_model(&mut wide, 0, 0, 32, true);
     assert!(capped > 0);
@@ -668,9 +669,9 @@ fn steal_checks_mask_and_skips_bad_heads() {
         VecDeque::from([good.clone()]),
     ];
     let (moved, _) = steal_model(&mut peers, 0, 0, 8, true);
-    assert_eq!(moved, 2);
+    assert_eq!(moved, 1);
     assert_eq!(peers[1].len(), 2);
-    assert_eq!(peers[2].len(), 0);
+    assert_eq!(peers[2].len(), 1);
 }
 
 #[test]
@@ -694,7 +695,7 @@ fn exiting_task_eventually_runs() {
     assert!(peer_head_ok(0, Some(&exiting)));
     let mut peers: Vec<VecDeque<PendingTask>> = vec![
         VecDeque::new(),
-        VecDeque::from([exiting.clone()]),
+        VecDeque::from([exiting.clone(), good.clone()]),
         VecDeque::new(),
     ];
     let (stolen, _) = steal_model(&mut peers, 0, 0, 8, true);
