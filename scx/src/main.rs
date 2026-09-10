@@ -13,10 +13,13 @@ pub use bpf_intf::*;
 mod config;
 mod flow;
 mod flow_edf;
+mod flow_group;
 mod flow_select;
 mod flow_slice;
 #[cfg(test)]
 mod flow_tests_edf;
+#[cfg(test)]
+mod flow_tests_group;
 mod snapshot;
 mod stats;
 mod topology;
@@ -347,9 +350,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_within_40() {
-        assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() <= 40);
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 32);
+    fn task_size_is_48() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     }
 
     #[test]
@@ -359,7 +361,34 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_96() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(), 96);
+    fn sched_stats_size_is_128() {
+        assert_eq!(
+            std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
+            128
+        );
+    }
+
+    #[test]
+    fn groups_match_header() {
+        assert_eq!(
+            crate::flow_group::NGROUPS,
+            crate::bpf_intf::flow_consts_FLOW_NGROUPS as u64
+        );
+        assert_eq!(
+            crate::flow_group::GROUP_LIGHT as u64,
+            crate::bpf_intf::flow_consts_FLOW_GROUP_LIGHT as u64
+        );
+        assert_eq!(
+            crate::flow_group::GROUP_HOG as u64,
+            crate::bpf_intf::flow_consts_FLOW_GROUP_HOG as u64
+        );
+        assert_eq!(
+            crate::flow_group::PARK_LIGHT,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+        );
+        assert_eq!(
+            crate::flow_group::PARK_HOG,
+            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK_HOG as u64
+        );
     }
 }

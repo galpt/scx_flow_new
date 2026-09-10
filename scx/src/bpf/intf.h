@@ -17,7 +17,7 @@ typedef int pid_t;
 #ifndef __always_inline
 #define __always_inline inline __attribute__((__always_inline__))
 #endif
-/* Fixed slice at 1ms, ordered queues, display only cards. */
+/* Fixed slice at 1ms, two groups, ordered queues. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
@@ -25,18 +25,34 @@ enum flow_consts {
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_DSQ_BASE = 0x4000ULL,
 	FLOW_DSQ_PARK = 0x5000ULL,
+	FLOW_DSQ_PARK_HOG = 0x5001ULL,
+	FLOW_NGROUPS = 2ULL,
+	FLOW_GROUP_LIGHT = 0ULL,
+	FLOW_GROUP_HOG = 1ULL,
+	FLOW_WIN_NS = (32ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURN_NS = (16ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_NS = (4ULL * 1000ULL * 1000ULL),
+	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
+	FLOW_PROMOTE_WINS = 64ULL,
+	FLOW_PINNED_INFLATE_NS = (8ULL * 1000ULL * 1000ULL),
+	FLOW_PERF_LIGHT = 1024ULL,
+	FLOW_PERF_HOG = 512ULL,
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	FLOW_STEAL_BOUND = 8ULL,
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 	FLOW_WEIGHT = 1024ULL,
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 };
-/* Per task state at 32B. */
+/* Per task state at 48B with group plus window. */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
 	u64 vruntime;
 	u64 deadline;
+	u64 win_start;
+	u32 burn;
+	u8 group;
+	u8 low_runs;
 };
 /* Per CPU state at 24B. */
 struct flow_cpu_state {
@@ -45,7 +61,7 @@ struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
 };
-/* Scheduler counters at 96B with EDF detail. */
+/* Scheduler counters at 128B with group detail. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -59,6 +75,10 @@ struct flow_sched_stats {
 	u64 edf_enqueued;
 	u64 edf_clamped;
 	u64 edf_ordered;
+	u64 group_demote;
+	u64 group_promote;
+	u64 pinned_hog_inflated;
+	u64 group_steal_skipped;
 };
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -73,6 +93,58 @@ static __always_inline u64 flow_clamp_est(u64 v)
 static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
 {
 	return (u64)FLOW_DSQ_BASE + (u64)cpu;
+}
+/* Group of one CPU by id halves with extra to hog. */
+static __always_inline u8 flow_group_of_cpu(u32 cpu,
+	u64 nr)
+{
+	if (nr <= 1)
+		return (u8)FLOW_GROUP_LIGHT;
+	if ((u64)cpu < nr / 2)
+		return (u8)FLOW_GROUP_LIGHT;
+	return (u8)FLOW_GROUP_HOG;
+}
+/* Park id of one group with light as default. */
+static __always_inline u64 flow_park_for_group(u8 group)
+{
+	if (group == (u8)FLOW_GROUP_HOG)
+		return (u64)FLOW_DSQ_PARK_HOG;
+	return (u64)FLOW_DSQ_PARK;
+}
+/* Perf hint of one group with light at max. */
+static __always_inline u32 flow_perf_for_group(u8 group)
+{
+	if (group == (u8)FLOW_GROUP_HOG)
+		return (u32)FLOW_PERF_HOG;
+	return (u32)FLOW_PERF_LIGHT;
+}
+/* True when one window of 32ms has passed. */
+static __always_inline bool flow_win_ready(u64 now,
+	u64 win_start)
+{
+	if (win_start == 0)
+		return false;
+	return now - win_start >= (u64)FLOW_WIN_NS;
+}
+/* True when window burn reaches 16ms for demote. */
+static __always_inline bool flow_burn_hot(u32 burn)
+{
+	return (u64)burn >= (u64)FLOW_DEMOTE_BURN_NS;
+}
+/* True when one burst reaches 4ms for demote. */
+static __always_inline bool flow_burst_hot(u64 delta)
+{
+	return delta >= (u64)FLOW_DEMOTE_BURST_NS;
+}
+/* True when window burn stays below 4ms for promote. */
+static __always_inline bool flow_burn_low(u32 burn)
+{
+	return (u64)burn < (u64)FLOW_PROMOTE_BURN_NS;
+}
+/* Deadline with pinned hog extra of 8ms. */
+static __always_inline u64 flow_inflate_deadline(u64 dl)
+{
+	return dl + (u64)FLOW_PINNED_INFLATE_NS;
 }
 /* Scale estimate by weight with fixed identity. */
 static __always_inline u64 flow_scale_by_weight(u64 est,
