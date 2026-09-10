@@ -31,18 +31,15 @@ static __always_inline u32 flow_drain_own(s32 cpu,
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		if (bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr) &&
+		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 			bpf_task_release(p);
-			continue;
+			moved++;
+		} else {
+			bpf_task_release(p);
 		}
-		bpf_task_release(p);
-		moved++;
 	}
 	bpf_rcu_read_unlock();
 	return moved;
@@ -70,19 +67,16 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		if (bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr) &&
+		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 			bpf_task_release(p);
-			continue;
+			__sync_fetch_and_add(&flow_stats.park_moves, 1);
+			moved++;
+		} else {
+			bpf_task_release(p);
 		}
-		bpf_task_release(p);
-		__sync_fetch_and_add(&flow_stats.park_moves, 1);
-		moved++;
 	}
 	bpf_rcu_read_unlock();
 	return moved;
@@ -110,8 +104,6 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	if (peer_group != thief_group)
 		return 0;
 	dsq = flow_dsq_for_cpu(peer);
-	if (scx_bpf_dsq_nr_queued(dsq) == 0)
-		return 0;
 	if (scx_bpf_dsq_nr_queued(dsq) <
 	    (u64)FLOW_STEAL_MIN_DEPTH)
 		return 0;
@@ -120,19 +112,15 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
-		if (!bpf_cpumask_test_cpu((u32)thief,
-		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		if (!scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		if (bpf_cpumask_test_cpu((u32)thief,
+		    p->cpus_ptr) &&
+		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)thief, 0)) {
 			bpf_task_release(p);
-			continue;
+			stole = true;
+			break;
 		}
 		bpf_task_release(p);
-		stole = true;
-		break;
 	}
 	bpf_rcu_read_unlock();
 	if (stole) {
