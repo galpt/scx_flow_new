@@ -328,7 +328,7 @@ mod tests {
                 running_est_ns: 1_000_000,
                 running_pid: 7,
                 running_nice: -5,
-                running_weight: 1579,
+                running_weight: 1218,
                 ..Default::default()
             }],
             version: "4.2.12".to_string(),
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
-        assert_eq!(back.per_cpu[0].running_weight, 1579);
+        assert_eq!(back.per_cpu[0].running_weight, 1218);
         assert_eq!(back.version, "4.2.12");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);

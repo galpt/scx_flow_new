@@ -218,15 +218,17 @@ static __always_inline u64 flow_clamp_vruntime(u64 v,
 }
 /* Weight table for 40 nice levels from minus 20 to 19. */
 /* Index is nice plus 20 with center 1024 at nice 0. */
-/* Values fall as nice rises with 8 steps per doubling, */
-/* so K is 8. Made as 1024 times 2 to minus nice over 8, */
-/* rounded. The maker is docs only, the table is rodata. */
+/* Ends are 2048 at minus 20 and 256 at 19, */
+/* so total spread K is 8 with boost 2x and penalty 4x. */
+/* Made as 1024 times 2 to minus nice over 20 below 1, */
+/* else 1024 times 4 to minus nice over 19, rounded. */
+/* The maker is docs only, the table is rodata. */
 static const u16 flow_weight_table[40] = {
-	5793, 5312, 4871, 4467, 4096, 3756, 3444, 3158,
-	2896, 2656, 2435, 2233, 2048, 1878, 1722, 1579,
-	1448, 1328, 1218, 1117, 1024, 939, 861, 790,
-	724, 664, 609, 558, 512, 470, 431, 395,
-	362, 332, 304, 279, 256, 235, 215, 197,
+	2048, 1978, 1911, 1846, 1783, 1722, 1663, 1607,
+	1552, 1499, 1448, 1399, 1351, 1305, 1261, 1218,
+	1176, 1136, 1097, 1060, 1024, 952, 885, 823,
+	765, 711, 661, 614, 571, 531, 494, 459,
+	427, 397, 369, 343, 319, 296, 275, 256,
 };
 /* Weight of one nice level from the table. */
 /* Out of range maps to 1024 with no trap. */

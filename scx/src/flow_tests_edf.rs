@@ -828,7 +828,7 @@ fn cleared_running_view_reads_idle() {
         est: 100,
         pid: 7,
         nice: -5,
-        weight: 1579,
+        weight: 1218,
     };
     assert!(!view.is_idle());
     view.clear();
@@ -842,7 +842,7 @@ fn disable_exit_clears_only_owner() {
         est: 100,
         pid: 7,
         nice: -5,
-        weight: 1579,
+        weight: 1218,
     };
     view.clear_if_owner(7);
     assert_eq!(view, RunningView::idle());
@@ -851,13 +851,13 @@ fn disable_exit_clears_only_owner() {
         est: 100,
         pid: 9,
         nice: 10,
-        weight: 431,
+        weight: 494,
     };
     busy.clear_if_owner(7);
     assert_eq!(busy.pid, 9);
     assert_eq!(busy.est, 100);
     assert_eq!(busy.nice, 10);
-    assert_eq!(busy.weight, 431);
+    assert_eq!(busy.weight, 494);
     assert!(!busy.is_idle());
     let mut idle = RunningView::idle();
     idle.clear_if_owner(7);
@@ -1308,19 +1308,18 @@ fn empty_plus_zero_stay_safe_with_no_trap() {
 
 /*
  * Weight table holds 40 levels with strict fall plus
- * center 1024 at nice 0. Powers of two land at minus
- * 16 plus minus 8 plus 0 plus 8 plus 16 with K at 8.
- * All values fit in u16 with no zero.
+ * center 1024 at nice 0. Ends are 2048 at minus 20
+ * and 256 at 19, so total spread K is 8 with boost
+ * 2x and penalty 4x. All values fit in u16 with no zero.
  */
 #[test]
 fn weight_table_is_monotonic_with_center_1024() {
     assert_eq!(WEIGHT_TABLE.len(), 40);
     assert_eq!(WEIGHT_TABLE[20], 1024);
     assert_eq!(WEIGHT, 1024);
-    assert_eq!(WEIGHT_TABLE[4], 4096);
-    assert_eq!(WEIGHT_TABLE[12], 2048);
-    assert_eq!(WEIGHT_TABLE[28], 512);
-    assert_eq!(WEIGHT_TABLE[36], 256);
+    assert_eq!(WEIGHT_TABLE[0], 2048);
+    assert_eq!(WEIGHT_TABLE[9], 1499);
+    assert_eq!(WEIGHT_TABLE[39], 256);
     for w in WEIGHT_TABLE {
         assert!(w > 0);
     }
@@ -1328,8 +1327,8 @@ fn weight_table_is_monotonic_with_center_1024() {
         assert!(WEIGHT_TABLE[i] > WEIGHT_TABLE[i + 1]);
     }
     assert_eq!(weight_of(0), 1024);
-    assert_eq!(weight_of(-20), 5793);
-    assert_eq!(weight_of(19), 197);
+    assert_eq!(weight_of(-20), 2048);
+    assert_eq!(weight_of(19), 256);
     assert_eq!(NICE_MIN, -20);
     assert_eq!(NICE_MAX, 19);
     assert_eq!(WEIGHT_K, 8);
@@ -1347,8 +1346,8 @@ fn nice_maps_prio_minus_120_with_fallback() {
     assert_eq!(nice_of(139), 19);
     assert_eq!(nice_of(0), -120);
     assert_eq!(weight_of(nice_of(120)), 1024);
-    assert_eq!(weight_of(nice_of(100)), 5793);
-    assert_eq!(weight_of(nice_of(139)), 197);
+    assert_eq!(weight_of(nice_of(100)), 2048);
+    assert_eq!(weight_of(nice_of(139)), 256);
     assert_eq!(weight_of(nice_of(0)), 1024);
     assert_eq!(weight_of(-21), 1024);
     assert_eq!(weight_of(20), 1024);
@@ -1369,16 +1368,16 @@ fn cap_holds_in_k_bounds() {
     assert_eq!(cap_for_weight(0, slice), slice);
     assert_eq!(cap_for_weight(1024, 0), 0);
     assert_eq!(cap_for_weight(0, 0), 0);
-    let heavy = cap_for_weight(5793, slice);
-    let light = cap_for_weight(197, slice);
+    let heavy = cap_for_weight(2048, slice);
+    let light = cap_for_weight(256, slice);
     assert!(heavy < slice);
     assert!(light > slice);
     assert!(heavy >= slice / 8);
     assert!(light <= slice * 8);
     assert_eq!(cap_for_weight(1, slice), slice * 8);
     assert_eq!(cap_for_weight(u32::MAX, slice), slice / 8);
-    assert_eq!(heavy, (slice * 1024) / 5793);
-    assert_eq!(light, (slice * 1024) / 197);
+    assert_eq!(heavy, (slice * 1024) / 2048);
+    assert_eq!(light, (slice * 1024) / 256);
 }
 
 /*
@@ -1396,11 +1395,11 @@ fn clamp_w_matches_fixed_at_center() {
     );
     assert!(!was_clamped_w(frontier, frontier, slice, 1024));
     assert!(was_clamped_w(0, frontier, slice, 1024));
-    let heavy = clamp_vruntime_w(0, frontier, slice, 5793);
-    let light = clamp_vruntime_w(0, frontier, slice, 197);
+    let heavy = clamp_vruntime_w(0, frontier, slice, 2048);
+    let light = clamp_vruntime_w(0, frontier, slice, 256);
     assert!(time_before(light, heavy));
-    assert_eq!(heavy, frontier - cap_for_weight(5793, slice));
-    assert_eq!(light, frontier - cap_for_weight(197, slice));
+    assert_eq!(heavy, frontier - cap_for_weight(2048, slice));
+    assert_eq!(light, frontier - cap_for_weight(256, slice));
 }
 
 /*
@@ -1415,13 +1414,13 @@ fn heavy_keeps_earlier_deadline() {
     let frontier = 100_000_000;
     let v = frontier;
     let est = 1_000_000;
-    let (_, dl_heavy, _) = edf_insert(v, frontier, slice, est, 5793);
+    let (_, dl_heavy, _) = edf_insert(v, frontier, slice, est, 2048);
     let (_, dl_base, _) = edf_insert(v, frontier, slice, est, 1024);
-    let (_, dl_light, _) = edf_insert(v, frontier, slice, est, 197);
+    let (_, dl_light, _) = edf_insert(v, frontier, slice, est, 256);
     assert!(time_before(dl_heavy, dl_base));
     assert!(time_before(dl_base, dl_light));
-    assert!(scale_by_weight(est, 5793) < est);
-    assert!(scale_by_weight(est, 197) > est);
+    assert!(scale_by_weight(est, 2048) < est);
+    assert!(scale_by_weight(est, 256) > est);
 }
 
 /*
@@ -1447,7 +1446,7 @@ fn weight_keeps_routing_unchanged() {
         est: 100,
         pid: 7,
         nice: -20,
-        weight: 5793,
+        weight: 2048,
     };
     assert!(!view.is_idle());
     view.clear();
@@ -1467,16 +1466,16 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert_eq!(m.running_nice, 0);
     assert_eq!(m.running_weight, 0);
     assert_eq!(m.slice_ns, 0);
-    let txt2 = "{\"id\":1,\"running_nice\":-5,\"running_weight\":1579,\"tq_ns\":1000000}";
+    let txt2 = "{\"id\":1,\"running_nice\":-5,\"running_weight\":1218,\"tq_ns\":1000000}";
     let m2: crate::stats::PerCpuMetrics = serde_json::from_str(txt2).unwrap();
     assert_eq!(m2.running_nice, -5);
-    assert_eq!(m2.running_weight, 1579);
+    assert_eq!(m2.running_weight, 1218);
     assert_eq!(m2.slice_ns, 1_000_000);
-    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":431,\"slice_ns\":1000000}";
+    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":494,\"slice_ns\":1000000}";
     let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
     assert_eq!(m3.slice_ns, 1_000_000);
     assert_eq!(m3.running_nice, 10);
-    assert_eq!(m3.running_weight, 431);
+    assert_eq!(m3.running_weight, 494);
 }
 
 /*
@@ -1492,8 +1491,8 @@ fn facade_matches_weight_helpers() {
     assert_eq!(crate::flow::WEIGHT_K, crate::flow_slice::WEIGHT_K);
     assert_eq!(crate::flow::weight_of(0), crate::flow_slice::weight_of(0));
     assert_eq!(
-        crate::flow::cap_for_weight(197, crate::flow::SLICE_NS),
-        crate::flow_slice::cap_for_weight(197, crate::flow_slice::SLICE_NS)
+        crate::flow::cap_for_weight(256, crate::flow::SLICE_NS),
+        crate::flow_slice::cap_for_weight(256, crate::flow_slice::SLICE_NS)
     );
     assert_eq!(
         crate::flow::clamp_vruntime_w(0, 100, crate::flow::SLICE_NS, 1024),
