@@ -7,15 +7,15 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.7`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.8`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
-- `scx/src/bpf/select_cpu.bpf.c` placement with mask respect
-- `scx/src/bpf/enqueue.bpf.c` routing, insert, and kick
-- `scx/src/bpf/dispatch.bpf.c` own, park, and peer drains
-- `scx/src/bpf/lifecycle.bpf.c` running, stopping, enable,
-  disable, exit, dequeue
+- `scx/src/bpf/select_cpu.bpf.c` placement with group plus mask
+- `scx/src/bpf/enqueue.bpf.c` routing, insert, group, and kick
+- `scx/src/bpf/dispatch.bpf.c` own, group park, and peer drains
+- `scx/src/bpf/lifecycle.bpf.c` running, stopping, classifier,
+  enable, disable, exit, dequeue
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/bpf_intf.rs` generated bindings for the shared header
 - `scx/src/bpf_skel.rs` generated skeleton for the BPF object
@@ -24,18 +24,21 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow_slice.rs` slice plus estimate helpers
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
+- `scx/src/flow_group.rs` groups plus classifier plus parks
 - `scx/src/flow_tests_edf.rs` tests for S1 to S3 plus slice,
   estimate, EDF order, frontier, dispatch, steal, mask, and
   config
+- `scx/src/flow_tests_group.rs` tests for split plus parks plus
+  classifier plus isolation plus inflate
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
 - `scx/src/topology.rs` display only per-CPU cards
 - `scx/src/webui.rs` loopback dashboard server
-- `scx/ui/index.html` dashboard page
+- `scx/ui/index.html` dashboard page with group
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/edf_harness/harness.c` periodic load plus probe worker
 - `tools/edf_harness/run.sh` calibration plus sweep plus control
-- `tools/edf_harness/README.md` harness note
+- `tools/edf_harness/README.md` harness note with light p95
 - `LICENSE` full license text, a real file
 
 ## Design
@@ -71,30 +74,33 @@ no zero use, so new arrivals never inherit stale time.
 
 ### Placement
 
-Placement uses any idle CPU in the mask,
-then the prior CPU, the current CPU, and the first allowed
-CPU. Pinned tasks and tasks that cannot move stay local.
-Empty masks park in order. Frequency plus LLC plus CPU cards
-stay display only and never shape placement.
+Placement uses any idle CPU in the group and mask,
+then the prior CPU in the group, the current CPU in the
+group, and the first allowed CPU in the group. Pinned tasks
+and tasks that cannot move stay local with 8ms extra for
+pinned hog. Empty masks park in order in the task group.
+Frequency plus LLC plus CPU cards stay display only and never
+shape placement.
 Pinned subsets such as Lestat 16 plus 16 stay in mask.
-Single-CPU Konaka never leaves.
+Single-CPU Konaka never leaves. Two groups split by halves
+with extra to hog and a single CPU keeps all light.
 
 ### Dispatch
 
-Dispatch
-drains the local queue first, then the park queue, then
-idle steals from peers. Each pass visits every queued task
-in the local and park queues in order and moves live tasks
-when allowed, including exiting tasks
+Dispatch drains the local queue first, then the group park,
+then idle steals from same group peers only. Each pass visits
+every queued task in the local and park queues in order and
+moves live tasks when allowed, including exiting tasks
 so they run to exit, and skips past dead, foreign and failed
 heads, so every pass moves at least one task when movable
 work exists there. An idle CPU with no moved work steals past
 unmovable leftovers, while a busy CPU with moved work steals
 only when both queues are empty. Idle steals visit at most
-8 peers with a rotating cursor and take the first task in a
-peer queue that allows the thief when the donor holds at
-least two tasks, moving past dead, foreign and failed heads
-to rescue movable work behind a bad head.
+8 same group peers with a rotating cursor and take the first
+task in a peer queue that allows the thief when the donor
+holds at least two tasks. Cross group peers count as skipped
+with no cross move. Perf hints set 1024 for light and 512 for
+hog at init plus running with a weak guard as best effort.
 
 ### Kicks
 
@@ -107,12 +113,14 @@ queued task after insert.
 
 Counts cover inserts, requeues,
 completions, park moves, steal moves and kicks, plus EDF
-enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
-`0x4000` plus the CPU id with up to 1024 CPUs. The park queue
-uses id `0x5000` for tasks with no allowed CPU. The watchdog
-is 30 seconds. Ops name is `flow`. Task state stays at 32B.
+enqueued, EDF clamped, EDF ordered, group demote, group
+promote, pinned inflate, and group skip. Per-CPU queues use
+ids `0x4000` plus the CPU id with up to 1024 CPUs. Two park
+queues use ids `0x5000` for light and `0x5001` for hog for
+tasks with no allowed CPU in the group. The watchdog
+is 30 seconds. Ops name is `flow`. Task state stays at 48B.
 Per-CPU state stays at 24B.
-Counters stay at 96B.
+Counters stay at 128B.
 
 ### Measurement
 
@@ -120,13 +128,14 @@ For A/B comparison, install
 one build, measure the same workload, then install the other
 build and compare with no other change. The harness probe
 plus the control flag support baseline comparison with no
-scheduler change in the harness.
+scheduler change in the harness. For 4.2.8 compare light p95
+from the probe plus schbench with the same workload.
 
 ### Limits
 
 Version stays in
-4.2 line at `4.2.7`. Weight stays 1024 with no knob.
-The slice
+4.2 line at `4.2.8`. Weight stays 1024 with no knob.
+Groups stay fixed at two with no knob. The slice
 stays fixed at 1ms.
 
 ### History
@@ -136,7 +145,9 @@ cleanup removes frozen `fast_hits`, `linger_boosts` and
 `reuse_hits` with no behavior change, shrinking
 `flow_stats` from `120B` to `96B`. The `4.2.7` strip keeps
 a pure EDF core with a fixed slice at 1ms, task at 32B,
-per-CPU at 24B, and counters at 96B. The `4.2.6` base is
+per-CPU at 24B, and counters at 96B. The `4.2.8` step adds
+two strict groups with burn only moves, task at 48B, and
+counters at 128B. The `4.2.6` base is
 the last stable line. The `4.3.x` plus `4.4.0` lines were
 tried and failed with stalls and were abandoned.
 
@@ -198,7 +209,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.7`, state `enabled` and ops
+Expect version `4.2.8`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir
@@ -215,7 +226,8 @@ install.
 calibration plus sweep plus summary plus probe plus control.
 Each worker draws start jitter plus period plus execution
 with no scheduler use. One probe
-wakes each 10ms and records wake delay as a light baseline.
+wakes each 10ms and records wake delay as a light baseline
+for light p95 comparison with the same workload.
 All threads run with the default policy with no realtime use.
 The binary is built on each run with no checked in binary.
 See `tools/edf_harness/README.md` for levels plus metrics

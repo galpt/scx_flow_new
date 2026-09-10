@@ -4,15 +4,17 @@ scx_flow is our own EDF scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps one ordered queue per-CPU with a fixed slice at
-1ms. It is deliberately knob-free. It uses per-CPU ordered
+1ms plus two strict groups for light waits and hog burn.
+It is deliberately knob-free. It uses per-CPU ordered
 EDF plus vruntime fairness plus the fixed slice.
 
 ## Overview
 
-Tasks wait in per-CPU ordered queues, plus one park queue for
-tasks with no allowed CPU. Queues hold EDF order first with
-arrival order for ties. The deadline adds clamped virtual time
-and scaled estimate with a fixed weight of 1024. The kernel queue orders by deadline with the slice as the
+Tasks wait in per-CPU ordered queues, plus one park queue per
+group for tasks with no allowed CPU. Queues hold EDF order
+first with arrival order for ties. The deadline adds clamped
+virtual time and scaled estimate with a fixed weight of 1024.
+The kernel queue orders by deadline with the slice as the
 slice. The slice is fixed at 1ms with no knob.
 Fresh tasks join with the slice, so the start stays neutral.
 Estimates hold the last burst clamped at 1ns to 1 second.
@@ -22,38 +24,52 @@ with wrap safe order. Virtual time moves forward by scaled
 runtime and the frontier moves forward while work stays queued.
 An idle reset bounds to waking virtual time with no zero use.
 Blocked tasks complete at once. Runnable tasks requeue ordered
-with a refreshed estimate. Placement uses any idle CPU in the
-mask, then the prior CPU, the current CPU, and the first allowed
-CPU. Pinned tasks and tasks that cannot move stay local. Empty
-masks park in order. Frequency plus LLC plus CPU cards stay
-display only and never shape placement.
+with a refreshed estimate. Two groups split CPUs by id halves
+with extra to hog and a single CPU keeps all light. Burn only
+moves light to hog at 16ms in a 32ms window or one 4ms burst
+and returns hog to light after 4ms low for 64 wins near 2s.
+Cold tasks join light with a 4x gap against flaps. Placement
+uses any idle CPU in the group and mask, then the prior CPU,
+the current CPU, and the first allowed
+CPU in the group. Pinned tasks and tasks that cannot move stay
+local with 8ms extra for pinned hog. Empty
+masks park in order in the task group. Frequency plus LLC plus
+CPU cards stay display only and never shape placement.
 Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Mask respect keeps every
 choice inside the task mask.
-Dispatch drains the local queue first, then the park queue, then
-idle steals from peers. Each pass visits every queued task in the
+Dispatch drains the local queue first, then the group park,
+then idle steals from same group peers only. Each pass visits
+every queued task in the
 local and park queues in order and moves live tasks
 when allowed, including exiting tasks so they run to exit,
 and skips past dead, foreign and failed heads, so every pass moves
 at least one task when movable work exists there. An idle CPU with
 no moved work steals past unmovable leftovers, while a busy CPU
 with moved work steals only when both queues are empty. Idle steals
-scan past bad heads to rescue movable work when the donor holds at
-least two tasks. Idle targets are kicked only when the queue was
-empty with a mask check and no busy preemption.
+scan same group peers only with a rotating cursor and take the
+first task in a peer queue that allows the thief when the
+donor holds at least two tasks. Cross group picks count
+as skipped. Idle targets are kicked only when the queue was
+empty with a mask check and no busy preemption. Perf hints set
+1024 for light and 512 for hog at init plus running with a weak
+guard as best effort.
 
 The slice math and the queue rules live in
 `src/bpf/intf.h`, maps plus helpers plus the ops table in
 `src/bpf/main.bpf.c`, placement in
 `src/bpf/select_cpu.bpf.c`, inserts in
 `src/bpf/enqueue.bpf.c`, drains in
-`src/bpf/dispatch.bpf.c`, and lifecycle in
+`src/bpf/dispatch.bpf.c`, and lifecycle plus classifier in
 `src/bpf/lifecycle.bpf.c`, the Rust mirrors
 in `src/flow_slice.rs` plus `src/flow_edf.rs` plus
-`src/flow_select.rs` with a thin facade in `src/flow.rs`
+`src/flow_select.rs` plus `src/flow_group.rs` with a thin
+facade in `src/flow.rs`
 and tests for S1 to S3 plus slice, estimate, EDF order,
-frontier, dispatch, steal, mask, and config in
-`src/flow_tests_edf.rs`, constant validation in
+frontier, dispatch, steal, mask, groups, classifier,
+and config in
+`src/flow_tests_edf.rs` plus `src/flow_tests_group.rs`,
+constant validation in
 `src/config.rs`, generated bindings in `src/bpf_intf.rs`
 plus the generated skeleton in `src/bpf_skel.rs`, and
 snapshot plus topology in `src/snapshot.rs` plus
@@ -62,13 +78,14 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.7` in 4.2 line. Weight stays 1024 with no
+is `4.2.8` in 4.2 line. Weight stays 1024 with no
 knob. The slice stays fixed at 1ms.
-Task state stays at 32B. Per-CPU state stays at 24B.
-Counters stay at 96B. The `4.2.6` base is the last stable
+Task state stays at 48B. Per-CPU state stays at 24B.
+Counters stay at 128B. The `4.2.6` base is the last stable
 line. The `4.3.x` plus `4.4.0` lines were tried and failed
 with stalls and were abandoned. The `4.2.7` strip keeps a
-pure EDF core with the fixed slice.
+pure EDF core with the fixed slice. The `4.2.8` step adds
+two strict groups with burn only moves.
 
 ## Typical Use Cases
 
@@ -90,13 +107,15 @@ Yes.
 The scheduler is deliberately knob-free. The
 scheduling constants are compile-time values in
 `src/bpf/intf.h`, and no command-line option changes
-the scheduling behavior. The runtime footprint depends
+the scheduling behavior. Groups stay fixed at two with
+no knob. The runtime footprint depends
 only on the reporting options, which are `--stats`,
 `--monitor` and `--no-webui`. See `src/config.rs` and
 `src/flow.rs` for the checked values and the unit tests
 for slice fixed, estimate clamp, EDF order, sleeper cap,
 frontier order, ordered inserts, progress guarantee, steal
-bounds, donor depth, kick check, mask respect, display only
+bounds, donor depth, kick check, mask respect, groups,
+classifier, display only
 cards and config checks. For A/B comparison, install one build,
 measure the same workload, then install the other build and
 compare with no other change.
@@ -105,9 +124,10 @@ compare with no other change.
 
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
-summary line and a per-CPU grid with running estimates
-and fixed slices, plus system tiles for
-EDF enqueued, EDF clamped and EDF ordered, with no
+summary line and a per-CPU grid with group plus running
+estimates and fixed slices, plus system tiles for
+EDF enqueued, EDF clamped, EDF ordered, demote, promote,
+pinned inflate, and group skip, with no
 authentication, since the loopback address is the trust
 boundary.
 `--no-webui` disables it. Empty states show an empty CPU
@@ -116,8 +136,9 @@ data card when no data has arrived.
 ## Queues
 
 Each CPU keeps one ordered queue. Per-CPU queues use ids
-`0x4000` plus the CPU id with up to 1024 CPUs. One park queue
-uses id `0x5000` and holds tasks with no allowed CPU.
+`0x4000` plus the CPU id with up to 1024 CPUs. Two park queues
+use ids `0x5000` for light and `0x5001` for hog and hold tasks
+with no allowed CPU in the task group.
 
 ## Slices
 
@@ -129,42 +150,54 @@ at one slice behind the frontier with wrap safe order.
 
 ## Insert and dispatch
 
-Enqueue places each task on the selected CPU when allowed,
-then the first allowed CPU, then the park. Pinned
-tasks use their CPU or the park. Tasks that cannot
-move stay on the current CPU. Each insert computes the
+Enqueue places each task on the selected CPU in the group
+when allowed, then the first allowed CPU in the group,
+then the group park. Pinned
+tasks use their CPU or the group park with 8ms extra for
+pinned hog. Tasks that cannot
+move stay on the current CPU. Narrow opposite masks fall back
+to the first allowed CPU with the group moved to match. Each
+insert computes the
 frontier and the slice, clamps virtual time to at most
 one slice behind the frontier with wrap safety, scales
 the estimate with a fixed weight of 1024, and stores the
 deadline for the kernel queue with the slice as the slice.
 Running keeps the entry. Blocking completes it at once.
-Disable and exit count one completion. Dispatch drains the
-local queue first, then the park queue, then idle steals
-from peers. Each pass moves up to 32 tasks across local,
-park and steal. Each move in the local and park queues moves
+Disable and exit count one completion. Stopping adds burn to
+a 32ms window and moves light to hog at 16ms burn or one 4ms
+burst and hog to light after 4ms low for 64 wins near 2s.
+Dispatch drains the
+local queue first, then the group park, then idle steals
+from same group peers only. Each pass moves up to 32 tasks
+across local, park and steal. Each move in the local and park
+queues moves
 live tasks when allowed, including exiting
 tasks so they run to exit, and skips dead, foreign and failed
 tasks, so one head never blocks later work there. Steals take
-the first task in a peer queue that allows the thief when the
-donor holds at least two tasks and move past bad heads to rescue
-movable work behind them. An idle CPU with no moved work steals
-past unmovable leftovers, while a busy CPU with moved work
-steals only when both queues are empty. An idle kick is
-sent only when the queue was empty to a CPU in the task
+the first task in a same group peer queue that allows the thief
+when the donor holds at least two tasks. Cross group peers
+count as skipped with no cross move. An idle CPU with no moved
+work steals past unmovable leftovers, while a busy CPU with
+moved work steals only when both queues are empty. An idle kick
+is sent only when the queue was empty to a CPU in the task
 mask with no busy preemption.
 
 ## CPU choice
 
-CPU choice prefers an idle CPU in the task mask, then the
-prior CPU when allowed, then the current CPU when allowed,
-then the first allowed CPU. Pinned tasks stay in place. Tasks
-that cannot move stay on the current CPU. Frequency plus LLC
+CPU choice prefers an idle CPU in the group and mask, then
+the prior CPU in the group when allowed, then the current CPU
+in the group when allowed,
+then the first allowed CPU in the group. Pinned tasks stay in
+place. Tasks that cannot move stay on the current CPU.
+Frequency plus LLC
 plus CPU cards stay display only and never shape placement.
 Idle
-choice is rechecked in the mask. A final choice
-without an allowed CPU falls back to the park in
-enqueue. Enqueue reuses the selected CPU when
-allowed, then the first allowed CPU, then the park.
+choice is rechecked in the mask and group. A final choice
+without an allowed CPU in the group falls back to the group
+park in enqueue with narrow opposite moved to match. Enqueue
+reuses the selected CPU in the group when
+allowed, then the first allowed CPU in the group, then the
+group park.
 Tasks that cannot move use the per-CPU queue. The path
 uses only public helpers.
 
@@ -173,13 +206,17 @@ uses only public helpers.
 `--stats` prints deltas. `--monitor` runs the printer
 only. Counters cover inserts, requeues, completions,
 park moves, steal moves, idle kicks, inserts without
-state, EDF enqueued, EDF clamped and EDF ordered. Park moves
-count dispatch moves from the park queue. Steal moves count
-dispatch moves from peer queues. Kicks count idle wakeup
-kicks sent only when the queue was empty. EDF
+state, EDF enqueued, EDF clamped, EDF ordered, group demote,
+group promote, pinned inflate, and group skip. Park moves
+count dispatch moves from the group park. Steal moves count
+dispatch moves from same group peer queues. Kicks count idle
+wakeup kicks sent only when the queue was empty. EDF
 enqueued counts deadline inserts. EDF clamped counts sleeper
 caps to one slice. EDF ordered counts kernel queue inserts
-in order.
+in order. Demote counts light to hog moves by burn. Promote
+counts hog to light moves after low wins. Pinned inflate counts
+pinned hog deadlines with extra. Group skip counts cross group
+picks skipped for isolation.
 
 ## Measuring Wakeup Latency
 
@@ -190,18 +227,22 @@ dedicated CPUs with `-a`, use the monotonic clock
 device IRQs off the measured CPUs. For percentiles, run
 schbench with two message threads (`-m 2`) on an otherwise
 quiet machine. The harness probe wakes each 10ms and records
-wake delay as a light baseline with no realtime use.
+wake delay as a light baseline with no realtime use. For
+4.2.8 compare light p95 from the probe plus schbench with
+the same workload and no other change.
 
 ## Limitations
 
 - Idle wakeup kick. Wakeups join in EDF order and kick an
   idle target only when the queue was empty to collect
   at once.
-- Queues stay per-CPU. Idle CPUs collect park work and
-steal peer work with a scan past bad heads when the
-donor holds at least two tasks, so movable work behind
-a dead, foreign or failed head is rescued when the task
-allows the idle CPU.
+- Queues stay per-CPU with two groups. Idle CPUs collect group
+park work and steal same group peer work when the
+donor holds at least two tasks, so cross group work never
+moves by steal. Own plus park moves keep order with mask
+respect.
+- Groups split by halves with extra to hog. A single CPU keeps
+  all light with no peer scan through the same path.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report

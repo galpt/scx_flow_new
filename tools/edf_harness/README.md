@@ -128,7 +128,11 @@ across targets on 16 CPUs with governor
 plus reads neutral against build `4.2.4`. No `4.2.7`
 measurement exists yet. Build `4.2.7` keeps the same
 workload plus a 10ms probe plus control plus scheduler
-state ready for A and B comparison.
+state ready for A and B comparison. Build `4.2.8` keeps
+the same workload with no change to period plus execution
+plus probe timing and adds light p95 comparison from the
+10ms probe plus schbench with two message threads for
+percentiles with the same host plus governor plus seeds.
 
 A value of 100 percent is a measured rate at feasible
 use only with no guarantee. There is no threshold on 98.5.
