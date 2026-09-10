@@ -8,8 +8,8 @@
 /* task group and no task recheck. Peer keeps mask plus */
 /* depth with idle rescue and no task recheck, so a depth */
 /* 1 donor moves only when the thief is idle with no moved */
-/* plus no own left plus no park left. Busy thieves keep */
-/* depth 2. Tier 0 models also donor asleep rescue. BPF */
+/* plus no own left past unmovable park leftovers. Busy */
+/* thieves keep depth 2. Tier 0 models also donor asleep */
 /* ships thief idle only by construction due to verifier */
 /* jump at 1000001 on asleep check in the steal loop with */
 /* donor asleep handled by idle kick. Tier 3 holds park */
@@ -162,8 +162,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		park_left = scx_bpf_dsq_nr_queued(park);
 		if (park_left > 0 && moved > 0)
 			return;
-		if (moved == 0 && own_left == 0 &&
-		    park_left == 0)
+		if (moved == 0 && own_left == 0)
 			min_depth = 1;
 		else
 			min_depth = (u64)FLOW_STEAL_MIN_DEPTH;

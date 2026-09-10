@@ -133,12 +133,12 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
  * True when a donor queue may lose one task. Tier 0
  * model only. Needs at least two queued tasks, or one
  * queued task with a rescue when the thief is idle
- * with no moved plus no own left plus no park left or
- * when the donor is asleep with no running task. Busy
- * thieves with a running donor keep the last task. BPF
- * ships thief idle only by construction due to verifier
- * jump at 1000001 on asleep check, with donor asleep
- * handled by idle kick.
+ * with no moved plus no own left past unmovable park
+ * leftovers or when the donor is asleep with no running
+ * task. Busy thieves with a running donor keep the last
+ * task. BPF ships thief idle only by construction due
+ * to verifier jump at 1000001 on asleep check, with
+ * donor asleep handled by idle kick.
  */
 #[cfg(test)]
 pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
@@ -149,6 +149,18 @@ pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
         return true;
     }
     false
+}
+
+/*
+ * True when a thief may rescue a lone queued task.
+ * Needs no moved work plus no own left past unmovable
+ * park leftovers, so idle thieves rescue singletons
+ * even when the park holds only unmovable entries.
+ * Mirrors the BPF min depth gate with no park use.
+ */
+#[cfg(test)]
+pub fn rescue_single_ok(moved: u32, own_left: u64) -> bool {
+    moved == 0 && own_left == 0
 }
 
 /*
@@ -388,16 +400,29 @@ pub fn select_cpu_tiered(
 }
 
 /*
+ * True when an exiting task may run at once on this CPU.
+ * Needs an exiting task with this CPU allowed, so short
+ * exits skip order wait with no queue stall. Falls back
+ * when this CPU is not allowed.
+ */
+#[cfg(test)]
+pub fn exiting_local_ok(exiting: bool, current_allowed: bool) -> bool {
+    exiting && current_allowed
+}
+
+/*
  * True when an idle kick may run. Needs an idle target
- * with no running task, even with queued work, so a
- * missed empty to 1 kick is rescued on later inserts
- * while busy targets stay quiet with no storm. Queue
- * length no longer gates. A missing state fails closed
+ * with no running task and at most 2 queued, so a
+ * missed empty to 1 kick is rescued on the next insert
+ * while deep queues stay quiet with no storm. Busy
+ * targets stay quiet. A missing state fails closed
  * with no kick.
  */
 #[cfg(test)]
 pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
-    let _ = queue_len;
+    if queue_len > STEAL_MIN_DEPTH {
+        return false;
+    }
     if !has_state {
         return false;
     }
@@ -515,16 +540,16 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
  * peers starting after the cursor with wrap. Only idle
  * callers steal. Each peer needs at least two queued
  * tasks, or one with a rescue when the thief is idle
- * with no moved plus no own left plus no park left or
- * when the donor is asleep with no running task, so
- * thin running donors keep the last task while idle
- * thieves plus asleep donors rescue singletons. BPF
- * ships thief idle only by construction due to verifier
- * jump at 1000001 on asleep check, with donor asleep
- * handled by idle kick. Each peer is scanned in order
- * past dead, foreign, and failed heads, so movable work
- * behind a bad head is rescued. The cursor advances by
- * the peers visited. Returns the count moved and the
+ * with no moved plus no own left past unmovable park
+ * leftovers or when the donor is asleep with no running
+ * task, so thin running donors keep the last task while
+ * idle thieves plus asleep donors rescue singletons.
+ * BPF ships thief idle only by construction due to
+ * verifier jump at 1000001 on asleep check, with donor
+ * asleep handled by idle kick. Each peer is scanned in
+ * order past dead, foreign, and failed heads, so movable
+ * work behind a bad head is rescued. The cursor advances
+ * by the peers visited. Returns the count moved and the
  * new cursor.
  */
 #[cfg(test)]

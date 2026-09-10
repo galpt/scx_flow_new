@@ -71,6 +71,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u8 group;
 	u64 est = 0;
 	u64 slice = (u64)FLOW_SLICE_NS;
+	/* Exiting tasks run at once on this CPU with */
+	/* no order wait, so short exits never stall in */
+	/* a queue behind other work. Falls back when */
+	/* this CPU is not allowed. */
+	if (p->flags & PF_EXITING) {
+		s32 here =
+		    (s32)bpf_get_smp_processor_id();
+		if (flow_cpu_ok(p, here)) {
+			scx_bpf_dsq_insert(p,
+			    (u64)SCX_DSQ_LOCAL, slice,
+			    enq_flags);
+			return;
+		}
+	}
 	if (enq_flags & SCX_ENQ_REENQ)
 		is_requeue = true;
 	tctx = flow_get(p);
@@ -241,14 +255,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
-		/* Kick when the target is idle even with */
-		/* queued work, so a missed empty to 1 kick */
-		/* is rescued on later inserts. Gated on no */
-		/* running task with no storm. */
+		/* Kick when the target is idle with at most */
+		/* 2 queued, so a missed empty to 1 kick is */
+		/* rescued on the next insert while deep */
+		/* queues stay quiet with no storm. Gated */
+		/* on no running task. */
 		if (flow_cpu_ok(p, cpu)) {
 			if (!st)
 				return;
 			if (st->running_pid != 0)
+				return;
+			if (scx_bpf_dsq_nr_queued(dsq) >
+			    (u64)FLOW_STEAL_MIN_DEPTH)
 				return;
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);

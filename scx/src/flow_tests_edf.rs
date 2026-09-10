@@ -275,14 +275,23 @@ fn kick_idle_rescues_stale_queue() {
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
     assert!(kick_idle_ok(2, 0, true));
-    assert!(kick_idle_ok(8, 0, true));
-    assert!(kick_idle_ok(u64::MAX, 0, true));
+    assert!(!kick_idle_ok(3, 0, true));
+    assert!(!kick_idle_ok(8, 0, true));
+    assert!(!kick_idle_ok(u64::MAX, 0, true));
     assert!(!kick_idle_ok(0, 7, true));
     assert!(!kick_idle_ok(1, 1, true));
     assert!(!kick_idle_ok(2, 7, true));
     assert!(!kick_idle_ok(0, 0, false));
     assert!(!kick_idle_ok(2, 0, false));
     assert!(!park_kick_ok());
+}
+
+#[test]
+fn exiting_runs_at_once_on_allowed_current() {
+    assert!(exiting_local_ok(true, true));
+    assert!(!exiting_local_ok(true, false));
+    assert!(!exiting_local_ok(false, true));
+    assert!(!exiting_local_ok(false, false));
 }
 
 #[test]
@@ -725,6 +734,15 @@ fn busy_refuses_singleton() {
     assert_eq!(peers[1].len(), 1);
     let (busy, _) = steal_model(&mut peers.clone(), 0, 0, 8, false, false, &[false, false]);
     assert_eq!(busy, 0);
+}
+
+#[test]
+fn rescue_ignores_unmovable_park_leftovers() {
+    assert!(rescue_single_ok(0, 0));
+    assert!(!rescue_single_ok(1, 0));
+    assert!(!rescue_single_ok(0, 1));
+    assert!(!rescue_single_ok(1, 1));
+    assert!(!rescue_single_ok(0, 2));
 }
 
 /*
