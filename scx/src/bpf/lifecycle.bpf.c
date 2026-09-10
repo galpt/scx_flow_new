@@ -74,8 +74,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    scx_bpf_dsq_nr_queued(
 				    (u64)SCX_DSQ_LOCAL_ON |
 				    (u64)cpu) == 0) {
-					st->frontier =
-					    flow_frontier_idle(nv);
+					if (nv != 0)
+						st->frontier =
+						    flow_frontier_idle(nv);
 				} else {
 					st->frontier =
 					    flow_frontier_max(

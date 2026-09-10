@@ -90,11 +90,27 @@ pub fn frontier_max(old: u64, next: u64) -> u64 {
  * Frontier for an idle CPU from the waking virtual
  * time. The waking value bounds the reset with no
  * zero use, so a new arrival never inherits stale
- * time while queued work never moves backward.
+ * time while queued work never moves backward. The
+ * caller keeps the old frontier when the waking value
+ * is zero, so zero never disorders the frontier.
  */
 #[cfg(test)]
 pub fn frontier_idle(waking_v: u64) -> u64 {
     waking_v
+}
+
+/*
+ * Guarded idle frontier. Keeps the old frontier when
+ * the waking value is zero, so zero never disorders
+ * the frontier. Otherwise resets to the waking value.
+ */
+#[cfg(test)]
+pub fn frontier_idle_guarded(old: u64, waking_v: u64) -> u64 {
+    if waking_v == 0 {
+        old
+    } else {
+        frontier_idle(waking_v)
+    }
 }
 
 /*
@@ -117,12 +133,14 @@ pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (
  * Frontier step for a stop. A runnable stop or queued
  * work keeps the max, so time never moves backward
  * while work stays queued. An idle block resets to the
- * waking virtual time with no zero use.
+ * waking virtual time with no zero use. A zero waking
+ * value keeps the old frontier, so zero never
+ * disorders the frontier.
  */
 #[cfg(test)]
 pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
     if !runnable && queued == 0 {
-        frontier_idle(new_v)
+        frontier_idle_guarded(old, new_v)
     } else {
         frontier_max(old, new_v)
     }

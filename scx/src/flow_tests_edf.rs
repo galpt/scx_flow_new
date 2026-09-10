@@ -187,6 +187,9 @@ fn edf_frontier_step_idle_bounded() {
     assert_eq!(frontier_step(100_000_000, waking, true, 0), 100_000_000);
     assert_eq!(frontier_step(10, 20, true, 5), 20);
     assert_eq!(frontier_step(10, 20, false, 3), 20);
+    assert_eq!(frontier_step(100_000_000, 0, false, 0), 100_000_000);
+    assert_eq!(frontier_idle_guarded(100_000_000, 0), 100_000_000);
+    assert_eq!(frontier_idle_guarded(100_000_000, waking), waking);
 }
 
 #[test]
@@ -274,6 +277,12 @@ fn kick_bounds_match_empty_only() {
     assert!(!may_kick(2));
     assert!(!may_kick(8));
     assert!(!may_kick(u64::MAX));
+    assert!(kick_idle_ok(0, 0, true));
+    assert!(kick_idle_ok(1, 0, true));
+    assert!(!kick_idle_ok(0, 7, true));
+    assert!(!kick_idle_ok(1, 1, true));
+    assert!(!kick_idle_ok(0, 0, false));
+    assert!(!kick_idle_ok(2, 0, true));
 }
 
 #[test]

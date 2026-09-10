@@ -120,6 +120,8 @@ static __always_inline u64 flow_frontier_max(u64 old,
 	return old;
 }
 /* Frontier for idle CPU from waking time with no zero. */
+/* The caller keeps the old frontier when waking is zero, */
+/* so zero never disorders the frontier. */
 static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;

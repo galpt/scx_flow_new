@@ -185,13 +185,32 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 }
 
 /*
- * True when a kick may run. Needs a queue that held
- * at most one task after insert, so first arrivals
- * wake idle targets while queued work stays quiet.
+ * True when a kick may run on queue length alone.
+ * Needs a queue that held at most one task after
+ * insert, so first arrivals wake idle targets while
+ * queued work stays quiet. The full gate also needs
+ * an idle target with no running task.
  */
 #[cfg(test)]
 pub fn may_kick(queue_len: u64) -> bool {
     queue_len <= 1
+}
+
+/*
+ * True when an idle kick may run. Needs an empty
+ * queue plus an idle target with no running task, so
+ * busy targets stay quiet with no storm. A missing
+ * state fails closed with no kick.
+ */
+#[cfg(test)]
+pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
+    if !may_kick(queue_len) {
+        return false;
+    }
+    if !has_state {
+        return false;
+    }
+    running_pid == 0
 }
 
 /*

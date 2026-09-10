@@ -158,6 +158,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (scx_bpf_dsq_nr_queued(dsq) > 1)
 			return;
 		if (flow_cpu_ok(p, cpu)) {
+			if (!st)
+				return;
+			if (st->running_pid != 0)
+				return;
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
 		}
