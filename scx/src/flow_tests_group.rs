@@ -1471,3 +1471,28 @@ fn zero_plus_empty_plus_short_stay_safe() {
     let out2 = assign_by_llc(&[], &[], &[], &[], 0, false);
     assert!(out2.is_empty());
 }
+
+/*
+ * Weight leaves groups unchanged with no routing use.
+ * Split plus park plus steal plus classifier read the
+ * same with any nice, so only deadline plus vruntime
+ * move with weight.
+ */
+#[test]
+fn weight_leaves_groups_unchanged() {
+    assert_eq!(group_of_cpu(0, 4), GROUP_LIGHT);
+    assert_eq!(group_of_cpu(2, 4), GROUP_HOG);
+    assert_eq!(park_for_group(GROUP_LIGHT), PARK_LIGHT);
+    assert_eq!(park_for_group(GROUP_HOG), PARK_HOG);
+    assert_eq!(perf_for_group(GROUP_LIGHT), 1024);
+    assert_eq!(perf_for_group(GROUP_HOG), 1024);
+    let mut st = GroupState::cold();
+    st.win_start = 100_000_000;
+    let (d, p) = classify_step(&mut st, 101_000_000, 500_000);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(st.group, GROUP_LIGHT);
+    assert_eq!(burst_allowance(0), DEMOTE_BURST_NS);
+    assert_eq!(light_depth(&[1, 0, 0, 0], 4), 1);
+    assert_eq!(hog_depth(&[0, 0, 1, 0], 4), 1);
+}

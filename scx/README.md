@@ -17,9 +17,9 @@ EDF plus vruntime fairness plus the fixed slice.
 Tasks wait in per-CPU ordered queues, plus one park queue
 per group for tasks with no allowed CPU. Earliest deadline
 runs first with arrival order for ties. The deadline adds
-clamped virtual time and a scaled estimate at fixed weight.
-Exiting tasks run at once on this CPU via local with no
-order wait. Falls back when this CPU is not allowed.
+clamped virtual time and a scaled estimate at live weight
+from nice. Exiting tasks run at once on this CPU via local
+with no order wait. Falls back when this CPU is not allowed.
 
 ### Fixed slice
 
@@ -29,8 +29,8 @@ the last burst clamped at 1ns to 1 second.
 
 ### Fairness
 
-Sleeper lag is capped at one slice behind the frontier,
-so a waking task gains at most one slice of advantage.
+Sleeper lag is capped at a weight scaled cap in 125us to
+8ms, so a waking task gains at most the cap of advantage.
 Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
 tasks complete at once. Runnable tasks requeue ordered
@@ -68,8 +68,9 @@ check and no busy preemption. A missed wakeup is rescued
 on the next insert while deep queues stay quiet. Park
 sends no kick and the next dispatch pass collects it.
 
-Weight stays 1024 with no knob. The slice stays fixed
-at 1ms. The version is in `Cargo.toml`.
+Weight follows nice from minus 20 to 19 with center 1024
+and no knob. The slice stays fixed at 1ms. The version is
+in `Cargo.toml`.
 
 ## Typical Use Cases
 
@@ -97,8 +98,9 @@ scheduling behavior. Reporting only is `--stats`,
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock` and no
 authentication, since loopback is the trust boundary.
-It shows group depths, move rates, per-CPU state, and a
-button to download the full snapshot as JSON.
+It shows group depths, move rates, per-CPU nice plus
+weight, and a button to download the full snapshot as
+JSON.
 `--no-webui` disables it.
 
 ## Code map

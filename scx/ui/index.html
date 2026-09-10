@@ -422,10 +422,12 @@
     }
 
     /* Per-CPU cards with fixed slice plus group
-     * plus the running estimate and the pid. Freq
-     * unknown stays plain with no zero print. No
-     * sibling stays plain with no badge. Group shows
-     * live table when ready, else halves. */
+     * plus the running estimate plus the pid plus
+     * nice plus weight. Freq unknown stays plain
+     * with no zero print. No sibling stays plain
+     * with no badge. Group shows live table when
+     * ready, else halves. Nice plus weight stay
+     * display only with dash when idle. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -456,6 +458,8 @@
         var pid = cpu.running_pid || 0;
         var est = cpu.running_est_ns || 0;
         var slice = cpu.slice_ns || cpu.tq_ns || 0;
+        var nice = cpu.running_nice || 0;
+        var weight = cpu.running_weight || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'
@@ -467,6 +471,12 @@
           ? '<div class="core-est">est -</div>'
           : '<div class="core-est">est ' + fmtSlice(est) +
             '</div>';
+        var niceLabel = idle
+          ? '<div class="core-llc">nice -</div>'
+          : '<div class="core-llc">nice ' + nice + '</div>';
+        var weightLabel = idle
+          ? '<div class="core-llc">weight -</div>'
+          : '<div class="core-llc">weight ' + weight + '</div>';
         var sliceLabel = '<div class="core-slice">slice ' +
           fmtSlice(slice) + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
@@ -480,7 +490,8 @@
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel + groupLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + estLabel + sliceLabel +
+          pidLabel + estLabel + niceLabel +
+          weightLabel + sliceLabel +
           '</div>';
       }).join('');
     }

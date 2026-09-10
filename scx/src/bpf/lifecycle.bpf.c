@@ -28,8 +28,12 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	if (st) {
 		u64 est = tctx ?
 		    flow_clamp_est(tctx->est_ns) : 0;
+		s32 nice = flow_nice_of(p);
+		u32 w = flow_weight_of(nice);
 		st->running_est = est;
 		st->running_pid = (u32)p->pid;
+		st->running_nice = nice;
+		st->running_weight = w;
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
@@ -248,7 +252,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_on_cpu_dec();
 	tctx->run_at = 0;
 	scaled = flow_scale_by_weight(est,
-	    (u32)FLOW_WEIGHT);
+	    flow_weight_of(flow_nice_of(p)));
 	nv = flow_vruntime_add(tctx->vruntime, scaled);
 	tctx->vruntime = nv;
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {

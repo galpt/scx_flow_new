@@ -52,6 +52,8 @@ impl<'a> Scheduler<'a> {
             running_est: 0,
             running_pid: 0,
             cursor: 0,
+            running_nice: 0,
+            running_weight: 1024,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;
@@ -121,6 +123,8 @@ impl<'a> Scheduler<'a> {
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
+            e.running_nice = st.running_nice;
+            e.running_weight = st.running_weight;
             e.slice_ns = crate::flow::SLICE_NS;
             per_cpu.push(e);
         }

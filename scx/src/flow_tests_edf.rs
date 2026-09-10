@@ -824,7 +824,12 @@ fn idle_steals_past_unmovable_leftovers() {
 
 #[test]
 fn cleared_running_view_reads_idle() {
-    let mut view = RunningView { est: 100, pid: 7 };
+    let mut view = RunningView {
+        est: 100,
+        pid: 7,
+        nice: -5,
+        weight: 1579,
+    };
     assert!(!view.is_idle());
     view.clear();
     assert_eq!(view, RunningView::idle());
@@ -833,14 +838,26 @@ fn cleared_running_view_reads_idle() {
 
 #[test]
 fn disable_exit_clears_only_owner() {
-    let mut view = RunningView { est: 100, pid: 7 };
+    let mut view = RunningView {
+        est: 100,
+        pid: 7,
+        nice: -5,
+        weight: 1579,
+    };
     view.clear_if_owner(7);
     assert_eq!(view, RunningView::idle());
     assert!(view.is_idle());
-    let mut busy = RunningView { est: 100, pid: 9 };
+    let mut busy = RunningView {
+        est: 100,
+        pid: 9,
+        nice: 10,
+        weight: 431,
+    };
     busy.clear_if_owner(7);
     assert_eq!(busy.pid, 9);
     assert_eq!(busy.est, 100);
+    assert_eq!(busy.nice, 10);
+    assert_eq!(busy.weight, 431);
     assert!(!busy.is_idle());
     let mut idle = RunningView::idle();
     idle.clear_if_owner(7);
@@ -1287,4 +1304,199 @@ fn empty_plus_zero_stay_safe_with_no_trap() {
     let short_partner = vec![SIBLING_EMPTY];
     assert!(core_free(0, &short_partner, &[], 1));
     assert!(!core_free(1, &short_partner, &[], 1));
+}
+
+/*
+ * Weight table holds 40 levels with strict fall plus
+ * center 1024 at nice 0. Powers of two land at minus
+ * 16 plus minus 8 plus 0 plus 8 plus 16 with K at 8.
+ * All values fit in u16 with no zero.
+ */
+#[test]
+fn weight_table_is_monotonic_with_center_1024() {
+    assert_eq!(WEIGHT_TABLE.len(), 40);
+    assert_eq!(WEIGHT_TABLE[20], 1024);
+    assert_eq!(WEIGHT, 1024);
+    assert_eq!(WEIGHT_TABLE[4], 4096);
+    assert_eq!(WEIGHT_TABLE[12], 2048);
+    assert_eq!(WEIGHT_TABLE[28], 512);
+    assert_eq!(WEIGHT_TABLE[36], 256);
+    for w in WEIGHT_TABLE {
+        assert!(w > 0);
+    }
+    for i in 0..39 {
+        assert!(WEIGHT_TABLE[i] > WEIGHT_TABLE[i + 1]);
+    }
+    assert_eq!(weight_of(0), 1024);
+    assert_eq!(weight_of(-20), 5793);
+    assert_eq!(weight_of(19), 197);
+    assert_eq!(NICE_MIN, -20);
+    assert_eq!(NICE_MAX, 19);
+    assert_eq!(WEIGHT_K, 8);
+}
+
+/*
+ * Nice maps from static prio minus 120 with no clamp.
+ * Weight falls back to 1024 past the table ends, so
+ * unknown tasks stay neutral with no trap.
+ */
+#[test]
+fn nice_maps_prio_minus_120_with_fallback() {
+    assert_eq!(nice_of(120), 0);
+    assert_eq!(nice_of(100), -20);
+    assert_eq!(nice_of(139), 19);
+    assert_eq!(nice_of(0), -120);
+    assert_eq!(weight_of(nice_of(120)), 1024);
+    assert_eq!(weight_of(nice_of(100)), 5793);
+    assert_eq!(weight_of(nice_of(139)), 197);
+    assert_eq!(weight_of(nice_of(0)), 1024);
+    assert_eq!(weight_of(-21), 1024);
+    assert_eq!(weight_of(20), 1024);
+    assert_eq!(weight_of_prio(120), 1024);
+    assert_eq!(weight_of_prio(0), 1024);
+}
+
+/*
+ * Cap holds base in slice over 8 to slice times 8.
+ * Center stays at one slice. Heavy keeps a short cap,
+ * light keeps a long cap. Zero weight plus zero slice
+ * stay safe with no divide fault.
+ */
+#[test]
+fn cap_holds_in_k_bounds() {
+    let slice = SLICE_NS;
+    assert_eq!(cap_for_weight(1024, slice), slice);
+    assert_eq!(cap_for_weight(0, slice), slice);
+    assert_eq!(cap_for_weight(1024, 0), 0);
+    assert_eq!(cap_for_weight(0, 0), 0);
+    let heavy = cap_for_weight(5793, slice);
+    let light = cap_for_weight(197, slice);
+    assert!(heavy < slice);
+    assert!(light > slice);
+    assert!(heavy >= slice / 8);
+    assert!(light <= slice * 8);
+    assert_eq!(cap_for_weight(1, slice), slice * 8);
+    assert_eq!(cap_for_weight(u32::MAX, slice), slice / 8);
+    assert_eq!(heavy, (slice * 1024) / 5793);
+    assert_eq!(light, (slice * 1024) / 197);
+}
+
+/*
+ * Weight scaled clamp matches the fixed clamp at 1024.
+ * Heavy keeps a short lag, light keeps a long lag. Wrap
+ * stays safe with the same before check.
+ */
+#[test]
+fn clamp_w_matches_fixed_at_center() {
+    let slice = SLICE_NS;
+    let frontier = 100_000_000;
+    assert_eq!(
+        clamp_vruntime_w(0, frontier, slice, 1024),
+        clamp_vruntime(0, frontier, slice)
+    );
+    assert!(!was_clamped_w(frontier, frontier, slice, 1024));
+    assert!(was_clamped_w(0, frontier, slice, 1024));
+    let heavy = clamp_vruntime_w(0, frontier, slice, 5793);
+    let light = clamp_vruntime_w(0, frontier, slice, 197);
+    assert!(time_before(light, heavy));
+    assert_eq!(heavy, frontier - cap_for_weight(5793, slice));
+    assert_eq!(light, frontier - cap_for_weight(197, slice));
+}
+
+/*
+ * Heavy tasks keep earlier deadlines with the same
+ * start. Scale plus clamp plus deadline all move with
+ * weight, so low nice gains service with no starve as
+ * the cap holds extremes in 8x.
+ */
+#[test]
+fn heavy_keeps_earlier_deadline() {
+    let slice = SLICE_NS;
+    let frontier = 100_000_000;
+    let v = frontier;
+    let est = 1_000_000;
+    let (_, dl_heavy, _) = edf_insert(v, frontier, slice, est, 5793);
+    let (_, dl_base, _) = edf_insert(v, frontier, slice, est, 1024);
+    let (_, dl_light, _) = edf_insert(v, frontier, slice, est, 197);
+    assert!(time_before(dl_heavy, dl_base));
+    assert!(time_before(dl_base, dl_light));
+    assert!(scale_by_weight(est, 5793) < est);
+    assert!(scale_by_weight(est, 197) > est);
+}
+
+/*
+ * Weight stays out of routing with no group plus steal
+ * plus kick change. Placement plus drain plus kick read
+ * the same with any weight, so only deadline plus
+ * vruntime move with nice.
+ */
+#[test]
+fn weight_keeps_routing_unchanged() {
+    let allowed = [true, true, true, true];
+    assert_eq!(pick_target_cpu(1, &allowed), Some(1));
+    assert!(may_run_on(1, &allowed));
+    assert!(donor_ok(2, false, false));
+    assert!(!donor_ok(1, false, false));
+    assert!(kick_idle_ok(2, 0, true));
+    assert!(!park_kick_ok());
+    let idle = RunningView::idle();
+    assert!(idle.is_idle());
+    assert_eq!(idle.nice, 0);
+    assert_eq!(idle.weight, 1024);
+    let mut view = RunningView {
+        est: 100,
+        pid: 7,
+        nice: -20,
+        weight: 5793,
+    };
+    assert!(!view.is_idle());
+    view.clear();
+    assert_eq!(view, RunningView::idle());
+}
+
+/*
+ * Per CPU nice plus weight decode with defaults plus
+ * alias. Old JSON with no new fields stays valid. Old
+ * tq_ns still maps to slice with no loss.
+ */
+#[test]
+fn per_cpu_nice_plus_weight_decode_with_alias() {
+    let txt = "{\"id\":0}";
+    let m: crate::stats::PerCpuMetrics = serde_json::from_str(txt).unwrap();
+    assert_eq!(m.id, 0);
+    assert_eq!(m.running_nice, 0);
+    assert_eq!(m.running_weight, 0);
+    assert_eq!(m.slice_ns, 0);
+    let txt2 = "{\"id\":1,\"running_nice\":-5,\"running_weight\":1579,\"tq_ns\":1000000}";
+    let m2: crate::stats::PerCpuMetrics = serde_json::from_str(txt2).unwrap();
+    assert_eq!(m2.running_nice, -5);
+    assert_eq!(m2.running_weight, 1579);
+    assert_eq!(m2.slice_ns, 1_000_000);
+    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":431,\"slice_ns\":1000000}";
+    let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
+    assert_eq!(m3.slice_ns, 1_000_000);
+    assert_eq!(m3.running_nice, 10);
+    assert_eq!(m3.running_weight, 431);
+}
+
+/*
+ * Facade reexports the weight helpers with no drift.
+ * Table plus nice plus weight plus cap plus clamp all
+ * match the helper modules at once.
+ */
+#[test]
+fn facade_matches_weight_helpers() {
+    assert_eq!(crate::flow::WEIGHT_TABLE, crate::flow_slice::WEIGHT_TABLE);
+    assert_eq!(crate::flow::NICE_MIN, crate::flow_slice::NICE_MIN);
+    assert_eq!(crate::flow::NICE_MAX, crate::flow_slice::NICE_MAX);
+    assert_eq!(crate::flow::WEIGHT_K, crate::flow_slice::WEIGHT_K);
+    assert_eq!(crate::flow::weight_of(0), crate::flow_slice::weight_of(0));
+    assert_eq!(
+        crate::flow::cap_for_weight(197, crate::flow::SLICE_NS),
+        crate::flow_slice::cap_for_weight(197, crate::flow_slice::SLICE_NS)
+    );
+    assert_eq!(
+        crate::flow::clamp_vruntime_w(0, 100, crate::flow::SLICE_NS, 1024),
+        crate::flow_edf::clamp_vruntime_w(0, 100, crate::flow_slice::SLICE_NS, 1024)
+    );
 }

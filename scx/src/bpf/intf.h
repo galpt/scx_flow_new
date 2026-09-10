@@ -60,12 +60,14 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 24B. */
+/* Per CPU state at 32B with display only nice plus weight. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
 	u32 running_pid;
 	u32 cursor;
+	s32 running_nice;
+	u32 running_weight;
 };
 /* Scheduler counters at 136B with group detail. */
 struct flow_sched_stats {
@@ -210,6 +212,66 @@ static __always_inline u64 flow_clamp_vruntime(u64 v,
 	u64 frontier, u64 slice)
 {
 	u64 floor = frontier - slice;
+	if (flow_time_before(v, floor))
+		return floor;
+	return v;
+}
+/* Weight table for 40 nice levels from minus 20 to 19. */
+/* Index is nice plus 20 with center 1024 at nice 0. */
+/* Values fall as nice rises with 8 steps per doubling, */
+/* so K is 8. Made as 1024 times 2 to minus nice over 8, */
+/* rounded. The maker is docs only, the table is rodata. */
+static const u16 flow_weight_table[40] = {
+	5793, 5312, 4871, 4467, 4096, 3756, 3444, 3158,
+	2896, 2656, 2435, 2233, 2048, 1878, 1722, 1579,
+	1448, 1328, 1218, 1117, 1024, 939, 861, 790,
+	724, 664, 609, 558, 512, 470, 431, 395,
+	362, 332, 304, 279, 256, 235, 215, 197,
+};
+/* Weight of one nice level from the table. */
+/* Out of range maps to 1024 with no trap. */
+static __always_inline u32 flow_weight_of(s32 nice)
+{
+	s32 idx;
+	if (nice < -20)
+		return 1024;
+	if (nice > 19)
+		return 1024;
+	idx = nice + 20;
+	return (u32)flow_weight_table[(u32)idx];
+}
+/* Cap of one weight in nanos with K bounds. */
+/* Base is slice times 1024 over weight, held in slice */
+/* over 8 to slice times 8, so extremes stay bounded. */
+static __always_inline u64 flow_cap_for_weight(u32 weight,
+	u64 slice)
+{
+	u64 cap;
+	u64 lo;
+	u64 hi;
+	if (weight == 0)
+		return slice;
+	if (weight == 1024)
+		return slice;
+	if (slice == 0)
+		return 0;
+	cap = (slice * 1024ULL) / (u64)weight;
+	lo = slice / 8ULL;
+	hi = slice * 8ULL;
+	if (cap < lo)
+		return lo;
+	if (cap > hi)
+		return hi;
+	return cap;
+}
+/* Clamp virtual time with a weight scaled cap. */
+/* Floor is frontier minus cap with wrap, same as the */
+/* fixed clamp with slice at 1024. */
+static __always_inline u64 flow_clamp_vruntime_w(u64 v,
+	u64 frontier, u64 slice, u32 weight)
+{
+	u64 cap = flow_cap_for_weight(weight, slice);
+	u64 floor = frontier - cap;
 	if (flow_time_before(v, floor))
 		return floor;
 	return v;

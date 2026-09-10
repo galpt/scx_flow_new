@@ -121,6 +121,12 @@ pub struct PerCpuMetrics {
     /* Pid now on the CPU. Zero when idle. */
     #[serde(default)]
     pub running_pid: u32,
+    /* Nice now on the CPU. Zero when idle. Display only. */
+    #[serde(default)]
+    pub running_nice: i32,
+    /* Weight now on the CPU. 1024 when idle. Display only. */
+    #[serde(default)]
+    pub running_weight: u32,
     /* Current fixed slice in nanos. */
     /* Renamed from tq_ns; old JSON with tq_ns still */
     /* decodes via the alias for one release. */

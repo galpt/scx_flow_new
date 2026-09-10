@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.11`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.12`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -26,8 +26,8 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow_select.rs` placement plus steal plus mask
 - `scx/src/flow_group.rs` groups plus classifier plus parks
 - `scx/src/flow_tests_edf.rs` tests for S1 to S3 plus slice,
-  estimate, EDF order, frontier, dispatch, steal, mask, and
-  config
+  estimate, weight, EDF order, frontier, dispatch, steal,
+  mask, and config
 - `scx/src/flow_tests_group.rs` tests for split plus parks plus
   classifier plus isolation plus inflate
 - `scx/src/config.rs` validated constants with tests
@@ -48,10 +48,10 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Each CPU keeps an ordered queue plus one park queue per
 group. Earliest deadline runs first with arrival order
 for ties. The deadline adds clamped virtual time and a
-scaled burst estimate at fixed weight. Exiting tasks run
-at once on this CPU via local with no order wait. Falls
-back when this CPU is not allowed. The math lives in
-`scx/src/bpf/intf.h`, inserts in
+scaled burst estimate at live weight from nice. Exiting
+tasks run at once on this CPU via local with no order
+wait. Falls back when this CPU is not allowed. The math
+lives in `scx/src/bpf/intf.h`, inserts in
 `scx/src/bpf/enqueue.bpf.c`.
 
 ### Fixed slice
@@ -62,11 +62,11 @@ the last burst clamped at 1ns to 1 second.
 
 ### Fairness
 
-A waking task gains at most one slice of advantage over
-the frontier, so sleep never buys priority. Virtual time
-moves forward with scaled runtime while work stays queued
-and resets to waking time on idle, so new arrivals never
-inherit stale time. The rules live in
+A waking task gains at most a weight scaled cap in 125us
+to 8ms over the frontier, so sleep never buys priority.
+Virtual time moves forward with scaled runtime while work
+stays queued and resets to waking time on idle, so new
+arrivals never inherit stale time. The rules live in
 `scx/src/bpf/lifecycle.bpf.c`.
 
 ### Placement
@@ -115,8 +115,9 @@ scheduler change in the harness.
 
 ### Limits
 
-Weight stays 1024 with no knob. Groups stay fixed at
-two with no knob. The slice stays fixed at 1ms.
+Weight follows nice from minus 20 to 19 with center 1024
+and no knob. Groups stay fixed at two with no knob. The
+slice stays fixed at 1ms. No busy preemption.
 
 ## Build
 
@@ -176,7 +177,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.11`, state `enabled` and ops
+Expect version `4.2.12`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

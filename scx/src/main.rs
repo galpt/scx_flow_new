@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn cpu_size_within_32() {
         assert!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>() <= 32);
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 24);
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 32);
     }
 
     #[test]

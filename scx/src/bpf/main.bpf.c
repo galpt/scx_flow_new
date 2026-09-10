@@ -82,6 +82,17 @@ static __always_inline bool flow_cpu_ok(
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
+/* Nice of one task from static prio minus 120. */
+/* Null maps to 0, so weight falls back to 1024. */
+static __always_inline s32 flow_nice_of(
+	const struct task_struct *p)
+{
+	s32 nice;
+	if (!p)
+		return 0;
+	nice = (s32)p->static_prio - 120;
+	return nice;
+}
 static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
@@ -113,6 +124,8 @@ static __always_inline void flow_clear_running(s32 cpu)
 		return;
 	st->running_est = 0;
 	st->running_pid = 0;
+	st->running_nice = 0;
+	st->running_weight = 1024;
 }
 /* Clear running only when the pid owns it, so a disable */
 /* plus an exit never clears a new owner after a switch. */
@@ -131,6 +144,8 @@ static __always_inline void flow_clear_running_if_owner(
 		return;
 	st->running_est = 0;
 	st->running_pid = 0;
+	st->running_nice = 0;
+	st->running_weight = 1024;
 }
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */
@@ -314,6 +329,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->running_est = 0;
 		st->running_pid = 0;
 		st->cursor = (u32)cpu;
+		st->running_nice = 0;
+		st->running_weight = 1024;
 		group = flow_group_live((u32)cpu, n);
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,

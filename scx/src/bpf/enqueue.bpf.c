@@ -98,6 +98,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		frontier = flow_ref_frontier(p, sel);
 		clamped = flow_clamp_vruntime(0, frontier,
 		    slice);
+		/* No task state, so weight stays 1024. */
 		scaled = flow_scale_by_weight(
 		    flow_clamp_est(slice),
 		    (u32)FLOW_WEIGHT);
@@ -162,6 +163,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 scaled;
 		u64 dl;
 		u64 park;
+		s32 nice;
+		u32 w;
 		if (is_fresh)
 			est = slice;
 		else
@@ -177,10 +180,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		v = tctx->vruntime;
 		frontier = flow_ref_frontier(p, sel);
-		clamped = flow_clamp_vruntime(v, frontier,
-		    slice);
-		scaled = flow_scale_by_weight(est,
-		    (u32)FLOW_WEIGHT);
+		nice = flow_nice_of(p);
+		w = flow_weight_of(nice);
+		clamped = flow_clamp_vruntime_w(v, frontier,
+		    slice, w);
+		scaled = flow_scale_by_weight(est, w);
 		dl = flow_deadline(clamped, scaled);
 		if (group == (u8)FLOW_GROUP_HOG &&
 		    pinned) {
@@ -227,13 +231,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 scaled;
 		u64 dl;
 		u64 dsq;
+		s32 nice;
+		u32 w;
 		st = flow_cpu((u32)cpu);
 		if (st)
 			frontier = st->frontier;
-		clamped = flow_clamp_vruntime(v, frontier,
-		    slice);
-		scaled = flow_scale_by_weight(est,
-		    (u32)FLOW_WEIGHT);
+		nice = flow_nice_of(p);
+		w = flow_weight_of(nice);
+		clamped = flow_clamp_vruntime_w(v, frontier,
+		    slice, w);
+		scaled = flow_scale_by_weight(est, w);
 		dl = flow_deadline(clamped, scaled);
 		if (group == (u8)FLOW_GROUP_HOG &&
 		    pinned) {

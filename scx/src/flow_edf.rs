@@ -49,6 +49,29 @@ pub fn was_clamped(v: u64, frontier: u64, slice: u64) -> bool {
 }
 
 /*
+ * Clamp virtual time with a weight scaled cap. The floor
+ * is the frontier minus the cap with wrap, same as the
+ * fixed clamp with slice at 1024. Heavy tasks keep a
+ * short cap, light tasks keep a long cap, both held in
+ * slice over 8 to slice times 8.
+ */
+#[cfg(test)]
+pub fn clamp_vruntime_w(v: u64, frontier: u64, slice: u64, weight: u32) -> u64 {
+    let cap = crate::flow_slice::cap_for_weight(weight, slice);
+    let floor = frontier.wrapping_sub(cap);
+    if time_before(v, floor) { floor } else { v }
+}
+
+/*
+ * True when weight scaled time was clamped forward.
+ * Needs a lag beyond the cap, so only sleepers count.
+ */
+#[cfg(test)]
+pub fn was_clamped_w(v: u64, frontier: u64, slice: u64, weight: u32) -> bool {
+    clamp_vruntime_w(v, frontier, slice, weight) != v
+}
+
+/*
  * Deadline from clamped virtual time and scaled
  * estimate. The sum wraps with the clock with no
  * extra check, so order stays correct across wrap.
@@ -312,7 +335,8 @@ pub fn dispatch_own_park_model(
 /*
  * Running view of one CPU for tests. Mirrors the BPF
  * CPU state fields used by the dashboard. Zero pid
- * means idle.
+ * means idle. Nice plus weight stay display only with
+ * no placement use.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,16 +345,25 @@ pub struct RunningView {
     pub est: u64,
     /* Pid now on the CPU. Zero when idle. */
     pub pid: u32,
+    /* Nice now on the CPU. Zero when idle. */
+    pub nice: i32,
+    /* Weight now on the CPU. 1024 when idle. */
+    pub weight: u32,
 }
 
 #[cfg(test)]
 impl RunningView {
     /*
-     * Idle view with all fields at zero. Matches the
+     * Idle view with neutral weight. Matches the
      * cleared BPF state after stopping.
      */
     pub fn idle() -> Self {
-        Self { est: 0, pid: 0 }
+        Self {
+            est: 0,
+            pid: 0,
+            nice: 0,
+            weight: 1024,
+        }
     }
 
     /*
@@ -348,6 +381,8 @@ impl RunningView {
     pub fn clear(&mut self) {
         self.est = 0;
         self.pid = 0;
+        self.nice = 0;
+        self.weight = 1024;
     }
 
     /*
@@ -360,6 +395,8 @@ impl RunningView {
         if self.pid == pid {
             self.est = 0;
             self.pid = 0;
+            self.nice = 0;
+            self.weight = 1024;
         }
     }
 }

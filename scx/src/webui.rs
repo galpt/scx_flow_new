@@ -293,6 +293,8 @@ mod tests {
         assert_eq!(m2.per_cpu[0].id, 0);
         assert_eq!(m2.per_cpu[0].slice_ns, 0);
         assert_eq!(m2.per_cpu[0].group, 0);
+        assert_eq!(m2.per_cpu[0].running_nice, 0);
+        assert_eq!(m2.per_cpu[0].running_weight, 0);
         let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
         let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
         assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
@@ -325,9 +327,11 @@ mod tests {
                 slice_ns: 1_000_000,
                 running_est_ns: 1_000_000,
                 running_pid: 7,
+                running_nice: -5,
+                running_weight: 1579,
                 ..Default::default()
             }],
-            version: "4.2.11".to_string(),
+            version: "4.2.12".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -337,6 +341,8 @@ mod tests {
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("group"));
+        assert!(txt.contains("running_nice"));
+        assert!(txt.contains("running_weight"));
         assert!(txt.contains("group_demote"));
         assert!(txt.contains("group_wake_promote"));
         assert!(txt.contains("version"));
@@ -355,7 +361,9 @@ mod tests {
         assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
-        assert_eq!(back.version, "4.2.11");
+        assert_eq!(back.per_cpu[0].running_nice, -5);
+        assert_eq!(back.per_cpu[0].running_weight, 1579);
+        assert_eq!(back.version, "4.2.12");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);

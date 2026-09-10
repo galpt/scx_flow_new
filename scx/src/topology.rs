@@ -55,6 +55,8 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             group: 0,
             running_est_ns: 0,
             running_pid: 0,
+            running_nice: 0,
+            running_weight: 1024,
             slice_ns: crate::flow::SLICE_NS,
         });
     }
@@ -293,6 +295,8 @@ pub fn synthetic_card(
         group: 0,
         running_est_ns: 0,
         running_pid: 0,
+        running_nice: 0,
+        running_weight: 1024,
         slice_ns: crate::flow::SLICE_NS,
     }
 }
