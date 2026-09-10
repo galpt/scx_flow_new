@@ -34,6 +34,11 @@ volatile u64 flow_burst_allowance_ns;
 /* Halves is the fallback while ready is zero. */
 volatile u8 flow_group_by_cpu[1024];
 volatile u8 flow_group_ready;
+/* Sibling ring seeded by userspace at attach. */
+/* Each CPU holds the next CPU in the same core. */
+/* Minus one means singleton with no sibling. */
+/* Placement only with no dispatch use. */
+volatile s32 flow_sibling[1024];
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();

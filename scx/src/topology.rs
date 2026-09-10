@@ -2,10 +2,10 @@
 /*
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
- * Trimmed topology for the flow scheduler. Only the
- * static per CPU cards and the live frequency read are
- * needed. Frequency plus LLC plus CPU cards stay display
- * only and never shape placement.
+ * Trimmed topology for the flow scheduler. Static cards
+ * plus sibling plus LLC plus capacity plus max frequency
+ * seed the group table. Live frequency plus CPU cards
+ * stay display only and never shape placement.
  * Zero means unknown and keeps a plain fallback.
  */
 use log::warn;
@@ -28,8 +28,9 @@ fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
  * stays display only. Failures yield an empty list so
  * the scheduler keeps running without cards. Single
  * CPU and no sibling hosts keep plain per CPU cards.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Live frequency plus CPU cards stay display only
+ * and never shape placement. Max frequency plus
+ * capacity plus LLC plus siblings seed groups.
  */
 pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
     let topo = match Topology::new() {
@@ -130,10 +131,14 @@ pub fn read_cpuinfo_max_freq(cpu: u32) -> u64 {
 
 /*
  * Seed the per CPU group table plus ready flag. Reads
- * capacity plus max frequency for live CPUs, then
- * assigns by sorted interleave when spread tops 10pct.
- * Uniform hosts keep ready cleared with halves fallback.
- * Single CPU keeps ready cleared with all light.
+ * capacity plus max frequency plus siblings plus LLC
+ * for live CPUs, then assigns with core split plus LLC
+ * rules plus hetero interleave. All singleton cores use
+ * halves plus interleave exactly. Uniform hosts keep
+ * ready cleared when the core view matches halves, else
+ * ready set with best effort. Single CPU keeps ready
+ * cleared with all light. Short slices clamp with no
+ * pad.
  */
 pub fn group_seed(nr: usize) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
     let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
@@ -143,7 +148,89 @@ pub fn group_seed(nr: usize) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
         caps.push(read_cpu_capacity(cpu as u32));
         freqs.push(read_cpuinfo_max_freq(cpu as u32));
     }
-    crate::flow_group::seed_groups(&caps, &freqs, n)
+    let lists = sibling_lists(n);
+    let llc = llc_ids(n);
+    crate::flow_group::seed_groups_topology(&caps, &freqs, n, &lists, &llc)
+}
+
+/*
+ * Sibling ids of one CPU from sysfs. Reads the thread
+ * siblings list file. Missing files yield empty for a
+ * singleton core with no trap. Values cap at 1024.
+ */
+pub fn read_thread_siblings(cpu: u32) -> Vec<u32> {
+    if cpu as usize >= MAX_CPUS {
+        return Vec::new();
+    }
+    std::fs::read_to_string(format!(
+        "{}{}{}{}",
+        "/sys/devices/system/cpu/cpu", cpu, "/topology/", "thread_siblings_list"
+    ))
+    .ok()
+    .map(|s| crate::flow_group::parse_siblings_list(&s))
+    .unwrap_or_default()
+}
+
+/*
+ * Sibling lists for live CPUs. Each entry holds the
+ * sibling ids of one CPU in id order. Missing files
+ * yield singletons with no trap. Capped at 1024.
+ */
+pub fn sibling_lists(nr: usize) -> Vec<Vec<u32>> {
+    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
+    let mut out = Vec::with_capacity(n);
+    for cpu in 0..n {
+        out.push(read_thread_siblings(cpu as u32));
+    }
+    out
+}
+
+/*
+ * LLC ids for live CPUs. Reads the host topology once.
+ * Missing topology yields empty for one domain with no
+ * pad. Missing CPUs read as zero with no trap. Values
+ * seed per LLC split with no division.
+ */
+pub fn llc_ids(nr: usize) -> Vec<u32> {
+    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
+    let topo = match Topology::new() {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(n);
+    for cpu in 0..n {
+        let id = topo
+            .all_cpus
+            .get(&cpu)
+            .map(|c| c.llc_id as u32)
+            .unwrap_or(0);
+        out.push(id);
+    }
+    out
+}
+
+/*
+ * Sibling ring for free core checks. Each CPU maps to
+ * the next CPU in the same core, ring order by id.
+ * Singletons map to none, so the check is a no-op with
+ * state equivalence to the prior release. Missing files
+ * yield singletons with no trap. Capped at 1024.
+ */
+pub fn sibling_seed(nr: usize) -> [i32; crate::flow_group::GROUP_TABLE_LEN] {
+    let mut out = [crate::flow_group::SIBLING_NONE; crate::flow_group::GROUP_TABLE_LEN];
+    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
+    if n == 0 {
+        return out;
+    }
+    let lists = sibling_lists(n);
+    let cores = crate::flow_group::build_cores(n, &lists);
+    let ring = crate::flow_group::sibling_ring(&cores, n);
+    for (cpu, v) in ring.iter().enumerate() {
+        if cpu < out.len() {
+            out[cpu] = *v;
+        }
+    }
+    out
 }
 
 /*

@@ -143,11 +143,14 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.flow_ops_mut().flags = flags;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
         /* Static cards seed the start log and the cards. */
-        /* Frequency plus LLC plus CPU cards stay display */
-        /* only and never shape placement. */
+        /* Live frequency plus CPU cards stay display */
+        /* only and never shape placement. Max frequency */
+        /* plus capacity plus LLC plus siblings seed groups. */
         let cards = topology::web_cpu_static();
         /* Seed the per CPU group table. Uniform hosts keep */
         /* ready cleared with halves fallback and no trap. */
+        /* All singleton cores keep prior halves plus */
+        /* interleave exactly with no trap. */
         let nr_groups = cards
             .iter()
             .map(|c| c.id as usize + 1)
@@ -155,9 +158,11 @@ impl<'a> Scheduler<'a> {
             .unwrap_or(0)
             .min(MAX_CPUS);
         let (group_table, group_ready) = topology::group_seed(nr_groups);
+        let sibling_table = topology::sibling_seed(nr_groups);
         if let Some(bss) = skel.maps.bss_data.as_mut() {
             bss.flow_group_by_cpu = group_table;
             bss.flow_group_ready = group_ready;
+            bss.flow_sibling = sibling_table;
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;

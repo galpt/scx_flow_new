@@ -1016,3 +1016,387 @@ fn first_in_group_live_uses_table_when_ready() {
     );
     assert_eq!(first_in_group_live(&all, GROUP_HOG, 4, &table, 0), Some(2));
 }
+
+/*
+ * Sibling lists parse sysfs ranges. Comma splits
+ * tokens. Dash splits ranges. Bad tokens stay out.
+ * Ids at or past 1024 stay out. Output sorts.
+ */
+#[test]
+fn sibling_lists_parse_ranges_and_bad() {
+    assert_eq!(parse_siblings_list("0-1"), vec![0, 1]);
+    assert_eq!(parse_siblings_list("0,1"), vec![0, 1]);
+    assert_eq!(parse_siblings_list("0-1,4"), vec![0, 1, 4]);
+    assert_eq!(parse_siblings_list(" 2-3\n"), vec![2, 3]);
+    assert_eq!(parse_siblings_list("5"), vec![5]);
+    assert_eq!(parse_siblings_list(""), Vec::<u32>::new());
+    assert_eq!(parse_siblings_list("abc"), Vec::<u32>::new());
+    assert_eq!(parse_siblings_list("3-1"), Vec::<u32>::new());
+    assert_eq!(parse_siblings_list("1024"), Vec::<u32>::new());
+    assert_eq!(parse_siblings_list("1023"), vec![1023]);
+    assert_eq!(parse_siblings_list("0-1,0-1"), vec![0, 1]);
+    assert_eq!(parse_siblings_list("1,0"), vec![0, 1]);
+}
+
+/*
+ * Cores join sibling ids with union find. Pairs join.
+ * Offline ids stay out. Missing lists stay singleton.
+ * Order sorts by least id with no trap.
+ */
+#[test]
+fn cores_join_pairs_with_union_find() {
+    let lists = vec![vec![0, 1], vec![0, 1], vec![2, 3], vec![2, 3]];
+    let cores = build_cores(4, &lists);
+    assert_eq!(cores, vec![vec![0, 1], vec![2, 3]]);
+    let single: Vec<Vec<u32>> = vec![vec![], vec![], vec![], vec![]];
+    let cores2 = build_cores(4, &single);
+    assert_eq!(cores2.len(), 4);
+    assert!(cores_are_singletons(&cores2));
+    let off = vec![vec![0, 99], vec![1]];
+    let cores3 = build_cores(2, &off);
+    assert_eq!(cores3.len(), 2);
+    assert!(cores_are_singletons(&cores3));
+    assert!(build_cores(0, &[]).is_empty());
+    let one = build_cores(1, &[vec![0]]);
+    assert_eq!(one, vec![vec![0]]);
+}
+
+/*
+ * Singleton check gates the LLC bypass. All single
+ * cores read as singleton. Any pair reads as SMT on.
+ */
+#[test]
+fn singleton_check_gates_llc_bypass() {
+    assert!(cores_are_singletons(&[vec![0], vec![1]]));
+    assert!(!cores_are_singletons(&[vec![0, 1]]));
+    assert!(cores_are_singletons(&[]));
+    assert_eq!(core_max(&[10, 20], &[0, 1]), 20);
+    assert_eq!(core_max(&[], &[0]), 0);
+    assert_eq!(core_max(&[5], &[9]), 0);
+}
+
+/*
+ * Core split keeps siblings in one group. First half
+ * of cores is light, rest is hog. Odd core counts give
+ * the extra core to hog. Single core falls back to
+ * halves, so no group stays empty.
+ */
+#[test]
+fn cores_split_keeps_siblings_with_extra_to_hog() {
+    let cores = vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]];
+    let out = assign_cores_split(&cores, 8);
+    assert_eq!(&out[0..2], &[GROUP_LIGHT, GROUP_LIGHT]);
+    assert_eq!(&out[2..4], &[GROUP_LIGHT, GROUP_LIGHT]);
+    assert_eq!(&out[4..6], &[GROUP_HOG, GROUP_HOG]);
+    assert_eq!(&out[6..8], &[GROUP_HOG, GROUP_HOG]);
+    let odd = vec![vec![0, 1], vec![2, 3], vec![4, 5]];
+    let out2 = assign_cores_split(&odd, 6);
+    assert_eq!(out2.iter().filter(|&&g| g == GROUP_LIGHT).count(), 2);
+    assert_eq!(out2.iter().filter(|&&g| g == GROUP_HOG).count(), 4);
+    let one = vec![vec![0, 1]];
+    let out3 = assign_cores_split(&one, 2);
+    assert_eq!(out3[0], GROUP_LIGHT);
+    assert_eq!(out3[1], GROUP_HOG);
+    let single = assign_cores_split(&[vec![0]], 1);
+    assert_eq!(single, vec![GROUP_LIGHT]);
+}
+
+/*
+ * Core interleave spreads fast cores. Sorts by max
+ * capacity plus max frequency plus least id. Even slots
+ * go light, odd slots go hog. Odd core counts give the
+ * extra core to hog. Single core falls back to CPU
+ * interleave with no empty group.
+ */
+#[test]
+fn cores_interleave_spreads_fast_cores() {
+    let cores = vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]];
+    let caps = vec![1024, 1024, 1024, 1024, 512, 512, 512, 512];
+    let freqs = vec![4000000; 8];
+    let out = assign_cores_interleave(&cores, &caps, &freqs, 8);
+    assert_eq!(out.len(), 8);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_LIGHT).count(), 4);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_HOG).count(), 4);
+    assert_eq!(out[0], GROUP_LIGHT);
+    assert_eq!(out[1], GROUP_LIGHT);
+    assert_eq!(out[2], GROUP_HOG);
+    assert_eq!(out[3], GROUP_HOG);
+    let odd = vec![vec![0], vec![1], vec![2]];
+    let caps3 = vec![1024, 512, 512];
+    let freqs3 = vec![4000000; 3];
+    let out3 = assign_cores_interleave(&odd, &caps3, &freqs3, 3);
+    assert_eq!(out3.iter().filter(|&&g| g == GROUP_LIGHT).count(), 1);
+    assert_eq!(out3.iter().filter(|&&g| g == GROUP_HOG).count(), 2);
+    assert_eq!(out3[0], GROUP_LIGHT);
+}
+
+/*
+ * One LLC splits cores globally. Two cores go one
+ * light plus one hog. Four cores go two plus two.
+ */
+#[test]
+fn llc_one_splits_globally() {
+    let cores = vec![vec![0, 1], vec![2, 3]];
+    let llc = vec![0, 0, 0, 0];
+    let caps = vec![1024; 4];
+    let freqs = vec![4000000; 4];
+    let out = assign_by_llc(&cores, &llc, &caps, &freqs, 4, false);
+    assert_eq!(out[0], GROUP_LIGHT);
+    assert_eq!(out[2], GROUP_HOG);
+    let hetero = assign_by_llc(&cores, &llc, &caps, &freqs, 4, true);
+    assert_eq!(hetero.len(), 4);
+}
+
+/*
+ * Two LLCs split in each LLC. Each domain keeps both
+ * groups, so cache domains stay balanced. Four cores
+ * across two LLCs go one plus one in each LLC.
+ */
+#[test]
+fn llc_two_splits_per_llc() {
+    let cores = vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]];
+    let llc = vec![0, 0, 0, 0, 1, 1, 1, 1];
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let out = assign_by_llc(&cores, &llc, &caps, &freqs, 8, false);
+    assert_eq!(out[0], GROUP_LIGHT);
+    assert_eq!(out[2], GROUP_HOG);
+    assert_eq!(out[4], GROUP_LIGHT);
+    assert_eq!(out[6], GROUP_HOG);
+    let hetero = assign_by_llc(&cores, &llc, &caps, &freqs, 8, true);
+    assert_eq!(hetero.len(), 8);
+    assert!(hetero.contains(&GROUP_LIGHT));
+    assert!(hetero.contains(&GROUP_HOG));
+}
+
+/*
+ * N LLCs split in each LLC. Three domains each keep a
+ * split when cores allow, else global fallback keeps
+ * both groups with no empty trap.
+ */
+#[test]
+fn llc_n_splits_per_llc_with_fallback() {
+    let cores = vec![
+        vec![0, 1],
+        vec![2, 3],
+        vec![4, 5],
+        vec![6, 7],
+        vec![8, 9],
+        vec![10, 11],
+    ];
+    let llc = vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2];
+    let caps = vec![1024; 12];
+    let freqs = vec![4000000; 12];
+    let out = assign_by_llc(&cores, &llc, &caps, &freqs, 12, false);
+    assert_eq!(out.len(), 12);
+    assert!(out.contains(&GROUP_LIGHT));
+    assert!(out.contains(&GROUP_HOG));
+    let short: Vec<u32> = vec![];
+    let out2 = assign_by_llc(&cores, &short, &caps, &freqs, 12, false);
+    assert_eq!(out2.len(), 12);
+}
+
+/*
+ * All singleton cores bypass LLC exactly. The result
+ * matches halves when uniform and CPU interleave when
+ * hetero, so SMT off keeps prior state with no trap.
+ */
+#[test]
+fn singleton_bypass_keeps_prior_exact() {
+    let cores = vec![vec![0], vec![1], vec![2], vec![3]];
+    let llc = vec![0, 0, 1, 1];
+    let caps = vec![1024; 4];
+    let freqs = vec![4000000; 4];
+    let out = assign_by_llc(&cores, &llc, &caps, &freqs, 4, false);
+    for cpu in 0..4 {
+        assert_eq!(out[cpu], group_of_cpu(cpu as u32, 4));
+    }
+    let hcaps = vec![1024, 1024, 512, 512];
+    let out2 = assign_by_llc(&cores, &llc, &hcaps, &freqs, 4, true);
+    let want = assign_sorted_interleave(&hcaps, &freqs, 4);
+    assert_eq!(out2, want);
+}
+
+/*
+ * Topology seed with singletons matches prior seed.
+ * Table plus ready stay identical, so SMT off keeps
+ * state equivalence with no crash plus no stall.
+ */
+#[test]
+fn seed_topology_singleton_matches_prior() {
+    for nr in [2, 3, 4, 8, 16] {
+        let caps = vec![1024; nr];
+        let freqs = vec![4000000; nr];
+        let lists: Vec<Vec<u32>> = (0..nr).map(|c| vec![c as u32]).collect();
+        let llc = vec![0; nr];
+        let (t1, r1) = seed_groups(&caps, &freqs, nr);
+        let (t2, r2) = seed_groups_topology(&caps, &freqs, nr, &lists, &llc);
+        assert_eq!(r1, r2, "ready differs at {nr}");
+        assert_eq!(t1, t2, "table differs at {nr}");
+    }
+    let hcaps = vec![1024, 1024, 512, 512];
+    let hfreqs = vec![4000000; 4];
+    let lists: Vec<Vec<u32>> = (0..4).map(|c| vec![c as u32]).collect();
+    let (t1, r1) = seed_groups(&hcaps, &hfreqs, 4);
+    let (t2, r2) = seed_groups_topology(&hcaps, &hfreqs, 4, &lists, &[0, 0, 1, 1]);
+    assert_eq!(r1, 1);
+    assert_eq!(r2, 1);
+    assert_eq!(t1, t2);
+}
+
+/*
+ * Uniform adjacent SMT keeps ready cleared. Eight CPUs
+ * in four adjacent pairs split as halves, so strict
+ * stays with no table use.
+ */
+#[test]
+fn seed_topology_uniform_adjacent_keeps_ready_cleared() {
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let lists = vec![
+        vec![0, 1],
+        vec![0, 1],
+        vec![2, 3],
+        vec![2, 3],
+        vec![4, 5],
+        vec![4, 5],
+        vec![6, 7],
+        vec![6, 7],
+    ];
+    let llc = vec![0; 8];
+    let (t, r) = seed_groups_topology(&caps, &freqs, 8, &lists, &llc);
+    assert_eq!(r, 0);
+    assert!(t.iter().all(|&g| g == GROUP_LIGHT));
+    for cpu in 0..8 {
+        assert_eq!(group_live(cpu, 8, &t, r), group_of_cpu(cpu, 8));
+    }
+}
+
+/*
+ * Scattered SMT sets ready. Cores out of id order give
+ * a core view that differs from halves, so the table
+ * holds groups with best effort.
+ */
+#[test]
+fn seed_topology_scattered_sets_ready() {
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let lists = vec![
+        vec![0, 4],
+        vec![1, 5],
+        vec![2, 6],
+        vec![3, 7],
+        vec![0, 4],
+        vec![1, 5],
+        vec![2, 6],
+        vec![3, 7],
+    ];
+    let llc = vec![0; 8];
+    let cores = build_cores(8, &lists);
+    assert_eq!(cores.len(), 4);
+    let (t, r) = seed_groups_topology(&caps, &freqs, 8, &lists, &llc);
+    assert_eq!(r, 1);
+    let mut diverged = false;
+    for cpu in 0..8 {
+        if group_live(cpu, 8, &t, r) != group_of_cpu(cpu, 8) {
+            diverged = true;
+        }
+    }
+    assert!(diverged);
+}
+
+/*
+ * Sibling ring maps next in core. Pairs point at each
+ * other. Triples ring in id order. Singletons map to
+ * none, so the free check is a no-op.
+ */
+#[test]
+fn sibling_ring_maps_next_with_none_for_singleton() {
+    let cores = vec![vec![0, 1], vec![2]];
+    let ring = sibling_ring(&cores, 3);
+    assert_eq!(ring, vec![1, 0, SIBLING_NONE]);
+    let tri = vec![vec![0, 1, 2]];
+    let ring2 = sibling_ring(&tri, 3);
+    assert_eq!(ring2, vec![1, 2, 0]);
+    let single = vec![vec![0], vec![1]];
+    let ring3 = sibling_ring(&single, 2);
+    assert_eq!(ring3, vec![SIBLING_NONE, SIBLING_NONE]);
+    assert_eq!(SIBLING_NONE, -1);
+}
+
+/*
+ * SMT off with 8 CPUs keeps halves. All singleton
+ * cores give the same table plus ready as prior, plus
+ * the same live view with no division plus no trap.
+ */
+#[test]
+fn smt_off_8c_keeps_halves_with_no_trap() {
+    let nr = 8;
+    let caps = vec![1024; nr];
+    let freqs = vec![4000000; nr];
+    let lists: Vec<Vec<u32>> = (0..nr).map(|c| vec![c as u32]).collect();
+    let llc = vec![0; nr];
+    let (t1, r1) = seed_groups(&caps, &freqs, nr);
+    let (t2, r2) = seed_groups_topology(&caps, &freqs, nr, &lists, &llc);
+    assert_eq!(r1, 0);
+    assert_eq!(r2, 0);
+    assert_eq!(t1, t2);
+    for cpu in 0..nr {
+        assert_eq!(
+            group_live(cpu as u32, nr, &t2, r2),
+            group_of_cpu(cpu as u32, nr)
+        );
+    }
+    let cores = build_cores(nr, &lists);
+    assert!(cores_are_singletons(&cores));
+    let ring = sibling_ring(&cores, nr);
+    assert!(ring.iter().all(|&v| v == SIBLING_NONE));
+}
+
+/*
+ * SMT off with odd counts keeps extra to hog. Three
+ * plus five CPUs give one plus two light with the rest
+ * hog in both views with no empty group.
+ */
+#[test]
+fn smt_off_odd_keeps_extra_to_hog() {
+    for nr in [3, 5, 7] {
+        let caps = vec![1024; nr];
+        let freqs = vec![4000000; nr];
+        let lists: Vec<Vec<u32>> = (0..nr).map(|c| vec![c as u32]).collect();
+        let llc = vec![0; nr];
+        let (t1, r1) = seed_groups(&caps, &freqs, nr);
+        let (t2, r2) = seed_groups_topology(&caps, &freqs, nr, &lists, &llc);
+        assert_eq!(r1, r2);
+        assert_eq!(t1, t2);
+        let mut light = 0;
+        let mut hog = 0;
+        for cpu in 0..nr {
+            if group_live(cpu as u32, nr, &t2, r2) == GROUP_LIGHT {
+                light += 1;
+            } else {
+                hog += 1;
+            }
+        }
+        assert_eq!(light, nr / 2);
+        assert_eq!(hog, nr - nr / 2);
+    }
+}
+
+/*
+ * Single CPU keeps all light. Both seeds keep ready
+ * cleared with no peer scan plus no division.
+ */
+#[test]
+fn single_cpu_keeps_all_light_with_no_scan() {
+    let caps = vec![1024];
+    let freqs = vec![4000000];
+    let lists = vec![vec![0]];
+    let (t1, r1) = seed_groups(&caps, &freqs, 1);
+    let (t2, r2) = seed_groups_topology(&caps, &freqs, 1, &lists, &[0]);
+    assert_eq!(r1, 0);
+    assert_eq!(r2, 0);
+    assert_eq!(t1, t2);
+    assert_eq!(group_live(0, 1, &t2, r2), GROUP_LIGHT);
+    assert_eq!(group_of_cpu(0, 1), GROUP_LIGHT);
+}

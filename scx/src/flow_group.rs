@@ -3,9 +3,12 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Group helpers for the flow scheduler.
- * Two groups split CPUs by id halves with extra
- * to hog. Odd counts give the extra CPU to hog in
- * both views. Light holds short waits. Hog holds burn.
+ * Two groups split cores by half with extra
+ * to hog. Odd counts give the extra core to hog in
+ * both views. One LLC splits globally. Two plus N
+ * LLCs split in each LLC. All singleton cores use
+ * halves plus interleave exactly. Light holds short
+ * waits. Hog holds burn.
  * The classifier uses burn with a 32ms window plus
  * wake hits. Demote needs 16ms burn or one burst at
  * 4ms quiet down to 1ms floor during flood. Promote
@@ -208,6 +211,474 @@ pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_
         table[cpu] = *g;
     }
     (table, 1)
+}
+
+/* None marker for the sibling ring. */
+pub const SIBLING_NONE: i32 = -1;
+
+/*
+ * Parse one sibling list from sysfs. Accepts comma
+ * separated ids plus ranges with dash, such as 0-1
+ * plus 0,1 plus 0-1,4. Trims space plus newline.
+ * Bad tokens stay out with no trap. Ids at or past
+ * 1024 stay out, so the cap holds with no extra use.
+ */
+pub fn parse_siblings_list(s: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    for tok in s.split(',') {
+        let t = tok.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some((a, b)) = t.split_once('-') {
+            let lo = a.trim().parse::<u32>().ok();
+            let hi = b.trim().parse::<u32>().ok();
+            if let (Some(l), Some(h)) = (lo, hi) {
+                if l > h {
+                    continue;
+                }
+                if h >= 1024 && l >= 1024 {
+                    continue;
+                }
+                let mut v = l;
+                loop {
+                    if v < 1024 && !out.contains(&v) {
+                        out.push(v);
+                    }
+                    if v >= h || v >= 1023 {
+                        break;
+                    }
+                    v += 1;
+                    if out.len() >= 1024 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if let Ok(v) = t.parse::<u32>()
+            && v < 1024
+            && !out.contains(&v)
+        {
+            out.push(v);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/*
+ * Build cores from sibling lists with union find.
+ * Each list holds the sibling ids of one CPU. Only
+ * ids below nr join, so offline ids stay out. Missing
+ * lists mean singleton cores with no trap. Cores sort
+ * by member plus by least id, so order stays stable.
+ * No division, so no zero risk.
+ */
+pub fn build_cores(nr: usize, lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    let n = nr.min(GROUP_TABLE_LEN);
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        let mut r = x;
+        while p[r] != r {
+            r = p[r];
+        }
+        while p[x] != x {
+            let nxt = p[x];
+            p[x] = r;
+            x = nxt;
+        }
+        r
+    }
+    for cpu in 0..n {
+        let sibs = lists.get(cpu);
+        let empty: Vec<u32> = Vec::new();
+        let vals = sibs.unwrap_or(&empty);
+        for &s in vals {
+            let v = s as usize;
+            if v >= n {
+                continue;
+            }
+            if v == cpu {
+                continue;
+            }
+            let a = find(&mut parent, cpu);
+            let b = find(&mut parent, v);
+            if a != b {
+                if a < b {
+                    parent[b] = a;
+                } else {
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    for cpu in 0..n {
+        let r = find(&mut parent, cpu);
+        map.entry(r).or_default().push(cpu as u32);
+    }
+    let mut cores: Vec<Vec<u32>> = map.into_values().collect();
+    for c in cores.iter_mut() {
+        c.sort_unstable();
+    }
+    cores.sort_by_key(|c| c[0]);
+    cores
+}
+
+/*
+ * True when all cores hold one CPU. Hosts with SMT
+ * off land here. Callers bypass LLC rules then, so
+ * the split reduces to halves plus interleave with
+ * state equivalence to the prior release.
+ */
+pub fn cores_are_singletons(cores: &[Vec<u32>]) -> bool {
+    for c in cores {
+        if c.len() != 1 {
+            return false;
+        }
+    }
+    true
+}
+
+/*
+ * Max value in one core. Missing entries read as
+ * zero, so short slices stay quiet with no trap.
+ */
+pub fn core_max(vals: &[u64], core: &[u32]) -> u64 {
+    let mut m = 0u64;
+    for &cpu in core {
+        let v = vals.get(cpu as usize).copied().unwrap_or(0);
+        if v > m {
+            m = v;
+        }
+    }
+    m
+}
+
+/*
+ * Assign groups by core split. Keeps siblings in one
+ * group. First half of cores is light, rest is hog,
+ * so an odd core count gives the extra core to hog.
+ * Single CPU keeps all light. Single core with more
+ * than one CPU falls back to halves, so no group
+ * stays empty with no trap. Missing CPUs keep halves.
+ */
+pub fn assign_cores_split(cores: &[Vec<u32>], nr: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nr);
+    for cpu in 0..nr {
+        out.push(group_of_cpu(cpu as u32, nr));
+    }
+    if nr <= 1 {
+        return out;
+    }
+    let live: Vec<&Vec<u32>> = cores.iter().filter(|c| !c.is_empty()).collect();
+    if live.len() <= 1 {
+        return out;
+    }
+    let half = live.len() / 2;
+    for (pos, core) in live.iter().enumerate() {
+        let g = if pos < half { GROUP_LIGHT } else { GROUP_HOG };
+        for &cpu in core.iter() {
+            if (cpu as usize) < nr {
+                out[cpu as usize] = g;
+            }
+        }
+    }
+    out
+}
+
+/*
+ * Assign groups by hetero core interleave. Sorts cores
+ * by max capacity plus max frequency plus least id,
+ * then assigns even slots to light and odd slots to
+ * hog. Odd core counts give the extra core to hog, so
+ * counts match the split bias with no knob. Spreads
+ * fast cores across both groups. Single CPU keeps all
+ * light. Single core falls back to CPU interleave, so
+ * no group stays empty with no trap.
+ */
+pub fn assign_cores_interleave(
+    cores: &[Vec<u32>],
+    caps: &[u64],
+    freqs: &[u64],
+    nr: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nr);
+    for cpu in 0..nr {
+        out.push(group_of_cpu(cpu as u32, nr));
+    }
+    if nr <= 1 {
+        return out;
+    }
+    let live: Vec<&Vec<u32>> = cores.iter().filter(|c| !c.is_empty()).collect();
+    if live.len() <= 1 {
+        let n = nr.min(caps.len().min(freqs.len()));
+        if n <= 1 {
+            return out;
+        }
+        let live_caps: Vec<u64> = caps[..n].to_vec();
+        let live_freqs: Vec<u64> = freqs[..n].to_vec();
+        let flat = assign_sorted_interleave(&live_caps, &live_freqs, n);
+        for (cpu, g) in flat.iter().enumerate() {
+            if cpu < nr {
+                out[cpu] = *g;
+            }
+        }
+        return out;
+    }
+    let mut order: Vec<usize> = (0..live.len()).collect();
+    order.sort_by(|&a, &b| {
+        let ca = core_max(caps, live[a]);
+        let cb = core_max(caps, live[b]);
+        cb.cmp(&ca)
+            .then_with(|| {
+                let fa = core_max(freqs, live[a]);
+                let fb = core_max(freqs, live[b]);
+                fb.cmp(&fa)
+            })
+            .then_with(|| live[a][0].cmp(&live[b][0]))
+    });
+    for (pos, &ci) in order.iter().enumerate() {
+        let g = if pos % 2 == 1 || (live.len() % 2 == 1 && pos + 1 == live.len()) {
+            GROUP_HOG
+        } else {
+            GROUP_LIGHT
+        };
+        for &cpu in live[ci].iter() {
+            if (cpu as usize) < nr {
+                out[cpu as usize] = g;
+            }
+        }
+    }
+    out
+}
+
+/*
+ * Assign groups with LLC rules. One LLC splits cores
+ * globally. Two plus N LLCs split cores in each LLC,
+ * so each cache domain stays balanced. Cores take the
+ * LLC of the least id. Missing LLC folds to one domain
+ * with no pad. All singleton cores bypass LLC and use
+ * the prior halves plus interleave exactly, so SMT off
+ * keeps state equivalence. Empty group falls back to
+ * global, so no group stays empty with no trap.
+ */
+pub fn assign_by_llc(
+    cores: &[Vec<u32>],
+    llc: &[u32],
+    caps: &[u64],
+    freqs: &[u64],
+    nr: usize,
+    hetero: bool,
+) -> Vec<u8> {
+    if nr <= 1 {
+        return vec![GROUP_LIGHT; nr];
+    }
+    if cores_are_singletons(cores) {
+        if hetero {
+            let n = nr.min(caps.len().min(freqs.len()));
+            if n <= 1 {
+                let mut out = vec![GROUP_LIGHT; nr];
+                for (cpu, slot) in out.iter_mut().enumerate() {
+                    *slot = group_of_cpu(cpu as u32, nr);
+                }
+                return out;
+            }
+            let live_caps: Vec<u64> = caps[..n].to_vec();
+            let live_freqs: Vec<u64> = freqs[..n].to_vec();
+            let flat = assign_sorted_interleave(&live_caps, &live_freqs, n);
+            let mut out = vec![GROUP_LIGHT; nr];
+            for (cpu, g) in flat.iter().enumerate() {
+                if cpu < nr {
+                    out[cpu] = *g;
+                }
+            }
+            for (cpu, slot) in out.iter_mut().enumerate().skip(n) {
+                *slot = group_of_cpu(cpu as u32, nr);
+            }
+            return out;
+        }
+        let mut out = vec![GROUP_LIGHT; nr];
+        for (cpu, slot) in out.iter_mut().enumerate() {
+            *slot = group_of_cpu(cpu as u32, nr);
+        }
+        return out;
+    }
+    use std::collections::BTreeMap;
+    let live_cores: Vec<Vec<u32>> = cores.iter().filter(|c| !c.is_empty()).cloned().collect();
+    if live_cores.is_empty() {
+        let mut out = vec![GROUP_LIGHT; nr];
+        for (cpu, slot) in out.iter_mut().enumerate() {
+            *slot = group_of_cpu(cpu as u32, nr);
+        }
+        return out;
+    }
+    let mut llc_of_core: Vec<u32> = Vec::with_capacity(live_cores.len());
+    for core in &live_cores {
+        let first = core[0] as usize;
+        let id = llc.get(first).copied().unwrap_or(0);
+        llc_of_core.push(id);
+    }
+    let mut distinct: Vec<u32> = llc_of_core.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if llc.len() < nr && distinct.len() > 1 {
+        distinct = vec![0];
+    }
+    if distinct.len() <= 1 {
+        if hetero {
+            return assign_cores_interleave(&live_cores, caps, freqs, nr);
+        }
+        return assign_cores_split(&live_cores, nr);
+    }
+    let mut by_llc: BTreeMap<u32, Vec<Vec<u32>>> = BTreeMap::new();
+    for (i, core) in live_cores.iter().enumerate() {
+        let id = llc_of_core[i];
+        by_llc.entry(id).or_default().push(core.clone());
+    }
+    let mut out = vec![GROUP_LIGHT; nr];
+    for subset in by_llc.values() {
+        let mut ordered: Vec<Vec<u32>> = subset.clone();
+        ordered.sort_by_key(|c| c[0]);
+        if hetero {
+            ordered.sort_by(|a, b| {
+                let ca = core_max(caps, a);
+                let cb = core_max(caps, b);
+                cb.cmp(&ca)
+                    .then_with(|| {
+                        let fa = core_max(freqs, a);
+                        let fb = core_max(freqs, b);
+                        fb.cmp(&fa)
+                    })
+                    .then_with(|| a[0].cmp(&b[0]))
+            });
+            if ordered.len() <= 1 {
+                continue;
+            }
+            for (pos, core) in ordered.iter().enumerate() {
+                let g = if pos % 2 == 1 || (ordered.len() % 2 == 1 && pos + 1 == ordered.len()) {
+                    GROUP_HOG
+                } else {
+                    GROUP_LIGHT
+                };
+                for &cpu in core {
+                    if (cpu as usize) < nr {
+                        out[cpu as usize] = g;
+                    }
+                }
+            }
+        } else {
+            if ordered.len() <= 1 {
+                continue;
+            }
+            let half = ordered.len() / 2;
+            for (pos, core) in ordered.iter().enumerate() {
+                let g = if pos < half { GROUP_LIGHT } else { GROUP_HOG };
+                for &cpu in core {
+                    if (cpu as usize) < nr {
+                        out[cpu as usize] = g;
+                    }
+                }
+            }
+        }
+    }
+    let light_n = out.iter().filter(|&&g| g == GROUP_LIGHT).count();
+    let hog_n = out.iter().filter(|&&g| g == GROUP_HOG).count();
+    if light_n == 0 || hog_n == 0 {
+        if hetero {
+            return assign_cores_interleave(&live_cores, caps, freqs, nr);
+        }
+        return assign_cores_split(&live_cores, nr);
+    }
+    out
+}
+
+/*
+ * Seed the per CPU group table with topology. Builds
+ * cores from sibling lists with union find, then
+ * assigns with LLC rules plus hetero interleave. All
+ * singleton cores use the prior halves plus interleave
+ * exactly. Uniform hosts keep ready cleared when the
+ * core view matches halves, else ready set with best
+ * effort. Short slices clamp with no pad. Single CPU
+ * keeps ready cleared with all light.
+ */
+pub fn seed_groups_topology(
+    caps: &[u64],
+    freqs: &[u64],
+    nr: usize,
+    lists: &[Vec<u32>],
+    llc: &[u32],
+) -> ([u8; GROUP_TABLE_LEN], u8) {
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    if nr <= 1 {
+        return (table, 0);
+    }
+    let n = nr.min(GROUP_TABLE_LEN);
+    let cores = build_cores(n, lists);
+    if cores_are_singletons(&cores) {
+        return seed_groups(caps, freqs, n);
+    }
+    let avail = caps.len().min(freqs.len());
+    let m = n.min(avail);
+    if m <= 1 {
+        return (table, 0);
+    }
+    let live_caps: Vec<u64> = caps[..m].to_vec();
+    let live_freqs: Vec<u64> = freqs[..m].to_vec();
+    let hetero = hetero_needed(&live_caps, &live_freqs);
+    let assign = assign_by_llc(&cores, llc, caps, freqs, n, hetero);
+    if !hetero {
+        let mut same = true;
+        for (cpu, g) in assign.iter().enumerate().take(n) {
+            if *g != group_of_cpu(cpu as u32, n) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return (table, 0);
+        }
+    }
+    for (cpu, g) in assign.iter().enumerate() {
+        if cpu < GROUP_TABLE_LEN {
+            table[cpu] = *g;
+        }
+    }
+    (table, 1)
+}
+
+/*
+ * Sibling ring for free core checks. Each CPU maps to
+ * the next CPU in the same core, ring order by id.
+ * Singletons map to none, so the check is a no-op.
+ * Capped at 1024 with no trap.
+ */
+pub fn sibling_ring(cores: &[Vec<u32>], nr: usize) -> Vec<i32> {
+    let mut out = vec![SIBLING_NONE; nr];
+    for core in cores {
+        if core.len() <= 1 {
+            continue;
+        }
+        let mut sorted = core.clone();
+        sorted.sort_unstable();
+        for (i, &cpu) in sorted.iter().enumerate() {
+            if (cpu as usize) >= nr {
+                continue;
+            }
+            let nxt = sorted[(i + 1) % sorted.len()];
+            if (nxt as usize) >= nr {
+                continue;
+            }
+            out[cpu as usize] = nxt as i32;
+        }
+    }
+    out
 }
 
 /*
