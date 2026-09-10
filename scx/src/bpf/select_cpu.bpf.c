@@ -41,7 +41,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		group = (u8)FLOW_GROUP_LIGHT;
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0 && flow_cpu_ok(p, picked)) {
-		u8 g = flow_group_of_cpu((u32)picked,
+		u8 g = flow_group_live((u32)picked,
 		    nr_cpu_ids);
 		if (g == group)
 			return picked;
@@ -49,13 +49,13 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		    &flow_stats.group_steal_skipped, 1);
 	}
 	if (flow_cpu_ok(p, prev_cpu)) {
-		u8 g = flow_group_of_cpu((u32)prev_cpu,
+		u8 g = flow_group_live((u32)prev_cpu,
 		    nr_cpu_ids);
 		if (g == group)
 			return prev_cpu;
 	}
 	if (flow_cpu_ok(p, this_cpu)) {
-		u8 g = flow_group_of_cpu((u32)this_cpu,
+		u8 g = flow_group_live((u32)this_cpu,
 		    nr_cpu_ids);
 		if (g == group)
 			return this_cpu;

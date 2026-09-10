@@ -368,7 +368,7 @@
      * plus the running estimate and the pid. Freq
      * unknown stays plain with no zero print. No
      * sibling stays plain with no badge. Group shows
-     * light for low half and hog for high half. */
+     * live table when ready, else halves. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];

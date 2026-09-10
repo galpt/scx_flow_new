@@ -54,11 +54,11 @@ fn parks_are_per_group_at_5000_plus_5001() {
 }
 
 #[test]
-fn perf_is_1024_light_plus_512_hog() {
+fn perf_is_1024_for_both_groups() {
     assert_eq!(PERF_LIGHT, 1024);
-    assert_eq!(PERF_HOG, 512);
+    assert_eq!(PERF_HOG, 1024);
     assert_eq!(perf_for_group(GROUP_LIGHT), 1024);
-    assert_eq!(perf_for_group(GROUP_HOG), 512);
+    assert_eq!(perf_for_group(GROUP_HOG), 1024);
     assert_eq!(perf_for_group(9), 1024);
 }
 
@@ -69,6 +69,9 @@ fn window_consts_match_spec() {
     assert_eq!(DEMOTE_BURST_NS, 4_000_000);
     assert_eq!(PROMOTE_BURN_NS, 4_000_000);
     assert_eq!(PROMOTE_WINS, 64);
+    assert_eq!(PROMOTE_WAKE_HITS, 8);
+    assert_eq!(WAKE_SHORT_NS, 1_000_000);
+    assert_eq!(HETERO_SPREAD_PCT, 10);
     assert_eq!(PINNED_INFLATE_NS, 8_000_000);
     assert_eq!(WIN_NS, 64 * 500_000);
     assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 2_048_000_000);
@@ -94,6 +97,23 @@ fn window_consts_match_spec() {
         PINNED_INFLATE_NS,
         crate::bpf_intf::flow_consts_FLOW_PINNED_INFLATE_NS as u64
     );
+    assert_eq!(
+        PROMOTE_WAKE_HITS as u64,
+        crate::bpf_intf::flow_consts_FLOW_PROMOTE_WAKE_HITS as u64
+    );
+    assert_eq!(
+        WAKE_SHORT_NS,
+        crate::bpf_intf::flow_consts_FLOW_WAKE_SHORT_NS as u64
+    );
+    assert_eq!(
+        HETERO_SPREAD_PCT,
+        crate::bpf_intf::flow_consts_FLOW_HETERO_SPREAD_PCT as u64
+    );
+    assert_eq!(PERF_HOG, crate::bpf_intf::flow_consts_FLOW_PERF_HOG as u32);
+    assert_eq!(
+        PERF_LIGHT,
+        crate::bpf_intf::flow_consts_FLOW_PERF_LIGHT as u32
+    );
 }
 
 #[test]
@@ -104,6 +124,7 @@ fn cold_starts_light_with_no_window() {
     assert_eq!(st.win_start, 0);
     assert_eq!(st.burn, 0);
     assert_eq!(st.low_runs, 0);
+    assert_eq!(st.wake_hits, 0);
     assert!(!win_ready(1_000_000_000, 0));
     assert!(!win_ready(0, 0));
     assert!(!burn_hot(0));
@@ -215,18 +236,19 @@ fn hog_needs_64_low_wins_near_2s() {
         win_start: 100_000_000,
         burn: 0,
         low_runs: 0,
+        wake_hits: 0,
     };
     let mut now = st.win_start;
     for i in 0..63 {
         now += WIN_NS + 1;
-        let (d, p) = classify_step(&mut st, now, 500_000);
+        let (d, p) = classify_step(&mut st, now, 2_000_000);
         assert!(!d);
         assert!(!p, "promote early at {i}");
         assert_eq!(st.group, GROUP_HOG);
     }
     assert_eq!(st.low_runs, 63);
     now += WIN_NS + 1;
-    let (d, p) = classify_step(&mut st, now, 500_000);
+    let (d, p) = classify_step(&mut st, now, 2_000_000);
     assert!(!d);
     assert!(p);
     assert_eq!(st.group, GROUP_LIGHT);
@@ -240,6 +262,7 @@ fn middle_burn_breaks_streak_with_no_move() {
         win_start: 100_000_000,
         burn: 0,
         low_runs: 10,
+        wake_hits: 0,
     };
     let now = st.win_start + WIN_NS + 1;
     let mid: u64 = 8_000_000;
@@ -259,6 +282,7 @@ fn hog_burst_breaks_streak_with_no_promote() {
         win_start: 100_000_000,
         burn: 0,
         low_runs: 60,
+        wake_hits: 0,
     };
     let (d, p) = classify_step(&mut st, 101_000_000, 4_000_000);
     assert!(!d);
@@ -349,4 +373,336 @@ fn burn_add_caps_at_max() {
     assert_eq!(burn_add(0, 1_000_000), 1_000_000);
     assert_eq!(burn_add(u32::MAX, 1_000_000), u32::MAX);
     assert_eq!(burn_add(u32::MAX - 10, 100), u32::MAX);
+}
+
+#[test]
+fn wake_short_needs_1ms() {
+    assert!(wake_short(0));
+    assert!(wake_short(500_000));
+    assert!(wake_short(WAKE_SHORT_NS - 1));
+    assert!(!wake_short(WAKE_SHORT_NS));
+    assert!(!wake_short(WAKE_SHORT_NS + 1));
+    assert!(!wake_short(4_000_000));
+}
+
+#[test]
+fn wake_ready_needs_8_hits() {
+    assert!(!wake_ready(0));
+    assert!(!wake_ready(7));
+    assert!(wake_ready(8));
+    assert!(wake_ready(9));
+    assert!(wake_ready(u16::MAX));
+    assert_eq!(PROMOTE_WAKE_HITS, 8);
+}
+
+#[test]
+fn eight_short_blocks_promote_hog_to_light() {
+    let mut st = GroupState {
+        group: GROUP_HOG,
+        win_start: 100_000_000,
+        burn: 0,
+        low_runs: 0,
+        wake_hits: 0,
+    };
+    let mut now = 100_000_000;
+    for i in 0..7 {
+        now += 1_000_000;
+        let (d, p) = classify_step(&mut st, now, 200_000);
+        assert!(!d);
+        assert!(!p, "promote early at {i}");
+        assert_eq!(st.group, GROUP_HOG);
+    }
+    assert_eq!(st.wake_hits, 7);
+    now += 1_000_000;
+    let (d, p) = classify_step(&mut st, now, 200_000);
+    assert!(!d);
+    assert!(p);
+    assert_eq!(st.group, GROUP_LIGHT);
+    assert_eq!(st.wake_hits, 0);
+    assert_eq!(st.low_runs, 0);
+}
+
+#[test]
+fn middle_window_preserves_wake_hits() {
+    let mut st = GroupState {
+        group: GROUP_HOG,
+        win_start: 100_000_000,
+        burn: 0,
+        low_runs: 0,
+        wake_hits: 5,
+    };
+    let now = 100_000_000 + 1_000_000;
+    assert!(!win_ready(now, st.win_start));
+    let (d, p) = classify_step(&mut st, now, 500_000);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(st.group, GROUP_HOG);
+    assert_eq!(st.wake_hits, 6);
+    let mut fresh = GroupState {
+        group: GROUP_HOG,
+        win_start: 0,
+        burn: 0,
+        low_runs: 0,
+        wake_hits: 3,
+    };
+    let (d2, p2) = classify_step(&mut fresh, 200_000_000, 500_000);
+    assert!(!d2);
+    assert!(!p2);
+    assert_eq!(fresh.wake_hits, 4);
+}
+
+#[test]
+fn burn_gated_anti_game_breaks_wake_streak() {
+    let mut st = GroupState {
+        group: GROUP_HOG,
+        win_start: 100_000_000,
+        burn: 0,
+        low_runs: 0,
+        wake_hits: 7,
+    };
+    let (d, p) = classify_step(&mut st, 101_000_000, 4_000_000);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(st.wake_hits, 0);
+    let mut hot = GroupState {
+        group: GROUP_HOG,
+        win_start: 100_000_000,
+        burn: 10_000_000,
+        low_runs: 0,
+        wake_hits: 7,
+    };
+    let now = 100_000_000 + WIN_NS + 1;
+    let (d2, p2) = classify_step(&mut hot, now, 500_000);
+    assert!(!d2);
+    assert!(!p2);
+    assert_eq!(hot.group, GROUP_HOG);
+    assert_eq!(hot.wake_hits, 0);
+}
+
+#[test]
+fn slow_64_win_path_stays_intact_with_wake() {
+    let mut st = GroupState {
+        group: GROUP_HOG,
+        win_start: 100_000_000,
+        burn: 0,
+        low_runs: 0,
+        wake_hits: 0,
+    };
+    let mut now = st.win_start;
+    for _ in 0..64 {
+        now += WIN_NS + 1;
+        let _ = classify_step(&mut st, now, 2_000_000);
+    }
+    assert_eq!(st.group, GROUP_LIGHT);
+    let mut burst = GroupState::cold();
+    burst.win_start = 100_000_000;
+    let (d, _) = classify_step(&mut burst, 101_000_000, 4_000_000);
+    assert!(d);
+    assert_eq!(burst.wake_hits, 0);
+}
+
+#[test]
+fn task_state_stays_48_with_wake_at_46() {
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
+    let base = std::mem::MaybeUninit::<crate::bpf_intf::flow_task_ctx>::uninit();
+    let ptr = base.as_ptr();
+    let off = unsafe { std::ptr::addr_of!((*ptr).wake_hits) as usize - ptr as usize };
+    assert_eq!(off, 46);
+    assert_eq!(
+        crate::bpf_intf::flow_consts_FLOW_PROMOTE_WAKE_HITS as u64,
+        8
+    );
+}
+
+#[test]
+fn park_per_task_recheck_keeps_only_thief_group() {
+    let light = |g: u8| GroupTask {
+        allowed: vec![true, true],
+        live: true,
+        fail: false,
+        group: g,
+    };
+    let mut q = VecDeque::from([light(GROUP_LIGHT), light(GROUP_HOG), light(GROUP_LIGHT)]);
+    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
+    assert_eq!(moved, 2);
+    assert_eq!(skipped, 1);
+    assert_eq!(q.len(), 1);
+    let mut q2 = VecDeque::from([light(GROUP_HOG), light(GROUP_HOG)]);
+    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_LIGHT, 32);
+    assert_eq!(m2, 0);
+    assert_eq!(s2, 2);
+}
+
+#[test]
+fn peer_per_task_recheck_skips_stale_cross() {
+    let mk = |g: u8, allow: bool| GroupTask {
+        allowed: vec![allow, true],
+        live: true,
+        fail: false,
+        group: g,
+    };
+    let mut q = VecDeque::from([mk(GROUP_HOG, true), mk(GROUP_LIGHT, true)]);
+    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
+    assert_eq!(moved, 1);
+    assert_eq!(skipped, 1);
+    assert_eq!(q.len(), 1);
+    assert_eq!(q[0].group, GROUP_HOG);
+    assert!(group_task_ok(0, GROUP_LIGHT, &mk(GROUP_LIGHT, true)));
+    assert!(!group_task_ok(0, GROUP_LIGHT, &mk(GROUP_HOG, true)));
+}
+
+#[test]
+fn null_storage_defaults_to_light() {
+    let bad = GroupTask {
+        allowed: vec![true, true],
+        live: true,
+        fail: false,
+        group: 7,
+    };
+    assert!(group_task_ok(0, GROUP_LIGHT, &bad));
+    assert!(!group_task_ok(0, GROUP_HOG, &bad));
+    let mut q = VecDeque::from([bad.clone()]);
+    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
+    assert_eq!(moved, 1);
+    assert_eq!(skipped, 0);
+    let mut q2 = VecDeque::from([bad]);
+    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_HOG, 32);
+    assert_eq!(m2, 0);
+    assert_eq!(s2, 1);
+}
+
+#[test]
+fn mask_fail_never_counts_as_group_skip() {
+    let cross_mask_fail = GroupTask {
+        allowed: vec![false, false],
+        live: true,
+        fail: false,
+        group: GROUP_HOG,
+    };
+    let mut q = VecDeque::from([cross_mask_fail]);
+    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
+    assert_eq!(moved, 0);
+    assert_eq!(skipped, 0);
+    assert_eq!(q.len(), 1);
+    let dead_cross = GroupTask {
+        allowed: vec![true, true],
+        live: false,
+        fail: false,
+        group: GROUP_HOG,
+    };
+    let mut q2 = VecDeque::from([dead_cross]);
+    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_LIGHT, 32);
+    assert_eq!(m2, 0);
+    assert_eq!(s2, 0);
+}
+
+#[test]
+fn spread_needs_10pct() {
+    assert!(!spread_exceeds(&[]));
+    assert!(!spread_exceeds(&[100]));
+    assert!(!spread_exceeds(&[100, 100]));
+    assert!(!spread_exceeds(&[100, 105]));
+    assert!(!spread_exceeds(&[1000, 1000]));
+    assert!(spread_exceeds(&[100, 200]));
+    assert!(!spread_exceeds(&[900, 1000]));
+    assert!(spread_exceeds(&[899, 1000]));
+    assert!(spread_exceeds(&[1024, 512]));
+    assert!(!spread_exceeds(&[0, 0]));
+    assert!(!spread_exceeds(&[4787082, 4787082]));
+    assert!(spread_exceeds(&[4000000, 4787082]));
+}
+
+#[test]
+fn hetero_needed_checks_both_signals() {
+    assert!(!hetero_needed(&[1024, 1024], &[4787082, 4787082]));
+    assert!(hetero_needed(&[1024, 512], &[4787082, 4787082]));
+    assert!(hetero_needed(&[1024, 1024], &[4000000, 4787082]));
+    assert!(hetero_needed(&[1024, 512], &[4000000, 4787082]));
+    assert!(!hetero_needed(&[], &[]));
+    assert!(!hetero_needed(&[0, 0], &[0, 0]));
+}
+
+#[test]
+fn sorted_interleave_spreads_fast_across_groups() {
+    let caps = vec![1024, 1024, 512, 512];
+    let freqs = vec![4000000, 4000000, 4000000, 4000000];
+    let out = assign_sorted_interleave(&caps, &freqs, 4);
+    assert_eq!(out.len(), 4);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_LIGHT).count(), 2);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_HOG).count(), 2);
+    let caps2 = vec![1024, 512, 1024, 512];
+    let freqs2 = vec![5000000, 4000000, 5000000, 4000000];
+    let out2 = assign_sorted_interleave(&caps2, &freqs2, 4);
+    assert_eq!(out2[0], GROUP_LIGHT);
+    assert_eq!(out2[2], GROUP_HOG);
+    let single = assign_sorted_interleave(&[1024], &[4000000], 1);
+    assert_eq!(single, vec![GROUP_LIGHT]);
+}
+
+#[test]
+fn halves_fallback_when_uniform_or_single() {
+    let (t1, r1) = seed_groups(
+        &[1024, 1024, 1024, 1024],
+        &[4000000, 4000000, 4000000, 4000000],
+        4,
+    );
+    assert_eq!(r1, 0);
+    assert!(t1.iter().all(|&g| g == GROUP_LIGHT));
+    let (t2, r2) = seed_groups(&[1024], &[4000000], 1);
+    assert_eq!(r2, 0);
+    assert_eq!(t2[0], GROUP_LIGHT);
+    let (t3, r3) = seed_groups(&[1024, 512], &[4000000, 4000000], 2);
+    assert_eq!(r3, 1);
+    assert_ne!(t3[0], t3[1]);
+}
+
+#[test]
+fn group_live_mirrors_fallback_when_not_ready() {
+    let table = [GROUP_HOG; GROUP_TABLE_LEN];
+    assert_eq!(group_live(0, 4, &table, 0), group_of_cpu(0, 4));
+    assert_eq!(group_live(3, 4, &table, 0), group_of_cpu(3, 4));
+    assert_eq!(group_live(0, 1, &table, 0), GROUP_LIGHT);
+    let mut good = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    good[0] = GROUP_LIGHT;
+    good[1] = GROUP_HOG;
+    assert_eq!(group_live(0, 2, &good, 1), GROUP_LIGHT);
+    assert_eq!(group_live(1, 2, &good, 1), GROUP_HOG);
+    let mut bad = [7u8; GROUP_TABLE_LEN];
+    bad[0] = 7;
+    assert_eq!(group_live(0, 2, &bad, 1), GROUP_LIGHT);
+}
+
+#[test]
+fn seed_groups_sets_ready_only_when_hetero() {
+    let hetero_caps = vec![1024, 1024, 1024, 1024, 512, 512, 512, 512];
+    let hetero_freqs = vec![4787082; 8];
+    let (t, r) = seed_groups(&hetero_caps, &hetero_freqs, 8);
+    assert_eq!(r, 1);
+    assert_eq!(t[..8].iter().filter(|&&g| g == GROUP_LIGHT).count(), 4);
+    assert_eq!(t[..8].iter().filter(|&&g| g == GROUP_HOG).count(), 4);
+    assert_eq!(t.iter().filter(|&&g| g == GROUP_LIGHT).count(), 1020);
+    let uniform_caps = vec![1024; 8];
+    let uniform_freqs = vec![4787082; 8];
+    let (_, r2) = seed_groups(&uniform_caps, &uniform_freqs, 8);
+    assert_eq!(r2, 0);
+}
+
+#[test]
+fn first_in_group_live_uses_table_when_ready() {
+    let all = vec![true; 4];
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    table[0] = GROUP_HOG;
+    table[1] = GROUP_HOG;
+    table[2] = GROUP_LIGHT;
+    table[3] = GROUP_LIGHT;
+    assert_eq!(
+        first_in_group_live(&all, GROUP_LIGHT, 4, &table, 1),
+        Some(2)
+    );
+    assert_eq!(first_in_group_live(&all, GROUP_HOG, 4, &table, 1), Some(0));
+    assert_eq!(
+        first_in_group_live(&all, GROUP_LIGHT, 4, &table, 0),
+        Some(0)
+    );
+    assert_eq!(first_in_group_live(&all, GROUP_HOG, 4, &table, 0), Some(2));
 }

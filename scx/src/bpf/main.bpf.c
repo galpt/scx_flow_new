@@ -21,6 +21,11 @@ struct {
 } cpu_state_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
+/* Per CPU group table seeded by userspace at attach. */
+/* Ready is zero until the table holds live groups. */
+/* Halves is the fallback while ready is zero. */
+volatile u8 flow_group_by_cpu[1024];
+volatile u8 flow_group_ready;
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -96,6 +101,26 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_est = 0;
 	st->running_pid = 0;
 }
+/* Live group of one CPU from table plus halves fallback. */
+/* Reads the table when ready holds groups, else halves. */
+/* Bad values fall back to halves with no trap. */
+static __always_inline u8 flow_group_live(u32 cpu,
+	u64 nr)
+{
+	u8 g;
+	if (!flow_group_ready)
+		return flow_group_of_cpu(cpu, nr);
+	if ((u32)cpu >= (u32)FLOW_MAX_CPUS)
+		return flow_group_of_cpu(cpu, nr);
+	if ((u64)cpu >= nr)
+		return flow_group_of_cpu(cpu, nr);
+	g = flow_group_by_cpu[cpu];
+	if (g == (u8)FLOW_GROUP_HOG)
+		return (u8)FLOW_GROUP_HOG;
+	if (g == (u8)FLOW_GROUP_LIGHT)
+		return (u8)FLOW_GROUP_LIGHT;
+	return flow_group_of_cpu(cpu, nr);
+}
 /* First allowed CPU in one group in id order. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
@@ -109,7 +134,7 @@ static __always_inline s32 flow_first_in_group(
 			break;
 		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 			break;
-		g = flow_group_of_cpu((u32)cpu,
+		g = flow_group_live((u32)cpu,
 		    nr_cpu_ids);
 		if (g != group)
 			continue;
@@ -167,7 +192,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->running_est = 0;
 		st->running_pid = 0;
 		st->cursor = (u32)cpu;
-		group = flow_group_of_cpu((u32)cpu, n);
+		group = flow_group_live((u32)cpu, n);
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
 			    flow_perf_for_group(group));

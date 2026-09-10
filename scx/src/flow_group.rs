@@ -5,10 +5,12 @@
  * Group helpers for the flow scheduler.
  * Two groups split CPUs by id halves with extra
  * to hog. Light holds short waits. Hog holds burn.
- * The classifier uses burn only with a 32ms window.
- * Demote needs 16ms burn or one 4ms burst. Promote
- * needs 4ms low for 64 wins near 2s. Cold tasks join
- * light. The 4x gap keeps flips rare.
+ * The classifier uses burn with a 32ms window plus
+ * wake hits. Demote needs 16ms burn or one 4ms burst.
+ * Promote needs 4ms low for 64 wins near 2s or 8 short
+ * blocks below 1ms with low burn. Cold tasks join
+ * light. The 4x gap keeps flips rare. A per CPU table
+ * holds live groups when ready, else halves applies.
  */
 
 /* Count of groups. Fixed at two with no knob. */
@@ -42,15 +44,26 @@ pub const PROMOTE_WINS: u8 = 64;
 /* Extra deadline in nanos at 8ms for pinned hog. */
 #[cfg(test)]
 pub const PINNED_INFLATE_NS: u64 = 8_000_000;
+/* Short block in nanos below 1ms for wake. */
+#[cfg(test)]
+pub const WAKE_SHORT_NS: u64 = 1_000_000;
+/* Short blocks needed for one fast promote. */
+#[cfg(test)]
+pub const PROMOTE_WAKE_HITS: u16 = 8;
+/* Spread in percent above 10pct for hetero. */
+pub const HETERO_SPREAD_PCT: u64 = 10;
+/* Length of the per CPU group table. */
+pub const GROUP_TABLE_LEN: usize = 1024;
 /* Perf hint of light at max. */
 #[cfg(test)]
 pub const PERF_LIGHT: u32 = 1024;
-/* Perf hint of hog at half. */
+/* Perf hint of hog at max. */
 #[cfg(test)]
-pub const PERF_HOG: u32 = 512;
+pub const PERF_HOG: u32 = 1024;
 
 /*
  * Group of one CPU by id halves with extra to hog.
+ * Halves is the fallback when the table is not ready.
  * One or no CPUs keeps all light. Otherwise the low
  * half is light and the high half is hog, so an odd
  * count gives the extra CPU to hog.
@@ -63,6 +76,115 @@ pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
         return GROUP_LIGHT;
     }
     GROUP_HOG
+}
+
+/*
+ * Live group of one CPU from table plus halves fallback.
+ * Reads the table when ready holds groups, else halves.
+ * Bad values fall back to halves with no trap. Mirrors
+ * the BPF live helper for snapshot use.
+ */
+pub fn group_live(cpu: u32, nr: usize, table: &[u8], ready: u8) -> u8 {
+    if ready != 0 && (cpu as usize) < nr && (cpu as usize) < table.len() {
+        let g = table[cpu as usize];
+        if g == GROUP_HOG {
+            return GROUP_HOG;
+        }
+        if g == GROUP_LIGHT {
+            return GROUP_LIGHT;
+        }
+    }
+    group_of_cpu(cpu, nr)
+}
+
+/*
+ * True when values spread past 10pct. Needs max past
+ * min by more than 10pct of max, so uniform hosts stay
+ * plain. Empty plus single plus zero max stays false.
+ */
+pub fn spread_exceeds(vals: &[u64]) -> bool {
+    if vals.len() < 2 {
+        return false;
+    }
+    let mut min = u64::MAX;
+    let mut max = 0u64;
+    for &v in vals {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+    }
+    if max == 0 {
+        return false;
+    }
+    (max - min) as u128 * 100 > max as u128 * HETERO_SPREAD_PCT as u128
+}
+
+/*
+ * True when capacity or frequency spreads past 10pct.
+ * Either signal marks hetero, so one-sided skew still
+ * seeds the table. Short slices clamp to live CPUs.
+ */
+pub fn hetero_needed(caps: &[u64], freqs: &[u64]) -> bool {
+    spread_exceeds(caps) || spread_exceeds(freqs)
+}
+
+/*
+ * Assign groups by sorted interleave. Sorts live CPUs
+ * by capacity plus frequency plus id, then assigns even
+ * slots to light and odd slots to hog. The order spreads
+ * fast CPUs across both groups with no knob. Halves is
+ * the fallback when the table is not ready. Single CPU
+ * keeps all light.
+ */
+pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u8> {
+    let mut idx: Vec<usize> = (0..nr).collect();
+    idx.sort_by(|&a, &b| {
+        let ca = caps.get(a).copied().unwrap_or(0);
+        let cb = caps.get(b).copied().unwrap_or(0);
+        cb.cmp(&ca)
+            .then_with(|| {
+                let fa = freqs.get(a).copied().unwrap_or(0);
+                let fb = freqs.get(b).copied().unwrap_or(0);
+                fb.cmp(&fa)
+            })
+            .then_with(|| a.cmp(&b))
+    });
+    let mut out = vec![GROUP_LIGHT; nr];
+    for (pos, cpu) in idx.iter().enumerate() {
+        if nr > 1 && pos % 2 == 1 {
+            out[*cpu] = GROUP_HOG;
+        } else {
+            out[*cpu] = GROUP_LIGHT;
+        }
+    }
+    out
+}
+
+/*
+ * Seed the per CPU group table plus ready flag. Returns
+ * interleaved groups with ready set when hetero holds.
+ * Returns halves with ready cleared when hosts look
+ * uniform, so the BPF side plus snapshot stay on halves.
+ */
+pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_LEN], u8) {
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    if nr <= 1 {
+        return (table, 0);
+    }
+    let n = nr.min(GROUP_TABLE_LEN);
+    let live_caps: Vec<u64> = (0..n).map(|i| caps.get(i).copied().unwrap_or(0)).collect();
+    let live_freqs: Vec<u64> = (0..n).map(|i| freqs.get(i).copied().unwrap_or(0)).collect();
+    if !hetero_needed(&live_caps, &live_freqs) {
+        return (table, 0);
+    }
+    let assign = assign_sorted_interleave(&live_caps, &live_freqs, n);
+    for (cpu, g) in assign.iter().enumerate() {
+        table[cpu] = *g;
+    }
+    (table, 1)
 }
 
 /*
@@ -79,8 +201,8 @@ pub fn park_for_group(group: u8) -> u64 {
 }
 
 /*
- * Perf hint of one group with light at max. Hog
- * uses half. Any other value uses max.
+ * Perf hint of one group with single policy at max.
+ * Light plus hog use max. Any other value uses max.
  */
 #[cfg(test)]
 pub fn perf_for_group(group: u8) -> u32 {
@@ -135,6 +257,26 @@ pub fn burn_low(burn: u32) -> bool {
 }
 
 /*
+ * True when one block is short below 1ms for wake.
+ * Short blocks count toward fast promote with low
+ * burn, so brief waits return to light quickly.
+ */
+#[cfg(test)]
+pub fn wake_short(delta: u64) -> bool {
+    delta < WAKE_SHORT_NS
+}
+
+/*
+ * True when wake hits reach 8 for fast promote.
+ * Eight qualifying short blocks move hog to light
+ * at once with no wait for 64 wins.
+ */
+#[cfg(test)]
+pub fn wake_ready(hits: u16) -> bool {
+    (hits as u64) >= PROMOTE_WAKE_HITS as u64
+}
+
+/*
  * Deadline with pinned hog extra of 8ms. The sum
  * wraps with the clock, so order stays correct
  * across wrap with no extra check.
@@ -148,7 +290,8 @@ pub fn inflate_deadline(dl: u64) -> u64 {
  * Task window state for tests. Mirrors the BPF
  * task fields used by the classifier. Group holds
  * 0 for light and 1 for hog. Low runs counts low
- * windows toward 64. Burn holds window burn.
+ * windows toward 64. Burn holds window burn. Wake
+ * hits counts short blocks toward 8 at off 46.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +304,8 @@ pub struct GroupState {
     pub burn: u32,
     /* Low windows in a row toward promote. */
     pub low_runs: u8,
+    /* Short blocks in a row toward fast promote. */
+    pub wake_hits: u16,
 }
 
 #[cfg(test)]
@@ -175,6 +320,7 @@ impl GroupState {
             win_start: 0,
             burn: 0,
             low_runs: 0,
+            wake_hits: 0,
         }
     }
 
@@ -204,15 +350,18 @@ pub fn burn_add(burn: u32, delta: u64) -> u32 {
 
 /*
  * One classifier step for tests. Mirrors the BPF
- * stopping path with burn only. Adds the burst to
- * burn, then checks burst demote, then window end.
- * A 4ms burst moves light to hog at once. A 16ms
- * window moves light to hog at the window end. A
- * low window below 4ms moves the streak forward.
- * Middle burn breaks the streak with no move. A
- * hog needs 64 low wins near 2s to return to
- * light. Returns true for demote plus true for
- * promote when each move runs.
+ * stopping path with burn plus wake. Adds the burst
+ * to burn, then checks burst demote, then wake fast
+ * promote, then window end. A 4ms burst moves light
+ * to hog at once. Eight short blocks below 1ms with
+ * low burn move hog to light at once. A 16ms window
+ * moves light to hog at the window end. A low window
+ * below 4ms moves the streak forward. Middle burn
+ * breaks the streak with no move. Middle window keeps
+ * wake hits with no reset. A hog needs 64 low wins
+ * near 2s or 8 short hits to return to light. Returns
+ * true for demote plus true for promote when each move
+ * runs.
  */
 #[cfg(test)]
 pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) {
@@ -223,6 +372,7 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
     let mut demoted = false;
     let mut promoted = false;
     if burst_hot(delta) {
+        st.wake_hits = 0;
         if st.group == GROUP_LIGHT {
             st.group = GROUP_HOG;
             st.low_runs = 0;
@@ -234,6 +384,27 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
         st.low_runs = 0;
         return (demoted, promoted);
     }
+    if wake_short(delta) {
+        if st.group == GROUP_HOG {
+            if burn_low(st.burn) {
+                let next = st.wake_hits.saturating_add(1);
+                st.wake_hits = next;
+                if wake_ready(next) {
+                    st.group = GROUP_LIGHT;
+                    st.low_runs = 0;
+                    st.wake_hits = 0;
+                    st.win_start = now;
+                    st.burn = 0;
+                    promoted = true;
+                    return (demoted, promoted);
+                }
+            } else {
+                st.wake_hits = 0;
+            }
+        } else {
+            st.wake_hits = 0;
+        }
+    }
     if st.win_start == 0 {
         st.win_start = now;
         return (demoted, promoted);
@@ -242,6 +413,7 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
         return (demoted, promoted);
     }
     if burn_hot(st.burn) {
+        st.wake_hits = 0;
         if st.group == GROUP_LIGHT {
             st.group = GROUP_HOG;
             st.low_runs = 0;
@@ -260,6 +432,7 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
             if next >= PROMOTE_WINS {
                 st.group = GROUP_LIGHT;
                 st.low_runs = 0;
+                st.wake_hits = 0;
                 promoted = true;
             }
         } else if st.low_runs < PROMOTE_WINS {
@@ -270,6 +443,7 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
         return (demoted, promoted);
     }
     st.low_runs = 0;
+    st.wake_hits = 0;
     st.win_start = now;
     st.burn = 0;
     (demoted, promoted)
@@ -308,7 +482,12 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
     if !task.live || task.fail {
         return false;
     }
-    if task.group != thief_group {
+    let g = if task.group == GROUP_HOG {
+        GROUP_HOG
+    } else {
+        GROUP_LIGHT
+    };
+    if g != thief_group {
         return false;
     }
     crate::flow_select::may_run_on(thief, &task.allowed)
@@ -320,9 +499,11 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
  * the strict group check. Dead, foreign, failed,
  * and cross group heads stay, so one head never
  * blocks later work. Returns moved plus skipped
- * where skipped counts cross group heads. The BPF
- * peer drain checks donor group only with no task
- * recheck, so this model is stricter than dispatch.
+ * where skipped counts cross group heads on mask
+ * pass. The model documents Tier 0 with both drains
+ * plus merged skip. BPF Tier 2 uses park only
+ * immediate halves due to verifier jump plus BSS
+ * bounds with peer donor only.
  */
 #[cfg(test)]
 pub fn group_drain_model(
@@ -335,7 +516,12 @@ pub fn group_drain_model(
     let mut skipped = 0;
     let mut kept = std::collections::VecDeque::new();
     for task in queue.drain(..) {
-        let same = task.group == thief_group;
+        let g = if task.group == GROUP_HOG {
+            GROUP_HOG
+        } else {
+            GROUP_LIGHT
+        };
+        let same = g == thief_group;
         let ok = moved < budget
             && task.live
             && !task.fail
@@ -361,13 +547,38 @@ pub fn group_drain_model(
 /*
  * First allowed CPU in one group for tests. Scans
  * in id order and returns the first live CPU that
- * allows the task. Returns none when no allowed
- * CPU lives in the group.
+ * allows the task. Halves is the fallback. Returns
+ * none when no allowed CPU lives in the group.
  */
 #[cfg(test)]
 pub fn first_in_group(allowed: &[bool], group: u8, nr: usize) -> Option<u32> {
     for cpu in 0..nr {
         if group_of_cpu(cpu as u32, nr) != group {
+            continue;
+        }
+        if let Some(true) = allowed.get(cpu) {
+            return Some(cpu as u32);
+        }
+    }
+    None
+}
+
+/*
+ * First allowed CPU in one live group for tests.
+ * Scans in id order with the table when ready, else
+ * halves. Returns none when no allowed CPU lives in
+ * the group.
+ */
+#[cfg(test)]
+pub fn first_in_group_live(
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+) -> Option<u32> {
+    for cpu in 0..nr {
+        if group_live(cpu as u32, nr, table, ready) != group {
             continue;
         }
         if let Some(true) = allowed.get(cpu) {

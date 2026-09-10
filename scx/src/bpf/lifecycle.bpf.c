@@ -40,7 +40,11 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Burn step for one stop with window plus burst. */
+/* Burn step for one stop with window plus burst plus wake. */
+/* Short blocks below 1ms count toward 8 for fast promote. */
+/* Burn must stay low, so burn breaks the wake streak. */
+/* Middle window keeps wake hits with no reset. Slow path */
+/* with 64 low wins stays intact with no wake change. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,
 	u64 delta)
@@ -60,6 +64,7 @@ static __always_inline void flow_classify(
 		sum = 0xffffffffULL;
 	tctx->burn = (u32)sum;
 	if (flow_burst_hot(delta)) {
+		tctx->wake_hits = 0;
 		if (group ==
 		    (u8)FLOW_GROUP_LIGHT) {
 			tctx->group =
@@ -75,6 +80,32 @@ static __always_inline void flow_classify(
 		}
 		return;
 	}
+	if (flow_wake_short(delta)) {
+		if (group == (u8)FLOW_GROUP_HOG) {
+			if (flow_burn_low(tctx->burn)) {
+				u16 hits = tctx->wake_hits;
+				if (hits < 0xffff)
+					hits++;
+				tctx->wake_hits = hits;
+				if (flow_wake_ready(hits)) {
+					tctx->group =
+					    (u8)FLOW_GROUP_LIGHT;
+					tctx->low_runs = 0;
+					tctx->wake_hits = 0;
+					tctx->win_start = now;
+					tctx->burn = 0;
+					__sync_fetch_and_add(
+					    &flow_stats.group_promote,
+					    1);
+					return;
+				}
+			} else {
+				tctx->wake_hits = 0;
+			}
+		} else {
+			tctx->wake_hits = 0;
+		}
+	}
 	if (tctx->win_start == 0) {
 		tctx->win_start = now;
 		return;
@@ -82,6 +113,7 @@ static __always_inline void flow_classify(
 	if (!flow_win_ready(now, tctx->win_start))
 		return;
 	if (flow_burn_hot(tctx->burn)) {
+		tctx->wake_hits = 0;
 		if (group ==
 		    (u8)FLOW_GROUP_LIGHT) {
 			tctx->group =
@@ -106,6 +138,7 @@ static __always_inline void flow_classify(
 				tctx->group =
 				    (u8)FLOW_GROUP_LIGHT;
 				tctx->low_runs = 0;
+				tctx->wake_hits = 0;
 				__sync_fetch_and_add(
 				    &flow_stats.group_promote,
 				    1);
@@ -120,6 +153,7 @@ static __always_inline void flow_classify(
 		return;
 	}
 	tctx->low_runs = 0;
+	tctx->wake_hits = 0;
 	tctx->win_start = now;
 	tctx->burn = 0;
 }
@@ -205,6 +239,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->burn = 0;
 	tctx->group = (u8)FLOW_GROUP_LIGHT;
 	tctx->low_runs = 0;
+	tctx->wake_hits = 0;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

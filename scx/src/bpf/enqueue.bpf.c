@@ -27,7 +27,7 @@ static __always_inline s32 flow_pick_in_group(
 {
 	s32 first;
 	if (sel >= 0 && flow_cpu_ok(p, sel)) {
-		u8 g = flow_group_of_cpu((u32)sel,
+		u8 g = flow_group_live((u32)sel,
 		    nr_cpu_ids);
 		if (g == group)
 			return sel;
@@ -126,7 +126,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    p->cpus_ptr);
 			if (flow_cpu_ok(p, first)) {
 				cpu = first;
-				group = flow_group_of_cpu(
+				group = flow_group_live(
 				    (u32)first,
 				    nr_cpu_ids);
 				tctx->group = group;

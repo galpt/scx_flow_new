@@ -24,10 +24,13 @@ with wrap safe order. Virtual time moves forward by scaled
 runtime and the frontier moves forward while work stays queued.
 An idle reset bounds to waking virtual time with no zero use.
 Blocked tasks complete at once. Runnable tasks requeue ordered
-with a refreshed estimate. Two groups split CPUs by id halves
-with extra to hog and a single CPU keeps all light. Burn only
+with a refreshed estimate. Two groups use a per CPU table when ready, else halves
+with extra to hog and a single CPU keeps all light. Burn
 moves light to hog at 16ms in a 32ms window or one 4ms burst
-and returns hog to light after 4ms low for 64 wins near 2s.
+and returns hog to light after 4ms low for 64 wins near 2s
+or 8 short blocks below 1ms with low burn. Middle window
+keeps wake hits with no reset. Burn breaks the wake streak.
+Task state stays at 48B with wake hits at off 46.
 Cold tasks join light with a 4x gap against flaps. Placement
 uses any idle CPU in the group and mask, then the prior CPU,
 the current CPU, and the first allowed
@@ -39,25 +42,34 @@ Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Mask respect keeps every
 choice inside the task mask.
 Dispatch drains the local queue first, then the group park,
-then idle steals from same group peers only. Each pass visits
-every queued task in the
-local and park queues in order and moves live tasks
+then idle steals from same group peers only. Own keeps no
+group check, so a pinned single entry still runs where its
+mask allows. Park rechecks each task group on mask pass
+candidates with NULL as light plus immediate skip, so a
+stale cross entry never moves. Peer keeps donor group plus
+mask plus depth with no task recheck due to verifier jump
+plus BSS bounds. Tier 2 uses park only immediate halves
+with 995k under 1M. Each pass visits every queued task in
+the local and park queues in order and moves live tasks
 when allowed, including exiting tasks so they run to exit,
-and skips past dead, foreign and failed heads, so every pass moves
-at least one task when movable work exists there. An idle CPU with
-no moved work steals past unmovable leftovers, while a busy CPU
-with moved work steals only when both queues are empty. Idle steals
-scan same group peers only with a rotating cursor and take the
-first task in a peer queue that allows the thief when the
-donor holds at least two tasks. Cross group peers are
-skipped with no cross move and no counter. Cross group
-picks in select plus enqueue count group skip. Drains hold
-no per-task group lookup. Isolation follows enqueue
-placement plus thief park choice plus donor group check,
-with pinned single entries kept by the mask. Idle targets are kicked only when the queue was
-empty with a mask check and no busy preemption. Perf hints set
-1024 for light and 512 for hog at init plus running with a weak
-guard as best effort.
+and skips past dead, foreign and failed heads, so every pass
+moves at least one task when movable work exists there. An
+idle CPU with no moved work steals past unmovable leftovers,
+while a busy CPU with moved work steals only when both
+queues are empty. Idle steals scan same group peers only
+with a rotating cursor and take the first task in a peer
+queue that allows the thief when the donor holds at least
+two tasks. Cross group peers are skipped with no cross move
+and no counter. Cross group picks in select plus enqueue
+count group skip. Park cross tasks count group skip at once
+per task. Isolation follows enqueue placement plus thief
+park choice plus donor group check, with pinned single
+entries kept by the mask. Idle targets are kicked only when the queue was
+empty with a mask check and no busy preemption. Perf hints set 1024 for light and hog at init plus running
+with a weak guard as best effort. One policy keeps both
+groups at max since groups use dedicated CPUs, so hog
+frequency cannot harm light latency, and the old half cap
+punished hogs twice with no measurement.
 
 The slice math and the queue rules live in
 `src/bpf/intf.h`, maps plus helpers plus the ops table in
@@ -84,8 +96,8 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 Ops name is `flow` with a 30 second watchdog. Version
 is `4.2.8` in 4.2 line. Weight stays 1024 with no
 knob. The slice stays fixed at 1ms.
-Task state stays at 48B. Per-CPU state stays at 24B.
-Counters stay at 128B. The `4.2.6` base is the last stable
+Task state stays at 48B with wake hits at off 46.
+Per-CPU state stays at 24B. Counters stay at 128B. The `4.2.6` base is the last stable
 line. The `4.3.x` plus `4.4.0` lines were tried and failed
 with stalls and were abandoned. The `4.2.7` strip keeps a
 pure EDF core with the fixed slice. The `4.2.8` step adds
@@ -172,19 +184,22 @@ a 32ms window and moves light to hog at 16ms burn or one 4ms
 burst and hog to light after 4ms low for 64 wins near 2s.
 Dispatch drains the
 local queue first, then the group park, then idle steals
-from same group peers only. Each pass moves up to 32 tasks
-across local, park and steal. Each move in the local and park
-queues moves
-live tasks when allowed, including exiting
+from same group peers only. Own keeps no group check. Park
+rechecks each task group on mask pass candidates with NULL
+as light plus immediate skip. Peer keeps donor group plus
+mask plus depth with no task recheck due to verifier jump
+plus BSS bounds. Each pass moves up to 32 tasks across
+local, park and steal. Each move in the local and park
+queues moves live tasks when allowed, including exiting
 tasks so they run to exit, and skips dead, foreign and failed
 tasks, so one head never blocks later work there. Steals take
 the first task in a same group peer queue that allows the thief
 when the donor holds at least two tasks. Cross group peers
 are skipped with no cross move and no counter. Cross group
-picks in select plus enqueue count group skip. Drains hold
-no per-task group lookup. Isolation follows enqueue placement
-plus thief park choice plus donor group check, with pinned
-single entries kept by the mask. An idle CPU with no moved
+picks in select plus enqueue count group skip. Park cross
+tasks count group skip at once per task. Isolation follows
+enqueue placement plus thief park choice plus donor group
+check, with pinned single entries kept by the mask. An idle CPU with no moved
 work steals past unmovable leftovers, while a busy CPU with
 moved work steals only when both queues are empty. An idle kick
 is sent only when the queue was empty to a CPU in the task
@@ -249,15 +264,20 @@ park work and steal same group peer work when the
 donor holds at least two tasks, so cross group work never
 moves by steal. Own plus park moves keep order with mask
 respect.
-- Groups split by halves with extra to hog. A single CPU keeps
-  all light with no peer scan through the same path.
+- Groups use a per CPU table when ready, else halves with
+  extra to hog. A single CPU keeps all light with no peer
+  scan through the same path. Uniform hosts keep ready
+  cleared with halves fallback. Snapshot mirrors the live
+  table when ready, else halves with no trap.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report
   zero show freq unknown on the dashboard and in the
   start log, with no effect on placement. Frequency plus
   LLC plus CPU cards stay display only and never shape
-  placement.
+  placement. Perf hints keep 1024 for light and hog as best
+  effort with a weak guard at init plus running. One policy
+  keeps both groups at max since groups use dedicated CPUs.
 - Machines with one thread per core run plain per-CPU
 with no sibling step and no SMT badge. A single CPU
   host runs with no peer scan through the same path.

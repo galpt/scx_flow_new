@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-/* Dispatch keeps group isolation by construction with no */
-/* per task group lookup. Own drains to the same CPU, so a */
+/* Dispatch keeps group isolation with park recheck. */
+/* Own drains to the same CPU with no group check, so a */
 /* pinned single entry with the opposite group still runs */
 /* where its mask allows with steal held by the mask. Park */
-/* drains the thief group park only with enqueue parking by */
-/* task group. Peer steals check donor group plus mask plus */
-/* depth with no task recheck, so a stale cross entry with */
-/* a wide mask would move. Enqueue never leaves such a */
-/* stale except a reclassify plus migration disabled wrap. */
+/* drains the thief park with task recheck on mask pass */
+/* candidates with NULL as light plus immediate skip. Peer */
+/* keeps donor group plus mask plus depth with no task */
+/* recheck due to verifier jump plus BSS bounds. Tier 2 */
+/* uses park only immediate halves with 995k under 1M. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {
@@ -63,6 +63,8 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 	park = flow_park_for_group(thief_group);
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, park, 0) {
+		struct flow_task_ctx *tctx;
+		u8 g;
 		if (moved >= budget)
 			break;
 		p = bpf_task_from_pid(p->pid);
@@ -70,6 +72,21 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 			continue;
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr)) {
+			bpf_task_release(p);
+			continue;
+		}
+		tctx = bpf_task_storage_get(&task_ctx_stor,
+		    p, 0, 0);
+		if (!tctx)
+			g = (u8)FLOW_GROUP_LIGHT;
+		else if (tctx->group ==
+		    (u8)FLOW_GROUP_HOG)
+			g = (u8)FLOW_GROUP_HOG;
+		else
+			g = (u8)FLOW_GROUP_LIGHT;
+		if (g != thief_group) {
+			__sync_fetch_and_add(
+			    &flow_stats.group_steal_skipped, 1);
 			bpf_task_release(p);
 			continue;
 		}

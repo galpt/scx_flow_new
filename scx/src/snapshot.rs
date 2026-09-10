@@ -77,7 +77,8 @@ impl<'a> Scheduler<'a> {
      * live state. Gauges only, no deltas. Frequency
      * plus LLC plus CPU cards stay display only and
      * never feed placement or division. Slice stays
-     * fixed at 1ms. Group follows CPU halves.
+     * fixed at 1ms. Group follows the live table when
+     * ready, else halves fallback with no trap.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self
@@ -110,7 +111,7 @@ impl<'a> Scheduler<'a> {
                 .unwrap_or_default();
             e.id = cpu as u32;
             e.cur_freq_khz = self.cur_freq_khz.get(cpu).copied().unwrap_or(0);
-            e.group = crate::flow::group_of_cpu(cpu as u32, nr);
+            e.group = crate::flow::group_live(cpu as u32, nr, &self.group_table, self.group_ready);
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;

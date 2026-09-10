@@ -34,16 +34,19 @@ enum flow_consts {
 	FLOW_DEMOTE_BURST_NS = (4ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_WINS = 64ULL,
+	FLOW_PROMOTE_WAKE_HITS = 8ULL,
+	FLOW_WAKE_SHORT_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_HETERO_SPREAD_PCT = 10ULL,
 	FLOW_PINNED_INFLATE_NS = (8ULL * 1000ULL * 1000ULL),
 	FLOW_PERF_LIGHT = 1024ULL,
-	FLOW_PERF_HOG = 512ULL,
+	FLOW_PERF_HOG = 1024ULL,
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	FLOW_STEAL_BOUND = 8ULL,
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 	FLOW_WEIGHT = 1024ULL,
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 };
-/* Per task state at 48B with group plus window. */
+/* Per task state at 48B with group plus window plus wake. */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
@@ -53,6 +56,7 @@ struct flow_task_ctx {
 	u32 burn;
 	u8 group;
 	u8 low_runs;
+	u16 wake_hits;
 };
 /* Per CPU state at 24B. */
 struct flow_cpu_state {
@@ -95,6 +99,7 @@ static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
 	return (u64)FLOW_DSQ_BASE + (u64)cpu;
 }
 /* Group of one CPU by id halves with extra to hog. */
+/* Halves is the fallback when the group table is not ready. */
 static __always_inline u8 flow_group_of_cpu(u32 cpu,
 	u64 nr)
 {
@@ -111,7 +116,7 @@ static __always_inline u64 flow_park_for_group(u8 group)
 		return (u64)FLOW_DSQ_PARK_HOG;
 	return (u64)FLOW_DSQ_PARK;
 }
-/* Perf hint of one group with light at max. */
+/* Perf hint of one group with single policy at max. */
 static __always_inline u32 flow_perf_for_group(u8 group)
 {
 	if (group == (u8)FLOW_GROUP_HOG)
@@ -140,6 +145,16 @@ static __always_inline bool flow_burst_hot(u64 delta)
 static __always_inline bool flow_burn_low(u32 burn)
 {
 	return (u64)burn < (u64)FLOW_PROMOTE_BURN_NS;
+}
+/* True when one block is short below 1ms for wake. */
+static __always_inline bool flow_wake_short(u64 delta)
+{
+	return delta < (u64)FLOW_WAKE_SHORT_NS;
+}
+/* True when wake hits reach 8 for fast promote. */
+static __always_inline bool flow_wake_ready(u16 hits)
+{
+	return (u64)hits >= (u64)FLOW_PROMOTE_WAKE_HITS;
 }
 /* Deadline with pinned hog extra of 8ms. */
 static __always_inline u64 flow_inflate_deadline(u64 dl)

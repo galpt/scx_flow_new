@@ -114,6 +114,10 @@ pub(crate) struct Scheduler<'a> {
     cur_freq_khz: Vec<u64>,
     freq_read_at: Option<std::time::Instant>,
     started_at: std::time::Instant,
+    /* Per CPU group table plus ready flag. */
+    group_table: [u8; crate::flow_group::GROUP_TABLE_LEN],
+    /* Zero keeps halves fallback in snapshot. */
+    group_ready: u8,
 }
 
 impl<'a> Scheduler<'a> {
@@ -142,6 +146,19 @@ impl<'a> Scheduler<'a> {
         /* Frequency plus LLC plus CPU cards stay display */
         /* only and never shape placement. */
         let cards = topology::web_cpu_static();
+        /* Seed the per CPU group table. Uniform hosts keep */
+        /* ready cleared with halves fallback and no trap. */
+        let nr_groups = cards
+            .iter()
+            .map(|c| c.id as usize + 1)
+            .max()
+            .unwrap_or(0)
+            .min(MAX_CPUS);
+        let (group_table, group_ready) = topology::group_seed(nr_groups);
+        if let Some(bss) = skel.maps.bss_data.as_mut() {
+            bss.flow_group_by_cpu = group_table;
+            bss.flow_group_ready = group_ready;
+        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
@@ -170,6 +187,8 @@ impl<'a> Scheduler<'a> {
             cur_freq_khz: Vec::with_capacity(MAX_CPUS),
             freq_read_at: None,
             started_at: std::time::Instant::now(),
+            group_table,
+            group_ready,
         })
     }
 

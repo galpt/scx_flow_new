@@ -98,6 +98,55 @@ pub fn parse_freq_khz(s: &str) -> u64 {
 }
 
 /*
+ * Capacity of one CPU from the host file. Missing files
+ * yield zero for unknown. The value feeds group assign
+ * with frequency, else halves applies with no trap.
+ */
+pub fn read_cpu_capacity(cpu: u32) -> u64 {
+    std::fs::read_to_string(format!(
+        "{}{}{}",
+        "/sys/devices/system/cpu/cpu", cpu, "/cpu_capacity"
+    ))
+    .ok()
+    .map(|s| parse_freq_khz(&s))
+    .unwrap_or(0)
+}
+
+/*
+ * Max frequency of one CPU in kilohertz. Reads the
+ * cpuinfo file. Missing files yield zero for unknown.
+ * The value feeds group assign with capacity, else
+ * halves applies with no trap.
+ */
+pub fn read_cpuinfo_max_freq(cpu: u32) -> u64 {
+    std::fs::read_to_string(format!(
+        "{}{}{}{}",
+        "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "cpuinfo_max_freq"
+    ))
+    .ok()
+    .map(|s| parse_freq_khz(&s))
+    .unwrap_or(0)
+}
+
+/*
+ * Seed the per CPU group table plus ready flag. Reads
+ * capacity plus max frequency for live CPUs, then
+ * assigns by sorted interleave when spread tops 10pct.
+ * Uniform hosts keep ready cleared with halves fallback.
+ * Single CPU keeps ready cleared with all light.
+ */
+pub fn group_seed(nr: usize) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
+    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
+    let mut caps = Vec::with_capacity(n);
+    let mut freqs = Vec::with_capacity(n);
+    for cpu in 0..n {
+        caps.push(read_cpu_capacity(cpu as u32));
+        freqs.push(read_cpuinfo_max_freq(cpu as u32));
+    }
+    crate::flow_group::seed_groups(&caps, &freqs, n)
+}
+
+/*
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement
