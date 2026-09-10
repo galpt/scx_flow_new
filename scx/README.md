@@ -5,7 +5,8 @@ in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps one ordered queue per-CPU with a fixed slice at
 1ms plus two groups for light waits and hog burn, strict
-iff ready is zero and best effort iff ready is one.
+exactly when ready is zero and best effort when ready
+is one.
 It is deliberately knob-free. It uses per-CPU ordered
 EDF plus vruntime fairness plus the fixed slice.
 
