@@ -1,16 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-/* Dispatch keeps group isolation by construction. */
+/* Dispatch keeps park isolation by construction. */
 /* Own drains to the same CPU with no group check, so a */
 /* pinned single entry with the opposite group still runs */
 /* where its mask allows with steal held by the mask. Park */
 /* drains the thief group park only with enqueue parking by */
-/* task group and no task recheck. Peer keeps donor group */
-/* plus mask plus depth with no task recheck. Tier 3 holds */
-/* park plus peer by construction due to verifier jump plus */
-/* BSS bounds at 1000001 plus 58286 plus 60190. Strict on */
-/* uniform hosts. Best effort on hetero hosts. Dispatch uses */
-/* halves. Placement uses live table. */
+/* task group and no task recheck. Peer keeps mask plus */
+/* depth with no donor check and no task recheck, so steal */
+/* stays mask gated and best effort across groups. Tier 3 */
+/* holds park only by construction due to verifier jump at */
+/* 1000001 on donor check in the steal loop. Strict park on */
+/* uniform hosts. Best effort peer plus hetero hosts. */
+/* Dispatch uses halves. Placement uses live table. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {
@@ -86,8 +87,6 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 {
 	struct task_struct *p;
 	u64 dsq;
-	u8 thief_group;
-	u8 peer_group;
 	bool stole = false;
 	if (thief < 0)
 		return 0;
@@ -96,12 +95,6 @@ static __always_inline u32 flow_drain_peer(s32 thief,
 	if (!flow_cpu_live(peer))
 		return 0;
 	if (thief == (s32)peer)
-		return 0;
-	thief_group = flow_group_of_cpu((u32)thief,
-	    nr_cpu_ids);
-	peer_group = flow_group_of_cpu(peer,
-	    nr_cpu_ids);
-	if (peer_group != thief_group)
 		return 0;
 	dsq = flow_dsq_for_cpu(peer);
 	if (scx_bpf_dsq_nr_queued(dsq) <

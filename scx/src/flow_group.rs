@@ -632,14 +632,15 @@ pub struct GroupTask {
  * True when one group task may move to the thief.
  * Needs a live task with no move failure plus the
  * CPU in the mask plus the same group. Tier 0 model
- * only. BPF ships Tier 3 park plus peer by construction
- * with no task recheck due to verifier jump plus BSS
- * bounds at 1000001 plus 58286 plus 60190, so a stale
- * cross entry may move on hetero hosts with strict on
- * uniform hosts. Pinned single tasks with one allowed
- * CPU may cross with an inflated deadline, so the caller
- * checks that path before this strict check. Exiting
- * tasks use the same rule with no extra path.
+ * only. BPF ships Tier 3 park only by construction
+ * with no task recheck due to verifier jump at 1000001
+ * on donor check, so a stale cross entry may move on
+ * hetero hosts with strict park on uniform hosts and
+ * best effort peer across groups. Pinned single tasks
+ * with one allowed CPU may cross with an inflated
+ * deadline, so the caller checks that path before this
+ * strict check. Exiting tasks use the same rule with no
+ * extra path.
  */
 #[cfg(test)]
 pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
@@ -659,18 +660,18 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
 
 /*
  * Drain up to budget group tasks for one CPU. Tier 0
- * model only. BPF ships Tier 3 park plus peer by
+ * model only. BPF ships Tier 3 park only by
  * construction with no task recheck due to verifier jump
- * plus BSS bounds at 1000001 plus 58286 plus 60190, so a
- * stale cross entry may move on hetero hosts with strict
- * on uniform hosts. The scan keeps order and moves each
- * task that passes the strict group check. Dead, foreign,
- * failed, and cross group heads stay, so one head never
- * blocks later work. Returns moved plus skipped where
- * skipped counts cross group heads on mask pass. The model
- * keeps both drains plus merged skip. BPF Tier 3 uses park
- * plus peer by construction with halves due to verifier
- * jump plus BSS bounds.
+ * at 1000001 on donor check, so a stale cross entry may
+ * move on hetero hosts with strict park on uniform hosts
+ * and best effort peer across groups. The scan keeps order
+ * and moves each task that passes the strict group check.
+ * Dead, foreign, failed, and cross group heads stay, so
+ * one head never blocks later work. Returns moved plus
+ * skipped where skipped counts cross group heads on mask
+ * pass. The model keeps both drains plus merged skip. BPF
+ * Tier 3 uses park only by construction with halves due
+ * to verifier jump at 1000001 with peer mask only.
  */
 #[cfg(test)]
 pub fn group_drain_model(

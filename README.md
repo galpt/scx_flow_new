@@ -99,18 +99,17 @@ halves. Placement uses live table.
 ### Dispatch
 
 Dispatch drains the local queue first, then the group park,
-then idle steals from same group peers only. Own keeps no
+then idle steals from peers with mask only. Own keeps no
 group check, so a pinned single entry still runs where its
 mask allows. Park drains the thief group park only with no
 task recheck, so a stale cross entry may move on hetero
-hosts with strict on uniform hosts. Peer keeps donor group
-plus mask plus depth with no task recheck due to verifier
-jump plus BSS bounds, so a stale cross peer entry may move
-on hetero hosts with strict on uniform hosts. Tier 3 holds
-park plus peer by construction due to verifier jump plus
-BSS bounds at 1000001 plus 58286 plus 60190. Strict on
-uniform hosts. Best effort on hetero hosts. Dispatch uses
-halves. Placement uses live table. Each pass visits every
+hosts with strict on uniform hosts. Peer keeps mask
+plus depth with no donor check and no task recheck, so
+steal stays mask gated and best effort across groups.
+Tier 3 holds park only by construction due to verifier
+jump at 1000001 on donor check in the steal loop. Strict
+park on uniform hosts. Best effort peer plus hetero hosts.
+Dispatch uses halves. Placement uses live table. Each pass visits every
 queued task in
 the local and park queues in order and moves live tasks
 when allowed, including exiting tasks so they run to exit,
@@ -119,16 +118,16 @@ pass moves at least one task when movable work exists
 there. An idle CPU with no moved work steals past unmovable
 leftovers, while a busy CPU with moved work steals only
 when both queues are empty. Idle steals visit at most 8
-same group peers with a rotating cursor and take the first
+peers with a rotating cursor and take the first
 task in a peer queue that allows the thief when the donor
-holds at least two tasks. Cross group donors are skipped
-with no cross move and no counter. A stale cross task in
-a same group donor may move on hetero hosts. A stale cross
+holds at least two tasks. Cross group tasks may move
+with no counter. A cross task in any donor may move on
+both uniform and hetero hosts. A stale cross
 task in the group park may move on hetero hosts. Cross group
 picks in
 select plus enqueue count group skip. Isolation follows
-enqueue placement plus thief park choice plus donor group
-check,
+enqueue placement plus thief park choice with peer best
+effort across groups,
 with pinned single entries kept by the mask. Perf hints set
 1024 for light and hog at init plus running with a weak
 guard as best effort. One policy keeps both groups at max

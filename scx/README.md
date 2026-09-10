@@ -56,17 +56,16 @@ Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Mask respect keeps every
 choice inside the task mask.
 Dispatch drains the local queue first, then the group park,
-then idle steals from same group peers only. Own keeps no
+then idle steals from peers with mask only. Own keeps no
 group check, so a pinned single entry still runs where its
 mask allows. Park drains the thief group park only with no
 task recheck, so a stale cross entry may move on hetero
-hosts with strict on uniform hosts. Peer keeps donor
-group plus mask plus depth with no task recheck due to
-verifier jump plus BSS bounds, so a stale cross peer entry
-may move on hetero hosts with strict on uniform hosts.
-Tier 3 holds park plus peer by construction due to verifier
-jump plus BSS bounds at 1000001 plus 58286 plus 60190.
-Strict on uniform hosts. Best effort on hetero hosts.
+hosts with strict on uniform hosts. Peer keeps mask
+plus depth with no donor check and no task recheck, so
+steal stays mask gated and best effort across groups.
+Tier 3 holds park only by construction due to verifier
+jump at 1000001 on donor check in the steal loop. Strict
+park on uniform hosts. Best effort peer plus hetero hosts.
 Dispatch uses halves. Placement uses live table. Each
 pass visits every queued task in
 the local and park queues in order and moves live tasks
@@ -75,16 +74,16 @@ and skips past dead, foreign and failed heads, so every pass
 moves at least one task when movable work exists there. An
 idle CPU with no moved work steals past unmovable leftovers,
 while a busy CPU with moved work steals only when both
-queues are empty. Idle steals scan same group peers only
+queues are empty. Idle steals scan peers only
 with a rotating cursor and take the first task in a peer
 queue that allows the thief when the donor holds at least
-two tasks. Cross group donors are skipped with no cross
-move and no counter. A stale cross task in a same group
-donor may move on hetero hosts. A stale cross task in the
+two tasks. Cross group tasks may move with no counter.
+A cross task in any donor may move on both uniform and
+hetero hosts. A stale cross task in the
 group park may move on hetero hosts. Cross group picks in
 select plus enqueue
 count group skip. Isolation follows enqueue placement plus
-thief park choice plus donor group check, with pinned single
+thief park choice with peer best effort across groups, with pinned single
 entries kept by the mask. Idle targets are kicked only when the queue was
 empty with a mask check and no busy preemption. Perf hints set 1024 for light and hog at init plus running
 with a weak guard as best effort. One policy keeps both
@@ -218,28 +217,27 @@ depth 2 to 3 to 2ms, depth 4 plus to 1ms. Per task worst
 case is the 1ms floor during flood.
 Dispatch drains the
 local queue first, then the group park, then idle steals
-from same group peers only. Own keeps no group check. Park
+from peers with mask only. Own keeps no group check. Park
 drains the thief group park only with no task recheck, so a
 stale cross entry may move on hetero hosts with strict on
-uniform hosts. Peer keeps donor group plus mask plus depth
-with no task recheck due to verifier jump plus BSS bounds,
-so a stale cross peer entry may move on hetero hosts with
-strict on uniform hosts. Strict on uniform hosts. Best
-effort on hetero hosts. Dispatch uses halves. Placement
-uses live table. Each pass moves up to 32 tasks across
+uniform hosts. Peer keeps mask plus depth with no donor
+check and no task recheck, so steal stays mask gated and
+best effort across groups. Strict park on uniform hosts.
+Best effort peer plus hetero hosts. Dispatch uses halves.
+Placement uses live table. Each pass moves up to 32 tasks across
 local, park and steal. Each move in the local and park
 queues moves live tasks when allowed, including exiting
 tasks so they run to exit, and skips dead, foreign and failed
 tasks, so one head never blocks later work there. Steals take
-the first task in a same group peer queue that allows the thief
-when the donor holds at least two tasks. Cross group donors
-are skipped with no cross move and no counter. A stale cross
-task in a same group donor may move on hetero hosts. A stale
+the first task in a peer queue that allows the thief
+when the donor holds at least two tasks. Cross group tasks
+may move with no counter. A cross task in any donor may
+move on both uniform and hetero hosts. A stale
 cross task in the group park may move on hetero hosts. Cross
 group
 picks in select plus enqueue count group skip. Isolation
-follows enqueue placement plus thief park choice plus donor
-group check, with pinned single entries kept by the mask. An idle CPU with no moved
+follows enqueue placement plus thief park choice with peer
+best effort across groups, with pinned single entries kept by the mask. An idle CPU with no moved
 work steals past unmovable leftovers, while a busy CPU with
 moved work steals only when both queues are empty. An idle kick
 is sent only when the queue was empty to a CPU in the task
@@ -306,13 +304,13 @@ the same workload and no other change.
   idle target only when the queue was empty to collect
   at once.
 - Queues stay per-CPU with two groups. Idle CPUs collect group
-park work and steal same group peer work when the
-donor holds at least two tasks. Park plus peer trust enqueue
-placement plus thief park choice plus donor group check with
-no task recheck due to verifier jump plus BSS bounds, so
-stale cross entries may move on hetero hosts with strict on
-uniform hosts. Own plus park moves keep order with mask
-respect.
+park work and steal peer work with mask only when the
+donor holds at least two tasks. Park trusts enqueue
+placement plus thief park choice with no task recheck due
+to verifier jump at 1000001 on donor check, so stale
+cross entries may move on hetero hosts with strict park
+on uniform hosts and best effort peer. Own plus park moves
+keep order with mask respect.
 - Groups use a per CPU table when ready, else halves with
   extra to hog. Odd counts give the extra CPU to hog in
   both views. Short slices clamp with no pad. A single
