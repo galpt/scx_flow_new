@@ -51,6 +51,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             cur_freq_khz: 0,
             llc_id: cpu.llc_id as u32,
             smt,
+            group: 0,
             running_est_ns: 0,
             running_pid: 0,
             slice_ns: crate::flow::SLICE_NS,
@@ -133,7 +134,8 @@ pub fn filter_allowed(
 /*
  * Synthetic card for tests. Builds one display only
  * card with the given id plus frequency plus LLC plus
- * thread role. Slice stays fixed at 1ms.
+ * thread role. Slice stays fixed at 1ms. Group stays
+ * light with zero.
  */
 #[cfg(test)]
 pub fn synthetic_card(
@@ -148,6 +150,7 @@ pub fn synthetic_card(
         cur_freq_khz: 0,
         llc_id,
         smt,
+        group: 0,
         running_est_ns: 0,
         running_pid: 0,
         slice_ns: crate::flow::SLICE_NS,

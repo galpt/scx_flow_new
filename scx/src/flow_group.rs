@@ -15,10 +15,8 @@
 #[cfg(test)]
 pub const NGROUPS: u64 = 2;
 /* Light group id for short waits. */
-#[cfg(test)]
 pub const GROUP_LIGHT: u8 = 0;
 /* Hog group id for burn. */
-#[cfg(test)]
 pub const GROUP_HOG: u8 = 1;
 /* Park id of the light group. */
 #[cfg(test)]
@@ -57,7 +55,6 @@ pub const PERF_HOG: u32 = 512;
  * half is light and the high half is hog, so an odd
  * count gives the extra CPU to hog.
  */
-#[cfg(test)]
 pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
     if nr <= 1 {
         return GROUP_LIGHT;

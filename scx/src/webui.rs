@@ -259,11 +259,16 @@ mod tests {
         assert_eq!(m.stats.edf_enqueued, 0);
         assert_eq!(m.stats.edf_clamped, 0);
         assert_eq!(m.stats.edf_ordered, 0);
+        assert_eq!(m.stats.group_demote, 0);
+        assert_eq!(m.stats.group_promote, 0);
+        assert_eq!(m.stats.pinned_hog_inflated, 0);
+        assert_eq!(m.stats.group_steal_skipped, 0);
         assert!(m.per_cpu.is_empty());
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
         assert_eq!(m2.per_cpu[0].slice_ns, 0);
+        assert_eq!(m2.per_cpu[0].group, 0);
         let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
         let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
         assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
@@ -283,10 +288,15 @@ mod tests {
                 edf_enqueued: 8,
                 edf_clamped: 1,
                 edf_ordered: 8,
+                group_demote: 1,
+                group_promote: 0,
+                pinned_hog_inflated: 2,
+                group_steal_skipped: 5,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
+                group: 1,
                 slice_ns: 1_000_000,
                 running_est_ns: 1_000_000,
                 running_pid: 7,
@@ -295,11 +305,17 @@ mod tests {
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("slice_ns"));
+        assert!(txt.contains("group"));
+        assert!(txt.contains("group_demote"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.edf_enqueued, 8);
         assert_eq!(back.stats.edf_clamped, 1);
         assert_eq!(back.stats.edf_ordered, 8);
+        assert_eq!(back.stats.group_demote, 1);
+        assert_eq!(back.stats.pinned_hog_inflated, 2);
+        assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
+        assert_eq!(back.per_cpu[0].group, 1);
     }
 }

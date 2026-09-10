@@ -8,7 +8,9 @@
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
  * EDF counts cover ordered inserts with clamp detail.
- * Web metrics adds per-CPU cards with fixed slice.
+ * Group counts cover demote plus promote plus pinned
+ * inflate plus steal skips. Web metrics adds per-CPU
+ * cards with fixed slice plus group.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -66,13 +68,25 @@ pub struct Metrics {
     #[stat(desc = "Kernel queue inserts in order")]
     #[serde(default)]
     pub edf_ordered: u64,
+    #[stat(desc = "Light to hog moves by burn")]
+    #[serde(default)]
+    pub group_demote: u64,
+    #[stat(desc = "Hog to light moves after low wins")]
+    #[serde(default)]
+    pub group_promote: u64,
+    #[stat(desc = "Pinned hog deadlines with extra")]
+    #[serde(default)]
+    pub pinned_hog_inflated: u64,
+    #[stat(desc = "Cross group picks skipped")]
+    #[serde(default)]
+    pub group_steal_skipped: u64,
 }
 
 /*
  * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
  * per-CPU map on each poll. The slice holds the fixed
- * slice at 1ms.
+ * slice at 1ms. Group holds 0 for light and 1 for hog.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
@@ -91,6 +105,9 @@ pub struct PerCpuMetrics {
     /* True for the second thread of a core. */
     #[serde(default)]
     pub smt: bool,
+    /* Group id. 0 is light. 1 is hog. */
+    #[serde(default)]
+    pub group: u8,
     /* Estimate of the task now on the CPU. Zero idle. */
     #[serde(default)]
     pub running_est_ns: u64,
@@ -124,7 +141,8 @@ impl Metrics {
             w,
             "[{}] run={} runtime={} uptime={} \
             ins={} req={} done={} park={} steal={} \
-            kick={} noctx={} edfenq={} edfclamp={} edford={}",
+            kick={} noctx={} edfenq={} edfclamp={} edford={} \
+            demote={} promote={} pinfl={} gskip={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -139,6 +157,10 @@ impl Metrics {
             self.edf_enqueued,
             self.edf_clamped,
             self.edf_ordered,
+            self.group_demote,
+            self.group_promote,
+            self.pinned_hog_inflated,
+            self.group_steal_skipped,
         )?;
         Ok(())
     }
@@ -162,6 +184,14 @@ impl Metrics {
             edf_enqueued: self.edf_enqueued.wrapping_sub(rhs.edf_enqueued),
             edf_clamped: self.edf_clamped.wrapping_sub(rhs.edf_clamped),
             edf_ordered: self.edf_ordered.wrapping_sub(rhs.edf_ordered),
+            group_demote: self.group_demote.wrapping_sub(rhs.group_demote),
+            group_promote: self.group_promote.wrapping_sub(rhs.group_promote),
+            pinned_hog_inflated: self
+                .pinned_hog_inflated
+                .wrapping_sub(rhs.pinned_hog_inflated),
+            group_steal_skipped: self
+                .group_steal_skipped
+                .wrapping_sub(rhs.group_steal_skipped),
         }
     }
 }

@@ -297,6 +297,22 @@
           EDF ordered:</span>
           <span class="stat-value" id="edf-ord">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Demote:</span>
+          <span class="stat-value" id="demote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote:</span>
+          <span class="stat-value" id="promote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Pinned inflate:</span>
+          <span class="stat-value" id="pinfl">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Group skip:</span>
+          <span class="stat-value" id="gskip">0</span>
+        </div>
       </div>
     </div>
 
@@ -348,10 +364,11 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with fixed slice plus the
-     * running estimate and the pid. Freq unknown
-     * stays plain with no zero print. No sibling
-     * stays plain with no badge. */
+    /* Per-CPU cards with fixed slice plus group
+     * plus the running estimate and the pid. Freq
+     * unknown stays plain with no zero print. No
+     * sibling stays plain with no badge. Group shows
+     * light for low half and hog for high half. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -397,11 +414,14 @@
           fmtSlice(slice) + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
+        var grp = (cpu.group === 1) ? 'hog' : 'light';
+        var groupLabel = '<div class="core-llc">group ' +
+          grp + '</div>';
         return '<div class="card core-card">' +
           '<div class="core-id">CPU ' + cpu.id +
           smtLabel + '</div>' +
           '<div class="core-freq">' + freqLabel +
-          '</div>' + llcLabel +
+          '</div>' + llcLabel + groupLabel +
           '<div>' + badge + '</div>' +
           pidLabel + estLabel + sliceLabel +
           '</div>';
@@ -410,7 +430,7 @@
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
-     * walks the insert and move split. */
+     * walks the insert plus move plus group split. */
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -418,6 +438,8 @@
       var done = s.completions || 0;
       var park = s.park_moves || 0;
       var steal = s.steal_moves || 0;
+      var demote = s.group_demote || 0;
+      var promote = s.group_promote || 0;
       var placed = ins + req;
       var tldr, explanation;
       if (!placed && !onCpu) {
@@ -431,7 +453,9 @@
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) + '.';
+          ' and steal moves cover ' + fmt(steal) +
+          '. Demote covers ' + fmt(demote) +
+          ' and promote covers ' + fmt(promote) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -439,7 +463,9 @@
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) + '.';
+          ' and steal moves cover ' + fmt(steal) +
+          '. Demote covers ' + fmt(demote) +
+          ' and promote covers ' + fmt(promote) + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -481,6 +507,14 @@
         fmt(s.edf_clamped || 0);
       el('edf-ord').textContent =
         fmt(s.edf_ordered || 0);
+      el('demote').textContent =
+        fmt(s.group_demote || 0);
+      el('promote').textContent =
+        fmt(s.group_promote || 0);
+      el('pinfl').textContent =
+        fmt(s.pinned_hog_inflated || 0);
+      el('gskip').textContent =
+        fmt(s.group_steal_skipped || 0);
 
       renderCoreCards(data);
     }

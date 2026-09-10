@@ -33,6 +33,10 @@ impl<'a> Scheduler<'a> {
             edf_enqueued: s.edf_enqueued,
             edf_clamped: s.edf_clamped,
             edf_ordered: s.edf_ordered,
+            group_demote: s.group_demote,
+            group_promote: s.group_promote,
+            pinned_hog_inflated: s.pinned_hog_inflated,
+            group_steal_skipped: s.group_steal_skipped,
         }
     }
 
@@ -73,7 +77,7 @@ impl<'a> Scheduler<'a> {
      * live state. Gauges only, no deltas. Frequency
      * plus LLC plus CPU cards stay display only and
      * never feed placement or division. Slice stays
-     * fixed at 1ms.
+     * fixed at 1ms. Group follows CPU halves.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self
@@ -106,6 +110,7 @@ impl<'a> Scheduler<'a> {
                 .unwrap_or_default();
             e.id = cpu as u32;
             e.cur_freq_khz = self.cur_freq_khz.get(cpu).copied().unwrap_or(0);
+            e.group = crate::flow::group_of_cpu(cpu as u32, nr);
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;

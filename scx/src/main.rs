@@ -201,7 +201,8 @@ impl<'a> Scheduler<'a> {
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
             "exit ins={} req={} done={} park={} steal={} \
-            edfenq={} edfclamp={} edford={} runtime={} oncpu={}",
+            edfenq={} edfclamp={} edford={} demote={} \
+            promote={} pinfl={} gskip={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -210,6 +211,10 @@ impl<'a> Scheduler<'a> {
             m.edf_enqueued,
             m.edf_clamped,
             m.edf_ordered,
+            m.group_demote,
+            m.group_promote,
+            m.pinned_hog_inflated,
+            m.group_steal_skipped,
             runtime,
             oncpu,
         );

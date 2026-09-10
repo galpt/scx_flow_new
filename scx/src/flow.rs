@@ -8,7 +8,6 @@
  */
 
 pub use crate::flow_edf::*;
-#[cfg(test)]
 pub use crate::flow_group::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
