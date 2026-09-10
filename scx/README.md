@@ -26,9 +26,13 @@ An idle reset bounds to waking virtual time with no zero use.
 Blocked tasks complete at once. Runnable tasks requeue ordered
 with a refreshed estimate. Two groups use a per CPU table when ready, else halves
 with extra to hog and a single CPU keeps all light. Burn
-moves light to hog at 16ms in a 32ms window or one 4ms burst
-and returns hog to light after 4ms low for 64 wins near 2s
-or 8 short blocks below 1ms with low burn. Middle window
+moves light to hog at 16ms in a 32ms window or one burst
+at 4ms quiet down to 1ms floor during flood and returns
+hog to light after 4ms low for 64 wins near 2s
+or 8 short blocks below 1ms with low burn. Depth sums
+light per CPU queued tasks with table depth 0 to 1 to
+4ms, depth 2 to 3 to 2ms, depth 4 plus to 1ms. Per task
+worst case is the 1ms floor during flood. Middle window
 keeps wake hits with no reset. Burn breaks the wake streak.
 Task state stays at 48B with wake hits at off 46.
 Cold tasks join light with a 4x gap against flaps. Placement
@@ -180,8 +184,12 @@ the estimate with a fixed weight of 1024, and stores the
 deadline for the kernel queue with the slice as the slice.
 Running keeps the entry. Blocking completes it at once.
 Disable and exit count one completion. Stopping adds burn to
-a 32ms window and moves light to hog at 16ms burn or one 4ms
-burst and hog to light after 4ms low for 64 wins near 2s.
+a 32ms window and moves light to hog at 16ms burn or one
+burst at 4ms quiet down to 1ms floor during flood and hog
+to light after 4ms low for 64 wins near 2s. Depth sums
+light per CPU queued tasks with table depth 0 to 1 to 4ms,
+depth 2 to 3 to 2ms, depth 4 plus to 1ms. Per task worst
+case is the 1ms floor during flood.
 Dispatch drains the
 local queue first, then the group park, then idle steals
 from same group peers only. Own keeps no group check. Park

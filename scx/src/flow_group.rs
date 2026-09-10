@@ -6,9 +6,10 @@
  * Two groups split CPUs by id halves with extra
  * to hog. Light holds short waits. Hog holds burn.
  * The classifier uses burn with a 32ms window plus
- * wake hits. Demote needs 16ms burn or one 4ms burst.
- * Promote needs 4ms low for 64 wins near 2s or 8 short
- * blocks below 1ms with low burn. Cold tasks join
+ * wake hits. Demote needs 16ms burn or one burst at
+ * 4ms quiet down to 1ms floor during flood. Promote
+ * needs 4ms low for 64 wins near 2s or 8 short blocks
+ * below 1ms with low burn. Cold tasks join
  * light. The 4x gap keeps flips rare. A per CPU table
  * holds live groups when ready, else halves applies.
  */
@@ -33,8 +34,15 @@ pub const WIN_NS: u64 = 32_000_000;
 #[cfg(test)]
 pub const DEMOTE_BURN_NS: u64 = 16_000_000;
 /* Single burst in nanos at 4ms for demote. */
+/* Quiet case of the adaptive check with depth 0. */
 #[cfg(test)]
 pub const DEMOTE_BURST_NS: u64 = 4_000_000;
+/* Mild burst in nanos at 2ms for demote. */
+#[cfg(test)]
+pub const DEMOTE_BURST_MID_NS: u64 = 2_000_000;
+/* Floor burst in nanos at 1ms for demote. */
+#[cfg(test)]
+pub const DEMOTE_BURST_FLOOR_NS: u64 = 1_000_000;
 /* Window burn in nanos below 4ms for promote. */
 #[cfg(test)]
 pub const PROMOTE_BURN_NS: u64 = 4_000_000;
@@ -239,11 +247,69 @@ pub fn burn_hot(burn: u32) -> bool {
 /*
  * True when one burst reaches 4ms for demote. A
  * single long burst moves to hog at once with no
- * wait for the window end.
+ * wait for the window end. Quiet case with depth 0.
  */
 #[cfg(test)]
 pub fn burst_hot(delta: u64) -> bool {
     delta >= DEMOTE_BURST_NS
+}
+
+/*
+ * Allowance from light depth with flood backpressure.
+ * Depth sums queued tasks in light per CPU queues
+ * capped at 4. Table is depth 0 to 1 to 4ms, depth 2
+ * to 3 to 2ms, depth 4 plus to 1ms. Quiet keeps 4ms
+ * so solo bursts still move fast alone. Mild pressure
+ * steps down to 2ms so rising flood reacts sooner yet
+ * stays clear of one slice chatter. Deep flood pins at
+ * 1ms, so per task worst case is one slice during
+ * flood. Recomputed per stop with no new task field,
+ * so task stays at 48B. Halves matches dispatch view
+ * with no table cost in the stop path.
+ */
+#[cfg(test)]
+pub fn burst_allowance(depth: u64) -> u64 {
+    if depth >= 4 {
+        DEMOTE_BURST_FLOOR_NS
+    } else if depth >= 2 {
+        DEMOTE_BURST_MID_NS
+    } else {
+        DEMOTE_BURST_NS
+    }
+}
+
+/*
+ * True when one burst reaches the allowance for
+ * demote. The caller passes the allowance for the
+ * current light depth, so flood lowers the line to
+ * the floor with no extra state.
+ */
+#[cfg(test)]
+pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
+    delta >= allow
+}
+
+/*
+ * Light depth from per CPU queued counts capped at 4.
+ * Sums queued tasks over light CPUs in halves order
+ * with early stop at 4. Halves matches the BPF depth
+ * with no table use. Missing entries count as zero,
+ * so short slices stay quiet with no trap.
+ */
+#[cfg(test)]
+pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
+    let mut depth = 0u64;
+    for cpu in 0..nr {
+        if group_of_cpu(cpu as u32, nr) != GROUP_LIGHT {
+            continue;
+        }
+        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
+        if depth >= 4 {
+            depth = 4;
+            break;
+        }
+    }
+    depth
 }
 
 /*
@@ -350,28 +416,42 @@ pub fn burn_add(burn: u32, delta: u64) -> u32 {
 
 /*
  * One classifier step for tests. Mirrors the BPF
- * stopping path with burn plus wake. Adds the burst
- * to burn, then checks burst demote, then wake fast
- * promote, then window end. A 4ms burst moves light
- * to hog at once. Eight short blocks below 1ms with
- * low burn move hog to light at once. A 16ms window
- * moves light to hog at the window end. A low window
- * below 4ms moves the streak forward. Middle burn
- * breaks the streak with no move. Middle window keeps
- * wake hits with no reset. A hog needs 64 low wins
- * near 2s or 8 short hits to return to light. Returns
- * true for demote plus true for promote when each move
- * runs.
+ * stopping path with burn plus wake at quiet depth.
+ * Quiet wrapper around the depth step with depth 0,
+ * so lone bursts keep the 4ms line with no pressure.
+ * See the depth step for the full move table.
  */
 #[cfg(test)]
 pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) {
+    classify_step_depth(st, now, delta, 0)
+}
+
+/*
+ * One classifier step with light depth for tests.
+ * Mirrors the BPF stopping path with burn plus wake.
+ * Adds the burst to burn, then checks the allowance
+ * for the depth, then wake fast promote, then window
+ * end. Allowance is 4ms at depth 0 to 1, 2ms at depth
+ * 2 to 3, 1ms at depth 4 plus. Eight short blocks
+ * below 1ms with low burn move hog to light at once.
+ * A 16ms window moves light to hog at the window end.
+ * A low window below 4ms moves the streak forward.
+ * Middle burn breaks the streak with no move. Middle
+ * window keeps wake hits with no reset. A hog needs
+ * 64 low wins near 2s or 8 short hits to return to
+ * light. Allowance is recomputed per stop with no new
+ * task field, so task stays at 48B. Returns true for
+ * demote plus true for promote when each move runs.
+ */
+#[cfg(test)]
+pub fn classify_step_depth(st: &mut GroupState, now: u64, delta: u64, depth: u64) -> (bool, bool) {
     if st.group != GROUP_LIGHT && st.group != GROUP_HOG {
         st.group = GROUP_LIGHT;
     }
     st.burn = burn_add(st.burn, delta);
     let mut demoted = false;
     let mut promoted = false;
-    if burst_hot(delta) {
+    if burst_hot_at(delta, burst_allowance(depth)) {
         st.wake_hits = 0;
         if st.group == GROUP_LIGHT {
             st.group = GROUP_HOG;

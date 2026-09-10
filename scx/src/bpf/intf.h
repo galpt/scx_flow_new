@@ -32,6 +32,8 @@ enum flow_consts {
 	FLOW_WIN_NS = (32ULL * 1000ULL * 1000ULL),
 	FLOW_DEMOTE_BURN_NS = (16ULL * 1000ULL * 1000ULL),
 	FLOW_DEMOTE_BURST_NS = (4ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_MID_NS = (2ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_FLOOR_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_WINS = 64ULL,
 	FLOW_PROMOTE_WAKE_HITS = 8ULL,
@@ -137,9 +139,33 @@ static __always_inline bool flow_burn_hot(u32 burn)
 	return (u64)burn >= (u64)FLOW_DEMOTE_BURN_NS;
 }
 /* True when one burst reaches 4ms for demote. */
+/* Quiet case of the adaptive check with depth 0. */
 static __always_inline bool flow_burst_hot(u64 delta)
 {
 	return delta >= (u64)FLOW_DEMOTE_BURST_NS;
+}
+/* Burst allowance from light depth with flood backpressure. */
+/* Depth sums queued tasks in light per CPU queues capped at */
+/* 4. Table is depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, */
+/* depth 4 plus to 1ms. Quiet keeps 4ms so lone bursts move */
+/* fast with no pressure. Mild halves to 2ms so flood bursts */
+/* move earlier but still above one slice with no flap on */
+/* single slices. Deep floors at 1ms, so per task worst case */
+/* is the floor during flood. Halves keeps the view matched */
+/* to dispatch isolation with no BSS cost in stopping. */
+static __always_inline u64 flow_burst_allowance(u64 depth)
+{
+	if (depth >= 4)
+		return (u64)FLOW_DEMOTE_BURST_FLOOR_NS;
+	if (depth >= 2)
+		return (u64)FLOW_DEMOTE_BURST_MID_NS;
+	return (u64)FLOW_DEMOTE_BURST_NS;
+}
+/* True when one burst reaches the allowance for demote. */
+static __always_inline bool flow_burst_hot_at(u64 delta,
+	u64 allow)
+{
+	return delta >= allow;
 }
 /* True when window burn stays below 4ms for promote. */
 static __always_inline bool flow_burn_low(u32 burn)

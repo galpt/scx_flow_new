@@ -141,7 +141,11 @@ tasks with no allowed CPU in the group. The watchdog
 is 30 seconds. Ops name is `flow`. Task state stays at 48B
 with wake hits at off 46. Per-CPU state stays at 24B.
 Counters stay at 128B. Burn moves light to hog at 16ms in
-a 32ms window or one 4ms burst. Eight short blocks below
+a 32ms window or one burst at 4ms quiet down to 1ms floor
+during flood. Depth sums light per CPU queued tasks with
+table depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, depth 4
+plus to 1ms. Per task worst case is the 1ms floor during
+flood. Eight short blocks below
 1ms with low burn move hog to light at once. Middle window
 keeps wake hits with no reset. Burn breaks the wake streak,
 so gaming stays hard. Slow 64 wins near 2s stays intact.

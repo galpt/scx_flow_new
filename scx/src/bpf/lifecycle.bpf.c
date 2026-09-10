@@ -40,17 +40,52 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
+/* Light depth from per CPU queued counts capped at 4. */
+/* Sums queued tasks over light per CPU queues in halves */
+/* order with early stop at 4. Halves matches dispatch */
+/* isolation with no BSS cost in stopping. Park queues stay */
+/* out, so the measure tracks CPU pressure only with one */
+/* pass and bounded cost. Stopping only, never dispatch. */
+static __always_inline u64 flow_light_depth(void)
+{
+	u64 depth = 0;
+	s32 cpu;
+	bpf_for(cpu, 0, 1024) {
+		u64 dsq;
+		u8 g;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		g = flow_group_of_cpu((u32)cpu,
+		    nr_cpu_ids);
+		if (g != (u8)FLOW_GROUP_LIGHT)
+			continue;
+		dsq = flow_dsq_for_cpu((u32)cpu);
+		depth += scx_bpf_dsq_nr_queued(dsq);
+		if (depth >= 4) {
+			depth = 4;
+			break;
+		}
+	}
+	return depth;
+}
 /* Burn step for one stop with window plus burst plus wake. */
-/* Short blocks below 1ms count toward 8 for fast promote. */
-/* Burn must stay low, so burn breaks the wake streak. */
-/* Middle window keeps wake hits with no reset. Slow path */
-/* with 64 low wins stays intact with no wake change. */
+/* Burst allowance adapts to light depth with 4ms quiet to */
+/* 2ms mild to 1ms floor during flood. Short blocks below */
+/* 1ms count toward 8 for fast promote. Burn must stay low, */
+/* so burn breaks the wake streak. Middle window keeps wake */
+/* hits with no reset. Slow path with 64 low wins stays */
+/* intact with no wake change. Stopping only, never dispatch. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,
 	u64 delta)
 {
 	u8 group;
 	u64 sum;
+	u64 allow;
 	if (!tctx)
 		return;
 	group = tctx->group;
@@ -63,7 +98,8 @@ static __always_inline void flow_classify(
 	if (sum > 0xffffffffULL)
 		sum = 0xffffffffULL;
 	tctx->burn = (u32)sum;
-	if (flow_burst_hot(delta)) {
+	allow = flow_burst_allowance(flow_light_depth());
+	if (flow_burst_hot_at(delta, allow)) {
 		tctx->wake_hits = 0;
 		if (group ==
 		    (u8)FLOW_GROUP_LIGHT) {

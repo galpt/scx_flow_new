@@ -67,6 +67,8 @@ fn window_consts_match_spec() {
     assert_eq!(WIN_NS, 32_000_000);
     assert_eq!(DEMOTE_BURN_NS, 16_000_000);
     assert_eq!(DEMOTE_BURST_NS, 4_000_000);
+    assert_eq!(DEMOTE_BURST_MID_NS, 2_000_000);
+    assert_eq!(DEMOTE_BURST_FLOOR_NS, 1_000_000);
     assert_eq!(PROMOTE_BURN_NS, 4_000_000);
     assert_eq!(PROMOTE_WINS, 64);
     assert_eq!(PROMOTE_WAKE_HITS, 8);
@@ -148,6 +150,125 @@ fn burst_hot_needs_4ms() {
     assert!(burst_hot(DEMOTE_BURST_NS));
     assert!(burst_hot(DEMOTE_BURST_NS + 1));
     assert!(burst_hot(16_000_000));
+}
+
+/*
+ * Allowance maps depth to the burst line. Quiet
+ * keeps 4ms, mild halves to 2ms, deep floors at 1ms.
+ * Header values match the Rust mirrors with no knob.
+ */
+#[test]
+fn burst_allowance_maps_depth_to_line() {
+    assert_eq!(DEMOTE_BURST_NS, 4_000_000);
+    assert_eq!(DEMOTE_BURST_MID_NS, 2_000_000);
+    assert_eq!(DEMOTE_BURST_FLOOR_NS, 1_000_000);
+    assert_eq!(
+        DEMOTE_BURST_MID_NS,
+        crate::bpf_intf::flow_consts_FLOW_DEMOTE_BURST_MID_NS as u64
+    );
+    assert_eq!(
+        DEMOTE_BURST_FLOOR_NS,
+        crate::bpf_intf::flow_consts_FLOW_DEMOTE_BURST_FLOOR_NS as u64
+    );
+    assert_eq!(burst_allowance(0), 4_000_000);
+    assert_eq!(burst_allowance(1), 4_000_000);
+    assert_eq!(burst_allowance(2), 2_000_000);
+    assert_eq!(burst_allowance(3), 2_000_000);
+    assert_eq!(burst_allowance(4), 1_000_000);
+    assert_eq!(burst_allowance(5), 1_000_000);
+    assert_eq!(burst_allowance(100), 1_000_000);
+    assert!(!burst_hot_at(3_999_999, burst_allowance(1)));
+    assert!(burst_hot_at(4_000_000, burst_allowance(1)));
+    assert!(!burst_hot_at(1_999_999, burst_allowance(2)));
+    assert!(burst_hot_at(2_000_000, burst_allowance(2)));
+    assert!(!burst_hot_at(999_999, burst_allowance(4)));
+    assert!(burst_hot_at(1_000_000, burst_allowance(4)));
+}
+
+/*
+ * Depth sums light queues only with cap at 4. Hog
+ * queues stay out, so cross group flood never lifts
+ * the light line. Missing entries count as zero.
+ */
+#[test]
+fn light_depth_sums_light_only_capped_at_4() {
+    assert_eq!(light_depth(&[], 0), 0);
+    assert_eq!(light_depth(&[0, 0, 0, 0], 4), 0);
+    assert_eq!(light_depth(&[1, 0, 0, 0], 4), 1);
+    assert_eq!(light_depth(&[0, 0, 5, 5], 4), 0);
+    assert_eq!(light_depth(&[1, 0, 10, 10], 4), 1);
+    assert_eq!(light_depth(&[1, 1, 0, 0], 4), 2);
+    assert_eq!(light_depth(&[2, 2, 0, 0], 4), 4);
+    assert_eq!(light_depth(&[10, 10, 10, 10], 4), 4);
+    assert_eq!(light_depth(&[1], 1), 1);
+    assert_eq!(light_depth(&[5, 5], 2), 4);
+}
+
+/*
+ * Quiet keeps the 4ms line. A burst just below 4ms
+ * stays light, a burst at 4ms demotes at once.
+ */
+#[test]
+fn quiet_keeps_4ms_line() {
+    let mut stay = GroupState::cold();
+    stay.win_start = 100_000_000;
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 3_999_999, 0);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(stay.group, GROUP_LIGHT);
+    let mut move_light = GroupState::cold();
+    move_light.win_start = 100_000_000;
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 4_000_000, 1);
+    assert!(d2);
+    assert!(!p2);
+    assert_eq!(move_light.group, GROUP_HOG);
+}
+
+/*
+ * Mild pressure uses the 2ms line. A burst just
+ * below 2ms stays light, a burst at 2ms demotes.
+ */
+#[test]
+fn mild_pressure_uses_2ms_line() {
+    let mut stay = GroupState::cold();
+    stay.win_start = 100_000_000;
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 1_999_999, 2);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(stay.group, GROUP_LIGHT);
+    let mut move_light = GroupState::cold();
+    move_light.win_start = 100_000_000;
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 2_000_000, 3);
+    assert!(d2);
+    assert!(!p2);
+    assert_eq!(move_light.group, GROUP_HOG);
+}
+
+/*
+ * Deep pressure demotes at the 1ms floor. A burst
+ * just below 1ms stays light, a burst at 1ms moves
+ * to hog at once with per task worst case at floor.
+ */
+#[test]
+fn deep_pressure_demotes_at_floor() {
+    let mut stay = GroupState::cold();
+    stay.win_start = 100_000_000;
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 999_999, 4);
+    assert!(!d);
+    assert!(!p);
+    assert_eq!(stay.group, GROUP_LIGHT);
+    let mut move_light = GroupState::cold();
+    move_light.win_start = 100_000_000;
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 1_000_000, 4);
+    assert!(d2);
+    assert!(!p2);
+    assert_eq!(move_light.group, GROUP_HOG);
+    let mut deep = GroupState::cold();
+    deep.win_start = 100_000_000;
+    let (d3, p3) = classify_step_depth(&mut deep, 101_000_000, 1_000_000, 100);
+    assert!(d3);
+    assert!(!p3);
+    assert_eq!(deep.group, GROUP_HOG);
 }
 
 #[test]
