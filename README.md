@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.12`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.13`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -25,16 +25,19 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
 - `scx/src/flow_group.rs` groups plus classifier plus parks
+- `scx/src/flow_preempt.rs` delay plus granule plus rate
 - `scx/src/flow_tests_edf.rs` tests for S1 to S3 plus slice,
   estimate, weight, EDF order, frontier, dispatch, steal,
   mask, and config
 - `scx/src/flow_tests_group.rs` tests for split plus parks plus
   classifier plus isolation plus inflate
+- `scx/src/flow_tests_preempt.rs` tests for delay plus
+  granule plus rate plus fail closed
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
 - `scx/src/topology.rs` display only per-CPU cards
 - `scx/src/webui.rs` loopback dashboard server
-- `scx/ui/index.html` dashboard page with group
+- `scx/ui/index.html` dashboard page with group plus delay
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/edf_harness/harness.c` periodic load plus probe worker
 - `tools/edf_harness/run.sh` calibration plus sweep plus control
@@ -91,16 +94,20 @@ in `scx/src/bpf/dispatch.bpf.c`.
 
 ### Kicks
 
-Only idle targets with at most 2 queued are kicked with
-a mask check and no busy preemption. A missed wakeup is
-rescued on the next insert while deep queues stay quiet.
-Park sends no kick and the next pass collects it.
+Idle targets with at most 2 queued are kicked with a mask
+check. Busy targets need armed delay at 62 in 32us units
+plus deserved granule weight aware with 64us floor plus
+clear rate plus same group plus mask with one kick per
+slice. A missed wakeup is rescued on the next insert while
+deep queues stay quiet. Park sends no kick and the next
+pass collects it. Disarmed stays idle only.
 
 ### Counts and queues
 
-Counters cover inserts, completions, steals, kicks, EDF
-order events, group moves, and skips. The dashboard shows
-them per group and per CPU with a one-click JSON log
+Counters cover inserts, completions, steals, kicks,
+preempt kicks plus skips, EDF order events, group moves,
+and skips. The dashboard shows them per group and per CPU
+with delay dots plus rates and a one-click JSON log
 download at `/api/snapshot`. The payload lives in
 `scx/src/stats.rs`, `scx/src/webui.rs` and
 `scx/ui/index.html`.
@@ -117,7 +124,8 @@ scheduler change in the harness.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. Groups stay fixed at two with no knob. The
-slice stays fixed at 1ms. No busy preemption.
+slice stays fixed at 1ms. Delay arms at 62 in 32us units
+with 1/8 decay and one kick per slice.
 
 ## Build
 
@@ -177,7 +185,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.12`, state `enabled` and ops
+Expect version `4.2.13`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

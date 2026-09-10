@@ -30,10 +30,37 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		    flow_clamp_est(tctx->est_ns) : 0;
 		s32 nice = flow_nice_of(p);
 		u32 w = flow_weight_of(nice);
+		u64 dsq;
+		u64 q;
+		u8 sample;
+		u8 nwin;
+		u8 ncur;
+		u16 ncnt;
 		st->running_est = est;
 		st->running_pid = (u32)p->pid;
-		st->running_nice = nice;
-		st->running_weight = w;
+		st->running_nice = (s16)nice;
+		st->running_weight = (u16)w;
+		st->cursor = flow_cursor_val(st->cursor);
+		/* Refresh delay with no loop. Keeps */
+		/* hysteresis with decay on each slice. */
+		dsq = flow_dsq_for_cpu((u32)cpu);
+		q = scx_bpf_dsq_nr_queued(dsq);
+		sample = flow_delay_from_queued(q);
+		nwin = flow_delay_max(st->delay_win,
+		    sample);
+		ncur = flow_delay_max(st->delay_cur,
+		    sample);
+		ncnt = st->delay_cnt + 1;
+		if ((u64)ncnt >=
+		    (u64)FLOW_DELAY_WIN_LEN) {
+			nwin = flow_delay_close(nwin,
+			    ncur);
+			ncur = 0;
+			ncnt = 0;
+		}
+		st->delay_win = nwin;
+		st->delay_cur = ncur;
+		st->delay_cnt = ncnt;
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);

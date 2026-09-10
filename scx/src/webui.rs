@@ -281,6 +281,8 @@ mod tests {
         assert_eq!(m.stats.group_wake_promote, 0);
         assert_eq!(m.stats.pinned_hog_inflated, 0);
         assert_eq!(m.stats.group_steal_skipped, 0);
+        assert_eq!(m.stats.preempt_kicks, 0);
+        assert_eq!(m.stats.preempt_skipped, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -295,6 +297,8 @@ mod tests {
         assert_eq!(m2.per_cpu[0].group, 0);
         assert_eq!(m2.per_cpu[0].running_nice, 0);
         assert_eq!(m2.per_cpu[0].running_weight, 0);
+        assert_eq!(m2.per_cpu[0].delay_win, 0);
+        assert!(!m2.per_cpu[0].delay_armed);
         let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
         let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
         assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
@@ -319,6 +323,8 @@ mod tests {
                 group_wake_promote: 1,
                 pinned_hog_inflated: 2,
                 group_steal_skipped: 5,
+                preempt_kicks: 6,
+                preempt_skipped: 7,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -329,9 +335,11 @@ mod tests {
                 running_pid: 7,
                 running_nice: -5,
                 running_weight: 1218,
+                delay_win: 62,
+                delay_armed: true,
                 ..Default::default()
             }],
-            version: "4.2.12".to_string(),
+            version: "4.2.13".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -343,8 +351,12 @@ mod tests {
         assert!(txt.contains("group"));
         assert!(txt.contains("running_nice"));
         assert!(txt.contains("running_weight"));
+        assert!(txt.contains("delay_win"));
+        assert!(txt.contains("delay_armed"));
         assert!(txt.contains("group_demote"));
         assert!(txt.contains("group_wake_promote"));
+        assert!(txt.contains("preempt_kicks"));
+        assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
@@ -359,11 +371,15 @@ mod tests {
         assert_eq!(back.stats.group_wake_promote, 1);
         assert_eq!(back.stats.pinned_hog_inflated, 2);
         assert_eq!(back.stats.group_steal_skipped, 5);
+        assert_eq!(back.stats.preempt_kicks, 6);
+        assert_eq!(back.stats.preempt_skipped, 7);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
         assert_eq!(back.per_cpu[0].running_weight, 1218);
-        assert_eq!(back.version, "4.2.12");
+        assert_eq!(back.per_cpu[0].delay_win, 62);
+        assert!(back.per_cpu[0].delay_armed);
+        assert_eq!(back.version, "4.2.13");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);

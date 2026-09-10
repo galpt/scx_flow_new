@@ -262,21 +262,116 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
-		/* Kick when the target is idle with at most */
-		/* 2 queued, so a missed empty to 1 kick is */
-		/* rescued on the next insert while deep */
-		/* queues stay quiet with no storm. Gated */
-		/* on no running task. */
+		/* Kick idle plus busy preempt with delay. */
+		/* Idle keeps at most 2 queued with no storm. */
+		/* Busy needs armed plus deserved plus rate */
+		/* clear plus same group plus mask with one */
+		/* kick per slice. Fail closed with no kick */
+		/* plus skip count on any clear. No loop. */
 		if (flow_cpu_ok(p, cpu)) {
+			u64 q;
+			u8 sample;
+			u8 win;
+			u8 cur;
+			u16 cnt;
+			u8 nwin;
+			u8 ncur;
+			u16 ncnt;
+			bool armed;
+			u64 granule;
+			bool rate_ok;
+			bool same;
+			bool mask_ok;
+			bool ok;
+			u32 occ_pid;
+			u32 occ_w;
+			u64 run_at;
+			u64 now2;
+			u64 run_ns;
+			struct task_struct *occ;
+			struct flow_task_ctx *octx;
 			if (!st)
 				return;
-			if (st->running_pid != 0)
+			q = scx_bpf_dsq_nr_queued(dsq);
+			sample = flow_delay_from_queued(q);
+			win = st->delay_win;
+			cur = st->delay_cur;
+			cnt = st->delay_cnt;
+			nwin = flow_delay_max(win, sample);
+			ncur = flow_delay_max(cur, sample);
+			ncnt = cnt + 1;
+			if ((u64)ncnt >=
+			    (u64)FLOW_DELAY_WIN_LEN) {
+				nwin = flow_delay_close(nwin,
+				    ncur);
+				ncur = 0;
+				ncnt = 0;
+			}
+			st->delay_win = nwin;
+			st->delay_cur = ncur;
+			st->delay_cnt = ncnt;
+			if (st->running_pid == 0) {
+				if (scx_bpf_dsq_nr_queued(
+				    dsq) >
+				    (u64)FLOW_STEAL_MIN_DEPTH)
+					return;
+				scx_bpf_kick_cpu(cpu,
+				    SCX_KICK_IDLE);
+				__sync_fetch_and_add(
+				    &flow_stats.kicks, 1);
 				return;
-			if (scx_bpf_dsq_nr_queued(dsq) >
-			    (u64)FLOW_STEAL_MIN_DEPTH)
+			}
+			armed = flow_delay_armed(
+			    st->delay_win);
+			occ_w = (u32)st->running_weight;
+			granule = flow_granule_for_weight(
+			    occ_w, slice);
+			rate_ok = flow_rate_clear(
+			    st->cursor);
+			same = group ==
+			    flow_group_live((u32)cpu,
+			    nr_cpu_ids);
+			mask_ok =
+			    bpf_cpumask_test_cpu(
+			    (u32)cpu, p->cpus_ptr);
+			occ_pid = st->running_pid;
+			occ = bpf_task_from_pid(occ_pid);
+			if (!occ) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
 				return;
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			}
+			octx = flow_lookup(occ);
+			run_at = octx ? octx->run_at : 0;
+			bpf_task_release(occ);
+			if (!run_at ||
+			    run_at == (u64)-1) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				return;
+			}
+			now2 = flow_now();
+			if (now2 >= run_at)
+				run_ns = now2 - run_at;
+			else
+				run_ns = 0;
+			ok = flow_preempt_ok(armed,
+			    flow_deserved(run_ns, granule),
+			    rate_ok, same, mask_ok);
+			if (!ok) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				return;
+			}
+			__sync_fetch_and_or(&st->cursor,
+			    (u32)FLOW_CURSOR_RATE_BIT);
+			scx_bpf_kick_cpu(cpu,
+			    SCX_KICK_PREEMPT);
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_kicks, 1);
 		}
 	}
 }

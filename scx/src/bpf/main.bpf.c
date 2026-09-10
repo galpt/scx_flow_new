@@ -126,6 +126,7 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
+	st->cursor = flow_cursor_val(st->cursor);
 }
 /* Clear running only when the pid owns it, so a disable */
 /* plus an exit never clears a new owner after a switch. */
@@ -146,6 +147,7 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
+	st->cursor = flow_cursor_val(st->cursor);
 }
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */
@@ -328,9 +330,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->frontier = 0;
 		st->running_est = 0;
 		st->running_pid = 0;
-		st->cursor = (u32)cpu;
+		st->cursor = flow_cursor_val((u32)cpu);
 		st->running_nice = 0;
 		st->running_weight = 1024;
+		st->delay_win = 0;
+		st->delay_cur = 0;
+		st->delay_cnt = 0;
 		group = flow_group_live((u32)cpu, n);
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,

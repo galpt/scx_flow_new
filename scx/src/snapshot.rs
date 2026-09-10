@@ -38,6 +38,8 @@ impl<'a> Scheduler<'a> {
             pinned_hog_inflated: s.pinned_hog_inflated,
             group_steal_skipped: s.group_steal_skipped,
             group_wake_promote: s.group_wake_promote,
+            preempt_kicks: s.preempt_kicks,
+            preempt_skipped: s.preempt_skipped,
         }
     }
 
@@ -54,6 +56,9 @@ impl<'a> Scheduler<'a> {
             cursor: 0,
             running_nice: 0,
             running_weight: 1024,
+            delay_win: 0,
+            delay_cur: 0,
+            delay_cnt: 0,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;
@@ -123,8 +128,10 @@ impl<'a> Scheduler<'a> {
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
-            e.running_nice = st.running_nice;
-            e.running_weight = st.running_weight;
+            e.running_nice = st.running_nice as i32;
+            e.running_weight = st.running_weight as u32;
+            e.delay_win = st.delay_win;
+            e.delay_armed = crate::flow::delay_armed(st.delay_win);
             e.slice_ns = crate::flow::SLICE_NS;
             per_cpu.push(e);
         }

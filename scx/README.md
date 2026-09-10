@@ -64,9 +64,12 @@ across groups.
 ### Kicks
 
 Idle targets with at most 2 queued are kicked with a mask
-check and no busy preemption. A missed wakeup is rescued
-on the next insert while deep queues stay quiet. Park
-sends no kick and the next dispatch pass collects it.
+check. Busy targets need armed delay at 62 in 32us units
+plus deserved granule weight aware with 64us floor plus
+clear rate plus same group plus mask with one kick per
+slice. A missed wakeup is rescued on the next insert
+while deep queues stay quiet. Park sends no kick and the
+next dispatch pass collects it. Disarmed stays idle only.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is
@@ -98,9 +101,9 @@ scheduling behavior. Reporting only is `--stats`,
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock` and no
 authentication, since loopback is the trust boundary.
-It shows group depths, move rates, per-CPU nice plus
-weight, and a button to download the full snapshot as
-JSON.
+It shows group depths, move rates, preempt rates,
+per-CPU nice plus weight plus delay dots, and a button
+to download the full snapshot as JSON.
 `--no-webui` disables it.
 
 ## Code map

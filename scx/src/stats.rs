@@ -7,13 +7,14 @@
  * count fresh joins. Requeues count runnable slice ends.
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
+ * Preempt counts cover busy kicks plus gate skips.
  * EDF counts cover ordered inserts with clamp detail.
  * Group counts cover demote plus promote plus wake
  * promote plus pinned inflate plus steal skips. Wake
  * promote is the fast subset of promote by 8 short
  * blocks. Web metrics adds per-CPU cards with fixed
- * slice plus group plus depths plus pressure plus
- * version plus topology plus timestamp for the page
+ * slice plus group plus delay plus depths plus pressure
+ * plus version plus topology plus timestamp for the page
  * and the JSON log.
  */
 use std::io::Write;
@@ -87,6 +88,12 @@ pub struct Metrics {
     #[stat(desc = "Hog to light moves by wake hits")]
     #[serde(default)]
     pub group_wake_promote: u64,
+    #[stat(desc = "Busy kicks after armed delay")]
+    #[serde(default)]
+    pub preempt_kicks: u64,
+    #[stat(desc = "Busy kicks skipped by gates")]
+    #[serde(default)]
+    pub preempt_skipped: u64,
 }
 
 /*
@@ -127,6 +134,12 @@ pub struct PerCpuMetrics {
     /* Weight now on the CPU. 1024 when idle. Display only. */
     #[serde(default)]
     pub running_weight: u32,
+    /* Delay window in 32us units. 62 arms. Display only. */
+    #[serde(default)]
+    pub delay_win: u8,
+    /* True when delay is armed at 62. Display only. */
+    #[serde(default)]
+    pub delay_armed: bool,
     /* Current fixed slice in nanos. */
     /* Renamed from tq_ns; old JSON with tq_ns still */
     /* decodes via the alias for one release. */
@@ -176,7 +189,8 @@ impl Metrics {
             "[{}] run={} runtime={} uptime={} \
             ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
-            demote={} promote={} wpromote={} pinfl={} gskip={}",
+            demote={} promote={} wpromote={} pinfl={} gskip={} \
+            pkick={} pskip={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -196,6 +210,8 @@ impl Metrics {
             self.group_wake_promote,
             self.pinned_hog_inflated,
             self.group_steal_skipped,
+            self.preempt_kicks,
+            self.preempt_skipped,
         )?;
         Ok(())
     }
@@ -228,6 +244,8 @@ impl Metrics {
                 .group_steal_skipped
                 .wrapping_sub(rhs.group_steal_skipped),
             group_wake_promote: self.group_wake_promote.wrapping_sub(rhs.group_wake_promote),
+            preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
+            preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
         }
     }
 }

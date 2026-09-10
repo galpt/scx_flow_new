@@ -47,6 +47,13 @@ enum flow_consts {
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 	FLOW_WEIGHT = 1024ULL,
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
+	FLOW_DELAY_UNIT_NS = 32000ULL,
+	FLOW_DELAY_MAX = 250ULL,
+	FLOW_DELAY_ARM = 62ULL,
+	FLOW_DELAY_WIN_LEN = 8ULL,
+	FLOW_GRANULE_FLOOR_NS = 64000ULL,
+	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
+	FLOW_CURSOR_MASK = 0x7fffffffULL,
 };
 /* Per task state at 48B with group plus window plus wake. */
 struct flow_task_ctx {
@@ -60,16 +67,19 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 32B with display only nice plus weight. */
+/* Per CPU state at 32B with delay plus rate. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
 	u32 running_pid;
 	u32 cursor;
-	s32 running_nice;
-	u32 running_weight;
+	s16 running_nice;
+	u16 running_weight;
+	u8 delay_win;
+	u8 delay_cur;
+	u16 delay_cnt;
 };
-/* Scheduler counters at 136B with group detail. */
+/* Scheduler counters at 152B with group detail. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -88,6 +98,8 @@ struct flow_sched_stats {
 	u64 pinned_hog_inflated;
 	u64 group_steal_skipped;
 	u64 group_wake_promote;
+	u64 preempt_kicks;
+	u64 preempt_skipped;
 };
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -306,11 +318,110 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 	return waking_v;
 }
 /* Next peer for steal scan with rotating cursor. */
+/* Masks the rate bit, so one kick per slice keeps */
+/* the scan order with no extra state. */
 static __always_inline u32 flow_steal_next(u32 cursor,
 	u32 nr_cpus)
 {
+	u32 cur;
 	if (nr_cpus == 0)
 		return 0;
-	return (cursor + 1) % nr_cpus;
+	cur = cursor & (u32)FLOW_CURSOR_MASK;
+	return (cur + 1) % nr_cpus;
+}
+/* Cursor value without the rate bit. */
+static __always_inline u32 flow_cursor_val(u32 cursor)
+{
+	return cursor & (u32)FLOW_CURSOR_MASK;
+}
+/* True when the rate bit is clear for one kick. */
+static __always_inline bool flow_rate_clear(u32 cursor)
+{
+	return (cursor &
+	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
+}
+/* Delay sample in 32us units from queued count. */
+/* One slice is 31 units, two slices arm at 62. */
+/* Cap is 250 at 8ms with integer math only. */
+static __always_inline u8 flow_delay_from_queued(
+	u64 queued)
+{
+	u64 v;
+	if (queued >= 8)
+		return 250;
+	v = (queued * 125ULL) / 4ULL;
+	if (v > 250ULL)
+		return 250;
+	return (u8)v;
+}
+/* Decay one step by 1/8 with integer math only. */
+/* Holds peaks across windows for hysteresis. */
+static __always_inline u8 flow_delay_decay(u8 old)
+{
+	u32 o = (u32)old;
+	u32 d = o - o / 8U;
+	return (u8)d;
+}
+/* True when the delay window is armed at 62. */
+/* 62 is 1984us in 32us units near two slices. */
+static __always_inline bool flow_delay_armed(u8 win)
+{
+	return (u32)win >= (u32)FLOW_DELAY_ARM;
+}
+/* Max of two delay samples with cap at 250. */
+static __always_inline u8 flow_delay_max(u8 a,
+	u8 b)
+{
+	u8 m = a > b ? a : b;
+	if ((u32)m > (u32)FLOW_DELAY_MAX)
+		return (u8)FLOW_DELAY_MAX;
+	return m;
+}
+/* Close one window of 8 with decay plus max. */
+/* Decays the old max by 1/8 then keeps the max */
+/* with the current window max with cap at 250. */
+static __always_inline u8 flow_delay_close(u8 win,
+	u8 cur)
+{
+	u8 d = flow_delay_decay(win);
+	u8 m = flow_delay_max(d, cur);
+	return m;
+}
+/* Granule in nanos weight aware with 64us floor. */
+/* Base is slice times 1024 over weight with floor */
+/* at 64us, so heavy keeps short and light keeps */
+/* long with no trap on zero weight or slice. */
+static __always_inline u64 flow_granule_for_weight(
+	u32 weight, u64 slice)
+{
+	u64 base;
+	if (weight == 0) {
+		if (slice < (u64)FLOW_GRANULE_FLOOR_NS)
+			return (u64)FLOW_GRANULE_FLOOR_NS;
+		return slice;
+	}
+	if (slice == 0)
+		return (u64)FLOW_GRANULE_FLOOR_NS;
+	base = (slice * 1024ULL) / (u64)weight;
+	if (base < (u64)FLOW_GRANULE_FLOOR_NS)
+		return (u64)FLOW_GRANULE_FLOOR_NS;
+	return base;
+}
+/* True when deserved after one granule of run. */
+/* Needs run delta at or past the granule. */
+static __always_inline bool flow_deserved(u64 run_ns,
+	u64 granule)
+{
+	return run_ns >= granule;
+}
+/* True when all five preempt gates pass. */
+/* Armed plus deserved plus rate clear plus same */
+/* group plus mask with fail closed on any clear. */
+static __always_inline bool flow_preempt_ok(bool armed,
+	bool deserved, bool rate_clear, bool same_group,
+	bool mask_ok)
+{
+	return armed && deserved && rate_clear &&
+	    same_group && mask_ok;
 }
 #endif

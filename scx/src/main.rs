@@ -14,12 +14,15 @@ mod config;
 mod flow;
 mod flow_edf;
 mod flow_group;
+mod flow_preempt;
 mod flow_select;
 mod flow_slice;
 #[cfg(test)]
 mod flow_tests_edf;
 #[cfg(test)]
 mod flow_tests_group;
+#[cfg(test)]
+mod flow_tests_preempt;
 mod snapshot;
 mod stats;
 mod topology;
@@ -228,7 +231,7 @@ impl<'a> Scheduler<'a> {
             "exit ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
             demote={} promote={} wpromote={} pinfl={} gskip={} \
-            runtime={} oncpu={}",
+            pkick={} pskip={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -244,6 +247,8 @@ impl<'a> Scheduler<'a> {
             m.group_wake_promote,
             m.pinned_hog_inflated,
             m.group_steal_skipped,
+            m.preempt_kicks,
+            m.preempt_skipped,
             runtime,
             oncpu,
         );
@@ -398,7 +403,7 @@ mod tests {
     fn sched_stats_size_is_136() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            136
+            152
         );
     }
 
