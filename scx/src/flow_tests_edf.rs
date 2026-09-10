@@ -814,6 +814,24 @@ fn cleared_running_view_reads_idle() {
 }
 
 #[test]
+fn disable_exit_clears_only_owner() {
+    let mut view = RunningView { est: 100, pid: 7 };
+    view.clear_if_owner(7);
+    assert_eq!(view, RunningView::idle());
+    assert!(view.is_idle());
+    let mut busy = RunningView { est: 100, pid: 9 };
+    busy.clear_if_owner(7);
+    assert_eq!(busy.pid, 9);
+    assert_eq!(busy.est, 100);
+    assert!(!busy.is_idle());
+    let mut idle = RunningView::idle();
+    idle.clear_if_owner(7);
+    assert_eq!(idle, RunningView::idle());
+    assert!(kick_idle_ok(2, idle.pid, true));
+    assert!(!kick_idle_ok(2, busy.pid, true));
+}
+
+#[test]
 fn completion_counts_once_per_grant() {
     let mut deadline = COMPLETED_SENTINEL;
     assert!(!completion_take(&mut deadline));

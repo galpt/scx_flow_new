@@ -303,6 +303,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
+	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
+	    (u32)p->pid);
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
@@ -316,6 +318,8 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 {
 	struct flow_task_ctx *tctx;
 	(void)args;
+	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
+	    (u32)p->pid);
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;

@@ -109,6 +109,24 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_est = 0;
 	st->running_pid = 0;
 }
+/* Clear running only when the pid owns it, so a disable */
+/* plus an exit never clears a new owner after a switch. */
+static __always_inline void flow_clear_running_if_owner(
+	s32 cpu, u32 pid)
+{
+	struct flow_cpu_state *st;
+	if (cpu < 0)
+		return;
+	if (!flow_cpu_live((u32)cpu))
+		return;
+	st = flow_cpu((u32)cpu);
+	if (!st)
+		return;
+	if (st->running_pid != pid)
+		return;
+	st->running_est = 0;
+	st->running_pid = 0;
+}
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */
 /* Bad values fall back to halves with no trap. */

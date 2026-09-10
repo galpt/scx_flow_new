@@ -349,4 +349,17 @@ impl RunningView {
         self.est = 0;
         self.pid = 0;
     }
+
+    /*
+     * Clear the view only when the pid owns it. Mirrors
+     * the disable plus exit path that clears the BPF
+     * running fields only on owner match, so a stale
+     * exit never clears a new owner after a switch.
+     */
+    pub fn clear_if_owner(&mut self, pid: u32) {
+        if self.pid == pid {
+            self.est = 0;
+            self.pid = 0;
+        }
+    }
 }
