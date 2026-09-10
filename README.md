@@ -74,25 +74,35 @@ no zero use, so new arrivals never inherit stale time.
 
 ### Placement
 
-Placement uses any idle CPU in the group and mask,
+Placement uses a free core idle CPU in the group and mask,
+then any idle CPU in the group and mask,
 then the prior CPU in the group, the current CPU in the
-group, and the first allowed CPU in the group. Pinned tasks
+group, and the first allowed CPU in the group. Tier A prefers
+a free core. Tier B prefers any idle in the group. Placement
+only with no dispatch use. Singletons treat all idle as free
+with prior order and no trap. The scan stays minimal with one
+extra idle pick and no loop. Pinned tasks
 keep their CPU with the group moved to the live group of
 that CPU and 8ms extra for pinned hog. Tasks that cannot
 move stay local. Empty masks park in order in the task
-group. Frequency plus LLC plus CPU cards stay display only
-and never shape placement.
+group. Live frequency plus CPU cards stay display only
+and never shape placement. Max frequency plus capacity plus
+LLC plus siblings seed groups.
 Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Two groups use a per CPU
 table when ready, else halves with extra to hog and a single
 CPU keeps all light. Odd counts give the extra CPU to hog
 in both views, so interleave matches halves counts. Short
-slices clamp with no pad. The table sorts live CPUs by
-capacity plus frequency plus id, then interleaves even
-slots to light and odd slots to hog with the last odd slot
-to hog. Uniform hosts keep ready cleared with halves
-fallback. Capacity plus max frequency seed the table
-when spread tops 10pct, else halves applies. Strict on
+slices clamp with no pad. Cores split with extra to hog with
+siblings kept in one group. One LLC splits globally. Two plus
+N LLCs split in each LLC. All singleton cores use halves plus
+interleave exactly. The `4.2.9` admission seeds the table only
+when capacity or max frequency spread tops 10pct, else halves
+applies. The `4.2.10` rule builds cores from thread siblings
+lists with union find plus LLC rules plus hetero core interleave
+by max capacity plus max frequency plus least id. The same table
+is reused with no new tables. Uniform hosts keep ready cleared
+when the core view matches halves, else ready set. Strict on
 uniform hosts. Best effort on hetero hosts. Dispatch uses
 halves. Placement uses live table.
 

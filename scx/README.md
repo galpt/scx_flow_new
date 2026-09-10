@@ -11,26 +11,63 @@ EDF plus vruntime fairness plus the fixed slice.
 
 ## Overview
 
+### Order and deadlines
+
 Tasks wait in per-CPU ordered queues, plus one park queue per
 group for tasks with no allowed CPU. Queues hold EDF order
 first with arrival order for ties. The deadline adds clamped
 virtual time and scaled estimate with a fixed weight of 1024.
 The kernel queue orders by deadline with the slice as the
-slice. The slice is fixed at 1ms with no knob.
+slice.
+
+### Fixed slice
+
+The slice is fixed at 1ms with no knob.
 Fresh tasks join with the slice, so the start stays neutral.
 Estimates hold the last burst clamped at 1ns to 1 second.
+
+### Fairness
+
 Sleeper lag is capped at one slice behind the
 frontier, so a waking task gains at most one slice of advantage
 with wrap safe order. Virtual time moves forward by scaled
 runtime and the frontier moves forward while work stays queued.
 An idle reset bounds to waking virtual time with no zero use.
 Blocked tasks complete at once. Runnable tasks requeue ordered
-with a refreshed estimate. Two groups use a per CPU table when ready, else halves
+with a refreshed estimate.
+
+### Groups
+
+Two groups use a per CPU table when ready, else halves
 with extra to hog and a single CPU keeps all light. Odd
 counts give the extra CPU to hog in both views, so
 interleave matches halves counts. Short slices clamp
-with no pad, so missing entries never fake hetero. Burn
-moves light to hog at 16ms in a 32ms window or one burst
+with no pad, so missing entries never fake hetero. The
+`4.2.9` admission seeds the table only when capacity or
+max frequency spread tops 10pct, else halves applies.
+The `4.2.10` rule builds cores from thread siblings lists
+with union find, then splits cores with extra to hog.
+Siblings stay in one group. First half of cores is light
+with the rest hog. One core with more than one CPU falls
+back to halves, so no group stays empty. One LLC splits
+cores globally. Two plus N LLCs split cores in each LLC,
+so each cache domain stays balanced. Cores take the LLC
+of the least id. Missing LLC folds to one domain with no
+pad. All singleton cores bypass LLC and use halves plus
+interleave exactly, so SMT off keeps prior state. Hetero
+cores interleave by max capacity plus max frequency plus
+least id with even slots to light and odd slots to hog
+and the extra core to hog. The same table is reused with
+no new tables. Task state stays at 48B with wake hits at
+off 46. Per-CPU state stays at 24B. Counters stay at 136B.
+Uniform hosts keep ready cleared when the core view matches
+halves, else ready set. Hetero hosts keep ready set. Strict
+on uniform hosts. Best effort on hetero hosts. Dispatch
+uses halves. Placement uses live table. Snapshot mirrors
+the live table when ready, else halves with no trap.
+Machines with one thread per core keep halves plus
+interleave exactly with preference as no-op and no trap.
+Burn moves light to hog at 16ms in a 32ms window or one burst
 at 4ms quiet down to 1ms floor during flood and returns
 hog to light after 4ms low for 64 wins near 2s
 or 8 short blocks below 1ms with burn below 4ms. Depth
@@ -41,20 +78,30 @@ at the allowance clears wake hits. A short with burn at
 or past 4ms clears wake hits. A hot window at or past
 16ms clears wake hits. A middle window at the end clears
 wake hits with low runs. A low window below 4ms keeps
-wake hits. A window in progress keeps wake hits. Strict
-on uniform hosts. Best effort on hetero hosts. Dispatch
-uses halves. Placement uses live table.
-Task state stays at 48B with wake hits at off 46.
-Cold tasks join light with a 4x gap against flaps. Placement
-uses any idle CPU in the group and mask, then the prior CPU,
+wake hits. A window in progress keeps wake hits.
+Cold tasks join light with a 4x gap against flaps.
+
+### Placement
+
+Placement uses a free core idle CPU in the group and mask,
+then any idle CPU in the group and mask, then the prior CPU,
 the current CPU, and the first allowed
-CPU in the group. Pinned tasks and tasks that cannot move stay
+CPU in the group. Tier A prefers a free core. Tier B prefers
+any idle in the group. Placement only with no dispatch use.
+Table is reused with no new tables. Singletons treat all
+idle as free, so Tier A is a no-op with prior order and no
+trap. The scan stays minimal with one extra idle pick and
+no loop. Pinned tasks and tasks that cannot move stay
 local with 8ms extra for pinned hog. Empty
-masks park in order in the task group. Frequency plus LLC plus
+masks park in order in the task group. Live frequency plus
 CPU cards stay display only and never shape placement.
+Max frequency plus capacity plus LLC plus siblings seed groups.
 Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Mask respect keeps every
 choice inside the task mask.
+
+### Dispatch
+
 Dispatch drains the local queue first, then the group park,
 then idle steals from peers with mask only. Own keeps no
 group check, so a pinned single entry still runs where its
@@ -87,13 +134,19 @@ group park may move on hetero hosts. Cross group picks in
 select plus enqueue count group skip. Isolation follows
 enqueue placement plus thief park choice with peer best
 effort across groups, with pinned single entries kept by
-the mask. Idle targets are kicked even with queued work
-with a mask check and no busy preemption. Perf hints set
+the mask. Perf hints set
 1024 for light and hog at init plus running
 with a weak guard as best effort. One policy keeps both
 groups at max since groups use dedicated CPUs, so hog
 frequency cannot harm light latency, and the old half cap
 punished hogs twice with no measurement.
+
+### Kicks
+
+Idle targets are kicked even with queued work
+with a mask check and no busy preemption. Park sends no kick
+with no live allowed CPU after fallback, and the next dispatch
+pass collects it.
 
 The slice math and the queue rules live in
 `src/bpf/intf.h`, maps plus helpers plus the ops table in
@@ -260,13 +313,18 @@ pass collects it.
 
 ## CPU choice
 
-CPU choice prefers an idle CPU in the group and mask, then
-the prior CPU in the group when allowed, then the current CPU
+CPU choice prefers a free core idle CPU in the group and
+mask, then any idle CPU in the group and mask, then the prior
+CPU in the group when allowed, then the current CPU
 in the group when allowed,
-then the first allowed CPU in the group. Pinned tasks stay in
+then the first allowed CPU in the group. Tier A prefers a
+free core. Tier B prefers any idle in the group. Placement
+only with no dispatch use. Singletons treat all idle as
+free with prior order and no trap. Pinned tasks stay in
 place. Tasks that cannot move stay on the current CPU.
-Frequency plus LLC
-plus CPU cards stay display only and never shape placement.
+Live frequency plus
+CPU cards stay display only and never shape placement.
+Max frequency plus capacity plus LLC plus siblings seed groups.
 Idle
 choice is rechecked in the mask and group. A final choice
 without an allowed CPU in the group falls back to the group
@@ -335,21 +393,31 @@ the same workload and no other change.
   extra to hog. Odd counts give the extra CPU to hog in
   both views. Short slices clamp with no pad. A single
   CPU keeps all light with no peer scan through the same
-  path. Uniform hosts keep ready cleared with halves
-  fallback. Strict on uniform hosts. Best effort on hetero
+  path. Cores split with extra to hog with siblings kept
+  in one group. One LLC splits globally. Two plus N LLCs
+  split in each LLC. All singleton cores use halves plus
+  interleave exactly. Uniform hosts keep ready cleared when
+  the core view matches halves, else ready set. Hetero hosts
+  keep ready set with core interleave by max capacity plus
+  max frequency plus least id. Strict on uniform hosts. Best
+  effort on hetero
   hosts. Dispatch uses halves. Placement uses live table.
-  Snapshot mirrors the live table when ready, else halves
+  Placement prefers a free core idle plus any idle in the
+  group with singletons as no-op. Snapshot mirrors the live
+  table when ready, else halves
   with no trap.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report
   zero show freq unknown on the dashboard and in the
-  start log, with no effect on placement. Frequency plus
-  LLC plus CPU cards stay display only and never shape
-  placement. Perf hints keep 1024 for light and hog as best
+  start log, with no effect on placement. Live frequency plus
+  CPU cards stay display only and never shape
+  placement. Max frequency plus capacity plus LLC plus
+  siblings seed groups. Perf hints keep 1024 for light and hog as best
   effort with a weak guard at init plus running. One policy
   keeps both groups at max since groups use dedicated CPUs.
-- Machines with one thread per core run plain per-CPU
-with no sibling step and no SMT badge. A single CPU
+- Machines with one thread per core keep halves plus
+  interleave exactly with preference as no-op and no trap.
+  A single CPU
   host runs with no peer scan through the same path.
 - Needs a kernel with sched_ext enabled.
