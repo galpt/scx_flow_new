@@ -12,8 +12,8 @@ use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 
-use crate::stats;
 use crate::Scheduler;
+use crate::stats;
 
 impl<'a> Scheduler<'a> {
     pub(crate) fn get_metrics(&self) -> stats::Metrics {

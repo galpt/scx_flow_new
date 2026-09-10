@@ -14,16 +14,16 @@ use std::io::Write;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossbeam::channel::Receiver;
 use serde::Serialize;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use tiny_http::Header;
 use tiny_http::Response;
 use tiny_http::Server;
@@ -160,11 +160,11 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
         addr = format!("[::1]:{PORT}");
         server = Some(s);
     }
-    if server.is_none() {
-        if let Ok(s) = Server::http(format!("127.0.0.1:{PORT}")) {
-            addr = format!("127.0.0.1:{PORT}");
-            server = Some(s);
-        }
+    if server.is_none()
+        && let Ok(s) = Server::http(format!("127.0.0.1:{PORT}"))
+    {
+        addr = format!("127.0.0.1:{PORT}");
+        server = Some(s);
     }
     if let Some(server) = server {
         log::info!("web on port {addr}");
@@ -202,10 +202,10 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
         }
     } else {
         log::warn!("web TCP blocked, unix fallback");
-        if let Ok(m) = std::fs::symlink_metadata(SOCK) {
-            if m.file_type().is_socket() {
-                let _ = std::fs::remove_file(SOCK);
-            }
+        if let Ok(m) = std::fs::symlink_metadata(SOCK)
+            && m.file_type().is_socket()
+        {
+            let _ = std::fs::remove_file(SOCK);
         }
         let lis = match UnixListener::bind(SOCK) {
             Ok(v) => v,

@@ -36,11 +36,7 @@ pub fn time_before(a: u64, b: u64) -> bool {
 #[cfg(test)]
 pub fn clamp_vruntime(v: u64, frontier: u64, slice: u64) -> u64 {
     let floor = frontier.wrapping_sub(slice);
-    if time_before(v, floor) {
-        floor
-    } else {
-        v
-    }
+    if time_before(v, floor) { floor } else { v }
 }
 
 /*
@@ -79,11 +75,7 @@ pub fn vruntime_add(v: u64, delta: u64) -> u64 {
  */
 #[cfg(test)]
 pub fn frontier_max(old: u64, next: u64) -> u64 {
-    if time_before(old, next) {
-        next
-    } else {
-        old
-    }
+    if time_before(old, next) { next } else { old }
 }
 
 /*

@@ -11,8 +11,8 @@ use crate::flow::DISPATCH_BATCH;
 use crate::flow::EST_MAX_NS;
 use crate::flow::EST_MIN_NS;
 use crate::flow::SLICE_NS;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 
 /* Default fixed slice in nanos. */
 const DEF_SLICE_NS: u64 = SLICE_NS;
