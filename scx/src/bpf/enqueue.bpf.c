@@ -1,13 +1,41 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-static __always_inline s32 flow_pick_target(
-	const struct task_struct *p, s32 sel)
+/* Group of one task with light as default. */
+static __always_inline u8 flow_task_group(
+	struct flow_task_ctx *tctx)
+{
+	if (!tctx)
+		return (u8)FLOW_GROUP_LIGHT;
+	if (tctx->group == (u8)FLOW_GROUP_HOG)
+		return (u8)FLOW_GROUP_HOG;
+	return (u8)FLOW_GROUP_LIGHT;
+}
+/* True when one task cannot move to another CPU. */
+static __always_inline bool flow_task_pinned(
+	const struct task_struct *p)
+{
+	if (is_migration_disabled(p))
+		return true;
+	if (p->nr_cpus_allowed == 1)
+		return true;
+	return false;
+}
+/* Target in one group from selected plus first. */
+static __always_inline s32 flow_pick_in_group(
+	const struct task_struct *p, s32 sel,
+	u8 group)
 {
 	s32 first;
-	if (flow_cpu_ok(p, sel))
-		return sel;
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (flow_cpu_ok(p, first))
+	if (sel >= 0 && flow_cpu_ok(p, sel)) {
+		u8 g = flow_group_of_cpu((u32)sel,
+		    nr_cpu_ids);
+		if (g == group)
+			return sel;
+		__sync_fetch_and_add(
+		    &flow_stats.group_steal_skipped, 1);
+	}
+	first = flow_first_in_group(p, group);
+	if (first >= 0)
 		return first;
 	return -1;
 }
@@ -39,12 +67,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	s32 cpu = -1;
 	bool is_requeue = false;
 	bool is_fresh = false;
+	bool pinned = false;
+	u8 group;
 	u64 est = 0;
 	u64 slice = (u64)FLOW_SLICE_NS;
 	if (enq_flags & SCX_ENQ_REENQ)
 		is_requeue = true;
 	tctx = flow_get(p);
 	sel = p->scx.selected_cpu;
+	pinned = flow_task_pinned(p);
 	if (!tctx) {
 		u64 frontier;
 		u64 clamped;
@@ -65,25 +96,50 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.edf_clamped, 1);
 		__sync_fetch_and_add(&flow_stats.edf_ordered,
 		    1);
-		scx_bpf_dsq_insert_vtime(p, (u64)FLOW_DSQ_PARK,
-		    slice, dl, 0);
+		scx_bpf_dsq_insert_vtime(p,
+		    (u64)FLOW_DSQ_PARK, slice, dl, 0);
 		return;
 	}
+	group = flow_task_group(tctx);
 	if (tctx->est_ns == 0)
 		is_fresh = true;
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, here))
 			cpu = here;
+		else
+			cpu = flow_pick_in_group(p, sel,
+			    group);
+	} else if (p->nr_cpus_allowed == 1) {
+		s32 first;
+		first = (s32)bpf_cpumask_first(
+		    p->cpus_ptr);
+		if (flow_cpu_ok(p, first))
+			cpu = first;
+		else
+			cpu = -1;
+	} else {
+		cpu = flow_pick_in_group(p, sel, group);
+		if (cpu < 0) {
+			s32 first;
+			first = (s32)bpf_cpumask_first(
+			    p->cpus_ptr);
+			if (flow_cpu_ok(p, first)) {
+				cpu = first;
+				group = flow_group_of_cpu(
+				    (u32)first,
+				    nr_cpu_ids);
+				tctx->group = group;
+			}
+		}
 	}
-	if (cpu < 0)
-		cpu = flow_pick_target(p, sel);
 	if (cpu < 0) {
 		u64 frontier;
 		u64 v;
 		u64 clamped;
 		u64 scaled;
 		u64 dl;
+		u64 park;
 		if (is_fresh)
 			est = slice;
 		else
@@ -104,6 +160,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scaled = flow_scale_by_weight(est,
 		    (u32)FLOW_WEIGHT);
 		dl = flow_deadline(clamped, scaled);
+		if (group == (u8)FLOW_GROUP_HOG &&
+		    pinned) {
+			dl = flow_inflate_deadline(dl);
+			__sync_fetch_and_add(
+			    &flow_stats.pinned_hog_inflated,
+			    1);
+		}
 		if (dl == (u64)-1)
 			dl = (u64)-2;
 		tctx->deadline = dl;
@@ -114,8 +177,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.edf_clamped, 1);
 		__sync_fetch_and_add(&flow_stats.edf_ordered,
 		    1);
-		scx_bpf_dsq_insert_vtime(p, (u64)FLOW_DSQ_PARK,
-		    slice, dl, 0);
+		park = flow_park_for_group(group);
+		scx_bpf_dsq_insert_vtime(p, park, slice,
+		    dl, 0);
 		return;
 	}
 	if (is_fresh)
@@ -142,6 +206,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scaled = flow_scale_by_weight(est,
 		    (u32)FLOW_WEIGHT);
 		dl = flow_deadline(clamped, scaled);
+		if (group == (u8)FLOW_GROUP_HOG &&
+		    pinned) {
+			dl = flow_inflate_deadline(dl);
+			__sync_fetch_and_add(
+			    &flow_stats.pinned_hog_inflated,
+			    1);
+		}
 		if (dl == (u64)-1)
 			dl = (u64)-2;
 		tctx->vruntime = clamped;

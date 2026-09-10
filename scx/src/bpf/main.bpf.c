@@ -96,6 +96,29 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_est = 0;
 	st->running_pid = 0;
 }
+/* First allowed CPU in one group in id order. */
+static __always_inline s32 flow_first_in_group(
+	const struct task_struct *p, u8 group)
+{
+	s32 cpu;
+	bpf_for(cpu, 0, 1024) {
+		u8 g;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		g = flow_group_of_cpu((u32)cpu,
+		    nr_cpu_ids);
+		if (g != group)
+			continue;
+		if (bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr))
+			return cpu;
+	}
+	return -1;
+}
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"
@@ -119,6 +142,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		struct flow_cpu_state *st;
 		u32 key;
 		u64 dsq;
+		u8 group;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= n)
@@ -143,12 +167,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->running_est = 0;
 		st->running_pid = 0;
 		st->cursor = (u32)cpu;
+		group = flow_group_of_cpu((u32)cpu, n);
+		if (scx_bpf_cpuperf_set)
+			scx_bpf_cpuperf_set(cpu,
+			    flow_perf_for_group(group));
 	}
 	if ((u64)FLOW_DSQ_PARK >= (u64)SCX_DSQ_LOCAL_ON) {
 		scx_bpf_error("dsq id over bound");
 		return -EINVAL;
 	}
 	ret = scx_bpf_create_dsq((u64)FLOW_DSQ_PARK, -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("dsq create failed");
+		return ret;
+	}
+	if ((u64)FLOW_DSQ_PARK_HOG >=
+	    (u64)SCX_DSQ_LOCAL_ON) {
+		scx_bpf_error("dsq id over bound");
+		return -EINVAL;
+	}
+	ret = scx_bpf_create_dsq(
+	    (u64)FLOW_DSQ_PARK_HOG, -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
 		return ret;
