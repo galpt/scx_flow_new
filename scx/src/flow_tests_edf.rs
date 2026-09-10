@@ -740,6 +740,20 @@ fn cleared_running_view_reads_idle() {
 }
 
 #[test]
+fn completion_counts_once_per_grant() {
+    let mut deadline = COMPLETED_SENTINEL;
+    assert!(!completion_take(&mut deadline));
+    completion_grant(&mut deadline, 1_000_000);
+    assert!(completion_take(&mut deadline));
+    assert!(!completion_take(&mut deadline));
+    assert!(!completion_take(&mut deadline));
+    completion_grant(&mut deadline, u64::MAX);
+    assert_ne!(deadline, COMPLETED_SENTINEL);
+    assert!(completion_take(&mut deadline));
+    assert!(!completion_take(&mut deadline));
+}
+
+#[test]
 fn mask_range_and_live_fail_closed() {
     assert!(!may_run_on(-1, &[true, true]));
     assert!(!cpu_live(-1, 2));

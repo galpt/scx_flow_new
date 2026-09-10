@@ -91,7 +91,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
 	}
+	if (tctx->deadline == (u64)-1)
+		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
+	tctx->deadline = (u64)-1;
 }
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
@@ -102,7 +105,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->est_ns = 0;
 	tctx->run_at = 0;
 	tctx->vruntime = 0;
-	tctx->deadline = 0;
+	tctx->deadline = (u64)-1;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
@@ -110,7 +113,10 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	if (tctx->deadline == (u64)-1)
+		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
+	tctx->deadline = (u64)-1;
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct scx_exit_task_args *args)
@@ -120,5 +126,8 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	if (tctx->deadline == (u64)-1)
+		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
+	tctx->deadline = (u64)-1;
 }

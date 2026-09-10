@@ -104,6 +104,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scaled = flow_scale_by_weight(est,
 		    (u32)FLOW_WEIGHT);
 		dl = flow_deadline(clamped, scaled);
+		if (dl == (u64)-1)
+			dl = (u64)-2;
 		tctx->deadline = dl;
 		__sync_fetch_and_add(&flow_stats.edf_enqueued,
 		    1);
@@ -140,6 +142,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scaled = flow_scale_by_weight(est,
 		    (u32)FLOW_WEIGHT);
 		dl = flow_deadline(clamped, scaled);
+		if (dl == (u64)-1)
+			dl = (u64)-2;
 		tctx->vruntime = clamped;
 		tctx->deadline = dl;
 		__sync_fetch_and_add(&flow_stats.edf_enqueued,

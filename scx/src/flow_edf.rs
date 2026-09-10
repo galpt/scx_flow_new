@@ -129,6 +129,45 @@ pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
 }
 
 /*
+ * Sentinel for a consumed completion. The deadline
+ * holds max when no grant is outstanding, so a block
+ * plus a disable plus an exit count one task once.
+ * Enable starts consumed. Each insert regrants with a
+ * real deadline. Each completion consumes once.
+ */
+#[cfg(test)]
+pub const COMPLETED_SENTINEL: u64 = u64::MAX;
+
+/*
+ * Take one completion when a grant is outstanding.
+ * Returns true once per grant and consumes the grant,
+ * so a later block, disable, or exit sees consumed and
+ * counts nothing. Returns false when already consumed.
+ */
+#[cfg(test)]
+pub fn completion_take(deadline: &mut u64) -> bool {
+    if *deadline == COMPLETED_SENTINEL {
+        return false;
+    }
+    *deadline = COMPLETED_SENTINEL;
+    true
+}
+
+/*
+ * Grant one completion slot from a fresh deadline. A
+ * computed max maps to max minus one, so the grant
+ * never collides with the consumed sentinel.
+ */
+#[cfg(test)]
+pub fn completion_grant(deadline: &mut u64, dl: u64) {
+    if dl == COMPLETED_SENTINEL {
+        *deadline = COMPLETED_SENTINEL - 1;
+    } else {
+        *deadline = dl;
+    }
+}
+
+/*
  * Combined insert plus frontier step for tests. Runs
  * the insert model then advances virtual time by the
  * scaled estimate and steps the frontier, so callers
