@@ -45,160 +45,62 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ### Order and deadlines
 
-Each CPU keeps an ordered queue with a fixed slice at 1ms.
-Queues hold EDF order first with arrival order for ties.
-The deadline adds clamped virtual time and scaled estimate.
-The weight is fixed at 1024. The kernel
-queue orders by deadline with the slice as the slice.
-Our own EDF design uses per-CPU ordered queues plus
-vruntime fairness plus the fixed slice.
+Each CPU keeps an ordered queue plus one park queue per
+group. Earliest deadline runs first with arrival order
+for ties. The deadline adds clamped virtual time and a
+scaled burst estimate at fixed weight. The math lives in
+`scx/src/bpf/intf.h`, inserts in
+`scx/src/bpf/enqueue.bpf.c`.
 
 ### Fixed slice
 
-The slice is fixed at 1ms with no knob.
-Fresh tasks join with the slice so the start stays neutral.
-Estimates hold the last burst clamped at 1ns to 1 second.
-The deadline still
-uses the full clamped estimate.
+The slice is fixed at 1ms with no knob. Fresh tasks join
+with the slice so the start stays neutral. Estimates hold
+the last burst clamped at 1ns to 1 second.
 
 ### Fairness
 
-The sleeper cap keeps lag at one slice
-behind the frontier, so a waking task gains at most one
-slice of advantage with wrap safe order. Blocked tasks
-complete at once. Runnable tasks requeue ordered with a
-refreshed estimate. Virtual time moves forward by scaled
-runtime and the frontier moves forward while work stays
-queued. An idle reset bounds to waking virtual time with
-no zero use, so new arrivals never inherit stale time.
+A waking task gains at most one slice of advantage over
+the frontier, so sleep never buys priority. Virtual time
+moves forward with scaled runtime while work stays queued
+and resets to waking time on idle, so new arrivals never
+inherit stale time. The rules live in
+`scx/src/bpf/lifecycle.bpf.c`.
 
 ### Placement
 
-Placement scans for a free core in the group and mask with
-no claim, then any idle CPU in the group and mask,
-then the prior CPU in the group, the current CPU in the
-group, and the first allowed CPU in the group. Tier A scans
-for a free core with no claim, so a miss wastes no idle
-claim. Tier B prefers any idle in the group with claim only
-there. Placement
-only with no dispatch use. Singletons treat all running
-free as free with core check as no-op and no trap. The scan
-is bounded at 1024 with early exit in id order. Strict iff
-ready is zero, best effort iff ready is one with live table
-in placement. Pinned tasks
-keep their CPU with the group moved to the live group of
-that CPU and 8ms extra for pinned hog. Tasks that cannot
-move stay local. Empty masks park in order in the task
-group. Live frequency plus CPU cards stay display only
-and never shape placement. Max frequency plus capacity plus
-LLC plus siblings seed groups.
-Pinned subsets such as Lestat 16 plus 16 stay in mask.
-Single-CPU Konaka never leaves. Two groups use a per CPU
-table when ready, else halves with extra to hog and a single
-CPU keeps all light. Odd counts give the extra CPU to hog
-in both views, so interleave matches halves counts. Short
-slices clamp with no pad. Cores split with extra to hog with
-siblings kept in one group. One LLC splits globally. Two plus
-N LLCs split in each LLC. One core in one LLC keeps LIGHT as
-the default with no split. Each LLC with an odd core count
-gives the extra core to hog. All singleton cores use halves
-plus
-interleave exactly. The `4.2.9` admission seeds the table only
-when capacity or max frequency spread tops 10pct, else halves
-applies. The `4.2.10` rule builds cores from thread siblings
-lists with union find plus LLC rules plus hetero core interleave
-by max capacity plus max frequency plus least id. The same group
-table plus the sibling partner table are reused with no new
-maps. Ready stays cleared
-when the core view matches halves, else ready set. Strict iff
-ready is zero, best effort iff ready is one. Dispatch uses
-halves. Placement uses live table.
+Order is free core in group, any idle in group, prior,
+current, then first allowed, and the task mask always
+wins. Groups split physical cores with siblings kept
+together and cache local shares where the hardware
+allows. Strict when ready is zero, best effort when
+ready is one. The order lives in
+`scx/src/bpf/select_cpu.bpf.c`, seeding in
+`scx/src/topology.rs`.
 
 ### Dispatch
 
-Dispatch drains the local queue first, then the group park,
-then idle steals from peers with mask only. Own keeps no
-group check, so a pinned single entry still runs where its
-mask allows. Park drains the thief group park only with no
-task recheck, so a stale cross entry may move iff ready is
-one with strict park iff ready is zero. Peer keeps mask
-plus depth with idle rescue and no task recheck, so a
-depth 1 donor moves only when the thief is idle with no
-moved plus no own left plus no park left. Busy thieves
-keep depth 2. Tier 0 models also donor asleep rescue. BPF
-ships thief idle only due to verifier jump at 1000001 on
-asleep check, with donor asleep handled by idle kick.
-Tier 3 holds park only by construction due to verifier
-jump at 1000001 on donor check in the steal loop. Strict
-park iff ready is zero, best effort peer iff ready is one.
-Dispatch uses halves. Placement uses live table. Each pass
-visits every queued task in the local and park queues in
-order and moves live tasks when allowed, including exiting
-tasks so they run to exit, and skips past dead, foreign
-and failed heads, so every pass moves at least one task
-when movable work exists there. An idle CPU with no moved
-work steals past unmovable leftovers, while a busy CPU
-with moved work steals only when both queues are empty.
-Idle steals visit at most 8 peers with a rotating cursor
-and take the first task in a peer queue that allows the
-thief when the donor meets min depth. Cross group tasks
-may move with no counter. A cross task in any donor may
-move iff ready is one or zero with mask only. A stale cross
-task
-in the group park may move iff ready is one. Cross group
-picks in select plus enqueue count group skip. Isolation
-follows enqueue placement plus thief park choice with peer
-best effort across groups, with pinned single entries kept
-by the mask. Perf hints set 1024 for light and hog at init
-plus running with a weak guard as best effort. One policy
-keeps both groups at max since groups use dedicated CPUs,
-so hog frequency cannot harm light latency, and the old
-half cap punished hogs twice with no measurement.
+Order is local queue, group park, then steals from peers
+with mask checks. An idle thief may rescue a lone queued
+task, busy thieves keep depth 2. Every pass moves at
+least one task when movable work exists. The drains live
+in `scx/src/bpf/dispatch.bpf.c`.
 
 ### Kicks
 
-Kicks wake idle targets with a mask check and no busy
-preemption. The kick runs when the target has no running
-task even with queued work, so a missed empty to 1 kick is
-rescued on later inserts. Gated on idle with no storm.
-Park sends no kick since it holds tasks with no live
-allowed CPU after fallback with no single idle target, and
-the next dispatch pass collects them.
+Only idle targets are kicked with a mask check and no
+busy preemption. A missed wakeup is rescued on later
+inserts. Park sends no kick and the next pass collects
+it.
 
 ### Counts and queues
 
-Counts cover inserts, requeues,
-completions, park moves, steal moves and kicks, plus EDF
-enqueued, EDF clamped, EDF ordered, group demote, group
-promote plus wake promote, pinned inflate, and group
-skip. Wake promote is the fast subset of promote by 8
-short blocks. Per-CPU queues use
-ids `0x4000` plus the CPU id with up to 1024 CPUs. Two park
-queues use ids `0x5000` for light and `0x5001` for hog for
-tasks with no allowed CPU in the group. The watchdog
-is 30 seconds. Ops name is `flow`. Task state stays at 48B
-with wake hits at off 46. Per-CPU state stays at 24B.
-Counters stay at 136B. Burn moves light to hog at 16ms in
-a 32ms window or one burst at 4ms quiet down to 1ms floor
-during flood. Depth sums light per CPU queued tasks with
-halves depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, depth 4
-plus to 1ms with strict iff ready is zero and best effort
-iff ready is one. Per task worst case is the 1ms floor
-during flood. Eight short blocks below 1ms with burn below
-4ms move hog to light at once. A burst at the allowance
-clears wake hits. A short with burn at or past 4ms clears
-wake hits. A hot window at or past 16ms clears wake hits.
-A middle window at the end clears wake hits with low runs.
-A low window below 4ms keeps wake hits. A window in
-progress keeps wake hits, so gaming stays hard. Slow 64
-wins near 2s stays intact.
-Dashboard shows per group depths plus steals plus demote
-plus promote plus wake rates plus pinned inflate plus
-skip plus per CPU group plus running plus slice plus
-pressure plus version plus topology in one view. Snapshot
-at `/api/snapshot` holds version plus timestamp plus
-topology plus per CPU plus all counters for download as
-a timestamped file on loopback only.
+Counters cover inserts, completions, steals, kicks, EDF
+order events, group moves, and skips. The dashboard shows
+them per group and per CPU with a one-click JSON log
+download at `/api/snapshot`. The payload lives in
+`scx/src/stats.rs`, `scx/src/webui.rs` and
+`scx/ui/index.html`.
 
 ### Measurement
 
@@ -206,35 +108,18 @@ For A/B comparison, install
 one build, measure the same workload, then install the other
 build and compare with no other change. The harness probe
 plus the control flag support baseline comparison with no
-scheduler change in the harness. For 4.2.10 compare light p95
-from the probe plus schbench with the same workload.
+scheduler change in the harness.
 
 ### Limits
 
-Version stays in
-4.2 line at `4.2.10`. Weight stays 1024 with no knob.
-Groups stay fixed at two with no knob. The slice
-stays fixed at 1ms.
+Weight stays 1024 with no knob. Groups stay fixed at
+two with no knob. The slice stays fixed at 1ms.
 
 ### History
 
-The `4.2.6`
-cleanup removes frozen `fast_hits`, `linger_boosts` and
-`reuse_hits` with no behavior change, shrinking
-`flow_stats` from `120B` to `96B`. The `4.2.7` strip keeps
-a pure EDF core with a fixed slice at 1ms, task at 32B,
-per-CPU at 24B, and counters at 96B. The `4.2.8` step adds
-two groups with burn only moves, strict iff ready is zero
-and best effort iff ready is one, task at 48B, and
-counters at 136B with wake detail. The `4.2.9` step keeps
-task at 48B plus per-CPU at 24B plus counters at 136B with
-idle singleton rescue plus idle kick rescue plus running
-owner clear and no new knob. The `4.2.10` step keeps task
-at 48B plus per-CPU at 24B plus counters at 136B with core
-plus LLC grouping plus free core Tier in placement only
-plus singleton equivalence and no new knob. The `4.2.6` base is the last
-stable line. The `4.3.x` plus `4.4.0` lines were tried and
-failed with stalls and were abandoned.
+The `4.2.6` base is the last stable line. The `4.3.x`
+plus `4.4.0` lines were tried and failed with stalls
+and were abandoned.
 
 ## Build
 
