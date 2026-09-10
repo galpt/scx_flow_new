@@ -4,7 +4,8 @@ scx_flow is our own EDF scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps one ordered queue per-CPU with a fixed slice at
-1ms plus two strict groups for light waits and hog burn.
+1ms plus two groups for light waits and hog burn, strict
+on uniform hosts and best effort on hetero hosts.
 It is deliberately knob-free. It uses per-CPU ordered
 EDF plus vruntime fairness plus the fixed slice.
 
@@ -120,7 +121,8 @@ Per-CPU state stays at 24B. Counters stay at 136B. The `4.2.6` base is the last 
 line. The `4.3.x` plus `4.4.0` lines were tried and failed
 with stalls and were abandoned. The `4.2.7` strip keeps a
 pure EDF core with the fixed slice. The `4.2.8` step adds
-two strict groups with burn only moves.
+two groups with burn only moves, strict on uniform hosts
+and best effort on hetero hosts.
 
 ## Typical Use Cases
 
@@ -135,7 +137,8 @@ two strict groups with burn only moves.
 
 ## Production Ready?
 
-Yes.
+Yes on uniform hosts. Hetero hosts get best effort
+grouping, see Limitations.
 
 ## Configuration
 

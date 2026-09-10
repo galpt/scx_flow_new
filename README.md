@@ -200,7 +200,8 @@ cleanup removes frozen `fast_hits`, `linger_boosts` and
 `flow_stats` from `120B` to `96B`. The `4.2.7` strip keeps
 a pure EDF core with a fixed slice at 1ms, task at 32B,
 per-CPU at 24B, and counters at 96B. The `4.2.8` step adds
-two strict groups with burn only moves, task at 48B, and
+two groups with burn only moves, strict on uniform hosts
+and best effort on hetero hosts, task at 48B, and
 counters at 136B with wake detail. The `4.2.6` base is
 the last stable line. The `4.3.x` plus `4.4.0` lines were
 tried and failed with stalls and were abandoned.
