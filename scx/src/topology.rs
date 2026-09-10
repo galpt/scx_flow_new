@@ -210,30 +210,6 @@ pub fn llc_ids(nr: usize) -> Vec<u32> {
 }
 
 /*
- * Sibling ring for free core checks. Each CPU maps to
- * the next CPU in the same core, ring order by id.
- * Singletons map to none, so the check is a no-op with
- * state equivalence to the prior release. Missing files
- * yield singletons with no trap. Capped at 1024.
- */
-pub fn sibling_seed(nr: usize) -> [i32; crate::flow_group::GROUP_TABLE_LEN] {
-    let mut out = [crate::flow_group::SIBLING_NONE; crate::flow_group::GROUP_TABLE_LEN];
-    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
-    if n == 0 {
-        return out;
-    }
-    let lists = sibling_lists(n);
-    let cores = crate::flow_group::build_cores(n, &lists);
-    let ring = crate::flow_group::sibling_ring(&cores, n);
-    for (cpu, v) in ring.iter().enumerate() {
-        if cpu < out.len() {
-            out[cpu] = *v;
-        }
-    }
-    out
-}
-
-/*
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement

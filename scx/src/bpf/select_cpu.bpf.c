@@ -39,6 +39,19 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		group = (u8)FLOW_GROUP_HOG;
 	else
 		group = (u8)FLOW_GROUP_LIGHT;
+	/* Tier A prefers a free core in the group. */
+	/* Tier B below prefers any idle in the group. */
+	/* Placement only with no dispatch use. */
+	/* Singletons treat all idle as free, so Tier A */
+	/* is a no-op with no trap. */
+	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr,
+	    SCX_PICK_IDLE_CORE);
+	if (picked >= 0 && flow_cpu_ok(p, picked)) {
+		u8 g = flow_group_live((u32)picked,
+		    nr_cpu_ids);
+		if (g == group)
+			return picked;
+	}
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0 && flow_cpu_ok(p, picked)) {
 		u8 g = flow_group_live((u32)picked,

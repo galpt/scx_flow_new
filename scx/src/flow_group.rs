@@ -214,6 +214,7 @@ pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_
 }
 
 /* None marker for the sibling ring. */
+#[cfg(test)]
 pub const SIBLING_NONE: i32 = -1;
 
 /*
@@ -659,6 +660,7 @@ pub fn seed_groups_topology(
  * Singletons map to none, so the check is a no-op.
  * Capped at 1024 with no trap.
  */
+#[cfg(test)]
 pub fn sibling_ring(cores: &[Vec<u32>], nr: usize) -> Vec<i32> {
     let mut out = vec![SIBLING_NONE; nr];
     for core in cores {

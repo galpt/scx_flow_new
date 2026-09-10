@@ -158,11 +158,9 @@ impl<'a> Scheduler<'a> {
             .unwrap_or(0)
             .min(MAX_CPUS);
         let (group_table, group_ready) = topology::group_seed(nr_groups);
-        let sibling_table = topology::sibling_seed(nr_groups);
         if let Some(bss) = skel.maps.bss_data.as_mut() {
             bss.flow_group_by_cpu = group_table;
             bss.flow_group_ready = group_ready;
-            bss.flow_sibling = sibling_table;
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;

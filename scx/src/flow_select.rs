@@ -197,6 +197,179 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 }
 
 /*
+ * True when one CPU sits on a free core. Needs the CPU
+ * plus no sibling with a running task. Singletons with
+ * none read as free, so SMT off is a no-op with no trap.
+ * Out of range CPUs fail closed with no placement.
+ * Follows the ring for up to 8 steps with no division.
+ */
+#[cfg(test)]
+pub fn core_free(cpu: i32, ring: &[i32], running: &[bool], nr: usize) -> bool {
+    if cpu < 0 {
+        return false;
+    }
+    let c = cpu as usize;
+    if c >= nr {
+        return false;
+    }
+    if (cpu as u64) >= MAX_CPUS as u64 {
+        return false;
+    }
+    if running.get(c).copied().unwrap_or(false) {
+        return false;
+    }
+    let Some(&nxt) = ring.get(c) else {
+        return true;
+    };
+    if nxt == crate::flow_group::SIBLING_NONE {
+        return true;
+    }
+    if nxt < 0 {
+        return true;
+    }
+    let mut cur = nxt as usize;
+    for _ in 0..8 {
+        if cur >= nr {
+            return true;
+        }
+        if running.get(cur).copied().unwrap_or(false) {
+            return false;
+        }
+        let Some(&after) = ring.get(cur) else {
+            return true;
+        };
+        if after == crate::flow_group::SIBLING_NONE || after < 0 {
+            return true;
+        }
+        let v = after as usize;
+        if v == c || v == cur {
+            return true;
+        }
+        if v >= nr {
+            return true;
+        }
+        cur = v;
+        if cur == c {
+            return true;
+        }
+    }
+    true
+}
+
+/*
+ * First free idle CPU in one group. Tier A model only.
+ * Scans in id order with the table when ready, else
+ * halves. Needs idle plus allowed plus free core.
+ * Returns none when no such CPU lives.
+ */
+#[cfg(test)]
+pub fn pick_free_idle(
+    allowed: &[bool],
+    idle: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    ring: &[i32],
+    running: &[bool],
+) -> Option<u32> {
+    for cpu in 0..nr {
+        if !may_run_on(cpu as i32, allowed) {
+            continue;
+        }
+        if idle.get(cpu).copied().unwrap_or(false) != true {
+            continue;
+        }
+        if crate::flow_group::group_live(cpu as u32, nr, table, ready) != group {
+            continue;
+        }
+        if !core_free(cpu as i32, ring, running, nr) {
+            continue;
+        }
+        return Some(cpu as u32);
+    }
+    None
+}
+
+/*
+ * First idle CPU in one group. Tier B model only.
+ * Scans in id order with the table when ready, else
+ * halves. Needs idle plus allowed in the group.
+ * Returns none when no such CPU lives.
+ */
+#[cfg(test)]
+pub fn pick_idle_in_group(
+    allowed: &[bool],
+    idle: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+) -> Option<u32> {
+    for cpu in 0..nr {
+        if !may_run_on(cpu as i32, allowed) {
+            continue;
+        }
+        if idle.get(cpu).copied().unwrap_or(false) != true {
+            continue;
+        }
+        if crate::flow_group::group_live(cpu as u32, nr, table, ready) != group {
+            continue;
+        }
+        return Some(cpu as u32);
+    }
+    None
+}
+
+/*
+ * Full tiered select model. Mirrors the BPF order of
+ * free idle plus any idle in the group plus previous
+ * plus current plus first in the group plus first.
+ * Tier A prefers a free core. Tier B prefers any idle
+ * in the group. Placement only with no dispatch use.
+ * Singletons treat all idle as free, so Tier A equals
+ * Tier B with prior order and no trap.
+ */
+#[cfg(test)]
+pub fn select_cpu_tiered(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    ring: &[i32],
+    running: &[bool],
+) -> Option<u32> {
+    if let Some(c) = pick_free_idle(allowed, idle, group, nr, table, ready, ring, running) {
+        return Some(c);
+    }
+    if let Some(c) = pick_idle_in_group(allowed, idle, group, nr, table, ready) {
+        return Some(c);
+    }
+    for &cpu in &[prev, cur] {
+        if may_run_on(cpu, allowed)
+            && crate::flow_group::group_live(cpu as u32, nr, table, ready) == group
+            && (cpu as usize) < nr
+            && cpu >= 0
+        {
+            return Some(cpu as u32);
+        }
+    }
+    if let Some(c) = crate::flow_group::first_in_group_live(allowed, group, nr, table, ready) {
+        return Some(c);
+    }
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(cpu as u32);
+        }
+    }
+    None
+}
+
+/*
  * True when an idle kick may run. Needs an idle target
  * with no running task, even with queued work, so a
  * missed empty to 1 kick is rescued on later inserts
