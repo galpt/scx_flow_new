@@ -101,8 +101,7 @@ at 1ms. The current version is `4.2.10`.
 
 ## Production Ready?
 
-Yes iff ready is zero. Hosts with ready is one get best
-effort grouping, see Limitations.
+Yes.
 
 ## Configuration
 
@@ -121,18 +120,18 @@ button to download the full snapshot as JSON.
 
 ## Code map
 
-Slice math and queue rules are in `src/bpf/intf.h`,
-maps plus helpers plus the ops table in
-`src/bpf/main.bpf.c`, placement in
-`src/bpf/select_cpu.bpf.c`, inserts in
-`src/bpf/enqueue.bpf.c`, drains in
-`src/bpf/dispatch.bpf.c`, lifecycle plus classifier in
-`src/bpf/lifecycle.bpf.c`. Rust mirrors are in
-`src/flow_slice.rs`, `src/flow_edf.rs`,
-`src/flow_select.rs` and `src/flow_group.rs` with tests
-in `src/flow_tests_edf.rs` plus
-`src/flow_tests_group.rs`. Stats plus payload are in
-`src/stats.rs`, `src/webui.rs` and `ui/index.html`.
+- Slice math and queue rules: `src/bpf/intf.h`
+- Maps, helpers, ops table: `src/bpf/main.bpf.c`
+- Placement: `src/bpf/select_cpu.bpf.c`
+- Inserts: `src/bpf/enqueue.bpf.c`
+- Drains: `src/bpf/dispatch.bpf.c`
+- Lifecycle plus classifier: `src/bpf/lifecycle.bpf.c`
+- Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
+  `src/flow_select.rs`, `src/flow_group.rs`
+- Tests: `src/flow_tests_edf.rs`,
+  `src/flow_tests_group.rs`
+- Stats plus dashboard payload: `src/stats.rs`,
+  `src/webui.rs`, `ui/index.html`
 
 ## Measuring Wakeup Latency
 
