@@ -264,10 +264,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
 		/* Kick idle plus busy preempt with delay. */
 		/* Idle keeps at most 2 queued with no storm. */
-		/* Busy needs armed plus deserved plus rate */
-		/* clear plus same group plus mask with one */
-		/* kick per slice. Fail closed with no kick */
-		/* plus skip count on any clear. No loop. */
+		/* Busy needs latched arm 62 stand 31 plus */
+		/* deserved woken dl before frontier plus */
+		/* quarter gran plus rate clear plus same */
+		/* group plus mask with one kick per slice. */
+		/* Frontier is the floor, so beating it by */
+		/* granule proves earliness with no lookup. */
+		/* Fail closed with no kick plus skip count */
+		/* on any clear. No loop. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u8 sample;
@@ -277,19 +281,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u8 nwin;
 			u8 ncur;
 			u16 ncnt;
+			bool held;
 			bool armed;
+			bool is_deserved;
 			u64 granule;
 			bool rate_ok;
 			bool same;
 			bool mask_ok;
 			bool ok;
-			u32 occ_pid;
-			u32 occ_w;
-			u64 run_at;
-			u64 now2;
-			u64 run_ns;
-			struct task_struct *occ;
-			struct flow_task_ctx *octx;
 			if (!st)
 				return;
 			q = scx_bpf_dsq_nr_queued(dsq);
@@ -321,11 +320,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				    &flow_stats.kicks, 1);
 				return;
 			}
-			armed = flow_delay_armed(
-			    st->delay_win);
-			occ_w = (u32)st->running_weight;
-			granule = flow_granule_for_weight(
-			    occ_w, slice);
+			held = flow_stand_held(st->cursor);
+			armed = flow_delay_armed_latched(
+			    st->delay_win, held);
+			if (armed)
+				__sync_fetch_and_or(&st->cursor,
+				    (u32)FLOW_CURSOR_STAND_BIT);
+			else
+				__sync_fetch_and_and(&st->cursor,
+				    ~(u32)FLOW_CURSOR_STAND_BIT);
+			granule = flow_granule_for_weight(w,
+			    slice);
+			is_deserved = flow_deserved(dl,
+			    st->frontier, granule);
 			rate_ok = flow_rate_clear(
 			    st->cursor);
 			same = group ==
@@ -334,32 +341,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			mask_ok =
 			    bpf_cpumask_test_cpu(
 			    (u32)cpu, p->cpus_ptr);
-			occ_pid = st->running_pid;
-			occ = bpf_task_from_pid(occ_pid);
-			if (!occ) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				return;
-			}
-			octx = flow_lookup(occ);
-			run_at = octx ? octx->run_at : 0;
-			bpf_task_release(occ);
-			if (!run_at ||
-			    run_at == (u64)-1) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				return;
-			}
-			now2 = flow_now();
-			if (now2 >= run_at)
-				run_ns = now2 - run_at;
-			else
-				run_ns = 0;
 			ok = flow_preempt_ok(armed,
-			    flow_deserved(run_ns, granule),
-			    rate_ok, same, mask_ok);
+			    is_deserved, rate_ok, same,
+			    mask_ok);
 			if (!ok) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped,

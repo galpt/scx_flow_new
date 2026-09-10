@@ -158,6 +158,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		u64 min_depth;
 		struct flow_cpu_state *st;
 		u32 cur;
+		u32 old;
+		u32 nxt;
 		u32 i;
 		park_left = scx_bpf_dsq_nr_queued(park);
 		if (park_left > 0 && moved > 0)
@@ -168,6 +170,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			min_depth = (u64)FLOW_STEAL_MIN_DEPTH;
 		st = flow_cpu((u32)cpu);
 		cur = st ? st->cursor : 0;
+		old = cur;
 		bpf_for(i, 0, 8) {
 			u32 peer;
 			if (moved >= budget)
@@ -184,7 +187,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			moved += flow_drain_peer(cpu, peer,
 			    min_depth);
 		}
-		if (st)
-			__sync_lock_test_and_set(&st->cursor, cur);
+		/* Keep rate plus stand with new peer. */
+		if (st) {
+			nxt = flow_cursor_store(cur, old);
+			__sync_lock_test_and_set(&st->cursor,
+			    nxt);
+		}
 	}
 }

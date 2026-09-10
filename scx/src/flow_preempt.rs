@@ -17,6 +17,8 @@ pub const DELAY_UNIT_NS: u64 = 32_000;
 pub const DELAY_MAX: u64 = 250;
 /* Armed delay in units at 62 near 1984us. */
 pub const DELAY_ARM: u64 = 62;
+/* Stand delay in units at 31 near 1ms. */
+pub const DELAY_STAND: u64 = 31;
 /* Window length in updates at 8. */
 #[cfg(test)]
 pub const DELAY_WIN_LEN: u64 = 8;
@@ -26,9 +28,11 @@ pub const GRANULE_FLOOR_NS: u64 = 64_000;
 /* Rate bit in the cursor top bit. */
 #[cfg(test)]
 pub const CURSOR_RATE_BIT: u32 = 0x8000_0000;
-/* Cursor value mask without the rate bit. */
+/* Stand bit in cursor bit10 with peer in 0 to 9. */
+pub const CURSOR_STAND_BIT: u32 = 0x0000_0400;
+/* Cursor peer mask without rate plus stand. */
 #[cfg(test)]
-pub const CURSOR_MASK: u32 = 0x7fff_ffff;
+pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
 /*
  * Sample in 32us units from queued count. One slice
@@ -60,6 +64,30 @@ pub fn delay_decay(old: u8) -> u8 {
  */
 pub fn delay_armed(win: u8) -> bool {
     (win as u64) >= DELAY_ARM
+}
+
+/*
+ * True when delay is armed with hysteresis. Arms
+ * at 62, then holds while win stays at or past
+ * stand at 31 with the latched flag.
+ */
+pub fn delay_armed_latched(win: u8, held: bool) -> bool {
+    if delay_armed(win) {
+        return true;
+    }
+    if held && (win as u64) >= DELAY_STAND {
+        return true;
+    }
+    false
+}
+
+/*
+ * True when the stand latch is held in bit10.
+ * Bits 0 to 9 hold peer, bit10 holds stand, top
+ * holds rate, so rotation masks both flags.
+ */
+pub fn stand_held(cursor: u32) -> bool {
+    (cursor & CURSOR_STAND_BIT) != 0
 }
 
 /*
@@ -108,35 +136,63 @@ pub fn delay_push(win: u8, cur: u8, cnt: u16, sample: u8) -> (u8, u8, u16) {
 }
 
 /*
- * Granule in nanos weight aware with 64us floor. Base
- * is slice times 1024 over weight with floor at 64us,
- * so heavy keeps short and light keeps long with no
- * trap on zero weight or slice.
+ * Granule in nanos quarter slice with 64us floor.
+ * Base is slice times 1024 over weight quartered
+ * with floor at 64us, so heavy keeps short and
+ * light keeps long with no trap on zero input.
  */
 #[cfg(test)]
 pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
     if weight == 0 {
-        if slice < GRANULE_FLOOR_NS {
+        let gran = slice / 4;
+        if gran < GRANULE_FLOOR_NS {
             return GRANULE_FLOOR_NS;
         }
-        return slice;
+        return gran;
     }
     if slice == 0 {
         return GRANULE_FLOOR_NS;
     }
     let base = ((slice as u128 * 1024) / weight as u128) as u64;
-    if base < GRANULE_FLOOR_NS {
+    let gran = base / 4;
+    if gran < GRANULE_FLOOR_NS {
         return GRANULE_FLOOR_NS;
     }
-    base
+    gran
 }
 
 /*
- * Cursor value without the rate bit.
+ * Cursor peer without rate plus stand.
  */
 #[cfg(test)]
 pub fn cursor_val(cursor: u32) -> u32 {
     cursor & CURSOR_MASK
+}
+
+/*
+ * Store peer plus keep rate plus stand. Masks the
+ * peer, so rotation keeps order with no extra
+ * state.
+ */
+#[cfg(test)]
+pub fn cursor_store(peer: u32, old: u32) -> u32 {
+    (peer & CURSOR_MASK) | (old & (CURSOR_RATE_BIT | CURSOR_STAND_BIT))
+}
+
+/*
+ * Set the stand latch plus keep peer plus rate.
+ */
+#[cfg(test)]
+pub fn stand_set(cursor: u32) -> u32 {
+    cursor | CURSOR_STAND_BIT
+}
+
+/*
+ * Clear the stand latch plus keep peer plus rate.
+ */
+#[cfg(test)]
+pub fn stand_clear(cursor: u32) -> u32 {
+    cursor & !CURSOR_STAND_BIT
 }
 
 /*
@@ -156,12 +212,13 @@ pub fn rate_set(cursor: u32) -> u32 {
 }
 
 /*
- * True when deserved after one granule of run. Needs
- * run delta at or past the granule.
+ * True when woken deadline beats frontier plus gran.
+ * Frontier is the service floor, so beating it by
+ * granule proves earliness with no occupant state.
  */
 #[cfg(test)]
-pub fn deserved(run_ns: u64, granule: u64) -> bool {
-    run_ns >= granule
+pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
+    (woken_dl.wrapping_sub(frontier.wrapping_add(granule)) as i64) < 0
 }
 
 /*

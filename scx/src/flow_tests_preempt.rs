@@ -25,6 +25,10 @@ fn delay_consts_match_header() {
         crate::bpf_intf::flow_consts_FLOW_DELAY_ARM as u64
     );
     assert_eq!(
+        DELAY_STAND,
+        crate::bpf_intf::flow_consts_FLOW_DELAY_STAND as u64
+    );
+    assert_eq!(
         DELAY_WIN_LEN,
         crate::bpf_intf::flow_consts_FLOW_DELAY_WIN_LEN as u64
     );
@@ -37,14 +41,21 @@ fn delay_consts_match_header() {
         crate::bpf_intf::flow_consts_FLOW_CURSOR_RATE_BIT as u32
     );
     assert_eq!(
+        crate::flow_preempt::CURSOR_STAND_BIT,
+        crate::bpf_intf::flow_consts_FLOW_CURSOR_STAND_BIT as u32
+    );
+    assert_eq!(
         CURSOR_MASK,
         crate::bpf_intf::flow_consts_FLOW_CURSOR_MASK as u32
     );
     assert_eq!(DELAY_UNIT_NS, 32_000);
     assert_eq!(DELAY_MAX, 250);
     assert_eq!(DELAY_ARM, 62);
+    assert_eq!(DELAY_STAND, 31);
     assert_eq!(DELAY_WIN_LEN, 8);
     assert_eq!(GRANULE_FLOOR_NS, 64_000);
+    assert_eq!(crate::flow_preempt::CURSOR_STAND_BIT, 0x400);
+    assert_eq!(CURSOR_MASK, 0x7fff_fbff);
 }
 
 #[test]
@@ -69,6 +80,41 @@ fn delay_armed_needs_62() {
     assert!(delay_armed(62));
     assert!(delay_armed(63));
     assert!(delay_armed(250));
+}
+
+#[test]
+fn stand_holds_62_to_55_until_31() {
+    assert!(delay_armed_latched(62, false));
+    assert!(delay_armed_latched(55, true));
+    assert!(!delay_armed(55));
+    assert!(delay_armed_latched(31, true));
+    assert!(!delay_armed_latched(30, true));
+    assert!(!delay_armed_latched(55, false));
+    assert!(!delay_armed_latched(31, false));
+    assert!(!delay_armed_latched(0, true));
+    assert!(!stand_held(0));
+    assert!(stand_held(crate::flow_preempt::CURSOR_STAND_BIT));
+    assert!(!stand_held(CURSOR_RATE_BIT));
+    let win = delay_close(62, 0);
+    assert_eq!(win, 55);
+    assert!(delay_armed_latched(win, true));
+    assert!(!delay_armed(win));
+    let mut w = 62u8;
+    let mut held = false;
+    held = delay_armed_latched(w, held);
+    assert!(held);
+    w = delay_close(w, 0);
+    held = delay_armed_latched(w, held);
+    assert!(held);
+    for _ in 0..16 {
+        w = delay_close(w, 0);
+        held = delay_armed_latched(w, held);
+        if !held {
+            break;
+        }
+    }
+    assert!(!held);
+    assert!((w as u64) < DELAY_STAND);
 }
 
 #[test]
@@ -130,30 +176,49 @@ fn delay_window_push_fast_arm_slow_fall() {
 #[test]
 fn granule_is_weight_aware_with_64us_floor() {
     let slice = 1_000_000u64;
-    assert_eq!(granule_for_weight(1024, slice), 1_000_000);
-    assert_eq!(granule_for_weight(2048, slice), 500_000);
-    assert_eq!(granule_for_weight(256, slice), 4_000_000);
+    assert_eq!(granule_for_weight(1024, slice), 250_000);
+    assert_eq!(granule_for_weight(2048, slice), 125_000);
+    assert_eq!(granule_for_weight(256, slice), 1_000_000);
     assert_eq!(granule_for_weight(1024, 0), 64_000);
-    assert_eq!(granule_for_weight(0, slice), slice);
+    assert_eq!(granule_for_weight(0, slice), 250_000);
     assert_eq!(granule_for_weight(0, 0), 64_000);
     assert_eq!(granule_for_weight(0, 10_000), 64_000);
     assert_eq!(granule_for_weight(u32::MAX, slice), 64_000);
     assert!(granule_for_weight(2048, slice) < slice);
-    assert!(granule_for_weight(256, slice) > slice);
-    assert!(deserved(1_000_000, 1_000_000));
-    assert!(!deserved(999_999, 1_000_000));
-    assert!(deserved(64_000, 64_000));
-    assert!(!deserved(63_999, 64_000));
+    assert_eq!(granule_for_weight(256, slice), slice);
+    assert!(granule_for_weight(128, slice) > slice);
+}
+
+#[test]
+fn frontier_deserved_beats_floor_by_granule() {
+    let slice = 1_000_000u64;
+    let gran = granule_for_weight(1024, slice);
+    assert_eq!(gran, 250_000);
+    let frontier = 100_000_000u64;
+    assert!(deserved(frontier, frontier, gran));
+    assert!(deserved(frontier + 100_000, frontier, gran));
+    assert!(!deserved(frontier + gran, frontier, gran));
+    assert!(!deserved(frontier + gran + 1, frontier, gran));
+    assert!(!deserved(frontier + 1_000_000, frontier, gran));
+    let old = u64::MAX - 10;
+    let wrap_gran = 20u64;
+    let wrap_sum = old.wrapping_add(wrap_gran);
+    assert_eq!(wrap_sum, 9);
+    assert!(deserved(5, old, wrap_gran));
+    assert!(!deserved(20, old, wrap_gran));
 }
 
 #[test]
 fn rate_bit_gates_once_per_slice() {
+    use crate::flow_preempt::CURSOR_STAND_BIT;
     assert!(rate_clear(0));
     assert!(rate_clear(5));
     assert!(rate_clear(CURSOR_MASK));
     assert!(!rate_clear(CURSOR_RATE_BIT));
     assert!(!rate_clear(CURSOR_RATE_BIT | 5));
     assert_eq!(cursor_val(CURSOR_RATE_BIT | 5), 5);
+    assert_eq!(cursor_val(CURSOR_STAND_BIT | 5), 5);
+    assert_eq!(cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 5), 5);
     assert_eq!(cursor_val(5), 5);
     assert_eq!(cursor_val(0), 0);
     assert_eq!(rate_set(5), CURSOR_RATE_BIT | 5);
@@ -162,6 +227,30 @@ fn rate_bit_gates_once_per_slice() {
     let masked = cursor_val(CURSOR_RATE_BIT | 2);
     assert_eq!(steal_next(masked, 4), 3);
     assert_eq!(steal_next(2, 4), 3);
+    let masked_stand = cursor_val(CURSOR_STAND_BIT | 2);
+    assert_eq!(masked_stand, 2);
+    assert_eq!(steal_next(masked_stand, 4), 3);
+    let both = cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    assert_eq!(both, 2);
+    assert_eq!(steal_next(both, 4), steal_next(2, 4));
+}
+
+#[test]
+fn cursor_store_keeps_rate_plus_stand() {
+    use crate::flow_preempt::CURSOR_STAND_BIT;
+    let old = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
+    assert_eq!(cursor_store(2, old), CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    assert_eq!(cursor_store(2, 0), 2);
+    assert_eq!(cursor_store(2, CURSOR_RATE_BIT | 7), CURSOR_RATE_BIT | 2);
+    assert_eq!(cursor_store(2, CURSOR_STAND_BIT | 7), CURSOR_STAND_BIT | 2);
+    assert_eq!(stand_set(5), CURSOR_STAND_BIT | 5);
+    assert!(stand_held(stand_set(5)));
+    assert!(!stand_held(stand_clear(stand_set(5))));
+    assert_eq!(cursor_val(cursor_store(2, old)), 2);
+    assert_eq!(
+        steal_next(cursor_val(cursor_store(9, old)), 16),
+        steal_next(9, 16)
+    );
 }
 
 #[test]
@@ -202,6 +291,11 @@ fn facade_matches_preempt_helpers() {
     );
     assert_eq!(crate::flow::DELAY_MAX, crate::flow_preempt::DELAY_MAX);
     assert_eq!(crate::flow::DELAY_ARM, crate::flow_preempt::DELAY_ARM);
+    assert_eq!(crate::flow::DELAY_STAND, crate::flow_preempt::DELAY_STAND);
+    assert_eq!(
+        crate::flow::CURSOR_STAND_BIT,
+        crate::flow_preempt::CURSOR_STAND_BIT
+    );
     assert_eq!(
         crate::flow::GRANULE_FLOOR_NS,
         crate::flow_preempt::GRANULE_FLOOR_NS
@@ -213,5 +307,13 @@ fn facade_matches_preempt_helpers() {
     assert_eq!(
         crate::flow::granule_for_weight(1024, 1_000_000),
         crate::flow_preempt::granule_for_weight(1024, 1_000_000)
+    );
+    assert_eq!(
+        crate::flow::delay_armed_latched(55, true),
+        crate::flow_preempt::delay_armed_latched(55, true)
+    );
+    assert_eq!(
+        crate::flow::stand_held(0x400),
+        crate::flow_preempt::stand_held(0x400)
     );
 }

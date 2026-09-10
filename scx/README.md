@@ -64,12 +64,16 @@ across groups.
 ### Kicks
 
 Idle targets with at most 2 queued are kicked with a mask
-check. Busy targets need armed delay at 62 in 32us units
-plus deserved granule weight aware with 64us floor plus
-clear rate plus same group plus mask with one kick per
-slice. A missed wakeup is rescued on the next insert
+check. Busy targets need latched delay arm 62 stand 31
+in 32us units plus deserved woken deadline before
+frontier plus quarter granule weight aware with 64us
+floor plus clear rate plus same group plus mask with
+one kick per slice. Frontier is the service floor, so
+beating it by granule proves earliness with no occupant
+state. A missed wakeup is rescued on the next insert
 while deep queues stay quiet. Park sends no kick and the
 next dispatch pass collects it. Disarmed stays idle only.
+See `src/bpf/intf.h` plus `src/bpf/enqueue.bpf.c`.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is
@@ -115,10 +119,11 @@ to download the full snapshot as JSON.
 - Drains: `src/bpf/dispatch.bpf.c`
 - Lifecycle plus classifier: `src/bpf/lifecycle.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
-  `src/flow_select.rs`, `src/flow_group.rs`
+  `src/flow_select.rs`, `src/flow_group.rs`,
+  `src/flow_preempt.rs`
 - Facade: `src/flow.rs`
 - Tests: `src/flow_tests_edf.rs`,
-  `src/flow_tests_group.rs`
+  `src/flow_tests_group.rs`, `src/flow_tests_preempt.rs`
 - Constant validation: `src/config.rs`
 - Generated bindings plus skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`

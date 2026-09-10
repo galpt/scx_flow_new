@@ -444,7 +444,7 @@
      * with no badge. Group shows live table when
      * ready, else halves. Nice plus weight stay
      * display only with dash when idle. Delay shows
-     * armed dot at 62 with hollow dot when clear. */
+     * latched dot with hollow when clear. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -502,7 +502,7 @@
         var groupLabel = '<div class="core-llc">group ' +
           grp + '</div>';
         var delay = cpu.delay_win || 0;
-        var armed = cpu.delay_armed || delay >= 62;
+        var armed = !!cpu.delay_armed;
         var dot = armed ? ' ●' : ' ○';
         var delayLabel = '<div class="core-llc">delay ' +
           delay + dot + '</div>';

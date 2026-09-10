@@ -50,10 +50,12 @@ enum flow_consts {
 	FLOW_DELAY_UNIT_NS = 32000ULL,
 	FLOW_DELAY_MAX = 250ULL,
 	FLOW_DELAY_ARM = 62ULL,
+	FLOW_DELAY_STAND = 31ULL,
 	FLOW_DELAY_WIN_LEN = 8ULL,
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
 	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
-	FLOW_CURSOR_MASK = 0x7fffffffULL,
+	FLOW_CURSOR_STAND_BIT = 0x400ULL,
+	FLOW_CURSOR_MASK = 0x7ffffbffULL,
 };
 /* Per task state at 48B with group plus window plus wake. */
 struct flow_task_ctx {
@@ -318,7 +320,7 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 	return waking_v;
 }
 /* Next peer for steal scan with rotating cursor. */
-/* Masks the rate bit, so one kick per slice keeps */
+/* Masks rate plus stand, so one kick per slice keeps */
 /* the scan order with no extra state. */
 static __always_inline u32 flow_steal_next(u32 cursor,
 	u32 nr_cpus)
@@ -329,10 +331,36 @@ static __always_inline u32 flow_steal_next(u32 cursor,
 	cur = cursor & (u32)FLOW_CURSOR_MASK;
 	return (cur + 1) % nr_cpus;
 }
-/* Cursor value without the rate bit. */
+/* Cursor peer without rate plus stand. */
 static __always_inline u32 flow_cursor_val(u32 cursor)
 {
 	return cursor & (u32)FLOW_CURSOR_MASK;
+}
+/* True when the stand latch is held in bit10. */
+/* Bits 0 to 9 hold peer, bit10 holds stand, top */
+/* holds rate, so rotation masks both flags. */
+static __always_inline bool flow_stand_held(u32 cursor)
+{
+	return (cursor &
+	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
+}
+/* Store peer plus keep rate plus stand. */
+static __always_inline u32 flow_cursor_store(u32 peer,
+	u32 old)
+{
+	return (peer & (u32)FLOW_CURSOR_MASK) |
+	    (old & ((u32)FLOW_CURSOR_RATE_BIT |
+	    (u32)FLOW_CURSOR_STAND_BIT));
+}
+/* Set the stand latch plus keep peer plus rate. */
+static __always_inline u32 flow_stand_set(u32 cursor)
+{
+	return cursor | (u32)FLOW_CURSOR_STAND_BIT;
+}
+/* Clear the stand latch plus keep peer plus rate. */
+static __always_inline u32 flow_stand_clear(u32 cursor)
+{
+	return cursor & ~(u32)FLOW_CURSOR_STAND_BIT;
 }
 /* True when the rate bit is clear for one kick. */
 static __always_inline bool flow_rate_clear(u32 cursor)
@@ -368,6 +396,18 @@ static __always_inline bool flow_delay_armed(u8 win)
 {
 	return (u32)win >= (u32)FLOW_DELAY_ARM;
 }
+/* True when delay is armed with hysteresis. */
+/* Arms at 62, then holds while win stays at or */
+/* past stand at 31 with the latched flag. */
+static __always_inline bool flow_delay_armed_latched(
+	u8 win, bool held)
+{
+	if ((u32)win >= (u32)FLOW_DELAY_ARM)
+		return true;
+	if (held && (u32)win >= (u32)FLOW_DELAY_STAND)
+		return true;
+	return false;
+}
 /* Max of two delay samples with cap at 250. */
 static __always_inline u8 flow_delay_max(u8 a,
 	u8 b)
@@ -387,32 +427,37 @@ static __always_inline u8 flow_delay_close(u8 win,
 	u8 m = flow_delay_max(d, cur);
 	return m;
 }
-/* Granule in nanos weight aware with 64us floor. */
-/* Base is slice times 1024 over weight with floor */
-/* at 64us, so heavy keeps short and light keeps */
-/* long with no trap on zero weight or slice. */
+/* Granule in nanos quarter slice with 64us floor. */
+/* Base is slice times 1024 over weight quartered */
+/* with floor at 64us, so heavy keeps short and */
+/* light keeps long with no trap on zero input. */
 static __always_inline u64 flow_granule_for_weight(
 	u32 weight, u64 slice)
 {
 	u64 base;
+	u64 gran;
 	if (weight == 0) {
-		if (slice < (u64)FLOW_GRANULE_FLOOR_NS)
+		gran = slice / 4ULL;
+		if (gran < (u64)FLOW_GRANULE_FLOOR_NS)
 			return (u64)FLOW_GRANULE_FLOOR_NS;
-		return slice;
+		return gran;
 	}
 	if (slice == 0)
 		return (u64)FLOW_GRANULE_FLOOR_NS;
 	base = (slice * 1024ULL) / (u64)weight;
-	if (base < (u64)FLOW_GRANULE_FLOOR_NS)
+	gran = base / 4ULL;
+	if (gran < (u64)FLOW_GRANULE_FLOOR_NS)
 		return (u64)FLOW_GRANULE_FLOOR_NS;
-	return base;
+	return gran;
 }
-/* True when deserved after one granule of run. */
-/* Needs run delta at or past the granule. */
-static __always_inline bool flow_deserved(u64 run_ns,
-	u64 granule)
+/* True when woken deadline beats frontier plus gran. */
+/* Frontier is the service floor, so beating it by */
+/* granule proves earliness with no occupant state. */
+static __always_inline bool flow_deserved(u64 woken_dl,
+	u64 frontier, u64 granule)
 {
-	return run_ns >= granule;
+	return flow_time_before(woken_dl,
+	    frontier + granule);
 }
 /* True when all five preempt gates pass. */
 /* Armed plus deserved plus rate clear plus same */

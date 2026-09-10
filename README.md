@@ -95,12 +95,16 @@ in `scx/src/bpf/dispatch.bpf.c`.
 ### Kicks
 
 Idle targets with at most 2 queued are kicked with a mask
-check. Busy targets need armed delay at 62 in 32us units
-plus deserved granule weight aware with 64us floor plus
-clear rate plus same group plus mask with one kick per
-slice. A missed wakeup is rescued on the next insert while
-deep queues stay quiet. Park sends no kick and the next
-pass collects it. Disarmed stays idle only.
+check. Busy targets need latched delay arm 62 stand 31
+in 32us units plus deserved woken deadline before
+frontier plus quarter granule weight aware with 64us
+floor plus clear rate plus same group plus mask with one
+kick per slice. Frontier is the service floor, so beating
+it by granule proves earliness with no occupant state.
+A missed wakeup is rescued on the next insert while deep
+queues stay quiet. Park sends no kick and the next pass
+collects it. Disarmed stays idle only. See
+`scx/src/bpf/intf.h` plus `scx/src/bpf/enqueue.bpf.c`.
 
 ### Counts and queues
 
@@ -124,8 +128,9 @@ scheduler change in the harness.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. Groups stay fixed at two with no knob. The
-slice stays fixed at 1ms. Delay arms at 62 in 32us units
-with 1/8 decay and one kick per slice.
+slice stays fixed at 1ms. Delay arms at 62 stands at 31
+in 32us units with 1/8 decay and one kick per slice.
+Granule is quarter scaled slice floored at 64us.
 
 ## Build
 

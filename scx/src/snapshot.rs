@@ -131,7 +131,8 @@ impl<'a> Scheduler<'a> {
             e.running_nice = st.running_nice as i32;
             e.running_weight = st.running_weight as u32;
             e.delay_win = st.delay_win;
-            e.delay_armed = crate::flow::delay_armed(st.delay_win);
+            e.delay_armed =
+                crate::flow::delay_armed_latched(st.delay_win, crate::flow::stand_held(st.cursor));
             e.slice_ns = crate::flow::SLICE_NS;
             per_cpu.push(e);
         }
