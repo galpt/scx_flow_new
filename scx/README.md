@@ -65,7 +65,7 @@ check and no busy preemption. Park sends no kick and the
 next dispatch pass collects it.
 
 Weight stays 1024 with no knob. The slice stays fixed
-at 1ms. The current version is `4.2.10`.
+at 1ms. The version is in `Cargo.toml`.
 
 ## Typical Use Cases
 
