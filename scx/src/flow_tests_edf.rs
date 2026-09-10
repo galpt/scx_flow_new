@@ -1126,3 +1126,108 @@ fn tiered_keeps_mask_plus_group() {
     );
     assert_eq!(got4, Some(2));
 }
+
+/*
+ * SMT off placement matches prior. All singleton cores
+ * give Tier A equal to Tier B, so the tiered order
+ * equals the prior any idle in group plus fallback.
+ * Table equals halves with ready cleared, so no stall.
+ */
+#[test]
+fn smt_off_placement_matches_prior() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_NONE;
+    let nr = 8;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let ring = vec![SIBLING_NONE; 8];
+    let running = vec![false; 8];
+    let allowed = vec![true; 8];
+    for idle in [
+        vec![true; 8],
+        vec![false, true, false, true, false, true, false, true],
+        vec![false; 8],
+    ] {
+        let free = pick_free_idle(&allowed, &idle, GROUP_LIGHT, nr, &table, 0, &ring, &running);
+        let any = pick_idle_in_group(&allowed, &idle, GROUP_LIGHT, nr, &table, 0);
+        assert_eq!(free, any);
+        let tier = select_cpu_tiered(
+            0,
+            7,
+            &allowed,
+            &idle,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &ring,
+            &running,
+        );
+        if any.is_some() {
+            assert_eq!(tier, any);
+        } else if crate::flow_select::may_run_on(0, &allowed)
+            && crate::flow_group::group_live(0, nr, &table, 0) == GROUP_LIGHT
+        {
+            assert_eq!(tier, Some(0));
+        }
+    }
+    let single_ring = vec![SIBLING_NONE];
+    let single_run = vec![false];
+    let single_allow = vec![true];
+    let single_idle = vec![true];
+    let single_table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let t = select_cpu_tiered(
+        0,
+        0,
+        &single_allow,
+        &single_idle,
+        GROUP_LIGHT,
+        1,
+        &single_table,
+        0,
+        &single_ring,
+        &single_run,
+    );
+    assert_eq!(t, Some(0));
+    for nr in [3, 5] {
+        let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+        let ring = vec![SIBLING_NONE; nr];
+        let running = vec![false; nr];
+        let allowed = vec![true; nr];
+        let idle = vec![true; nr];
+        let free = pick_free_idle(&allowed, &idle, GROUP_LIGHT, nr, &table, 0, &ring, &running);
+        let any = pick_idle_in_group(&allowed, &idle, GROUP_LIGHT, nr, &table, 0);
+        assert_eq!(free, any);
+        assert_eq!(free, Some(0));
+    }
+}
+
+/*
+ * Empty plus zero plus missing stay safe. Zero CPUs
+ * give ready cleared with no table use. Missing ring
+ * reads as free with no trap. No division runs here.
+ */
+#[test]
+fn empty_plus_zero_stay_safe_with_no_trap() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_NONE;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let ring: Vec<i32> = vec![];
+    let running: Vec<bool> = vec![];
+    assert!(!core_free(0, &ring, &running, 0));
+    assert!(!core_free(-1, &ring, &running, 0));
+    assert_eq!(
+        pick_free_idle(&[], &[], GROUP_LIGHT, 0, &table, 0, &ring, &running),
+        None
+    );
+    assert_eq!(
+        pick_idle_in_group(&[], &[], GROUP_LIGHT, 0, &table, 0),
+        None
+    );
+    let tier = select_cpu_tiered(-1, -1, &[], &[], GROUP_LIGHT, 0, &table, 0, &ring, &running);
+    assert_eq!(tier, None);
+    let short_ring = vec![SIBLING_NONE];
+    assert!(core_free(0, &short_ring, &[], 1));
+    assert!(!core_free(1, &short_ring, &[], 1));
+}

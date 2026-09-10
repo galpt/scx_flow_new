@@ -1400,3 +1400,28 @@ fn single_cpu_keeps_all_light_with_no_scan() {
     assert_eq!(group_live(0, 1, &t2, r2), GROUP_LIGHT);
     assert_eq!(group_of_cpu(0, 1), GROUP_LIGHT);
 }
+
+/*
+ * Zero plus empty plus short stay safe. Zero CPUs give
+ * ready cleared with no use. Short slices clamp with no
+ * pad. No division runs, so no zero risk. No group stays
+ * empty with more than one CPU.
+ */
+#[test]
+fn zero_plus_empty_plus_short_stay_safe() {
+    let (t0, r0) = seed_groups(&[], &[], 0);
+    assert_eq!(r0, 0);
+    let (t1, r1) = seed_groups_topology(&[], &[], 0, &[], &[]);
+    assert_eq!(r1, 0);
+    assert_eq!(t0, t1);
+    let (t2, r2) = seed_groups_topology(&[1024], &[4000000], 4, &[], &[]);
+    assert_eq!(r2, 0);
+    assert!(t2.iter().all(|&g| g == GROUP_LIGHT));
+    let cores = build_cores(0, &[]);
+    assert!(cores.is_empty());
+    assert!(cores_are_singletons(&cores));
+    let out = assign_cores_split(&[], 0);
+    assert!(out.is_empty());
+    let out2 = assign_by_llc(&[], &[], &[], &[], 0, false);
+    assert!(out2.is_empty());
+}
