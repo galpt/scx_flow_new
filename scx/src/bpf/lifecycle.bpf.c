@@ -1,25 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- *
- * Task life, included by main.bpf.c via include.
- *
- * Running records the stamp and the running view.
- * Stopping refreshes the estimate from the last burst
- * and moves virtual time forward with a bounded
- * frontier. Runnable tasks requeue ordered with a new
- * estimate. Idle resets bound to waking virtual time
- * with no zero use. Enable clears state. Disable and
- * exit release once. Dequeue keeps the entry across
- * dispatch to run.
- */
-
+/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
 	struct flow_cpu_state *st;
 	s32 cpu;
-
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	if (tctx)
@@ -32,34 +17,18 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	if (st) {
 		u64 est = tctx ?
 		    flow_clamp_est(tctx->est_ns) : 0;
-		u64 tq = st->tq_ns;
-
-		/* Zero guard stays for empty map reads with */
-		/* no behavior change in the normal path. */
-		if (tq == 0)
-			tq = (u64)FLOW_TQ_SEED_NS;
 		st->running_est = est;
 		st->running_pid = (u32)p->pid;
-		/* The hint uses only estimate against mean. */
-		flow_cpuperf_set(cpu, est, tq);
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
 }
-
-/*
- * Keep the accounted entry across dispatch to run. The
- * move to the local DSQ leaves custody but the entry
- * stays for the ordered insert. The block path and the
- * exit paths release once through the grant sentinel.
- */
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	u64 deq_flags)
 {
 	(void)p;
 	(void)deq_flags;
 }
-
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	bool runnable)
 {
@@ -68,18 +37,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 now;
 	u64 delta;
 	u64 est;
-	u64 old;
 	u64 scaled;
 	u64 nv;
-
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
+	(void)now;
 	if (!tctx || !tctx->run_at ||
 	    tctx->run_at == (u64)-1) {
 		flow_clear_running(cpu);
 		flow_on_cpu_dec();
-		flow_cpuperf_restore(cpu, runnable);
 		return;
 	}
 	if (now >= tctx->run_at)
@@ -87,7 +54,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	else
 		delta = 0;
 	est = flow_clamp_est(delta);
-	old = flow_clamp_est(tctx->est_ns);
 	tctx->est_ns = est;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_clear_running(cpu);
@@ -99,40 +65,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx->vruntime = nv;
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		struct flow_cpu_state *st;
-
 		st = flow_cpu((u32)cpu);
 		if (st) {
 			if (!runnable) {
 				u64 dsq;
-
 				dsq = flow_dsq_for_cpu((u32)cpu);
 				if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
 				    scx_bpf_dsq_nr_queued(
 				    (u64)SCX_DSQ_LOCAL_ON |
 				    (u64)cpu) == 0) {
-					/* Idle reset bounds to waking time. */
-					/* Grace miss still completes with */
-					/* max accounting and never kills. */
-					/* The harness cancels, the owner */
-					/* never kills. Zero never wins. */
-					if ((u64)FLOW_GATE_IEDF) {
-						if (nv == 0) {
-							/* Keep old, no zero use. */
-						} else if (tctx->deadline != 0 &&
-						    !flow_grace_ok(now,
-						    tctx->deadline)) {
-							st->frontier =
-							    flow_frontier_max(
-							    st->frontier, nv);
-						} else {
-							st->frontier =
-							    flow_frontier_idle(
-							    nv);
-						}
-					} else {
-						st->frontier =
-						    flow_frontier_idle(nv);
-					}
+					st->frontier =
+					    flow_frontier_idle(nv);
 				} else {
 					st->frontier =
 					    flow_frontier_max(
@@ -145,72 +88,37 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		}
 	}
 	if (runnable) {
-		u32 owner = tctx->owner;
-
-		/* Runnable tasks requeue ordered with new est. */
-		/* Equal estimates skip the mean write. */
-		if (owner != FLOW_OWNER_NONE &&
-		    flow_cpu_live(owner) &&
-		    !((u64)FLOW_GATE_CUTS && old == est))
-			flow_replace_cpu(owner, old, est);
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
 	}
-	/* Blocked tasks complete and release at once. */
 	__sync_fetch_and_add(&flow_stats.completions, 1);
-	flow_release(tctx);
-	flow_cpuperf_restore(cpu, runnable);
 }
-
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
-
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
 	tctx->est_ns = 0;
 	tctx->run_at = 0;
-	tctx->grant_ns = (u64)-1;
-	tctx->owner = FLOW_OWNER_NONE;
 	tctx->vruntime = 0;
 	tctx->deadline = 0;
 }
-
-/*
- * Release the accounted entry when a task leaves the
- * scheduler. The grant sentinel keeps the release to
- * a single decrement.
- */
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
-
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
-	if (tctx->grant_ns == (u64)-1)
-		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
-	flow_release(tctx);
 }
-
-/*
- * Release the accounted entry at task exit. The grant
- * sentinel keeps the release to a single decrement
- * with the disable path.
- */
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct scx_exit_task_args *args)
 {
 	struct flow_task_ctx *tctx;
-
 	(void)args;
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
-	if (tctx->grant_ns == (u64)-1)
-		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
-	flow_release(tctx);
 }

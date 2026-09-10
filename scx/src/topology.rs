@@ -3,21 +3,16 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
  * Trimmed topology for the flow scheduler. Only the
- * static per-CPU cards and the live frequency read are
- * needed. Placement uses a small per-CPU LLC table
- * seeded once at attach. Frequency is display only
- * and never shapes placement. Zero means unknown
- * and keeps a plain fallback.
+ * static per CPU cards and the live frequency read are
+ * needed. Frequency plus LLC plus CPU cards stay display
+ * only and never shape placement with no table in BPF.
+ * Zero means unknown and keeps a plain fallback.
  */
-use crate::stats::PerCpuMetrics;
 use log::warn;
 use scx_utils::Topology;
 
 /* Compile time CPU bound. Matches the BPF header. */
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
-
-/* Unknown LLC id. Mirrors the BPF header. */
-const LLC_UNKNOWN: u32 = crate::flow::LLC_UNKNOWN;
 
 /* True when a lower id shares the core. */
 fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
@@ -27,12 +22,14 @@ fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
 }
 
 /*
- * Static per-CPU cards seeded once at attach. Max
+ * Static per CPU cards seeded once at attach. Max
  * frequency, cache domain and thread role come from
  * the host topology. Zero frequency means unknown and
  * stays display only. Failures yield an empty list so
  * the scheduler keeps running without cards. Single
- * CPU and no sibling hosts keep plain per-CPU cards.
+ * CPU and no sibling hosts keep plain per CPU cards.
+ * Frequency plus LLC plus CPU cards stay display only
+ * and never shape placement with no table in BPF.
  */
 pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
     let topo = match Topology::new() {
@@ -56,7 +53,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             smt,
             running_est_ns: 0,
             running_pid: 0,
-            tq_ns: crate::flow::TQ_SEED_NS,
+            tq_ns: crate::flow::SLICE_NS,
             depth: 0,
         });
     }
@@ -70,7 +67,9 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
  * words. Unknown frequency stays unknown and never
  * prints as zero. Missing cards stay unknown. Single
  * CPU prints as one CPU with no peers. No sibling
- * prints as no SMT with plain per-CPU behavior.
+ * prints as no SMT with plain per CPU behavior.
+ * Frequency plus LLC plus CPU cards stay display only
+ * and never shape placement with no table in BPF.
  */
 pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
     if cards.is_empty() {
@@ -89,39 +88,11 @@ pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
 }
 
 /*
- * Per-CPU LLC table and domain count for the BPF
- * side. Known CPUs carry the card domain. Missing
- * CPUs carry the unknown value. Empty cards yield
- * all unknown with zero domains. Single domain
- * yields one, so the BPF side stays plain.
- */
-pub fn llc_seed(cards: &[PerCpuMetrics]) -> ([u32; MAX_CPUS], u64) {
-    let mut table = [LLC_UNKNOWN; MAX_CPUS];
-    for c in cards {
-        let id = c.id as usize;
-        if id < MAX_CPUS {
-            table[id] = c.llc_id;
-        }
-    }
-    let mut seen: Vec<u32> = Vec::new();
-    for c in cards {
-        if !seen.contains(&c.llc_id) {
-            seen.push(c.llc_id);
-        }
-    }
-    let nr = if cards.is_empty() {
-        0
-    } else {
-        seen.len() as u64
-    };
-    (table, nr)
-}
-
-/*
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement
- * or division.
+ * or division. Frequency stays display only with no
+ * table in BPF.
  */
 pub fn current_freq_khz(cpu: u32) -> u64 {
     std::fs::read_to_string(format!(

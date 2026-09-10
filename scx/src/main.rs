@@ -135,13 +135,10 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         skel.struct_ops.flow_ops_mut().flags = flags;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
-        /* Seed the LLC table before load. Fail open. */
+        /* Static cards seed the start log and the cards. */
+        /* Frequency plus LLC plus CPU cards stay display */
+        /* only with no table in BPF. */
         let cards = topology::web_cpu_static();
-        if let Some(bss) = skel.maps.bss_data.as_mut() {
-            let (table, nr) = topology::llc_seed(&cards);
-            bss.flow_cpu_llc = table;
-            bss.flow_llc_nr = nr;
-        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
@@ -300,19 +297,12 @@ mod tests {
     }
 
     #[test]
-    fn tq_matches_header() {
+    fn slice_matches_header() {
         assert_eq!(
-            crate::flow_mean::TQ_SEED_NS,
-            crate::bpf_intf::flow_consts_FLOW_TQ_SEED_NS as u64
+            crate::flow_mean::SLICE_NS,
+            crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
         );
-        assert_eq!(
-            crate::flow_mean::TQ_MIN_NS,
-            crate::bpf_intf::flow_consts_FLOW_TQ_MIN_NS as u64
-        );
-        assert_eq!(
-            crate::flow_mean::TQ_MAX_NS,
-            crate::bpf_intf::flow_consts_FLOW_TQ_MAX_NS as u64
-        );
+        assert_eq!(crate::flow_mean::SLICE_NS, 1_000_000);
         assert_eq!(
             crate::flow_mean::EST_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
@@ -333,26 +323,6 @@ mod tests {
             crate::flow_edf::DSQ_PARK,
             crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
         );
-        assert_eq!(
-            crate::flow_select::LLC_UNKNOWN,
-            crate::bpf_intf::flow_consts_FLOW_LLC_UNKNOWN
-        );
-    }
-
-    #[test]
-    fn mean_matches_helpers() {
-        assert_eq!(crate::flow_mean::TQ_SEED_NS, 8_000_000);
-        assert_eq!(crate::flow_mean::TQ_MIN_NS, 500_000);
-        assert_eq!(crate::flow_mean::TQ_MAX_NS, 32_000_000);
-    }
-
-    #[test]
-    fn acct_matches_header() {
-        assert_eq!(
-            crate::flow_mean::ACCT_MAX_NS,
-            crate::bpf_intf::flow_consts_FLOW_ACCT_MAX_NS as u64
-        );
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CLAMP as u64, 1);
     }
 
     #[test]
@@ -365,32 +335,27 @@ mod tests {
     }
 
     #[test]
-    fn sticky_matches_header() {
+    fn steal_matches_header() {
         assert_eq!(
             crate::flow_select::STEAL_MIN_DEPTH,
             crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_DEPTH as u64
         );
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_STICKY as u64, 1);
+        assert_eq!(
+            crate::flow_select::STEAL_BOUND as u64,
+            crate::bpf_intf::flow_consts_FLOW_STEAL_BOUND as u64
+        );
     }
 
     #[test]
-    fn cuts_matches_header() {
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_CUTS as u64, 1);
+    fn task_size_within_40() {
+        assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() <= 40);
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 32);
     }
 
     #[test]
-    fn iedf_matches_header() {
-        assert_eq!(
-            crate::flow_edf::BATCH_EPS_NS,
-            crate::bpf_intf::flow_consts_FLOW_IEDF_BATCH_EPS_NS as u64
-        );
-        assert_eq!(
-            crate::flow_edf::GRACE_NS,
-            crate::bpf_intf::flow_consts_FLOW_IEDF_GRACE_NS as u64
-        );
-        assert_eq!(crate::flow_edf::BATCH_EPS_NS, 96_000);
-        assert_eq!(crate::flow_edf::GRACE_NS, 50_000);
-        assert_eq!(crate::bpf_intf::flow_gates_FLOW_GATE_IEDF as u64, 1);
+    fn cpu_size_within_32() {
+        assert!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>() <= 32);
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 24);
     }
 
     #[test]

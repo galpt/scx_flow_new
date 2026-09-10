@@ -5,23 +5,15 @@
  * Deadline and queue helpers for the flow scheduler.
  * The functions mirror the BPF header so behavior
  * stays the same on both sides of the boundary.
+ * The slice is fixed at 1ms with no mean and no knob.
  */
 
 /* Bound of moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
-/* Cap of shed tasks in park at twice one batch. */
-#[cfg(test)]
-pub const SHED_PARK_MAX: u64 = 64;
 /* Owner value for tasks with no accounting. */
 #[cfg(test)]
 pub const OWNER_NONE: u32 = 0xFFFF_FFFF;
-/* Batch window for sticky batching in nanos. */
-#[cfg(test)]
-pub const BATCH_EPS_NS: u64 = 96_000;
-/* Grace after deadline in nanos for accounting. */
-#[cfg(test)]
-pub const GRACE_NS: u64 = 50_000;
-/* Base id of the per-CPU ordered queues. */
+/* Base id of the per CPU ordered queues. */
 #[cfg(test)]
 pub const DSQ_BASE: u64 = 0x4000;
 /* Park id for tasks with no allowed CPU. */
@@ -109,33 +101,6 @@ pub fn frontier_idle(waking_v: u64) -> u64 {
 }
 
 /*
- * True when two deadlines fall in one batch window.
- * The window is tiny against the mean floor, so a
- * batch keeps cache warmth with no fair loss. Wrap
- * safe with unsigned distance and no signed negate.
- */
-#[cfg(test)]
-pub fn batch_within(a: u64, b: u64) -> bool {
-    a.abs_diff(b) <= BATCH_EPS_NS
-}
-
-/*
- * True when now is still within grace past deadline.
- * Grace is tiny against the least period, so late
- * accounting stays prompt with no kill. The harness
- * cancels, the scheduler never kills. Wrap safe with
- * no extra branch beyond the before check.
- */
-#[cfg(test)]
-pub fn grace_ok(now: u64, deadline_val: u64) -> bool {
-    let limit = deadline_val.wrapping_add(GRACE_NS);
-    if now == limit {
-        return true;
-    }
-    time_before(now, limit)
-}
-
-/*
  * Full EDF insert model. Clamps the virtual time to a
  * bounded lag, scales the estimate, and adds the
  * deadline with wrap. Returns the clamped time, the
@@ -154,10 +119,7 @@ pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (
  * Frontier step for a stop. A runnable stop or queued
  * work keeps the max, so time never moves backward
  * while work stays queued. An idle block resets to the
- * waking virtual time with no zero use. The insert
- * deadline and this step compose in order with the
- * deadline first and the frontier next, so one insert
- * plus one stop moves both forward at once.
+ * waking virtual time with no zero use.
  */
 #[cfg(test)]
 pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
@@ -173,8 +135,7 @@ pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
  * the insert model then advances virtual time by the
  * scaled estimate and steps the frontier, so callers
  * see the clamped time plus the deadline plus the next
- * frontier at once with no extra path. Mirrors the BPF
- * order of enqueue then stopping with no new path.
+ * frontier at once with no extra path.
  */
 #[cfg(test)]
 pub fn edf_insert_and_step(
@@ -189,115 +150,8 @@ pub fn edf_insert_and_step(
     let (clamped, dl, flag) = edf_insert(v, frontier, slice, est, weight);
     let scaled = crate::flow_mean::scale_by_weight(crate::flow_mean::clamp_est(est), weight);
     let next_v = vruntime_add(clamped, scaled);
-    let next_frontier = frontier_step(frontier, next_v, runnable, queued);
-    (clamped, dl, next_frontier, flag)
-}
-
-/*
- * True when an overload should shed to park. Needs a
- * target queue at one full batch, so only excess
- * sheds while the owner stays fair. The shed keeps
- * the target frontier with owner none and no kill
- * and no Pi use. Park keeps order by deadline.
- */
-#[cfg(test)]
-pub fn should_shed(queue_len: u64) -> bool {
-    queue_len >= DISPATCH_BATCH as u64
-}
-
-/*
- * True when an overload should shed to park with a
- * park cap. Needs a target queue at one full batch
- * and a park queue below the cap, so only excess
- * sheds while park stays bounded at twice one batch.
- * A full park falls through to the target with no
- * drop and no kill. The shed keeps the target
- * frontier with owner none and no kill and no Pi use.
- * Park keeps order by deadline.
- */
-#[cfg(test)]
-pub fn should_shed_cap(queue_len: u64, park_len: u64) -> bool {
-    queue_len >= DISPATCH_BATCH as u64 && park_len < SHED_PARK_MAX
-}
-
-/*
- * Idle frontier with a zero guard. Zero never wins,
- * so a waking value of zero keeps the old frontier.
- * A nonzero waking value bounds the reset with no
- * stale zero use. Mirrors the BPF idle guard.
- */
-#[cfg(test)]
-pub fn frontier_idle_guarded(old: u64, waking_v: u64) -> u64 {
-    if waking_v == 0 {
-        old
-    } else {
-        frontier_idle(waking_v)
-    }
-}
-
-/*
- * Idle frontier with grace and zero guard. Runnable
- * stops keep the max, so time never moves backward
- * while work stays queued. Queued work keeps the max
- * with the same bound. An idle stop with zero keeps
- * the old frontier with no stale zero use. An idle
- * stop past grace keeps the max for prompt account.
- * An idle stop within grace resets to waking time.
- * Mirrors the BPF stopping path with no new path.
- */
-#[cfg(test)]
-pub fn frontier_idle_grace_step(
-    old: u64,
-    waking_v: u64,
-    deadline: u64,
-    now: u64,
-    runnable: bool,
-    dsq: u64,
-    local: u64,
-) -> u64 {
-    if runnable {
-        return frontier_max(old, waking_v);
-    }
-    if dsq != 0 || local != 0 {
-        return frontier_max(old, waking_v);
-    }
-    if waking_v == 0 {
-        return old;
-    }
-    if deadline != 0 && !grace_ok(now, deadline) {
-        return frontier_max(old, waking_v);
-    }
-    frontier_idle(waking_v)
-}
-
-/*
- * True when a stop should restore the low hint. Runnable
- * stops keep their work, so they never restore. Queued
- * work also keeps the hint, so restore runs once per
- * idle change.
- */
-#[cfg(test)]
-pub fn should_restore_hint(runnable: bool, dsq: u64, local: u64) -> bool {
-    if runnable {
-        return false;
-    }
-    if dsq != 0 {
-        return false;
-    }
-    if local != 0 {
-        return false;
-    }
-    true
-}
-
-/*
- * True when a mean replace may run. Needs distinct
- * clamped estimates, so equal bursts skip the sum and
- * mean write at once.
- */
-#[cfg(test)]
-pub fn should_replace(old: u64, new: u64) -> bool {
-    crate::flow_mean::clamp_est(old) != crate::flow_mean::clamp_est(new)
+    let next = frontier_step(frontier, next_v, runnable, queued);
+    (clamped, dl, next, flag)
 }
 
 /*
@@ -353,11 +207,10 @@ pub fn ordered_insert(queue: &mut Vec<OrderedEntry>, entry: OrderedEntry) -> usi
  * Drain up to budget tasks for one CPU. The scan
  * visits every queued task in order and moves each
  * live task with the CPU in the mask and with no
- * move failure. Exiting tasks move when allowed, so
- * they run to exit on the owner or on a thief. Dead,
- * foreign, and failed heads are skipped, so one head
- * never blocks later work. Returns the count moved.
- * A zero return means no movable work was present.
+ * move failure. Dead, foreign, and failed heads are
+ * skipped, so one head never blocks later work.
+ * Returns the count moved. A zero return means no
+ * movable work was present.
  */
 #[cfg(test)]
 pub fn drain_model(
@@ -383,23 +236,7 @@ pub fn drain_model(
 }
 
 /*
- * Own budget for dispatch with no reserve. Returns the
- * full budget, so own drains first and park drains on
- * the remainder. The park reserve was dropped for the
- * 1M verifier limit under 4.2.4, so park can wait behind
- * saturated own. This is the 4.2.0 baseline order with
- * no per-pass bound and no starve bound. Shed
- * backpressure is future work. The gate keeps no
- * reserve, so set and clear both keep 4.2.0 order.
- */
-#[cfg(test)]
-pub fn own_budget_for_dispatch(budget: u32, park_queued: u64, iedf: bool) -> u32 {
-    let _ = (park_queued, iedf);
-    budget
-}
-
-/*
- * Dispatch own then park in 4.2.0 order. Drains own
+ * Dispatch own then park in fixed order. Drains own
  * with the full budget, returns early when saturated,
  * then drains park with the rest when park holds work.
  * The total never exceeds budget. A saturated own
@@ -412,10 +249,8 @@ pub fn dispatch_own_park_model(
     park: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
     cpu: i32,
     budget: u32,
-    iedf: bool,
 ) -> (u32, u32) {
-    let own_budget = own_budget_for_dispatch(budget, park.len() as u64, iedf);
-    let moved_own = drain_model(own, cpu, own_budget);
+    let moved_own = drain_model(own, cpu, budget);
     if moved_own >= budget {
         return (moved_own, 0);
     }
@@ -438,18 +273,6 @@ pub struct RunningView {
     pub est: u64,
     /* Pid now on the CPU. Zero when idle. */
     pub pid: u32,
-}
-
-/*
- * Per-CPU depth for tests. Each slot counts queued
- * tasks on one CPU across all queues. The sum matches
- * the queued total.
- */
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CpuDepths {
-    /* Queued tasks per-CPU. Index is the CPU. */
-    pub nr: Vec<u64>,
 }
 
 #[cfg(test)]
@@ -477,45 +300,5 @@ impl RunningView {
     pub fn clear(&mut self) {
         self.est = 0;
         self.pid = 0;
-    }
-}
-
-#[cfg(test)]
-impl CpuDepths {
-    /*
-     * Empty depths with all CPUs at zero. Matches the
-     * BPF state after init.
-     */
-    pub fn new(nr_cpus: usize) -> Self {
-        Self {
-            nr: vec![0; nr_cpus],
-        }
-    }
-
-    /*
-     * Join one task to a CPU. Counts saturate at the
-     * top, so a burst of joins never wraps the gauge.
-     */
-    pub fn join(&mut self, cpu: usize) {
-        if let Some(v) = self.nr.get_mut(cpu) {
-            *v = v.saturating_add(1);
-        }
-    }
-
-    /*
-     * Leave one task from a CPU. Counts never go below
-     * zero, so a double leave stays safe.
-     */
-    pub fn leave(&mut self, cpu: usize) {
-        if let Some(v) = self.nr.get_mut(cpu) {
-            *v = v.saturating_sub(1);
-        }
-    }
-
-    /*
-     * Sum of all CPUs. Matches the queued total.
-     */
-    pub fn sum(&self) -> u64 {
-        self.nr.iter().fold(0, |a, &v| a.saturating_add(v))
     }
 }

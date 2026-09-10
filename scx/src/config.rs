@@ -5,34 +5,25 @@
  * Validated scheduling constants for the flow scheduler.
  * The defaults match the shared BPF header. Validation
  * keeps bad values from reaching the BPF object.
+ * The slice is fixed at 1ms with no mean and no knob.
  */
 use crate::flow::DISPATCH_BATCH;
 use crate::flow::EST_MAX_NS;
 use crate::flow::EST_MIN_NS;
-use crate::flow::TQ_MAX_NS;
-use crate::flow::TQ_MIN_NS;
-use crate::flow::TQ_SEED_NS;
+use crate::flow::SLICE_NS;
 use anyhow::bail;
 use anyhow::Result;
 
-/* Default seed of the per-CPU mean in nanos. */
-const DEF_SEED_NS: u64 = TQ_SEED_NS;
-/* Default floor of the per-CPU mean in nanos. */
-const DEF_MIN_NS: u64 = TQ_MIN_NS;
-/* Default ceiling of the per-CPU mean in nanos. */
-const DEF_MAX_NS: u64 = TQ_MAX_NS;
+/* Default fixed slice in nanos. */
+const DEF_SLICE_NS: u64 = SLICE_NS;
 /* Default tasks moved in one dispatch pass. */
 const DEF_BATCH: u32 = DISPATCH_BATCH;
 
 /* Validated scheduling constants. */
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /* Seed of the per-CPU mean in nanos. */
-    pub tq_seed_ns: u64,
-    /* Floor of the per-CPU mean in nanos. */
-    pub tq_min_ns: u64,
-    /* Ceiling of the per-CPU mean in nanos. */
-    pub tq_max_ns: u64,
+    /* Fixed slice in nanos. */
+    pub slice_ns: u64,
     /* Tasks moved in one dispatch pass. */
     pub dispatch_batch: u32,
 }
@@ -41,9 +32,7 @@ impl Default for Config {
     /* Compile time defaults from the shared header. */
     fn default() -> Self {
         Self {
-            tq_seed_ns: DEF_SEED_NS,
-            tq_min_ns: DEF_MIN_NS,
-            tq_max_ns: DEF_MAX_NS,
+            slice_ns: DEF_SLICE_NS,
             dispatch_batch: DEF_BATCH,
         }
     }
@@ -56,23 +45,11 @@ impl Config {
      * fault, not a runtime state.
      */
     pub fn validate(&self) -> Result<()> {
-        if self.tq_seed_ns != TQ_SEED_NS {
-            bail!("seed bad {}", self.tq_seed_ns);
+        if self.slice_ns != SLICE_NS {
+            bail!("slice bad {}", self.slice_ns);
         }
-        if self.tq_min_ns != TQ_MIN_NS {
-            bail!("floor bad {}", self.tq_min_ns);
-        }
-        if self.tq_max_ns != TQ_MAX_NS {
-            bail!("ceiling bad {}", self.tq_max_ns);
-        }
-        if self.tq_min_ns >= self.tq_max_ns {
-            bail!("range bad {}", self.tq_min_ns);
-        }
-        if self.tq_seed_ns < self.tq_min_ns {
-            bail!("seed bad {}", self.tq_seed_ns);
-        }
-        if self.tq_seed_ns > self.tq_max_ns {
-            bail!("seed bad {}", self.tq_seed_ns);
+        if self.slice_ns != 1_000_000 {
+            bail!("slice bad {}", self.slice_ns);
         }
         if EST_MIN_NS != 1 {
             bail!("est floor bad {}", EST_MIN_NS);
@@ -95,10 +72,8 @@ impl Config {
      */
     pub fn describe(&self) -> String {
         format!(
-            "seed={}us floor={}us ceiling={}us batch={}",
-            self.tq_seed_ns / 1000,
-            self.tq_min_ns / 1000,
-            self.tq_max_ns / 1000,
+            "slice={}us batch={}",
+            self.slice_ns / 1000,
             self.dispatch_batch,
         )
     }
@@ -112,27 +87,15 @@ impl Config {
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBuilder {
-    tq_seed_ns: Option<u64>,
-    tq_min_ns: Option<u64>,
-    tq_max_ns: Option<u64>,
+    slice_ns: Option<u64>,
     dispatch_batch: Option<u32>,
 }
 
 #[cfg(test)]
 impl ConfigBuilder {
-    /* Set the mean seed. */
-    pub fn tq_seed_ns(mut self, v: u64) -> Self {
-        self.tq_seed_ns = Some(v);
-        self
-    }
-    /* Set the mean floor. */
-    pub fn tq_min_ns(mut self, v: u64) -> Self {
-        self.tq_min_ns = Some(v);
-        self
-    }
-    /* Set the mean ceiling. */
-    pub fn tq_max_ns(mut self, v: u64) -> Self {
-        self.tq_max_ns = Some(v);
+    /* Set the fixed slice. */
+    pub fn slice_ns(mut self, v: u64) -> Self {
+        self.slice_ns = Some(v);
         self
     }
     /* Set the dispatch batch bound. */
@@ -143,14 +106,10 @@ impl ConfigBuilder {
     /* Assemble and validate the result. */
     pub fn build(self) -> Result<Config> {
         let d = Config::default();
-        let seed = self.tq_seed_ns.unwrap_or(d.tq_seed_ns);
-        let min = self.tq_min_ns.unwrap_or(d.tq_min_ns);
-        let max = self.tq_max_ns.unwrap_or(d.tq_max_ns);
+        let slice = self.slice_ns.unwrap_or(d.slice_ns);
         let batch = self.dispatch_batch.unwrap_or(d.dispatch_batch);
         let cfg = Config {
-            tq_seed_ns: seed,
-            tq_min_ns: min,
-            tq_max_ns: max,
+            slice_ns: slice,
             dispatch_batch: batch,
         };
         cfg.validate()?;
@@ -178,24 +137,21 @@ mod tests {
         let cfg = ConfigBuilder::default().dispatch_batch(16).build();
         let cfg = cfg.unwrap();
         assert_eq!(cfg.dispatch_batch, 16);
-        assert_eq!(cfg.tq_seed_ns, Config::default().tq_seed_ns);
+        assert_eq!(cfg.slice_ns, Config::default().slice_ns);
     }
 
     #[test]
-    fn seed_floor_ceiling_match_flow() {
-        assert_eq!(Config::default().tq_seed_ns, crate::flow_mean::TQ_SEED_NS);
-        assert_eq!(Config::default().tq_min_ns, crate::flow_mean::TQ_MIN_NS);
-        assert_eq!(Config::default().tq_max_ns, crate::flow_mean::TQ_MAX_NS);
+    fn slice_matches_flow() {
+        assert_eq!(Config::default().slice_ns, crate::flow_mean::SLICE_NS);
+        assert_eq!(crate::flow_mean::SLICE_NS, 1_000_000);
     }
 
     #[test]
-    fn rejects_bad_seed_floor_ceiling() {
-        let a = ConfigBuilder::default().tq_seed_ns(1).build();
+    fn rejects_bad_slice() {
+        let a = ConfigBuilder::default().slice_ns(1).build();
         assert!(a.is_err());
-        let b = ConfigBuilder::default().tq_min_ns(1).build();
+        let b = ConfigBuilder::default().slice_ns(8_000_000).build();
         assert!(b.is_err());
-        let c = ConfigBuilder::default().tq_max_ns(1).build();
-        assert!(c.is_err());
     }
 
     #[test]
@@ -209,9 +165,7 @@ mod tests {
     #[test]
     fn describe_is_stable() {
         let s = Config::default().describe();
-        assert!(s.contains("seed=8000us"));
-        assert!(s.contains("floor=500us"));
-        assert!(s.contains("ceiling=32000us"));
+        assert!(s.contains("slice=1000us"));
         assert!(s.contains("batch=32"));
     }
 }
