@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.8`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.9`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -104,43 +104,47 @@ group check, so a pinned single entry still runs where its
 mask allows. Park drains the thief group park only with no
 task recheck, so a stale cross entry may move on hetero
 hosts with strict on uniform hosts. Peer keeps mask
-plus depth with no donor check and no task recheck, so
-steal stays mask gated and best effort across groups.
+plus depth with idle rescue and no task recheck, so a
+depth 1 donor moves only when the thief is idle with no
+moved plus no own left plus no park left. Busy thieves
+keep depth 2. Tier 0 models also donor asleep rescue. BPF
+ships thief idle only due to verifier jump at 1000001 on
+asleep check, with donor asleep handled by idle kick.
 Tier 3 holds park only by construction due to verifier
 jump at 1000001 on donor check in the steal loop. Strict
 park on uniform hosts. Best effort peer plus hetero hosts.
-Dispatch uses halves. Placement uses live table. Each pass visits every
-queued task in
-the local and park queues in order and moves live tasks
-when allowed, including exiting tasks so they run to exit,
-and skips past dead, foreign and failed heads, so every
-pass moves at least one task when movable work exists
-there. An idle CPU with no moved work steals past unmovable
-leftovers, while a busy CPU with moved work steals only
-when both queues are empty. Idle steals visit at most 8
-peers with a rotating cursor and take the first
-task in a peer queue that allows the thief when the donor
-holds at least two tasks. Cross group tasks may move
-with no counter. A cross task in any donor may move on
-both uniform and hetero hosts. A stale cross
-task in the group park may move on hetero hosts. Cross group
-picks in
-select plus enqueue count group skip. Isolation follows
-enqueue placement plus thief park choice with peer best
-effort across groups,
-with pinned single entries kept by the mask. Perf hints set
-1024 for light and hog at init plus running with a weak
-guard as best effort. One policy keeps both groups at max
-since groups use dedicated CPUs, so hog frequency cannot
-harm light latency, and the old half cap punished hogs
-twice with no measurement.
+Dispatch uses halves. Placement uses live table. Each pass
+visits every queued task in the local and park queues in
+order and moves live tasks when allowed, including exiting
+tasks so they run to exit, and skips past dead, foreign
+and failed heads, so every pass moves at least one task
+when movable work exists there. An idle CPU with no moved
+work steals past unmovable leftovers, while a busy CPU
+with moved work steals only when both queues are empty.
+Idle steals visit at most 8 peers with a rotating cursor
+and take the first task in a peer queue that allows the
+thief when the donor meets min depth. Cross group tasks
+may move with no counter. A cross task in any donor may
+move on both uniform and hetero hosts. A stale cross task
+in the group park may move on hetero hosts. Cross group
+picks in select plus enqueue count group skip. Isolation
+follows enqueue placement plus thief park choice with peer
+best effort across groups, with pinned single entries kept
+by the mask. Perf hints set 1024 for light and hog at init
+plus running with a weak guard as best effort. One policy
+keeps both groups at max since groups use dedicated CPUs,
+so hog frequency cannot harm light latency, and the old
+half cap punished hogs twice with no measurement.
 
 ### Kicks
 
-Kicks wake idle
-targets only when the queue was empty with a mask check and
-no busy preemption. The queue length check uses at most one
-queued task after insert.
+Kicks wake idle targets with a mask check and no busy
+preemption. The kick runs when the target has no running
+task even with queued work, so a missed empty to 1 kick is
+rescued on later inserts. Gated on idle with no storm.
+Park sends no kick since it holds tasks with no live
+allowed CPU after fallback with no single idle target, and
+the next dispatch pass collects them.
 
 ### Counts and queues
 
@@ -183,13 +187,13 @@ For A/B comparison, install
 one build, measure the same workload, then install the other
 build and compare with no other change. The harness probe
 plus the control flag support baseline comparison with no
-scheduler change in the harness. For 4.2.8 compare light p95
+scheduler change in the harness. For 4.2.9 compare light p95
 from the probe plus schbench with the same workload.
 
 ### Limits
 
 Version stays in
-4.2 line at `4.2.8`. Weight stays 1024 with no knob.
+4.2 line at `4.2.9`. Weight stays 1024 with no knob.
 Groups stay fixed at two with no knob. The slice
 stays fixed at 1ms.
 
@@ -203,9 +207,12 @@ a pure EDF core with a fixed slice at 1ms, task at 32B,
 per-CPU at 24B, and counters at 96B. The `4.2.8` step adds
 two groups with burn only moves, strict on uniform hosts
 and best effort on hetero hosts, task at 48B, and
-counters at 136B with wake detail. The `4.2.6` base is
-the last stable line. The `4.3.x` plus `4.4.0` lines were
-tried and failed with stalls and were abandoned.
+counters at 136B with wake detail. The `4.2.9` step keeps
+task at 48B plus per-CPU at 24B plus counters at 136B with
+idle singleton rescue plus idle kick rescue plus running
+owner clear and no new knob. The `4.2.6` base is the last
+stable line. The `4.3.x` plus `4.4.0` lines were tried and
+failed with stalls and were abandoned.
 
 ## Build
 
@@ -265,7 +272,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.8`, state `enabled` and ops
+Expect version `4.2.9`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

@@ -61,31 +61,35 @@ group check, so a pinned single entry still runs where its
 mask allows. Park drains the thief group park only with no
 task recheck, so a stale cross entry may move on hetero
 hosts with strict on uniform hosts. Peer keeps mask
-plus depth with no donor check and no task recheck, so
-steal stays mask gated and best effort across groups.
+plus depth with idle rescue and no task recheck, so a
+depth 1 donor moves only when the thief is idle with no
+moved plus no own left plus no park left. Busy thieves
+keep depth 2. Tier 0 models also donor asleep rescue. BPF
+ships thief idle only due to verifier jump at 1000001 on
+asleep check, with donor asleep handled by idle kick.
 Tier 3 holds park only by construction due to verifier
 jump at 1000001 on donor check in the steal loop. Strict
 park on uniform hosts. Best effort peer plus hetero hosts.
-Dispatch uses halves. Placement uses live table. Each
-pass visits every queued task in
-the local and park queues in order and moves live tasks
-when allowed, including exiting tasks so they run to exit,
-and skips past dead, foreign and failed heads, so every pass
-moves at least one task when movable work exists there. An
-idle CPU with no moved work steals past unmovable leftovers,
-while a busy CPU with moved work steals only when both
-queues are empty. Idle steals scan peers only
-with a rotating cursor and take the first task in a peer
-queue that allows the thief when the donor holds at least
-two tasks. Cross group tasks may move with no counter.
-A cross task in any donor may move on both uniform and
-hetero hosts. A stale cross task in the
+Dispatch uses halves. Placement uses live table. Each pass
+visits every queued task in the local and park queues in
+order and moves live tasks when allowed, including exiting
+tasks so they run to exit, and skips past dead, foreign
+and failed heads, so every pass moves at least one task
+when movable work exists there. An idle CPU with no moved
+work steals past unmovable leftovers, while a busy CPU
+with moved work steals only when both queues are empty.
+Idle steals scan peers only with a rotating cursor and
+take the first task in a peer queue that allows the thief
+when the donor meets min depth. Cross group tasks may move
+with no counter. A cross task in any donor may move on
+both uniform and hetero hosts. A stale cross task in the
 group park may move on hetero hosts. Cross group picks in
-select plus enqueue
-count group skip. Isolation follows enqueue placement plus
-thief park choice with peer best effort across groups, with pinned single
-entries kept by the mask. Idle targets are kicked only when the queue was
-empty with a mask check and no busy preemption. Perf hints set 1024 for light and hog at init plus running
+select plus enqueue count group skip. Isolation follows
+enqueue placement plus thief park choice with peer best
+effort across groups, with pinned single entries kept by
+the mask. Idle targets are kicked even with queued work
+with a mask check and no busy preemption. Perf hints set
+1024 for light and hog at init plus running
 with a weak guard as best effort. One policy keeps both
 groups at max since groups use dedicated CPUs, so hog
 frequency cannot harm light latency, and the old half cap
@@ -114,15 +118,19 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.8` in 4.2 line. Weight stays 1024 with no
+is `4.2.9` in 4.2 line. Weight stays 1024 with no
 knob. The slice stays fixed at 1ms.
 Task state stays at 48B with wake hits at off 46.
-Per-CPU state stays at 24B. Counters stay at 136B. The `4.2.6` base is the last stable
-line. The `4.3.x` plus `4.4.0` lines were tried and failed
-with stalls and were abandoned. The `4.2.7` strip keeps a
-pure EDF core with the fixed slice. The `4.2.8` step adds
-two groups with burn only moves, strict on uniform hosts
-and best effort on hetero hosts.
+Per-CPU state stays at 24B. Counters stay at 136B. The
+`4.2.6` base is the last stable line. The `4.3.x` plus
+`4.4.0` lines were tried and failed with stalls and were
+abandoned. The `4.2.7` strip keeps a pure EDF core with
+the fixed slice. The `4.2.8` step adds two groups with
+burn only moves, strict on uniform hosts and best effort
+on hetero hosts. The `4.2.9` step keeps task at 48B plus
+per-CPU at 24B plus counters at 136B with idle singleton
+rescue plus idle kick rescue plus running owner clear and
+no new knob.
 
 ## Typical Use Cases
 
@@ -208,7 +216,8 @@ one slice behind the frontier with wrap safety, scales
 the estimate with a fixed weight of 1024, and stores the
 deadline for the kernel queue with the slice as the slice.
 Running keeps the entry. Blocking completes it at once.
-Disable and exit count one completion. Stopping adds burn to
+Disable and exit count one completion plus clear running
+only on owner match. Stopping adds burn to
 a 32ms window and moves light to hog at 16ms burn or one
 burst at 4ms quiet down to 1ms floor during flood and hog
 to light after 4ms low for 64 wins near 2s. Depth sums
@@ -220,28 +229,34 @@ local queue first, then the group park, then idle steals
 from peers with mask only. Own keeps no group check. Park
 drains the thief group park only with no task recheck, so a
 stale cross entry may move on hetero hosts with strict on
-uniform hosts. Peer keeps mask plus depth with no donor
-check and no task recheck, so steal stays mask gated and
-best effort across groups. Strict park on uniform hosts.
-Best effort peer plus hetero hosts. Dispatch uses halves.
-Placement uses live table. Each pass moves up to 32 tasks across
-local, park and steal. Each move in the local and park
-queues moves live tasks when allowed, including exiting
-tasks so they run to exit, and skips dead, foreign and failed
-tasks, so one head never blocks later work there. Steals take
-the first task in a peer queue that allows the thief
-when the donor holds at least two tasks. Cross group tasks
-may move with no counter. A cross task in any donor may
-move on both uniform and hetero hosts. A stale
-cross task in the group park may move on hetero hosts. Cross
-group
-picks in select plus enqueue count group skip. Isolation
-follows enqueue placement plus thief park choice with peer
-best effort across groups, with pinned single entries kept by the mask. An idle CPU with no moved
-work steals past unmovable leftovers, while a busy CPU with
-moved work steals only when both queues are empty. An idle kick
-is sent only when the queue was empty to a CPU in the task
-mask with no busy preemption.
+uniform hosts. Peer keeps mask plus depth with idle rescue
+and no task recheck, so a depth 1 donor moves only when
+the thief is idle with no moved plus no own left plus no
+park left. Busy thieves keep depth 2. Tier 0 models also
+donor asleep rescue. BPF ships thief idle only due to
+verifier jump at 1000001 on asleep check, with donor asleep
+handled by idle kick. Strict park on uniform hosts. Best
+effort peer plus hetero hosts. Dispatch uses halves.
+Placement uses live table. Each pass moves up to 32 tasks
+across local, park and steal. Each move in the local and
+park queues moves live tasks when allowed, including
+exiting tasks so they run to exit, and skips dead, foreign
+and failed tasks, so one head never blocks later work
+there. Steals take the first task in a peer queue that
+allows the thief when the donor meets min depth. Cross
+group tasks may move with no counter. A cross task in any
+donor may move on both uniform and hetero hosts. A stale
+cross task in the group park may move on hetero hosts.
+Cross group picks in select plus enqueue count group skip.
+Isolation follows enqueue placement plus thief park choice
+with peer best effort across groups, with pinned single
+entries kept by the mask. An idle CPU with no moved work
+steals past unmovable leftovers, while a busy CPU with
+moved work steals only when both queues are empty. An idle
+kick is sent even with queued work to a CPU in the task
+mask with no busy preemption. Park sends no kick with no
+live allowed CPU after fallback, and the next dispatch
+pass collects it.
 
 ## CPU choice
 
@@ -273,7 +288,7 @@ group skip. Wake promote is the fast subset of promote
 by 8 short blocks. Park moves
 count dispatch moves from the group park. Steal moves count
 dispatch moves from peer queues. Kicks count idle
-wakeup kicks sent only when the queue was empty. EDF
+wakeup kicks sent even with queued work. EDF
 enqueued counts deadline inserts. EDF clamped counts sleeper
 caps to one slice. EDF ordered counts kernel queue inserts
 in order. Demote counts light to hog moves by burn. Promote
@@ -295,22 +310,27 @@ device IRQs off the measured CPUs. For percentiles, run
 schbench with two message threads (`-m 2`) on an otherwise
 quiet machine. The harness probe wakes each 10ms and records
 wake delay as a light baseline with no realtime use. For
-4.2.8 compare light p95 from the probe plus schbench with
+4.2.9 compare light p95 from the probe plus schbench with
 the same workload and no other change.
 
 ## Limitations
 
 - Idle wakeup kick. Wakeups join in EDF order and kick an
-  idle target only when the queue was empty to collect
-  at once.
-- Queues stay per-CPU with two groups. Idle CPUs collect group
-park work and steal peer work with mask only when the
-donor holds at least two tasks. Park trusts enqueue
-placement plus thief park choice with no task recheck due
-to verifier jump at 1000001 on donor check, so stale
-cross entries may move on hetero hosts with strict park
-on uniform hosts and best effort peer. Own plus park moves
-keep order with mask respect.
+  idle target even with queued work to collect at once.
+  Park sends no kick with no live allowed CPU after
+  fallback, and the next dispatch pass collects it.
+- Queues stay per-CPU with two groups. Idle CPUs collect
+  group park work and steal peer work with mask only with
+  idle rescue for depth 1 when the thief is idle with no
+  moved plus no own left plus no park left, else depth 2.
+  Tier 0 models also donor asleep rescue. BPF ships thief
+  idle only due to verifier jump at 1000001 on asleep
+  check, with donor asleep handled by idle kick. Park
+  trusts enqueue placement plus thief park choice with no
+  task recheck due to verifier jump at 1000001 on donor
+  check, so stale cross entries may move on hetero hosts
+  with strict park on uniform hosts and best effort peer.
+  Own plus park moves keep order with mask respect.
 - Groups use a per CPU table when ready, else halves with
   extra to hog. Odd counts give the extra CPU to hog in
   both views. Short slices clamp with no pad. A single

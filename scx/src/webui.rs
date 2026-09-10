@@ -327,7 +327,7 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.2.8".to_string(),
+            version: "4.2.9".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
-        assert_eq!(back.version, "4.2.8");
+        assert_eq!(back.version, "4.2.9");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
