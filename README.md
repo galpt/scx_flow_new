@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.13`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.14`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -74,13 +74,16 @@ arrivals never inherit stale time. The rules live in
 
 ### Placement
 
-Order is free core in group, any idle in group, prior,
-current, then first allowed, and the task mask always
-wins. Groups split physical cores with siblings kept
-together and cache local shares where the hardware
-allows. Strict when ready is zero, best effort when
-ready is one. The order lives in
-`scx/src/bpf/select_cpu.bpf.c`, seeding in
+Order is waker CPU when idle in group, free core in group,
+any idle in group, prior, current, then first allowed,
+and the task mask always wins. An idle core cannot
+stack, so locality is free. Every other case keeps
+current behavior. Groups split physical cores with
+siblings kept together and cache local shares where
+the hardware allows. Strict when ready is zero, best
+effort when ready is one. The order lives in
+`scx/src/bpf/select_cpu.bpf.c` plus
+`scx/src/bpf/enqueue.bpf.c`, seeding in
 `scx/src/topology.rs`.
 
 ### Dispatch
@@ -198,7 +201,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.13`, state `enabled` and ops
+Expect version `4.2.14`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

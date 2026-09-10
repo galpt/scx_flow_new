@@ -349,16 +349,58 @@ pub fn pick_idle_in_group(
 }
 
 /*
+ * True when the waker CPU may keep the task. Needs idle
+ * with no running task plus allowed plus in group.
+ * An idle core cannot stack, so locality is free.
+ * Every other case keeps current behavior.
+ */
+#[cfg(test)]
+pub fn waker_first_ok(
+    waker: i32,
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    running: &[bool],
+) -> bool {
+    if waker < 0 {
+        return false;
+    }
+    if (waker as usize) >= nr {
+        return false;
+    }
+    if (waker as u64) >= MAX_CPUS as u64 {
+        return false;
+    }
+    if !may_run_on(waker, allowed) {
+        return false;
+    }
+    if crate::flow_group::group_live(waker as u32, nr, table, ready) != group {
+        return false;
+    }
+    if running.get(waker as usize).copied().unwrap_or(true) {
+        return false;
+    }
+    true
+}
+
+/*
  * Full tiered select model. Mirrors the BPF order of
- * free scan plus any idle in the group plus previous
- * plus current plus first in the group plus first.
- * Tier A scans for a free core with no claim, so a
- * miss wastes no idle claim. Tier B prefers any idle
- * in the group with claim only there. Placement only
- * with no dispatch use. Singletons treat all running
- * free as free, so Tier A equals Tier B order with no
- * trap. Strict iff ready is zero, best effort iff
- * ready is one with live table in placement.
+ * waker CPU first plus free scan plus any idle in the
+ * group plus previous plus current plus first in
+ * the group plus first. Waker wins when idle with
+ * no running task plus allowed plus in group. An
+ * idle core cannot stack, so locality is free.
+ * Every other case keeps current behavior. Tier A
+ * scans for a free core with no claim, so a miss
+ * wastes no idle claim. Tier B prefers any idle
+ * in the group with claim only there. Placement
+ * only with no dispatch use. Singletons treat all
+ * running free as free, so Tier A equals Tier B
+ * order with no trap. Strict iff ready is zero,
+ * best effort iff ready is one with live table
+ * in placement.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered(
@@ -373,6 +415,9 @@ pub fn select_cpu_tiered(
     partner: &[u16],
     running: &[bool],
 ) -> Option<u32> {
+    if waker_first_ok(cur, allowed, group, nr, table, ready, running) {
+        return Some(cur as u32);
+    }
     if let Some(c) = pick_free_idle(allowed, group, nr, table, ready, partner, running) {
         return Some(c);
     }

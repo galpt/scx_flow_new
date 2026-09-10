@@ -142,7 +142,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			cpu = -1;
 		}
 	} else {
-		cpu = flow_pick_in_group(p, sel, group);
+		s32 waker =
+		    (s32)bpf_get_smp_processor_id();
+		struct flow_cpu_state *wst =
+		    flow_cpu((u32)waker);
+		/* Waker CPU first, see select. */
+		if (wst && wst->running_pid == 0 &&
+		    flow_cpu_ok(p, waker) &&
+		    flow_group_live((u32)waker,
+		    nr_cpu_ids) == group)
+			cpu = waker;
+		else
+			cpu = flow_pick_in_group(p, sel,
+			    group);
 		if (cpu < 0) {
 			s32 first;
 			first = (s32)bpf_cpumask_first(

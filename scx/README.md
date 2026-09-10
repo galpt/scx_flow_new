@@ -46,11 +46,15 @@ ready is one.
 
 ### Placement
 
-Order is free core in group, any idle in group, prior,
-current, then first allowed, and the task mask always
-wins. Pinned tasks stay local. Empty masks park in order
-in the task group. Frequency cards stay display only and
-never shape placement. Pinned subsets stay in mask.
+Order is waker CPU when idle in group, free core in group,
+any idle in group, prior, current, then first allowed,
+and the task mask always wins. An idle core cannot
+stack, so locality is free. Every other case keeps
+current behavior. Pinned tasks stay local. Empty masks
+park in order in the task group. Frequency cards stay
+display only and never shape placement. Pinned subsets
+stay in mask. See `src/bpf/select_cpu.bpf.c` plus
+`src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
 

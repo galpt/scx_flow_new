@@ -8,6 +8,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 first;
 	u8 group;
 	struct flow_task_ctx *tctx;
+	struct flow_cpu_state *wst;
 	this_cpu = (s32)bpf_get_smp_processor_id();
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
@@ -39,6 +40,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		group = (u8)FLOW_GROUP_HOG;
 	else
 		group = (u8)FLOW_GROUP_LIGHT;
+	/* Waker CPU first when idle in group with mask. */
+	/* An idle core cannot stack, so locality is free. */
+	/* Every other case keeps current behavior. */
+	wst = flow_cpu((u32)this_cpu);
+	if (wst && wst->running_pid == 0 &&
+	    flow_cpu_ok(p, this_cpu) &&
+	    flow_group_live((u32)this_cpu,
+	    nr_cpu_ids) == group)
+		return this_cpu;
 	/* Tier A scans for a free core in the group. */
 	/* Tier B below prefers any idle in the group. */
 	/* Placement only with no dispatch use. */

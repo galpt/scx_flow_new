@@ -1082,7 +1082,8 @@ fn tier_a_needs_no_idle_claim() {
  * Singletons treat all running free as free. The core
  * check is a no-op, so Tier A is the first running
  * free in the group with no trap. Tier B stays first
- * idle, so the two may differ with no stall.
+ * idle, so the two may differ with no stall. Waker CPU
+ * is busy, so the tiers below run with no keep.
  */
 #[test]
 fn singleton_tier_is_noop_with_prior_order() {
@@ -1092,7 +1093,7 @@ fn singleton_tier_is_noop_with_prior_order() {
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let partner = vec![SIBLING_EMPTY; 4];
-    let running = vec![false; 4];
+    let running = vec![false, false, true, false];
     let allowed = vec![true; 4];
     let idle = vec![false, true, false, false];
     let free = pick_free_idle(&allowed, GROUP_LIGHT, nr, &table, 0, &partner, &running);
@@ -1114,7 +1115,7 @@ fn singleton_tier_is_noop_with_prior_order() {
         &running,
     );
     assert_eq!(tier, Some(0));
-    let busy = vec![false, false, false, false];
+    let busy = vec![false, true, false, false];
     let idle2 = vec![false, false, false, false];
     let tier2 = select_cpu_tiered(
         2,
@@ -1193,10 +1194,192 @@ fn tiered_keeps_mask_plus_group() {
 }
 
 /*
+ * Waker CPU idle in group keeps the waker. Needs idle
+ * with no running task plus allowed plus in group.
+ * An idle core cannot stack, so locality is free.
+ * Beats Tier A even when CPU 0 is free with no idle.
+ */
+#[test]
+fn waker_idle_keeps_waker() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let partner = vec![SIBLING_EMPTY; 4];
+    let running = vec![false; 4];
+    let allowed = vec![true; 4];
+    let idle = vec![false; 4];
+    assert!(waker_first_ok(
+        2,
+        &allowed,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &running
+    ));
+    let got = select_cpu_tiered(
+        0,
+        2,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &partner,
+        &running,
+    );
+    assert_eq!(got, Some(2));
+}
+
+/*
+ * Waker CPU busy falls through to the tiers. Needs no
+ * running task, so a busy waker keeps Tier A order
+ * with no keep. Every other case keeps current
+ * behavior with no change.
+ */
+#[test]
+fn waker_busy_falls_to_tiers() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let partner = vec![SIBLING_EMPTY; 4];
+    let running = vec![false, false, true, false];
+    let allowed = vec![true; 4];
+    let idle = vec![false; 4];
+    assert!(!waker_first_ok(
+        2,
+        &allowed,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &running
+    ));
+    let got = select_cpu_tiered(
+        0,
+        2,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &partner,
+        &running,
+    );
+    assert_eq!(got, Some(0));
+}
+
+/*
+ * Waker CPU cross group falls through to the tiers.
+ * Needs the same group, so a hog waker keeps light
+ * Tier A order with no keep. Every other case keeps
+ * current behavior with no change.
+ */
+#[test]
+fn waker_cross_group_falls_to_tiers() {
+    use crate::flow_group::GROUP_HOG;
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    table[0] = GROUP_LIGHT;
+    table[1] = GROUP_LIGHT;
+    table[2] = GROUP_HOG;
+    table[3] = GROUP_HOG;
+    let partner = vec![SIBLING_EMPTY; 4];
+    let running = vec![false; 4];
+    let allowed = vec![true; 4];
+    let idle = vec![true; 4];
+    assert!(!waker_first_ok(
+        2,
+        &allowed,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &running
+    ));
+    assert!(waker_first_ok(
+        2, &allowed, GROUP_HOG, nr, &table, 1, &running
+    ));
+    let got = select_cpu_tiered(
+        0,
+        2,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        1,
+        &partner,
+        &running,
+    );
+    assert_eq!(got, Some(0));
+}
+
+/*
+ * Waker CPU mask fail falls through to the tiers. Needs
+ * the mask set, so a foreign waker keeps Tier A order
+ * with no keep. Every other case keeps current
+ * behavior with no change.
+ */
+#[test]
+fn waker_mask_fail_falls_to_tiers() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let partner = vec![SIBLING_EMPTY; 4];
+    let running = vec![false; 4];
+    let allowed = vec![true, false, false, true];
+    let idle = vec![false; 4];
+    assert!(!waker_first_ok(
+        1,
+        &allowed,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &running
+    ));
+    assert!(!waker_first_ok(
+        9,
+        &allowed,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &running
+    ));
+    let got = select_cpu_tiered(
+        0,
+        1,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+    );
+    assert_eq!(got, Some(0));
+}
+
+/*
  * SMT off placement keeps the core check as a no-op.
  * All singleton cores read as free, so Tier A is the
  * first running free in the group with no trap. Table
  * equals halves with ready cleared, so no stall.
+ * Waker CPU is busy, so the tiers below run with no keep.
  * Strict iff ready is zero with live table in use.
  */
 #[test]
@@ -1207,7 +1390,7 @@ fn smt_off_placement_matches_prior() {
     let nr = 8;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let partner = vec![SIBLING_EMPTY; 8];
-    let running = vec![false; 8];
+    let running = vec![false, false, false, false, false, false, false, true];
     let allowed = vec![true; 8];
     for idle in [
         vec![true; 8],
