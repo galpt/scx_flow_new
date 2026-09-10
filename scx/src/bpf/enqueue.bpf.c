@@ -105,19 +105,27 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		is_fresh = true;
 	if (is_migration_disabled(p)) {
 		s32 here = scx_bpf_task_cpu(p);
-		if (flow_cpu_ok(p, here))
+		if (flow_cpu_ok(p, here)) {
 			cpu = here;
-		else
+			group = flow_group_live((u32)here,
+			    nr_cpu_ids);
+			tctx->group = group;
+		} else {
 			cpu = flow_pick_in_group(p, sel,
 			    group);
+		}
 	} else if (p->nr_cpus_allowed == 1) {
 		s32 first;
 		first = (s32)bpf_cpumask_first(
 		    p->cpus_ptr);
-		if (flow_cpu_ok(p, first))
+		if (flow_cpu_ok(p, first)) {
 			cpu = first;
-		else
+			group = flow_group_live((u32)first,
+			    nr_cpu_ids);
+			tctx->group = group;
+		} else {
 			cpu = -1;
+		}
 	} else {
 		cpu = flow_pick_in_group(p, sel, group);
 		if (cpu < 0) {

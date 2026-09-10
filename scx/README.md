@@ -25,15 +25,24 @@ runtime and the frontier moves forward while work stays queued.
 An idle reset bounds to waking virtual time with no zero use.
 Blocked tasks complete at once. Runnable tasks requeue ordered
 with a refreshed estimate. Two groups use a per CPU table when ready, else halves
-with extra to hog and a single CPU keeps all light. Burn
+with extra to hog and a single CPU keeps all light. Odd
+counts give the extra CPU to hog in both views, so
+interleave matches halves counts. Short slices clamp
+with no pad, so missing entries never fake hetero. Burn
 moves light to hog at 16ms in a 32ms window or one burst
 at 4ms quiet down to 1ms floor during flood and returns
 hog to light after 4ms low for 64 wins near 2s
-or 8 short blocks below 1ms with low burn. Depth sums
-light per CPU queued tasks with table depth 0 to 1 to
-4ms, depth 2 to 3 to 2ms, depth 4 plus to 1ms. Per task
-worst case is the 1ms floor during flood. Middle window
-keeps wake hits with no reset. Burn breaks the wake streak.
+or 8 short blocks below 1ms with burn below 4ms. Depth
+sums light per CPU queued tasks with halves depth 0 to
+1 to 4ms, depth 2 to 3 to 2ms, depth 4 plus to 1ms. Per
+task worst case is the 1ms floor during flood. A burst
+at the allowance clears wake hits. A short with burn at
+or past 4ms clears wake hits. A hot window at or past
+16ms clears wake hits. A middle window at the end clears
+wake hits with low runs. A low window below 4ms keeps
+wake hits. A window in progress keeps wake hits. Strict
+on uniform hosts. Best effort on hetero hosts. Dispatch
+uses halves. Placement uses live table.
 Task state stays at 48B with wake hits at off 46.
 Cold tasks join light with a 4x gap against flaps. Placement
 uses any idle CPU in the group and mask, then the prior CPU,
@@ -50,10 +59,14 @@ then idle steals from same group peers only. Own keeps no
 group check, so a pinned single entry still runs where its
 mask allows. Park rechecks each task group on mask pass
 candidates with NULL as light plus immediate skip, so a
-stale cross entry never moves. Peer keeps donor group plus
-mask plus depth with no task recheck due to verifier jump
-plus BSS bounds. Tier 2 uses park only immediate halves
-with 995k under 1M. Each pass visits every queued task in
+stale cross entry never moves there. Peer keeps donor
+group plus mask plus depth with no task recheck due to
+verifier jump plus BSS bounds, so a stale cross peer entry
+may move on hetero hosts with strict on uniform hosts.
+Tier 2 uses park only immediate halves with 995k under 1M.
+Strict on uniform hosts. Best effort on hetero hosts.
+Dispatch uses halves. Placement uses live table. Each
+pass visits every queued task in
 the local and park queues in order and moves live tasks
 when allowed, including exiting tasks so they run to exit,
 and skips past dead, foreign and failed heads, so every pass
@@ -63,8 +76,10 @@ while a busy CPU with moved work steals only when both
 queues are empty. Idle steals scan same group peers only
 with a rotating cursor and take the first task in a peer
 queue that allows the thief when the donor holds at least
-two tasks. Cross group peers are skipped with no cross move
-and no counter. Cross group picks in select plus enqueue
+two tasks. Cross group donors are skipped with no cross
+move and no counter. A stale cross task in a same group
+donor may move on hetero hosts. Cross group picks in
+select plus enqueue
 count group skip. Park cross tasks count group skip at once
 per task. Isolation follows enqueue placement plus thief
 park choice plus donor group check, with pinned single
@@ -179,8 +194,9 @@ at one slice behind the frontier with wrap safe order.
 Enqueue places each task on the selected CPU in the group
 when allowed, then the first allowed CPU in the group,
 then the group park. Pinned
-tasks use their CPU or the group park with 8ms extra for
-pinned hog. Tasks that cannot
+tasks keep their CPU with the group moved to the live
+group of that CPU and 8ms extra for pinned hog. Tasks
+that cannot
 move stay on the current CPU. Narrow opposite masks fall back
 to the first allowed CPU with the group moved to match. Each
 insert computes the
@@ -200,16 +216,22 @@ Dispatch drains the
 local queue first, then the group park, then idle steals
 from same group peers only. Own keeps no group check. Park
 rechecks each task group on mask pass candidates with NULL
-as light plus immediate skip. Peer keeps donor group plus
-mask plus depth with no task recheck due to verifier jump
-plus BSS bounds. Each pass moves up to 32 tasks across
+as light plus immediate skip, so a stale cross entry never
+moves there. Peer keeps donor group plus mask plus depth
+with no task recheck due to verifier jump plus BSS bounds,
+so a stale cross peer entry may move on hetero hosts with
+strict on uniform hosts. Strict on uniform hosts. Best
+effort on hetero hosts. Dispatch uses halves. Placement
+uses live table. Each pass moves up to 32 tasks across
 local, park and steal. Each move in the local and park
 queues moves live tasks when allowed, including exiting
 tasks so they run to exit, and skips dead, foreign and failed
 tasks, so one head never blocks later work there. Steals take
 the first task in a same group peer queue that allows the thief
-when the donor holds at least two tasks. Cross group peers
-are skipped with no cross move and no counter. Cross group
+when the donor holds at least two tasks. Cross group donors
+are skipped with no cross move and no counter. A stale cross
+task in a same group donor may move on hetero hosts. Cross
+group
 picks in select plus enqueue count group skip. Park cross
 tasks count group skip at once per task. Isolation follows
 enqueue placement plus thief park choice plus donor group
@@ -281,14 +303,19 @@ the same workload and no other change.
   at once.
 - Queues stay per-CPU with two groups. Idle CPUs collect group
 park work and steal same group peer work when the
-donor holds at least two tasks, so cross group work never
-moves by steal. Own plus park moves keep order with mask
-respect.
+donor holds at least two tasks. Park cross never moves
+by recheck. Peer cross may move with no task recheck on
+hetero hosts with strict on uniform hosts. Own plus park
+moves keep order with mask respect.
 - Groups use a per CPU table when ready, else halves with
-  extra to hog. A single CPU keeps all light with no peer
-  scan through the same path. Uniform hosts keep ready
-  cleared with halves fallback. Snapshot mirrors the live
-  table when ready, else halves with no trap.
+  extra to hog. Odd counts give the extra CPU to hog in
+  both views. Short slices clamp with no pad. A single
+  CPU keeps all light with no peer scan through the same
+  path. Uniform hosts keep ready cleared with halves
+  fallback. Strict on uniform hosts. Best effort on hetero
+  hosts. Dispatch uses halves. Placement uses live table.
+  Snapshot mirrors the live table when ready, else halves
+  with no trap.
 - The topology is snapshotted at attach, so a CPU
   hotplug needs a restart.
 - Unknown frequency stays unknown. Hosts that report

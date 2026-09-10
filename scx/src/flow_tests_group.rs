@@ -6,9 +6,12 @@
  * The tests mirror the BPF header so behavior
  * stays the same on both sides of the boundary.
  * Two groups split CPUs by id halves with extra
- * to hog. The classifier uses burn only with a
- * 32ms window plus 16ms demote plus 4ms burst plus
- * 4ms low for 64 wins near 2s.
+ * to hog and odd extra to hog in both views. The
+ * classifier uses burn only with a 32ms window plus
+ * 16ms demote plus 4ms burst plus 4ms low for 64 wins
+ * near 2s plus 8 short blocks below 1ms with burn
+ * below 4ms. Tier 0 models keep both drains. BPF ships
+ * Tier 2 peer with donor only.
  */
 use crate::flow::*;
 use std::collections::VecDeque;
@@ -456,8 +459,13 @@ fn inflate_adds_8ms_with_wrap() {
     assert_eq!(inflate_deadline(1_000_000), 1_000_000 + PINNED_INFLATE_NS);
 }
 
+/*
+ * Tier 0 model only. BPF ships Tier 2 peer with donor
+ * only and no task recheck, so hetero peer may move
+ * cross with strict on uniform hosts.
+ */
 #[test]
-fn drain_keeps_strict_isolation() {
+fn drain_keeps_strict_isolation_tier0_model_only() {
     let light = |g: u8| GroupTask {
         allowed: vec![true, true, true, true],
         live: true,
@@ -476,8 +484,13 @@ fn drain_keeps_strict_isolation() {
     assert!(group_task_ok(1, GROUP_HOG, &light(GROUP_HOG)));
 }
 
+/*
+ * Tier 0 model only. BPF ships Tier 2 peer with donor
+ * only and no task recheck, so hetero peer may move
+ * cross with strict on uniform hosts.
+ */
 #[test]
-fn drain_skips_dead_plus_failed_with_no_cross() {
+fn drain_skips_dead_plus_failed_with_no_cross_tier0_model_only() {
     let dead = GroupTask {
         allowed: vec![true, true],
         live: false,
@@ -671,8 +684,13 @@ fn task_state_stays_48_with_wake_at_46() {
     );
 }
 
+/*
+ * Tier 0 model only for park plus peer. BPF ships Tier
+ * 2 with park recheck plus peer donor only and no peer
+ * task recheck, so hetero peer may move cross.
+ */
 #[test]
-fn park_per_task_recheck_keeps_only_thief_group() {
+fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
     let light = |g: u8| GroupTask {
         allowed: vec![true, true],
         live: true,
@@ -690,8 +708,14 @@ fn park_per_task_recheck_keeps_only_thief_group() {
     assert_eq!(s2, 2);
 }
 
+/*
+ * Tier 0 model only. BPF ships Tier 2 peer with donor
+ * only and no task recheck due to verifier jump plus
+ * BSS bounds, so a stale cross peer entry may move on
+ * hetero hosts with strict on uniform hosts.
+ */
 #[test]
-fn peer_per_task_recheck_skips_stale_cross() {
+fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
     let mk = |g: u8, allow: bool| GroupTask {
         allowed: vec![allow, true],
         live: true,
@@ -708,8 +732,13 @@ fn peer_per_task_recheck_skips_stale_cross() {
     assert!(!group_task_ok(0, GROUP_LIGHT, &mk(GROUP_HOG, true)));
 }
 
+/*
+ * Tier 0 model only. BPF ships Tier 2 peer with donor
+ * only and no task recheck, so hetero peer may move
+ * cross with strict on uniform hosts.
+ */
 #[test]
-fn null_storage_defaults_to_light() {
+fn null_storage_defaults_to_light_tier0_model_only() {
     let bad = GroupTask {
         allowed: vec![true, true],
         live: true,
@@ -728,8 +757,13 @@ fn null_storage_defaults_to_light() {
     assert_eq!(s2, 1);
 }
 
+/*
+ * Tier 0 model only. BPF ships Tier 2 peer with donor
+ * only and no task recheck, so hetero peer may move
+ * cross with strict on uniform hosts.
+ */
 #[test]
-fn mask_fail_never_counts_as_group_skip() {
+fn mask_fail_never_counts_as_group_skip_tier0_model_only() {
     let cross_mask_fail = GroupTask {
         allowed: vec![false, false],
         live: true,
@@ -796,6 +830,60 @@ fn sorted_interleave_spreads_fast_across_groups() {
     assert_eq!(single, vec![GROUP_LIGHT]);
 }
 
+/*
+ * Odd counts give the extra CPU to hog in both views.
+ * Halves gives 1 light plus 2 hog at 3. Interleave
+ * matches with 1 light plus 2 hog, so hetero keeps
+ * the same bias with no split.
+ */
+#[test]
+fn odd_counts_give_extra_to_hog_in_both_views() {
+    assert_eq!(group_of_cpu(0, 3), GROUP_LIGHT);
+    assert_eq!(group_of_cpu(1, 3), GROUP_HOG);
+    assert_eq!(group_of_cpu(2, 3), GROUP_HOG);
+    let caps = vec![1024, 512, 512];
+    let freqs = vec![4000000, 4000000, 4000000];
+    let out = assign_sorted_interleave(&caps, &freqs, 3);
+    assert_eq!(out.len(), 3);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_LIGHT).count(), 1);
+    assert_eq!(out.iter().filter(|&&g| g == GROUP_HOG).count(), 2);
+    assert_eq!(out[0], GROUP_LIGHT);
+    assert_eq!(out[1], GROUP_HOG);
+    assert_eq!(out[2], GROUP_HOG);
+    let caps5 = vec![1024, 1024, 1024, 512, 512];
+    let freqs5 = vec![4000000; 5];
+    let out5 = assign_sorted_interleave(&caps5, &freqs5, 5);
+    assert_eq!(out5.iter().filter(|&&g| g == GROUP_LIGHT).count(), 2);
+    assert_eq!(out5.iter().filter(|&&g| g == GROUP_HOG).count(), 3);
+    let (t, r) = seed_groups(&caps, &freqs, 3);
+    assert_eq!(r, 1);
+    assert_eq!(t[..3].iter().filter(|&&g| g == GROUP_LIGHT).count(), 1);
+    assert_eq!(t[..3].iter().filter(|&&g| g == GROUP_HOG).count(), 2);
+}
+
+/*
+ * Short slices clamp with no pad. Uniform short stays
+ * ready cleared, so missing zeros never fake hetero.
+ * Hetero short uses only available entries.
+ */
+#[test]
+fn seed_groups_clamps_short_slices_with_no_pad() {
+    let (t1, r1) = seed_groups(&[1024, 1024], &[4000000, 4000000], 4);
+    assert_eq!(r1, 0);
+    assert!(t1.iter().all(|&g| g == GROUP_LIGHT));
+    let (t2, r2) = seed_groups(&[1024, 512], &[4000000, 4000000], 4);
+    assert_eq!(r2, 1);
+    assert_ne!(t2[0], t2[1]);
+    assert_eq!(t2[2], GROUP_LIGHT);
+    assert_eq!(t2[3], GROUP_LIGHT);
+    let (t3, r3) = seed_groups(&[], &[], 4);
+    assert_eq!(r3, 0);
+    assert!(t3.iter().all(|&g| g == GROUP_LIGHT));
+    let (t4, r4) = seed_groups(&[1024], &[4000000], 4);
+    assert_eq!(r4, 0);
+    assert!(t4.iter().all(|&g| g == GROUP_LIGHT));
+}
+
 #[test]
 fn halves_fallback_when_uniform_or_single() {
     let (t1, r1) = seed_groups(
@@ -842,6 +930,65 @@ fn seed_groups_sets_ready_only_when_hetero() {
     let uniform_freqs = vec![4787082; 8];
     let (_, r2) = seed_groups(&uniform_caps, &uniform_freqs, 8);
     assert_eq!(r2, 0);
+}
+
+/*
+ * Hetero keeps dispatch on halves while placement uses
+ * live. Strict on uniform hosts. Best effort on hetero
+ * hosts with verifier jump plus BSS bounds. Locks the
+ * documented split with no live use in dispatch.
+ */
+#[test]
+fn hetero_dispatch_uses_halves_placement_uses_live() {
+    let caps = vec![1024, 1024, 512, 512];
+    let freqs = vec![4000000, 4000000, 4000000, 4000000];
+    let (table, ready) = seed_groups(&caps, &freqs, 4);
+    assert_eq!(ready, 1);
+    let mut diverged = false;
+    for cpu in 0..4 {
+        let halves = group_of_cpu(cpu, 4);
+        let live = group_live(cpu, 4, &table, ready);
+        if halves != live {
+            diverged = true;
+        }
+    }
+    assert!(diverged);
+    assert_eq!(group_of_cpu(0, 4), GROUP_LIGHT);
+    assert_eq!(group_of_cpu(2, 4), GROUP_HOG);
+    assert_eq!(group_live(0, 4, &table, ready), GROUP_LIGHT);
+    assert_eq!(group_live(1, 4, &table, ready), GROUP_HOG);
+    assert_eq!(group_live(2, 4, &table, ready), GROUP_LIGHT);
+    let uniform = vec![1024; 4];
+    let uniform_freq = vec![4000000; 4];
+    let (t2, r2) = seed_groups(&uniform, &uniform_freq, 4);
+    assert_eq!(r2, 0);
+    for cpu in 0..4 {
+        assert_eq!(group_live(cpu, 4, &t2, r2), group_of_cpu(cpu, 4));
+    }
+}
+
+/*
+ * Pinned keeps the CPU with live regroup. A task pinned
+ * to one CPU takes the live group of that CPU, so later
+ * park plus steal see the same group. Locks the enqueue
+ * pinned path with no stale group.
+ */
+#[test]
+fn pinned_regroups_to_live_group() {
+    let caps = vec![1024, 1024, 512, 512];
+    let freqs = vec![4000000, 4000000, 4000000, 4000000];
+    let (table, ready) = seed_groups(&caps, &freqs, 4);
+    assert_eq!(ready, 1);
+    let pinned = 1u32;
+    let live = group_live(pinned, 4, &table, ready);
+    assert_eq!(live, GROUP_HOG);
+    assert_eq!(group_of_cpu(pinned, 4), GROUP_LIGHT);
+    assert_ne!(live, group_of_cpu(pinned, 4));
+    let pinned2 = 2u32;
+    let live2 = group_live(pinned2, 4, &table, ready);
+    assert_eq!(live2, GROUP_LIGHT);
+    assert_eq!(group_of_cpu(pinned2, 4), GROUP_HOG);
+    assert_ne!(live2, group_of_cpu(pinned2, 4));
 }
 
 #[test]

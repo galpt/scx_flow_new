@@ -9,6 +9,8 @@
 /* keeps donor group plus mask plus depth with no task */
 /* recheck due to verifier jump plus BSS bounds. Tier 2 */
 /* uses park only immediate halves with 995k under 1M. */
+/* Strict on uniform hosts. Best effort on hetero hosts. */
+/* Dispatch uses halves. Placement uses live table. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {

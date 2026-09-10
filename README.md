@@ -77,18 +77,24 @@ no zero use, so new arrivals never inherit stale time.
 Placement uses any idle CPU in the group and mask,
 then the prior CPU in the group, the current CPU in the
 group, and the first allowed CPU in the group. Pinned tasks
-and tasks that cannot move stay local with 8ms extra for
-pinned hog. Empty masks park in order in the task group.
-Frequency plus LLC plus CPU cards stay display only and never
-shape placement.
+keep their CPU with the group moved to the live group of
+that CPU and 8ms extra for pinned hog. Tasks that cannot
+move stay local. Empty masks park in order in the task
+group. Frequency plus LLC plus CPU cards stay display only
+and never shape placement.
 Pinned subsets such as Lestat 16 plus 16 stay in mask.
 Single-CPU Konaka never leaves. Two groups use a per CPU
 table when ready, else halves with extra to hog and a single
-CPU keeps all light. The table sorts live CPUs by capacity
-plus frequency plus id, then interleaves even slots to light
-and odd slots to hog. Uniform hosts keep ready cleared with
-halves fallback. Capacity plus max frequency seed the table
-when spread tops 10pct, else halves applies.
+CPU keeps all light. Odd counts give the extra CPU to hog
+in both views, so interleave matches halves counts. Short
+slices clamp with no pad. The table sorts live CPUs by
+capacity plus frequency plus id, then interleaves even
+slots to light and odd slots to hog with the last odd slot
+to hog. Uniform hosts keep ready cleared with halves
+fallback. Capacity plus max frequency seed the table
+when spread tops 10pct, else halves applies. Strict on
+uniform hosts. Best effort on hetero hosts. Dispatch uses
+halves. Placement uses live table.
 
 ### Dispatch
 
@@ -97,10 +103,14 @@ then idle steals from same group peers only. Own keeps no
 group check, so a pinned single entry still runs where its
 mask allows. Park rechecks each task group on mask pass
 candidates with NULL as light plus immediate skip, so a
-stale cross entry never moves. Peer keeps donor group plus
-mask plus depth with no task recheck due to verifier jump
-plus BSS bounds. Tier 2 uses park only immediate halves
-with 995k under 1M. Each pass visits every queued task in
+stale cross entry never moves there. Peer keeps donor group
+plus mask plus depth with no task recheck due to verifier
+jump plus BSS bounds, so a stale cross peer entry may move
+on hetero hosts with strict on uniform hosts. Tier 2 uses
+park only immediate halves with 995k under 1M. Strict on
+uniform hosts. Best effort on hetero hosts. Dispatch uses
+halves. Placement uses live table. Each pass visits every
+queued task in
 the local and park queues in order and moves live tasks
 when allowed, including exiting tasks so they run to exit,
 and skips past dead, foreign and failed heads, so every
@@ -110,8 +120,10 @@ leftovers, while a busy CPU with moved work steals only
 when both queues are empty. Idle steals visit at most 8
 same group peers with a rotating cursor and take the first
 task in a peer queue that allows the thief when the donor
-holds at least two tasks. Cross group peers are skipped
-with no cross move and no counter. Cross group picks in
+holds at least two tasks. Cross group donors are skipped
+with no cross move and no counter. A stale cross task in
+a same group donor may move on hetero hosts. Cross group
+picks in
 select plus enqueue count group skip. Park cross tasks
 count group skip at once per task. Isolation follows enqueue
 placement plus thief park choice plus donor group check,
@@ -145,12 +157,17 @@ with wake hits at off 46. Per-CPU state stays at 24B.
 Counters stay at 136B. Burn moves light to hog at 16ms in
 a 32ms window or one burst at 4ms quiet down to 1ms floor
 during flood. Depth sums light per CPU queued tasks with
-table depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, depth 4
-plus to 1ms. Per task worst case is the 1ms floor during
-flood. Eight short blocks below
-1ms with low burn move hog to light at once. Middle window
-keeps wake hits with no reset. Burn breaks the wake streak,
-so gaming stays hard. Slow 64 wins near 2s stays intact.
+halves depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, depth 4
+plus to 1ms with strict on uniform hosts and best effort
+on hetero hosts. Per task worst case is the 1ms floor
+during flood. Eight short blocks below 1ms with burn below
+4ms move hog to light at once. A burst at the allowance
+clears wake hits. A short with burn at or past 4ms clears
+wake hits. A hot window at or past 16ms clears wake hits.
+A middle window at the end clears wake hits with low runs.
+A low window below 4ms keeps wake hits. A window in
+progress keeps wake hits, so gaming stays hard. Slow 64
+wins near 2s stays intact.
 Dashboard shows per group depths plus steals plus demote
 plus promote plus wake rates plus pinned inflate plus
 skip plus per CPU group plus running plus slice plus

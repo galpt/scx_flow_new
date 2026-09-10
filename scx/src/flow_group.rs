@@ -4,14 +4,18 @@
  *
  * Group helpers for the flow scheduler.
  * Two groups split CPUs by id halves with extra
- * to hog. Light holds short waits. Hog holds burn.
+ * to hog. Odd counts give the extra CPU to hog in
+ * both views. Light holds short waits. Hog holds burn.
  * The classifier uses burn with a 32ms window plus
  * wake hits. Demote needs 16ms burn or one burst at
  * 4ms quiet down to 1ms floor during flood. Promote
  * needs 4ms low for 64 wins near 2s or 8 short blocks
- * below 1ms with low burn. Cold tasks join
+ * below 1ms with burn below 4ms. Cold tasks join
  * light. The 4x gap keeps flips rare. A per CPU table
  * holds live groups when ready, else halves applies.
+ * Short slices clamp with no pad. Strict on uniform
+ * hosts. Best effort on hetero hosts with dispatch on
+ * halves and placement on live.
  */
 
 /* Count of groups. Fixed at two with no knob. */
@@ -72,9 +76,11 @@ pub const PERF_HOG: u32 = 1024;
 /*
  * Group of one CPU by id halves with extra to hog.
  * Halves is the fallback when the table is not ready.
- * One or no CPUs keeps all light. Otherwise the low
- * half is light and the high half is hog, so an odd
- * count gives the extra CPU to hog.
+ * Dispatch keeps halves, so hetero placement is best
+ * effort with strict on uniform hosts. One or no CPUs
+ * keeps all light. Otherwise the low half is light and
+ * the high half is hog, so an odd count gives the
+ * extra CPU to hog.
  */
 pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
     if nr <= 1 {
@@ -90,7 +96,9 @@ pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
  * Live group of one CPU from table plus halves fallback.
  * Reads the table when ready holds groups, else halves.
  * Bad values fall back to halves with no trap. Mirrors
- * the BPF live helper for snapshot use.
+ * the BPF live helper for snapshot use. Placement uses
+ * live, dispatch keeps halves, so hetero is best effort
+ * with strict on uniform hosts.
  */
 pub fn group_live(cpu: u32, nr: usize, table: &[u8], ready: u8) -> u8 {
     if ready != 0 && (cpu as usize) < nr && (cpu as usize) < table.len() {
@@ -142,10 +150,11 @@ pub fn hetero_needed(caps: &[u64], freqs: &[u64]) -> bool {
 /*
  * Assign groups by sorted interleave. Sorts live CPUs
  * by capacity plus frequency plus id, then assigns even
- * slots to light and odd slots to hog. The order spreads
- * fast CPUs across both groups with no knob. Halves is
- * the fallback when the table is not ready. Single CPU
- * keeps all light.
+ * slots to light and odd slots to hog. Odd counts give
+ * the extra CPU to hog, so counts match halves with no
+ * knob. The order spreads fast CPUs across both groups.
+ * Halves is the fallback when the table is not ready.
+ * Single CPU keeps all light.
  */
 pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u8> {
     let mut idx: Vec<usize> = (0..nr).collect();
@@ -162,7 +171,7 @@ pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u
     });
     let mut out = vec![GROUP_LIGHT; nr];
     for (pos, cpu) in idx.iter().enumerate() {
-        if nr > 1 && pos % 2 == 1 {
+        if nr > 1 && (pos % 2 == 1 || (nr % 2 == 1 && pos + 1 == nr)) {
             out[*cpu] = GROUP_HOG;
         } else {
             out[*cpu] = GROUP_LIGHT;
@@ -176,15 +185,21 @@ pub fn assign_sorted_interleave(caps: &[u64], freqs: &[u64], nr: usize) -> Vec<u
  * interleaved groups with ready set when hetero holds.
  * Returns halves with ready cleared when hosts look
  * uniform, so the BPF side plus snapshot stay on halves.
+ * Short slices clamp to available entries with no pad,
+ * so missing entries never fake hetero.
  */
 pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_LEN], u8) {
     let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     if nr <= 1 {
         return (table, 0);
     }
-    let n = nr.min(GROUP_TABLE_LEN);
-    let live_caps: Vec<u64> = (0..n).map(|i| caps.get(i).copied().unwrap_or(0)).collect();
-    let live_freqs: Vec<u64> = (0..n).map(|i| freqs.get(i).copied().unwrap_or(0)).collect();
+    let avail = caps.len().min(freqs.len());
+    let n = nr.min(GROUP_TABLE_LEN).min(avail);
+    if n <= 1 {
+        return (table, 0);
+    }
+    let live_caps: Vec<u64> = caps[..n].to_vec();
+    let live_freqs: Vec<u64> = freqs[..n].to_vec();
     if !hetero_needed(&live_caps, &live_freqs) {
         return (table, 0);
     }
@@ -265,7 +280,9 @@ pub fn burst_hot(delta: u64) -> bool {
  * 1ms, so per task worst case is one slice during
  * flood. Recomputed per stop with no new task field,
  * so task stays at 48B. Halves matches dispatch view
- * with no table cost in the stop path.
+ * with no table cost in the stop path. Strict on
+ * uniform hosts. Best effort on hetero hosts with
+ * placement on the live table.
  */
 #[cfg(test)]
 pub fn burst_allowance(depth: u64) -> u64 {
@@ -293,8 +310,10 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
  * Light depth from per CPU queued counts capped at 4.
  * Sums queued tasks over light CPUs in halves order
  * with early stop at 4. Halves matches the BPF depth
- * with no table use. Missing entries count as zero,
- * so short slices stay quiet with no trap.
+ * with no table use. Strict on uniform hosts. Best
+ * effort on hetero hosts with placement on live.
+ * Missing entries count as zero, so short slices stay
+ * quiet with no trap.
  */
 #[cfg(test)]
 pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
@@ -316,9 +335,10 @@ pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
  * Hog depth from per CPU queued counts capped at 4.
  * Sums queued tasks over hog CPUs in halves order
  * with early stop at 4. Halves matches the BPF view
- * with no table use. Missing entries count as zero,
- * so short slices stay quiet with no trap. Display
- * only with no burst use.
+ * with no table use. Strict on uniform hosts. Best
+ * effort on hetero hosts with placement on live.
+ * Missing entries count as zero, so short slices stay
+ * quiet with no trap. Display only with no burst use.
  */
 #[cfg(test)]
 pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
@@ -340,7 +360,9 @@ pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
  * Both depths from per CPU queued counts capped at 4.
  * Single pass over halves order with early stop when
  * both hit 4. Mirrors the BPF refresh with one pass
- * and bounded cost. Missing entries count as zero.
+ * and bounded cost. Strict on uniform hosts. Best
+ * effort on hetero hosts with placement on live.
+ * Missing entries count as zero.
  */
 #[cfg(test)]
 pub fn group_depths(queued: &[u64], nr: usize) -> (u64, u64) {
@@ -487,15 +509,19 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
  * for the depth, then wake fast promote, then window
  * end. Allowance is 4ms at depth 0 to 1, 2ms at depth
  * 2 to 3, 1ms at depth 4 plus. Eight short blocks
- * below 1ms with low burn move hog to light at once.
- * A 16ms window moves light to hog at the window end.
- * A low window below 4ms moves the streak forward.
- * Middle burn breaks the streak with no move. Middle
- * window keeps wake hits with no reset. A hog needs
- * 64 low wins near 2s or 8 short hits to return to
- * light. Allowance is recomputed per stop with no new
- * task field, so task stays at 48B. Returns true for
- * demote plus true for promote when each move runs.
+ * below 1ms with burn below 4ms move hog to light at
+ * once. A burst at the allowance clears wake hits. A
+ * short with burn at or past 4ms clears wake hits. A
+ * 16ms window moves light to hog at the window end. A
+ * hot window at or past 16ms clears wake hits. A low
+ * window below 4ms moves the streak forward and keeps
+ * wake hits. A middle window at the end clears wake
+ * hits with low runs and no move. A window in progress
+ * keeps wake hits. A hog needs 64 low wins near 2s or
+ * 8 short hits to return to light. Allowance is
+ * recomputed per stop with no new task field, so task
+ * stays at 48B. Returns true for demote plus true for
+ * promote when each move runs.
  */
 #[cfg(test)]
 pub fn classify_step_depth(st: &mut GroupState, now: u64, delta: u64, depth: u64) -> (bool, bool) {
@@ -605,9 +631,11 @@ pub struct GroupTask {
 /*
  * True when one group task may move to the thief.
  * Needs a live task with no move failure plus the
- * CPU in the mask plus the same group. Pinned
- * single tasks with one allowed CPU may cross with
- * an inflated deadline, so the caller checks that
+ * CPU in the mask plus the same group. Tier 0 model
+ * only. BPF ships Tier 2 peer with donor only and no
+ * task recheck, so a stale cross peer entry may move.
+ * Pinned single tasks with one allowed CPU may cross
+ * with an inflated deadline, so the caller checks that
  * path before this strict check. Exiting tasks use
  * the same rule with no extra path.
  */
@@ -628,16 +656,18 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
 }
 
 /*
- * Drain up to budget group tasks for one CPU. The
- * scan keeps order and moves each task that passes
- * the strict group check. Dead, foreign, failed,
- * and cross group heads stay, so one head never
- * blocks later work. Returns moved plus skipped
- * where skipped counts cross group heads on mask
- * pass. The model documents Tier 0 with both drains
- * plus merged skip. BPF Tier 2 uses park only
- * immediate halves due to verifier jump plus BSS
- * bounds with peer donor only.
+ * Drain up to budget group tasks for one CPU. Tier 0
+ * model only. BPF ships Tier 2 peer with donor only
+ * and no task recheck, so a stale cross peer entry may
+ * move on hetero hosts with strict on uniform hosts.
+ * The scan keeps order and moves each task that passes
+ * the strict group check. Dead, foreign, failed, and
+ * cross group heads stay, so one head never blocks
+ * later work. Returns moved plus skipped where skipped
+ * counts cross group heads on mask pass. The model
+ * keeps both drains plus merged skip. BPF Tier 2 uses
+ * park only immediate halves due to verifier jump plus
+ * BSS bounds with peer donor only.
  */
 #[cfg(test)]
 pub fn group_drain_model(
