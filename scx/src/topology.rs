@@ -88,6 +88,16 @@ pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
 }
 
 /*
+ * Parse a frequency string in kilohertz. Trims space
+ * and parses the number. Bad input yields zero for
+ * unknown. The value stays display only and never
+ * feeds placement or division.
+ */
+pub fn parse_freq_khz(s: &str) -> u64 {
+    s.trim().parse().unwrap_or(0)
+}
+
+/*
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement
@@ -100,6 +110,120 @@ pub fn current_freq_khz(cpu: u32) -> u64 {
         "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "scaling_cur_freq"
     ))
     .ok()
-    .and_then(|s| s.trim().parse().ok())
+    .map(|s| parse_freq_khz(&s))
     .unwrap_or(0)
+}
+
+/*
+ * Filter cards to an allowed subset for tests. Keeps
+ * cards whose id is marked in the mask. Models pinned
+ * cgroup subsets with no placement use. Frequency plus
+ * LLC plus CPU cards stay display only here.
+ */
+#[cfg(test)]
+pub fn filter_allowed(
+    cards: &[crate::stats::PerCpuMetrics],
+    allowed: &[bool],
+) -> Vec<crate::stats::PerCpuMetrics> {
+    cards
+        .iter()
+        .filter(|c| allowed.get(c.id as usize).copied().unwrap_or(false))
+        .cloned()
+        .collect()
+}
+
+/*
+ * Synthetic card for tests. Builds one display only
+ * card with the given id plus frequency plus LLC plus
+ * thread role. Slice stays fixed at 1ms with no mean.
+ */
+#[cfg(test)]
+pub fn synthetic_card(
+    id: u32,
+    freq_khz: u64,
+    llc_id: u32,
+    smt: bool,
+) -> crate::stats::PerCpuMetrics {
+    crate::stats::PerCpuMetrics {
+        id,
+        freq_khz,
+        cur_freq_khz: 0,
+        llc_id,
+        smt,
+        running_est_ns: 0,
+        running_pid: 0,
+        tq_ns: crate::flow::SLICE_NS,
+        depth: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_cpu_card_reports_one_cpu() {
+        let cards = vec![synthetic_card(0, 3800000, 0, false)];
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            describe_topology(&cards),
+            "topology: 1 CPU, no SMT, freq known"
+        );
+        assert_eq!(filter_allowed(&cards, &[true]).len(), 1);
+        assert_eq!(filter_allowed(&cards, &[false]).len(), 0);
+        assert!(crate::flow_select::may_run_on(0, &[true]));
+        assert!(!crate::flow_select::may_run_on(1, &[true]));
+    }
+
+    #[test]
+    fn lestat_16_plus_16_subset_keeps_allowed() {
+        let mut cards = Vec::new();
+        for cpu in 0..32u32 {
+            let llc = if cpu < 16 { 0 } else { 1 };
+            cards.push(synthetic_card(cpu, 3500000, llc, false));
+        }
+        assert_eq!(cards.len(), 32);
+        let mut allowed = vec![false; 32];
+        for cpu in 0..8 {
+            allowed[cpu] = true;
+        }
+        for cpu in 16..24 {
+            allowed[cpu] = true;
+        }
+        let subset = filter_allowed(&cards, &allowed);
+        assert_eq!(subset.len(), 16);
+        for c in &subset {
+            assert!(allowed[c.id as usize]);
+            assert!(c.freq_khz != 0);
+        }
+        assert_eq!(
+            describe_topology(&subset),
+            "topology: 16 CPUs, no SMT, freq known"
+        );
+        for cpu in [8, 15, 24, 31] {
+            assert!(!allowed[cpu]);
+        }
+    }
+
+    #[test]
+    fn freq_parse_handles_valid_and_bad() {
+        assert_eq!(parse_freq_khz("3800000\n"), 3800000);
+        assert_eq!(parse_freq_khz("  3500000  "), 3500000);
+        assert_eq!(parse_freq_khz(""), 0);
+        assert_eq!(parse_freq_khz("abc"), 0);
+        assert_eq!(parse_freq_khz("0"), 0);
+        assert!(!crate::flow_select::freq_known(0));
+        assert!(crate::flow_select::freq_known(3800000));
+    }
+
+    #[test]
+    fn unknown_topology_stays_plain() {
+        let empty: Vec<crate::stats::PerCpuMetrics> = Vec::new();
+        assert_eq!(describe_topology(&empty), "topology unknown, plain per-CPU");
+        let unknown = vec![synthetic_card(0, 0, 0, false)];
+        assert_eq!(
+            describe_topology(&unknown),
+            "topology: 1 CPU, no SMT, freq unknown"
+        );
+    }
 }
