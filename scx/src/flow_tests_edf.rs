@@ -1424,6 +1424,44 @@ fn heavy_keeps_earlier_deadline() {
 }
 
 /*
+ * Insert matches weighted clamp plus scale plus
+ * deadline. BPF clamps with the weight cap in both
+ * enqueue paths, so the model composes the weighted
+ * clamp with the scaled estimate at every weight.
+ */
+#[test]
+fn edf_insert_matches_weighted_clamp_and_scale() {
+    let slice = SLICE_NS;
+    let frontier: u64 = 100_000_000;
+    let weights = [256u32, 1024, 2048];
+    let vs = [
+        frontier,
+        frontier.wrapping_sub(500_000),
+        0,
+        frontier.wrapping_add(1_000_000),
+    ];
+    let ests = [500_000u64, 1_000_000u64];
+    for weight in weights {
+        for v in vs {
+            for est in ests {
+                let want_c = clamp_vruntime_w(v, frontier, slice, weight);
+                let want_flag = was_clamped_w(v, frontier, slice, weight);
+                let want_scaled = scale_by_weight(clamp_est(est), weight);
+                let want_dl = deadline(want_c, want_scaled);
+                let (got_c, got_dl, got_flag) = edf_insert(v, frontier, slice, est, weight);
+                assert_eq!(got_c, want_c);
+                assert_eq!(got_flag, want_flag);
+                assert_eq!(got_dl, want_dl);
+            }
+        }
+    }
+    assert_eq!(
+        edf_insert(0, frontier, slice, 500_000, 1024).0,
+        clamp_vruntime(0, frontier, slice)
+    );
+}
+
+/*
  * Weight stays out of routing with no group plus steal
  * plus kick change. Placement plus drain plus kick read
  * the same with any weight, so only deadline plus

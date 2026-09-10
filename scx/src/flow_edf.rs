@@ -129,14 +129,15 @@ pub fn frontier_idle_guarded(old: u64, waking_v: u64) -> u64 {
 }
 
 /*
- * Full EDF insert model. Clamps the virtual time to a
- * bounded lag, scales the estimate, and adds the
+ * Full EDF insert model. Clamps the virtual time with the
+ * weight scaled cap, scales the estimate, and adds the
  * deadline with wrap. Returns the clamped time, the
- * deadline, and the clamp flag for counts.
+ * deadline, and the clamp flag for counts. Matches the
+ * BPF enqueue paths that clamp with the weight cap.
  */
 #[cfg(test)]
 pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (u64, u64, bool) {
-    let clamped = clamp_vruntime(v, frontier, slice);
+    let clamped = clamp_vruntime_w(v, frontier, slice, weight);
     let flag = clamped != v;
     let est_c = crate::flow_slice::clamp_est(est);
     let scaled = crate::flow_slice::scale_by_weight(est_c, weight);
