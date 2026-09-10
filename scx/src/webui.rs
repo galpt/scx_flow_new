@@ -57,8 +57,18 @@ fn jt(v: &Value) -> String {
 }
 
 /* Merged dashboard object for one snapshot. */
+/* Full log with version plus timestamp plus topology */
+/* plus depths plus allowance plus stats plus per-CPU. */
+/* Same object serves stats polling plus snapshot */
+/* download on loopback with no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
+        "version": snap.version.clone(),
+        "timestamp_ns": snap.timestamp_ns,
+        "topology": snap.topology.clone(),
+        "light_depth": snap.light_depth,
+        "hog_depth": snap.hog_depth,
+        "burst_allowance_ns": snap.burst_allowance_ns,
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
     })
@@ -66,7 +76,8 @@ fn merged(snap: &WebMetrics) -> Value {
 
 /*
  * Serve one unix client. Routes mirror the TCP server.
- * The root serves the page. The stats path serves JSON.
+ * The root serves the page. The stats plus snapshot
+ * paths serve the same full JSON with loopback only.
  * Unknown paths get a short not found reply.
  */
 fn unix_client(
@@ -94,7 +105,7 @@ fn unix_client(
     };
     let (body, ctype) = match path {
         "/" => (html.as_bytes().to_vec(), HTML),
-        "/api/stats" => {
+        "/api/stats" | "/api/snapshot" => {
             let txt = jt(&merged(&snap));
             (txt.into_bytes(), JSON)
         }
@@ -177,7 +188,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
                     let resp = resp.with_header(nocache.clone());
                     let _ = req.respond(resp);
                 }
-                "/api/stats" => {
+                "/api/stats" | "/api/snapshot" => {
                     let txt = jt(&merged(&snap));
                     let resp = Response::from_string(txt);
                     let resp = resp.with_header(jtype.clone());
@@ -243,7 +254,13 @@ mod tests {
         let v = merged(&snap);
         assert!(v.get("stats").is_some());
         assert!(v.get("per_cpu").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(2));
+        assert!(v.get("version").is_some());
+        assert!(v.get("timestamp_ns").is_some());
+        assert!(v.get("topology").is_some());
+        assert!(v.get("light_depth").is_some());
+        assert!(v.get("hog_depth").is_some());
+        assert!(v.get("burst_allowance_ns").is_some());
+        assert_eq!(v.as_object().map(|o| o.len()), Some(8));
     }
 
     /* Old snapshots without new fields still decode. */
@@ -261,9 +278,16 @@ mod tests {
         assert_eq!(m.stats.edf_ordered, 0);
         assert_eq!(m.stats.group_demote, 0);
         assert_eq!(m.stats.group_promote, 0);
+        assert_eq!(m.stats.group_wake_promote, 0);
         assert_eq!(m.stats.pinned_hog_inflated, 0);
         assert_eq!(m.stats.group_steal_skipped, 0);
         assert!(m.per_cpu.is_empty());
+        assert_eq!(m.version, "");
+        assert_eq!(m.timestamp_ns, 0);
+        assert_eq!(m.topology, "");
+        assert_eq!(m.light_depth, 0);
+        assert_eq!(m.hog_depth, 0);
+        assert_eq!(m.burst_allowance_ns, 0);
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
@@ -289,7 +313,8 @@ mod tests {
                 edf_clamped: 1,
                 edf_ordered: 8,
                 group_demote: 1,
-                group_promote: 0,
+                group_promote: 2,
+                group_wake_promote: 1,
                 pinned_hog_inflated: 2,
                 group_steal_skipped: 5,
                 ..Default::default()
@@ -302,20 +327,38 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
+            version: "4.2.8".to_string(),
+            timestamp_ns: 1_700_000_000_000_000_000,
+            topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
+            light_depth: 1,
+            hog_depth: 2,
+            burst_allowance_ns: 2_000_000,
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("group"));
         assert!(txt.contains("group_demote"));
+        assert!(txt.contains("group_wake_promote"));
+        assert!(txt.contains("version"));
+        assert!(txt.contains("topology"));
+        assert!(txt.contains("light_depth"));
+        assert!(txt.contains("burst_allowance_ns"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.edf_enqueued, 8);
         assert_eq!(back.stats.edf_clamped, 1);
         assert_eq!(back.stats.edf_ordered, 8);
         assert_eq!(back.stats.group_demote, 1);
+        assert_eq!(back.stats.group_promote, 2);
+        assert_eq!(back.stats.group_wake_promote, 1);
         assert_eq!(back.stats.pinned_hog_inflated, 2);
         assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
+        assert_eq!(back.version, "4.2.8");
+        assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
+        assert_eq!(back.light_depth, 1);
+        assert_eq!(back.hog_depth, 2);
+        assert_eq!(back.burst_allowance_ns, 2_000_000);
     }
 }

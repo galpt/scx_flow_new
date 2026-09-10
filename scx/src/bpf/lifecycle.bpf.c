@@ -40,18 +40,24 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Light depth from per CPU queued counts capped at 4. */
-/* Sums queued tasks over light per CPU queues in halves */
-/* order with early stop at 4. Halves matches dispatch */
-/* isolation with no BSS cost in stopping. Park queues stay */
-/* out, so the measure tracks CPU pressure only with one */
-/* pass and bounded cost. Stopping only, never dispatch. */
-static __always_inline u64 flow_light_depth(void)
+/* Pressure refresh from per CPU queued counts capped */
+/* at 4. Sums light plus hog queued tasks over per CPU */
+/* queues in halves order with early stop when both hit */
+/* 4. Halves matches dispatch isolation with no table */
+/* cost. Park stays out, so the measure tracks CPU */
+/* pressure only with one pass and bounded cost. Stores */
+/* depths plus allowance for snapshot with no task field. */
+/* Returns the allowance for the burst check. Stopping */
+/* only, never dispatch. */
+static __always_inline u64 flow_refresh_pressure(void)
 {
-	u64 depth = 0;
+	u64 light = 0;
+	u64 hog = 0;
+	u64 allow;
 	s32 cpu;
 	bpf_for(cpu, 0, 1024) {
 		u64 dsq;
+		u64 n;
 		u8 g;
 		if (cpu < 0)
 			continue;
@@ -61,16 +67,25 @@ static __always_inline u64 flow_light_depth(void)
 			break;
 		g = flow_group_of_cpu((u32)cpu,
 		    nr_cpu_ids);
-		if (g != (u8)FLOW_GROUP_LIGHT)
-			continue;
 		dsq = flow_dsq_for_cpu((u32)cpu);
-		depth += scx_bpf_dsq_nr_queued(dsq);
-		if (depth >= 4) {
-			depth = 4;
-			break;
+		n = scx_bpf_dsq_nr_queued(dsq);
+		if (g == (u8)FLOW_GROUP_LIGHT) {
+			light += n;
+			if (light >= 4)
+				light = 4;
+		} else {
+			hog += n;
+			if (hog >= 4)
+				hog = 4;
 		}
+		if (light >= 4 && hog >= 4)
+			break;
 	}
-	return depth;
+	allow = flow_burst_allowance(light);
+	flow_light_depth = light;
+	flow_hog_depth = hog;
+	flow_burst_allowance_ns = allow;
+	return allow;
 }
 /* Burn step for one stop with window plus burst plus wake. */
 /* Burst allowance adapts to light depth with 4ms quiet to */
@@ -98,7 +113,7 @@ static __always_inline void flow_classify(
 	if (sum > 0xffffffffULL)
 		sum = 0xffffffffULL;
 	tctx->burn = (u32)sum;
-	allow = flow_burst_allowance(flow_light_depth());
+	allow = flow_refresh_pressure();
 	if (flow_burst_hot_at(delta, allow)) {
 		tctx->wake_hits = 0;
 		if (group ==
@@ -132,6 +147,9 @@ static __always_inline void flow_classify(
 					tctx->burn = 0;
 					__sync_fetch_and_add(
 					    &flow_stats.group_promote,
+					    1);
+					__sync_fetch_and_add(
+					    &flow_stats.group_wake_promote,
 					    1);
 					return;
 				}

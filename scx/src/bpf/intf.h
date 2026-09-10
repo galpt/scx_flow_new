@@ -67,7 +67,7 @@ struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
 };
-/* Scheduler counters at 128B with group detail. */
+/* Scheduler counters at 136B with group detail. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -85,6 +85,7 @@ struct flow_sched_stats {
 	u64 group_promote;
 	u64 pinned_hog_inflated;
 	u64 group_steal_skipped;
+	u64 group_wake_promote;
 };
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)

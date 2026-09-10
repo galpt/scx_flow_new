@@ -8,9 +8,13 @@
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
  * EDF counts cover ordered inserts with clamp detail.
- * Group counts cover demote plus promote plus pinned
- * inflate plus steal skips. Web metrics adds per-CPU
- * cards with fixed slice plus group.
+ * Group counts cover demote plus promote plus wake
+ * promote plus pinned inflate plus steal skips. Wake
+ * promote is the fast subset of promote by 8 short
+ * blocks. Web metrics adds per-CPU cards with fixed
+ * slice plus group plus depths plus pressure plus
+ * version plus topology plus timestamp for the page
+ * and the JSON log.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -80,6 +84,9 @@ pub struct Metrics {
     #[stat(desc = "Cross group picks skipped")]
     #[serde(default)]
     pub group_steal_skipped: u64,
+    #[stat(desc = "Hog to light moves by wake hits")]
+    #[serde(default)]
+    pub group_wake_promote: u64,
 }
 
 /*
@@ -125,6 +132,9 @@ pub struct PerCpuMetrics {
  * Snapshot for the web dashboard. All fields are gauges.
  * The run loop pushes one per iteration. The web thread
  * keeps the newest behind a lock for the handlers.
+ * Version plus timestamp plus topology plus depths plus
+ * allowance join stats plus per-CPU for one screenshot
+ * plus one JSON log with back compat defaults.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
@@ -133,6 +143,24 @@ pub struct WebMetrics {
     /* One entry per online CPU. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
+    /* Scheduler version for the page plus the log. */
+    #[serde(default)]
+    pub version: String,
+    /* Wall time in nanos since epoch for the log. */
+    #[serde(default)]
+    pub timestamp_ns: u64,
+    /* One line topology summary for the page. */
+    #[serde(default)]
+    pub topology: String,
+    /* Light queued depth capped at 4 for pressure. */
+    #[serde(default)]
+    pub light_depth: u64,
+    /* Hog queued depth capped at 4 for display. */
+    #[serde(default)]
+    pub hog_depth: u64,
+    /* Burst line in nanos for the light depth. */
+    #[serde(default)]
+    pub burst_allowance_ns: u64,
 }
 
 impl Metrics {
@@ -142,7 +170,7 @@ impl Metrics {
             "[{}] run={} runtime={} uptime={} \
             ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
-            demote={} promote={} pinfl={} gskip={}",
+            demote={} promote={} wpromote={} pinfl={} gskip={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -159,6 +187,7 @@ impl Metrics {
             self.edf_ordered,
             self.group_demote,
             self.group_promote,
+            self.group_wake_promote,
             self.pinned_hog_inflated,
             self.group_steal_skipped,
         )?;
@@ -192,6 +221,7 @@ impl Metrics {
             group_steal_skipped: self
                 .group_steal_skipped
                 .wrapping_sub(rhs.group_steal_skipped),
+            group_wake_promote: self.group_wake_promote.wrapping_sub(rhs.group_wake_promote),
         }
     }
 }

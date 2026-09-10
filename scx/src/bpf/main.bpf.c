@@ -21,6 +21,14 @@ struct {
 } cpu_state_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
+/* Live pressure gauges for the dashboard with no task cost. */
+/* Light plus hog depths sum per CPU queued counts capped at */
+/* 4. Allowance holds the burst line for the light depth. */
+/* Stopping refreshes all three with one pass, so snapshot */
+/* reads a consistent view with no dispatch cost. */
+volatile u64 flow_light_depth;
+volatile u64 flow_hog_depth;
+volatile u64 flow_burst_allowance_ns;
 /* Per CPU group table seeded by userspace at attach. */
 /* Ready is zero until the table holds live groups. */
 /* Halves is the fallback while ready is zero. */
@@ -163,6 +171,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
+	flow_light_depth = 0;
+	flow_hog_depth = 0;
+	flow_burst_allowance_ns =
+	    (u64)FLOW_DEMOTE_BURST_NS;
 	bpf_for(cpu, 0, 1024) {
 		struct flow_cpu_state *st;
 		u32 key;

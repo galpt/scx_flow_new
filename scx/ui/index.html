@@ -216,13 +216,27 @@
           color:var(--text-secondary);margin-top:2px">
           per-CPU queues, fixed slices and placement
         </p>
+        <p style="font-size:0.75rem;
+          color:var(--text-muted);margin-top:2px;
+          font-family:var(--font-mono)"
+          id="meta-line">Loading...</p>
       </div>
-      <div id="status-badge" style="font-size:0.75rem;
-        padding:3px 10px;border-radius:999px;
-        border:1px solid var(--success);
-        color:var(--success);
-        font-family:var(--font-mono);white-space:nowrap">
-        ● running
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="download" style="font-size:0.75rem;
+          padding:3px 10px;border-radius:999px;
+          border:1px solid var(--border-hover);
+          background:var(--elevated);
+          color:var(--text-primary);
+          font-family:var(--font-mono);white-space:nowrap">
+          Download JSON
+        </button>
+        <div id="status-badge" style="font-size:0.75rem;
+          padding:3px 10px;border-radius:999px;
+          border:1px solid var(--success);
+          color:var(--success);
+          font-family:var(--font-mono);white-space:nowrap">
+          ● running
+        </div>
       </div>
     </header>
 
@@ -239,6 +253,45 @@
       <p class="subsection-label">Explanation</p>
       <p class="summary-explanation"
         id="summary-explanation"></p>
+    </div>
+
+    <!-- Groups with depths plus pressure plus rates -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Groups</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">
+          Light depth:</span>
+          <span class="stat-value" id="light-depth">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Hog depth:</span>
+          <span class="stat-value" id="hog-depth">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Allowance:</span>
+          <span class="stat-value" id="allowance">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Demote rate:</span>
+          <span class="stat-value" id="demote-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Promote rate:</span>
+          <span class="stat-value" id="promote-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Wake rate:</span>
+          <span class="stat-value" id="wake-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Steal rate:</span>
+          <span class="stat-value" id="steal-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip rate:</span>
+          <span class="stat-value" id="skip-rate">0</span>
+        </div>
+      </div>
     </div>
 
     <!-- System stats -->
@@ -304,6 +357,10 @@
         <div><span style="color:var(--text-muted)">
           Promote:</span>
           <span class="stat-value" id="promote">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Wake promote:</span>
+          <span class="stat-value" id="wpromote">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Pinned inflate:</span>
@@ -430,7 +487,8 @@
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
-     * walks the insert plus move plus group split. */
+     * walks the insert plus move plus group split with
+     * wake detail. */
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -440,6 +498,7 @@
       var steal = s.steal_moves || 0;
       var demote = s.group_demote || 0;
       var promote = s.group_promote || 0;
+      var wake = s.group_wake_promote || 0;
       var placed = ins + req;
       var tldr, explanation;
       if (!placed && !onCpu) {
@@ -455,7 +514,8 @@
           '. Park moves cover ' + fmt(park) +
           ' and steal moves cover ' + fmt(steal) +
           '. Demote covers ' + fmt(demote) +
-          ' and promote covers ' + fmt(promote) + '.';
+          ' and promote covers ' + fmt(promote) +
+          ' with wake ' + fmt(wake) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -465,9 +525,29 @@
           '. Park moves cover ' + fmt(park) +
           ' and steal moves cover ' + fmt(steal) +
           '. Demote covers ' + fmt(demote) +
-          ' and promote covers ' + fmt(promote) + '.';
+          ' and promote covers ' + fmt(promote) +
+          ' with wake ' + fmt(wake) + '.';
       }
       return { tldr: tldr, explanation: explanation };
+    }
+
+    /* Prior counters plus wall time for rate math. */
+    var prevStats = null;
+    var prevAt = 0;
+
+    /* Per second rate with one decimal below 100. */
+    function fmtRate(v) {
+      v = clamp(v);
+      if (v >= 100) return Math.round(v) + '/s';
+      return v.toFixed(1) + '/s';
+    }
+
+    /* Rate of one counter over the poll gap. */
+    function rateOf(cur, prev, dt) {
+      if (!dt || dt <= 0) return 0;
+      var d = cur - prev;
+      if (d < 0) d = 0;
+      return d / dt;
     }
 
     function updateUI(data) {
@@ -481,6 +561,57 @@
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
+
+      /* Meta line with version plus topology. */
+      var ver = data.version || '';
+      var topo = data.topology || '';
+      var meta = '';
+      if (ver) meta += 'v' + ver;
+      if (ver && topo) meta += ', ';
+      if (topo) meta += topo;
+      el('meta-line').textContent = meta ||
+        'per-CPU queues, fixed slices and placement';
+
+      /* Group depths plus pressure from snapshot. */
+      el('light-depth').textContent =
+        fmt(data.light_depth || 0);
+      el('hog-depth').textContent =
+        fmt(data.hog_depth || 0);
+      el('allowance').textContent =
+        fmtSlice(data.burst_allowance_ns || 0);
+
+      /* Rates from deltas over the poll gap. */
+      var nowMs = Date.now();
+      var dt = prevStats ?
+        (nowMs - prevAt) / 1000 : 0;
+      var demoteR = prevStats ?
+        rateOf(s.group_demote || 0,
+          prevStats.group_demote || 0, dt) : 0;
+      var promoteR = prevStats ?
+        rateOf(s.group_promote || 0,
+          prevStats.group_promote || 0, dt) : 0;
+      var wakeR = prevStats ?
+        rateOf(s.group_wake_promote || 0,
+          prevStats.group_wake_promote || 0, dt) : 0;
+      var stealR = prevStats ?
+        rateOf(s.steal_moves || 0,
+          prevStats.steal_moves || 0, dt) : 0;
+      var skipR = prevStats ?
+        rateOf(s.group_steal_skipped || 0,
+          prevStats.group_steal_skipped || 0, dt) : 0;
+      el('demote-rate').textContent = fmtRate(demoteR);
+      el('promote-rate').textContent = fmtRate(promoteR);
+      el('wake-rate').textContent = fmtRate(wakeR);
+      el('steal-rate').textContent = fmtRate(stealR);
+      el('skip-rate').textContent = fmtRate(skipR);
+      prevStats = {
+        group_demote: s.group_demote || 0,
+        group_promote: s.group_promote || 0,
+        group_wake_promote: s.group_wake_promote || 0,
+        steal_moves: s.steal_moves || 0,
+        group_steal_skipped: s.group_steal_skipped || 0
+      };
+      prevAt = nowMs;
 
       el('on-cpu').textContent = fmt(s.on_cpu || 0);
       el('uptime').textContent =
@@ -511,12 +642,38 @@
         fmt(s.group_demote || 0);
       el('promote').textContent =
         fmt(s.group_promote || 0);
+      el('wpromote').textContent =
+        fmt(s.group_wake_promote || 0);
       el('pinfl').textContent =
         fmt(s.pinned_hog_inflated || 0);
       el('gskip').textContent =
         fmt(s.group_steal_skipped || 0);
 
       renderCoreCards(data);
+    }
+
+    /* Full snapshot download as a timestamped file. */
+    /* Pure blob save with no new network surface plus */
+    /* the same loopback snapshot route. */
+    function downloadSnapshot() {
+      fetch('/api/snapshot', { cache: 'no-store' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          var txt = JSON.stringify(data, null, 2);
+          var blob = new Blob([txt],
+            { type: 'application/json' });
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          var stamp = new Date().toISOString()
+            .replace(/[:.]/g, '-').slice(0, 19);
+          a.href = url;
+          a.download = 'scx_flow_' + stamp + '.json';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        })
+        .catch(function() {});
     }
 
     function pollStats() {
@@ -538,6 +695,8 @@
         });
     }
 
+    el('download').addEventListener('click',
+      downloadSnapshot);
     pollStats();
     setInterval(pollStats, 1000);
   </script>

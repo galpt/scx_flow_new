@@ -37,6 +37,7 @@ impl<'a> Scheduler<'a> {
             group_promote: s.group_promote,
             pinned_hog_inflated: s.pinned_hog_inflated,
             group_steal_skipped: s.group_steal_skipped,
+            group_wake_promote: s.group_wake_promote,
         }
     }
 
@@ -78,17 +79,22 @@ impl<'a> Scheduler<'a> {
      * plus LLC plus CPU cards stay display only and
      * never feed placement or division. Slice stays
      * fixed at 1ms. Group follows the live table when
-     * ready, else halves fallback with no trap.
+     * ready, else halves fallback with no trap. Version
+     * plus timestamp plus topology plus depths plus
+     * allowance join the counters for one screenshot
+     * plus one JSON log.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
-        let nr = self
-            .skel
-            .maps
-            .bss_data
-            .as_ref()
-            .expect("bss missing")
-            .nr_cpu_ids as usize;
-        let nr = nr.min(crate::MAX_CPUS);
+        let (nr_raw, light_depth, hog_depth, burst_allowance_ns) = {
+            let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
+            (
+                bss.nr_cpu_ids as usize,
+                bss.flow_light_depth,
+                bss.flow_hog_depth,
+                bss.flow_burst_allowance_ns,
+            )
+        };
+        let nr = nr_raw.min(crate::MAX_CPUS);
         let now = std::time::Instant::now();
         let old = self
             .freq_read_at
@@ -118,7 +124,25 @@ impl<'a> Scheduler<'a> {
             e.slice_ns = crate::flow::SLICE_NS;
             per_cpu.push(e);
         }
+        let topology = if self.cpu_static.is_empty() {
+            crate::topology::describe_topology(&per_cpu)
+        } else {
+            crate::topology::describe_topology(&self.cpu_static)
+        };
+        let timestamp_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|v| v.as_nanos() as u64)
+            .unwrap_or(0);
         let stats = self.get_metrics();
-        stats::WebMetrics { stats, per_cpu }
+        stats::WebMetrics {
+            stats,
+            per_cpu,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            timestamp_ns,
+            topology,
+            light_depth,
+            hog_depth,
+            burst_allowance_ns,
+        }
     }
 }

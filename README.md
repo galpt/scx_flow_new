@@ -134,13 +134,15 @@ queued task after insert.
 Counts cover inserts, requeues,
 completions, park moves, steal moves and kicks, plus EDF
 enqueued, EDF clamped, EDF ordered, group demote, group
-promote, pinned inflate, and group skip. Per-CPU queues use
+promote plus wake promote, pinned inflate, and group
+skip. Wake promote is the fast subset of promote by 8
+short blocks. Per-CPU queues use
 ids `0x4000` plus the CPU id with up to 1024 CPUs. Two park
 queues use ids `0x5000` for light and `0x5001` for hog for
 tasks with no allowed CPU in the group. The watchdog
 is 30 seconds. Ops name is `flow`. Task state stays at 48B
 with wake hits at off 46. Per-CPU state stays at 24B.
-Counters stay at 128B. Burn moves light to hog at 16ms in
+Counters stay at 136B. Burn moves light to hog at 16ms in
 a 32ms window or one burst at 4ms quiet down to 1ms floor
 during flood. Depth sums light per CPU queued tasks with
 table depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, depth 4
@@ -149,6 +151,13 @@ flood. Eight short blocks below
 1ms with low burn move hog to light at once. Middle window
 keeps wake hits with no reset. Burn breaks the wake streak,
 so gaming stays hard. Slow 64 wins near 2s stays intact.
+Dashboard shows per group depths plus steals plus demote
+plus promote plus wake rates plus pinned inflate plus
+skip plus per CPU group plus running plus slice plus
+pressure plus version plus topology in one view. Snapshot
+at `/api/snapshot` holds version plus timestamp plus
+topology plus per CPU plus all counters for download as
+a timestamped file on loopback only.
 
 ### Measurement
 
@@ -175,7 +184,7 @@ cleanup removes frozen `fast_hits`, `linger_boosts` and
 a pure EDF core with a fixed slice at 1ms, task at 32B,
 per-CPU at 24B, and counters at 96B. The `4.2.8` step adds
 two strict groups with burn only moves, task at 48B, and
-counters at 128B. The `4.2.6` base is
+counters at 136B with wake detail. The `4.2.6` base is
 the last stable line. The `4.3.x` plus `4.4.0` lines were
 tried and failed with stalls and were abandoned.
 

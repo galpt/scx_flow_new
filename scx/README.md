@@ -101,7 +101,7 @@ Ops name is `flow` with a 30 second watchdog. Version
 is `4.2.8` in 4.2 line. Weight stays 1024 with no
 knob. The slice stays fixed at 1ms.
 Task state stays at 48B with wake hits at off 46.
-Per-CPU state stays at 24B. Counters stay at 128B. The `4.2.6` base is the last stable
+Per-CPU state stays at 24B. Counters stay at 136B. The `4.2.6` base is the last stable
 line. The `4.3.x` plus `4.4.0` lines were tried and failed
 with stalls and were abandoned. The `4.2.7` strip keeps a
 pure EDF core with the fixed slice. The `4.2.8` step adds
@@ -145,11 +145,17 @@ compare with no other change.
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock`. It shows a
 summary line and a per-CPU grid with group plus running
-estimates and fixed slices, plus system tiles for
-EDF enqueued, EDF clamped, EDF ordered, demote, promote,
-pinned inflate, and group skip, with no
+estimates and fixed slices, plus groups tiles for light
+depth, hog depth, allowance, demote rate, promote rate,
+wake rate, steal rate, and skip rate, plus system tiles
+for EDF enqueued, EDF clamped, EDF ordered, demote,
+promote plus wake promote, pinned inflate, and group
+skip, plus version plus topology, with no
 authentication, since the loopback address is the trust
-boundary.
+boundary. A download button fetches `/api/snapshot`
+with version plus timestamp plus topology plus per CPU
+plus all counters and saves it as a timestamped file
+with a blob save on loopback only.
 `--no-webui` disables it. Empty states show an empty CPU
 data card when no data has arrived.
 
@@ -238,16 +244,22 @@ uses only public helpers.
 only. Counters cover inserts, requeues, completions,
 park moves, steal moves, idle kicks, inserts without
 state, EDF enqueued, EDF clamped, EDF ordered, group demote,
-group promote, pinned inflate, and group skip. Park moves
+group promote plus wake promote, pinned inflate, and
+group skip. Wake promote is the fast subset of promote
+by 8 short blocks. Park moves
 count dispatch moves from the group park. Steal moves count
 dispatch moves from same group peer queues. Kicks count idle
 wakeup kicks sent only when the queue was empty. EDF
 enqueued counts deadline inserts. EDF clamped counts sleeper
 caps to one slice. EDF ordered counts kernel queue inserts
 in order. Demote counts light to hog moves by burn. Promote
-counts hog to light moves after low wins. Pinned inflate counts
+counts hog to light moves after low wins plus wake hits.
+Pinned inflate counts
 pinned hog deadlines with extra. Group skip counts cross group
-picks skipped for isolation.
+picks skipped for isolation. Snapshot adds version plus
+timestamp plus topology plus light depth plus hog depth
+plus allowance for the page plus the JSON log with back
+compat defaults.
 
 ## Measuring Wakeup Latency
 

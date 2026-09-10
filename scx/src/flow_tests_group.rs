@@ -205,6 +205,42 @@ fn light_depth_sums_light_only_capped_at_4() {
 }
 
 /*
+ * Hog depth sums hog queues only with cap at 4. Light
+ * queues stay out, so light flood never lifts the hog
+ * view. Display only with no burst use.
+ */
+#[test]
+fn hog_depth_sums_hog_only_capped_at_4() {
+    assert_eq!(hog_depth(&[], 0), 0);
+    assert_eq!(hog_depth(&[0, 0, 0, 0], 4), 0);
+    assert_eq!(hog_depth(&[5, 5, 0, 0], 4), 0);
+    assert_eq!(hog_depth(&[0, 0, 1, 0], 4), 1);
+    assert_eq!(hog_depth(&[10, 10, 1, 0], 4), 1);
+    assert_eq!(hog_depth(&[0, 0, 1, 1], 4), 2);
+    assert_eq!(hog_depth(&[0, 0, 2, 2], 4), 4);
+    assert_eq!(hog_depth(&[10, 10, 10, 10], 4), 4);
+    assert_eq!(hog_depth(&[1], 1), 0);
+    assert_eq!(hog_depth(&[5, 5], 2), 4);
+}
+
+/*
+ * Both depths share one pass with cap at 4 each. The
+ * single scan matches the BPF refresh with bounded
+ * cost. Light plus hog stay separate with no cross
+ * lift.
+ */
+#[test]
+fn group_depths_share_one_pass_capped() {
+    assert_eq!(group_depths(&[], 0), (0, 0));
+    assert_eq!(group_depths(&[0, 0, 0, 0], 4), (0, 0));
+    assert_eq!(group_depths(&[1, 0, 0, 1], 4), (1, 1));
+    assert_eq!(group_depths(&[2, 2, 2, 2], 4), (4, 4));
+    assert_eq!(group_depths(&[10, 10, 10, 10], 4), (4, 4));
+    assert_eq!(group_depths(&[1, 1, 0, 0], 4), (2, 0));
+    assert_eq!(group_depths(&[0, 0, 1, 1], 4), (0, 2));
+}
+
+/*
  * Quiet keeps the 4ms line. A burst just below 4ms
  * stays light, a burst at 4ms demotes at once.
  */

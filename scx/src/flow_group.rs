@@ -313,6 +313,60 @@ pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
 }
 
 /*
+ * Hog depth from per CPU queued counts capped at 4.
+ * Sums queued tasks over hog CPUs in halves order
+ * with early stop at 4. Halves matches the BPF view
+ * with no table use. Missing entries count as zero,
+ * so short slices stay quiet with no trap. Display
+ * only with no burst use.
+ */
+#[cfg(test)]
+pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
+    let mut depth = 0u64;
+    for cpu in 0..nr {
+        if group_of_cpu(cpu as u32, nr) != GROUP_HOG {
+            continue;
+        }
+        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
+        if depth >= 4 {
+            depth = 4;
+            break;
+        }
+    }
+    depth
+}
+
+/*
+ * Both depths from per CPU queued counts capped at 4.
+ * Single pass over halves order with early stop when
+ * both hit 4. Mirrors the BPF refresh with one pass
+ * and bounded cost. Missing entries count as zero.
+ */
+#[cfg(test)]
+pub fn group_depths(queued: &[u64], nr: usize) -> (u64, u64) {
+    let mut light = 0u64;
+    let mut hog = 0u64;
+    for cpu in 0..nr {
+        let n = queued.get(cpu).copied().unwrap_or(0);
+        if group_of_cpu(cpu as u32, nr) == GROUP_LIGHT {
+            light = light.saturating_add(n);
+            if light >= 4 {
+                light = 4;
+            }
+        } else {
+            hog = hog.saturating_add(n);
+            if hog >= 4 {
+                hog = 4;
+            }
+        }
+        if light >= 4 && hog >= 4 {
+            break;
+        }
+    }
+    (light, hog)
+}
+
+/*
  * True when window burn stays below 4ms for
  * promote. Only low windows move the streak
  * forward toward 64 wins near 2s.

@@ -221,7 +221,7 @@ impl<'a> Scheduler<'a> {
         info!(
             "exit ins={} req={} done={} park={} steal={} \
             edfenq={} edfclamp={} edford={} demote={} \
-            promote={} pinfl={} gskip={} runtime={} oncpu={}",
+            promote={} wpromote={} pinfl={} gskip={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -232,6 +232,7 @@ impl<'a> Scheduler<'a> {
             m.edf_ordered,
             m.group_demote,
             m.group_promote,
+            m.group_wake_promote,
             m.pinned_hog_inflated,
             m.group_steal_skipped,
             runtime,
@@ -385,10 +386,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_128() {
+    fn sched_stats_size_is_136() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            128
+            136
         );
     }
 
