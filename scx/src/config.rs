@@ -24,7 +24,7 @@ const DEF_BATCH: u32 = DISPATCH_BATCH;
 pub struct Config {
     /* Fixed slice in nanos. */
     pub slice_ns: u64,
-    /* Tasks moved in one dispatch pass. */
+    /* Fixed tasks moved in one dispatch pass. */
     pub dispatch_batch: u32,
 }
 
@@ -42,7 +42,9 @@ impl Config {
     /*
      * Validate the constants against the bounds the BPF
      * side relies on. An invalid value is a programming
-     * fault, not a runtime state.
+     * fault, not a runtime state. The slice stays fixed
+     * at 1ms and the batch stays fixed at 32, so one
+     * slice pairs with one budget with no knob.
      */
     pub fn validate(&self) -> Result<()> {
         if self.slice_ns != SLICE_NS {
@@ -57,10 +59,10 @@ impl Config {
         if EST_MAX_NS != 1_000_000_000 {
             bail!("est ceiling bad {}", EST_MAX_NS);
         }
-        if self.dispatch_batch == 0 {
+        if self.dispatch_batch != DISPATCH_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
         }
-        if self.dispatch_batch > DISPATCH_BATCH {
+        if self.dispatch_batch != 32 {
             bail!("batch bad {}", self.dispatch_batch);
         }
         Ok(())
@@ -98,7 +100,7 @@ impl ConfigBuilder {
         self.slice_ns = Some(v);
         self
     }
-    /* Set the dispatch batch bound. */
+    /* Set the fixed dispatch batch. Only 32 passes. */
     pub fn dispatch_batch(mut self, v: u32) -> Self {
         self.dispatch_batch = Some(v);
         self
@@ -133,10 +135,10 @@ mod tests {
     }
 
     #[test]
-    fn builder_overrides_one_field() {
-        let cfg = ConfigBuilder::default().dispatch_batch(16).build();
+    fn builder_explicit_fixed_matches_default() {
+        let cfg = ConfigBuilder::default().dispatch_batch(32).build();
         let cfg = cfg.unwrap();
-        assert_eq!(cfg.dispatch_batch, 16);
+        assert_eq!(cfg.dispatch_batch, 32);
         assert_eq!(cfg.slice_ns, Config::default().slice_ns);
     }
 
@@ -155,11 +157,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_and_large_batch() {
-        let a = ConfigBuilder::default().dispatch_batch(0).build();
-        assert!(a.is_err());
-        let b = ConfigBuilder::default().dispatch_batch(33).build();
-        assert!(b.is_err());
+    fn rejects_non_fixed_batch() {
+        for bad in [0, 1, 16, 31, 33, 64] {
+            let got = ConfigBuilder::default().dispatch_batch(bad).build();
+            assert!(got.is_err(), "batch {bad} must fail");
+        }
+        let ok = ConfigBuilder::default().dispatch_batch(32).build();
+        assert!(ok.is_ok());
     }
 
     #[test]
