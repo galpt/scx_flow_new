@@ -265,6 +265,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Kick idle plus busy preempt with delay. */
 		/* Idle fast path first with one queued read. */
 		/* Busy stamps max only, running owns count. */
+		/* Dual max drops one sample max, decay intact. */
 		/* Needs latched arm 62 stand 31 plus deserved */
 		/* woken dl before frontier plus quarter gran */
 		/* plus atomic rate claim plus same group plus */
@@ -273,7 +274,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* earliness with no lookup. Fail closed with */
 		/* no kick plus lumped skip on any clear. */
 		/* No loop. Delay persists across idle, next */
-		/* running decays, idle badge shows staleness. */
+		/* running decays, delay shows stale idle. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u8 sample;

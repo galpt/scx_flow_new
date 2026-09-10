@@ -139,7 +139,7 @@ pub struct PerCpuMetrics {
     /* Delay window in 32us units. 62 arms. Display only. */
     #[serde(default)]
     pub delay_win: u8,
-    /* True when delay is armed at 62. Display only. */
+    /* True when latched arm 62 stand 31 holds. Display only. */
     #[serde(default)]
     pub delay_armed: bool,
     /* Current fixed slice in nanos. */

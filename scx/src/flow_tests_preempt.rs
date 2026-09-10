@@ -367,3 +367,59 @@ fn facade_matches_preempt_helpers() {
         crate::flow_preempt::stand_held(0x400)
     );
 }
+
+/*
+ * Dual max is idempotent with bounded loss. Commutes
+ * plus assoc plus idem, racy keeps old to true max.
+ * Count stays running only, decay stays intact.
+ */
+#[test]
+fn delay_max_concurrent_keeps_bound() {
+    for (a, b) in [(0u8, 0u8), (10, 62), (62, 100), (100, 62), (250, 250)] {
+        assert_eq!(delay_max(a, b), delay_max(b, a));
+        assert_eq!(delay_max(a, a), delay_max(a, a));
+    }
+    assert_eq!(delay_max(10, 10), 10);
+    assert_eq!(delay_max(250, 255), 250);
+    for (a, b, c) in [(10u8, 62u8, 100u8), (0, 31, 62), (62, 62, 62)] {
+        assert_eq!(delay_max(delay_max(a, b), c), delay_max(a, delay_max(b, c)));
+    }
+    let old = 10u8;
+    let s1 = 62u8;
+    let s2 = 100u8;
+    let seq = delay_max(delay_max(old, s1), s2);
+    assert_eq!(seq, 100);
+    let r1 = delay_max(old, s1);
+    let r2 = delay_max(old, s2);
+    assert_eq!(r1, 62);
+    assert_eq!(r2, 100);
+    for r in [r1, r2] {
+        assert!(r >= old);
+        assert!(r <= seq);
+    }
+    assert_eq!(r1.max(r2), seq);
+    assert!(delay_close(100, 0) >= delay_close(62, 0));
+    assert_eq!(delay_close(62, 0), 55);
+}
+
+/*
+ * Cursor store keeps fresh flags, so CAS avoids the
+ * stale overwrite. Sequential model matches BPF CAS
+ * with no race, timing only, see dispatch.
+ */
+#[test]
+fn cursor_cas_keeps_fresh_flags() {
+    use crate::flow_preempt::CURSOR_STAND_BIT;
+    let old = 7u32;
+    let fresh = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
+    let peer = 2u32;
+    let stale = cursor_store(peer, old);
+    let kept = cursor_store(peer, fresh);
+    assert_eq!(stale, 2);
+    assert_eq!(kept, CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    assert!(stand_held(kept));
+    assert!(!rate_clear(kept));
+    assert!(rate_clear(stale));
+    assert_eq!(cursor_store(peer, old), cursor_store(peer, old));
+    assert_eq!(cursor_val(kept), peer);
+}

@@ -70,8 +70,8 @@ pub fn delay_armed(win: u8) -> bool {
  * True when delay is armed with hysteresis. Arms
  * at 62, then holds while win stays at or past
  * stand at 31 with the latched flag. Persists
- * across idle with no decay sans traffic. Idle
- * badge plus delay dot shows the staleness. Next
+ * across idle with no decay sans traffic. Delay
+ * shows stale when idle, see dashboard. Next
  * running decays at 1/8 per window.
  */
 pub fn delay_armed_latched(win: u8, held: bool) -> bool {
@@ -95,10 +95,9 @@ pub fn stand_held(cursor: u32) -> bool {
 
 /*
  * Max of two delay samples with cap at 250.
- * Enqueue stamps max only, running owns count.
- * One count site keeps 8 runnings per window.
- * Max is idempotent, so a lost race drops at most
- * one sample with no count skew.
+ * Win plus cur are dual writer max, count is
+ * running only. Lost race drops at most one
+ * sample with no count skew, decay intact.
  */
 #[cfg(test)]
 pub fn delay_max(a: u8, b: u8) -> u8 {
@@ -150,9 +149,11 @@ pub fn delay_push(win: u8, cur: u8, cnt: u16, sample: u8) -> (u8, u8, u16) {
  * Base is slice times 1024 over weight quartered
  * with floor at 64us, so heavy keeps short and
  * light keeps long with no trap on zero input.
- * Heavy woken keeps short on purpose, so it kicks
- * easier. Earliness is judged in woken weight
- * domain, occupant weight stays out, see deserved.
+ * Short heavy is stricter, tempering deadline
+ * lead. Net easiness is deadline math, not gran.
+ * Quarter bounds theft near 25% of a slice.
+ * Floor covers IPI plus switch cost, no thrash.
+ * Uses woken weight only, see deserved.
  */
 #[cfg(test)]
 pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
@@ -185,7 +186,8 @@ pub fn cursor_val(cursor: u32) -> u32 {
 /*
  * Store peer plus keep rate plus stand. Masks the
  * peer, so rotation keeps order with no extra
- * state.
+ * state. Dispatch CAS keeps fresh flags, model
+ * is sequential form, timing only.
  */
 #[cfg(test)]
 pub fn cursor_store(peer: u32, old: u32) -> u32 {
@@ -241,8 +243,8 @@ pub fn rate_claim(cursor: &mut u32) -> bool {
  * Stamp one sample with max only and no count.
  * Enqueue stamps, running owns count plus close,
  * so 8 means 8 runnings with no double count.
- * Max is idempotent, so a lost race drops at most
- * one sample with no count skew.
+ * Dual max drops at most one sample, no skew,
+ * decay intact. See delay_max bound.
  */
 #[cfg(test)]
 pub fn delay_stamp(win: u8, cur: u8, sample: u8) -> (u8, u8) {

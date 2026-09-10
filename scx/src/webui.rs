@@ -385,4 +385,11 @@ mod tests {
         assert_eq!(back.hog_depth, 2);
         assert_eq!(back.burst_allowance_ns, 2_000_000);
     }
+
+    /* Dashboard shows stale next to delay when idle. */
+    #[test]
+    fn dashboard_shows_stale_when_idle() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("(idle ? ' stale' : '')"));
+    }
 }

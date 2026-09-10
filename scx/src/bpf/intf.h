@@ -353,6 +353,8 @@ static __always_inline bool flow_stand_held(u32 cursor)
 	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
 }
 /* Store peer plus keep rate plus stand. */
+/* Dispatch CAS keeps fresh flags, model */
+/* is sequential form, timing only. */
 static __always_inline u32 flow_cursor_store(u32 peer,
 	u32 old)
 {
@@ -418,7 +420,7 @@ static __always_inline bool flow_delay_armed(u8 win)
 /* Arms at 62, then holds while win stays at or */
 /* past stand at 31 with the latched flag. */
 /* Persists across idle with no decay sans traffic. */
-/* Idle badge plus delay dot shows the staleness. */
+/* Delay shows stale when idle, see dashboard. */
 /* Next running decays at 1/8 per window. */
 static __always_inline bool flow_delay_armed_latched(
 	u8 win, bool held)
@@ -430,10 +432,9 @@ static __always_inline bool flow_delay_armed_latched(
 	return false;
 }
 /* Max of two delay samples with cap at 250. */
-/* Enqueue stamps max only, running owns count. */
-/* One count site keeps 8 runnings per window. */
-/* Max is idempotent, so a lost race drops at most */
-/* one sample with no count skew. */
+/* Win plus cur are dual writer max, count is */
+/* running only. Lost race drops at most one */
+/* sample with no count skew, decay intact. */
 static __always_inline u8 flow_delay_max(u8 a,
 	u8 b)
 {
@@ -456,9 +457,11 @@ static __always_inline u8 flow_delay_close(u8 win,
 /* Base is slice times 1024 over weight quartered */
 /* with floor at 64us, so heavy keeps short and */
 /* light keeps long with no trap on zero input. */
-/* Heavy woken keeps short on purpose, so it kicks */
-/* easier. Earliness is judged in woken weight */
-/* domain, occupant weight stays out, see deserved. */
+/* Short heavy is stricter, tempering deadline */
+/* lead. Net easiness is deadline math, not gran. */
+/* Quarter bounds theft near 25% of a slice. */
+/* Floor covers IPI plus switch cost, no thrash. */
+/* Uses woken weight only, see deserved. */
 static __always_inline u64 flow_granule_for_weight(
 	u32 weight, u64 slice)
 {

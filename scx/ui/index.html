@@ -445,7 +445,7 @@
      * ready, else halves. Nice plus weight stay
      * display only with dash when idle. Delay shows
      * latched dot with hollow when clear. Delay
-     * persists across idle, idle badge shows stale. */
+     * shows stale word when idle, explicit. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -506,7 +506,7 @@
         var armed = !!cpu.delay_armed;
         var dot = armed ? ' ●' : ' ○';
         var delayLabel = '<div class="core-llc">delay ' +
-          delay + dot + '</div>';
+          delay + dot + (idle ? ' stale' : '') + '</div>';
         return '<div class="card core-card">' +
           '<div class="core-id">CPU ' + cpu.id +
           smtLabel + '</div>' +
