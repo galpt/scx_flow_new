@@ -41,15 +41,17 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Each CPU keeps an ordered queue with a fixed slice at 1ms.
 Queues hold EDF order first with arrival order for ties.
 The deadline adds clamped virtual time and scaled estimate.
-The weight is fixed at 1024 with no custom heap. The kernel
+The weight is fixed at 1024. The kernel
 queue orders by deadline with the slice as the slice.
+Our own EDF design uses per-CPU ordered queues plus
+vruntime fairness plus the fixed slice.
 
 ### Fixed slice
 
-The slice is fixed at 1ms with no mean and no knob.
+The slice is fixed at 1ms with no knob.
 Fresh tasks join with the slice so the start stays neutral.
-Estimates hold the last burst clamped at 1ns to 1 second
-with no smoothing and no accounting cap. The deadline still
+Estimates hold the last burst clamped at 1ns to 1 second.
+The deadline still
 uses the full clamped estimate.
 
 ### Fairness
@@ -69,16 +71,17 @@ Placement uses any idle CPU in the mask,
 then the prior CPU, the current CPU, and the first allowed
 CPU. Pinned tasks and tasks that cannot move stay local.
 Empty masks park in order. Frequency plus LLC plus CPU cards
-stay display only and never shape placement with no table
-in BPF and no LLC or SMT preference.
+stay display only and never shape placement.
+Pinned subsets such as Lestat 16 plus 16 stay in mask.
+Single-CPU Konaka never leaves.
 
 ### Dispatch
 
 Dispatch
 drains the local queue first, then the park queue, then
 idle steals from peers. Each pass visits every queued task
-in the owned and park queues in order and moves live tasks
-with no move failure when allowed, including exiting tasks
+in the local and park queues in order and moves live tasks
+when allowed, including exiting tasks
 so they run to exit, and skips past dead, foreign and failed
 heads, so every pass moves at least one task when movable
 work exists there. An idle CPU with no moved work steals past
@@ -103,9 +106,9 @@ completions, park moves, steal moves and kicks, plus EDF
 enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
 `0x4000` plus the CPU id with up to 1024 CPUs. The park queue
 uses id `0x5000` for tasks with no allowed CPU. The watchdog
-is 30 seconds. Ops name is `flow`. Task state stays at 32B
-with no grant and no owner. Per-CPU state stays at 24B with
-no mean and no table. Counters stay at 96B.
+is 30 seconds. Ops name is `flow`. Task state stays at 32B.
+Per-CPU state stays at 24B.
+Counters stay at 96B.
 
 ### Measurement
 
@@ -118,28 +121,20 @@ scheduler change in the harness.
 ### Limits
 
 Version stays in
-4.2 line at `4.2.7` with no Pi path. Pi is deferred with no
-kill and no Pi use. Weight stays 1024 with no knob and no
-new maps plus no new queue ids plus no new option. The slice
-stays fixed at 1ms with no mean plus no grant plus no owner
-plus no shed plus no sticky plus no grace plus no LLC table
-plus no hint plus no gate plus no epsilon.
+4.2 line at `4.2.7`. Weight stays 1024 with no knob.
+The slice
+stays fixed at 1ms.
 
 ### History
 
-The 4.2.2 landing
-holds refactor content plus behavior content in one diff
-with no struct size change in the refactor part and the
-gate plus M1 to M4 in the behavior part with no new maps
-plus no new queue ids plus no new option. The map is
-`M1=batch/M2=grace/M3=shed/M4=guard`. The `4.2.6`
+The `4.2.6`
 cleanup removes frozen `fast_hits`, `linger_boosts` and
 `reuse_hits` with no behavior change, shrinking
-`flow_stats` from `120B` to `96B`. The `4.2.7` strip cuts
-mean plus grant plus owner plus shed plus sticky plus grace
-plus LLC table plus hint plus gates plus epsilons to a pure
-EDF core with a fixed slice at 1ms, task at 32B, per-CPU at
-24B, and counters at 96B.
+`flow_stats` from `120B` to `96B`. The `4.2.7` strip keeps
+a pure EDF core with a fixed slice at 1ms, task at 32B,
+per-CPU at 24B, and counters at 96B. The `4.2.6` base is
+the last stable line. The `4.3.x` plus `4.4.0` lines were
+tried and failed with stalls and were abandoned.
 
 ## Build
 
@@ -215,16 +210,16 @@ install.
 `tools/edf_harness` holds a periodic load worker with
 calibration plus sweep plus summary plus probe plus control.
 Each worker draws start jitter plus period plus execution
-with priority recorded only and no scheduler use. One probe
+with no scheduler use. One probe
 wakes each 10ms and records wake delay as a light baseline.
 All threads run with the default policy with no realtime use.
 The binary is built on each run with no checked in binary.
 See `tools/edf_harness/README.md` for levels plus metrics
 plus outputs. A value of 100 percent is a measured rate
 at feasible use only with no guarantee. There is no
-gate on 98.5. Use `stress-ng` only as background load
+threshold on 98.5. Use `stress-ng` only as background load
 plus `cyclictest` plus `schbench` as cross checks with
-no gate.
+no threshold.
 
 ## Run
 
@@ -261,7 +256,3 @@ cargo test
 ## License
 
 See `LICENSE`.
-
-## References
-
-1. Xiaojie Li and Xianbo He, The improved EDF scheduling algorithm for embedded real-time system in the uncertain environment, Proc. ICACTE, 2010, pp. V4-563 to V4-566. Read online at [ResearchGate](https://www.researchgate.net/publication/251952726_The_improved_EDF_scheduling_algorithm_for_embedded_real-time_system_in_the_uncertain_environment).

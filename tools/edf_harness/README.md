@@ -2,7 +2,7 @@
 
 The harness measures periodic completion on the host.
 It runs workers with start jitter plus period plus
-execution plus priority class and one probe with 10ms
+execution and one probe with 10ms
 wakes and counts completion plus use plus switches plus
 probe delay with no scheduler change. All threads run
 with the default policy with no realtime use. The binary
@@ -13,13 +13,11 @@ is built on each run with no checked in binary.
 Each worker draws start jitter uniform 0 to 1ms once,
 then each job draws period uniform 120 to 320ms with
 deadline equal to period and execution uniform 2 to
-16ms plus priority class round robin 0 to 2. Priority
-is recorded only with no scheduler use. Weight stays
-1024 with no Pi use. Pi is deferred with no kill and
-no Pi path. The scheduler never kills. The harness
+16ms with no scheduler use. Weight stays
+1024. The scheduler never kills. The harness
 counts a miss when wall completion passes release plus
 deadline. The slice in the scheduler is fixed at 1ms
-with no mean and no knob. The probe wakes each 10ms and
+with no knob. The probe wakes each 10ms and
 records wake delay as a light baseline with no realtime
 use. The control flag marks baseline runs for A and B
 comparison with no scheduler change in the harness.
@@ -87,10 +85,10 @@ no wall sampling. Offered use matches exact use on average
 with no extra sampling.
 
 A value of 100 percent is a measured rate at feasible
-use only with no guarantee. There is no gate on 98.5.
+use only with no guarantee. There is no threshold on 98.5.
 Report topology plus variance with each run. Use
 `stress-ng` only as background load plus `cyclictest`
-plus `schbench` as cross checks with no gate.
+plus `schbench` as cross checks with no threshold.
 
 ## Results (4.2.4 vs 4.2.5)
 
@@ -132,7 +130,7 @@ keeps the same workload plus a 10ms probe plus control
 plus scheduler state for A and B comparison.
 
 A value of 100 percent is a measured rate at feasible
-use only with no guarantee. There is no gate on 98.5.
+use only with no guarantee. There is no threshold on 98.5.
 
 ## Files
 

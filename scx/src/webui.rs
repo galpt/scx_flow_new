@@ -264,7 +264,6 @@ mod tests {
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
         assert_eq!(m2.per_cpu[0].tq_ns, 0);
-        assert_eq!(m2.per_cpu[0].depth, 0);
     }
 
     /* Full snapshot round trips through JSON. */
@@ -286,7 +285,6 @@ mod tests {
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
                 tq_ns: 8_000_000,
-                depth: 2,
                 running_est_ns: 1_000_000,
                 running_pid: 7,
                 ..Default::default()
@@ -299,6 +297,5 @@ mod tests {
         assert_eq!(back.stats.edf_clamped, 1);
         assert_eq!(back.stats.edf_ordered, 8);
         assert_eq!(back.per_cpu[0].tq_ns, 8_000_000);
-        assert_eq!(back.per_cpu[0].depth, 2);
     }
 }

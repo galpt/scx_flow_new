@@ -137,7 +137,7 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
         /* Static cards seed the start log and the cards. */
         /* Frequency plus LLC plus CPU cards stay display */
-        /* only with no table in BPF. */
+        /* only and never shape placement. */
         let cards = topology::web_cpu_static();
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;

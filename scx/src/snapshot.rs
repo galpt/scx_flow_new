@@ -6,7 +6,7 @@
  * metrics view and the dashboard view from the BPF
  * maps and the static cards. Gauges only, no deltas.
  * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement with no table in BPF.
+ * and never shape placement.
  */
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -39,8 +39,7 @@ impl<'a> Scheduler<'a> {
     /*
      * Read one CPU state without heap use. Failed
      * lookups yield an idle view with fixed slice.
-     * Depth stays zero as display only with no count
-     * in BPF. Slice stays fixed at 1ms with no mean.
+     * Slice stays fixed at 1ms.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {
@@ -74,8 +73,7 @@ impl<'a> Scheduler<'a> {
      * live state. Gauges only, no deltas. Frequency
      * plus LLC plus CPU cards stay display only and
      * never feed placement or division. Slice stays
-     * fixed at 1ms with no mean. Depth stays zero with
-     * no count in BPF.
+     * fixed at 1ms.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr = self
@@ -112,7 +110,6 @@ impl<'a> Scheduler<'a> {
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
             e.tq_ns = crate::flow::SLICE_NS;
-            e.depth = 0;
             per_cpu.push(e);
         }
         let stats = self.get_metrics();

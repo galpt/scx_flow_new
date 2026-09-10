@@ -5,16 +5,16 @@
  * Slice and estimate helpers for the flow scheduler.
  * The functions mirror the BPF header so behavior
  * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no mean and no knob.
+ * The slice is fixed at 1ms with no knob.
  * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement with no table in BPF.
+ * and never shape placement.
  */
 
 /* Lower bound of a per task estimate in nanos. */
 pub const EST_MIN_NS: u64 = 1;
 /* Upper bound of a per task estimate in nanos. */
 pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Fixed slice in nanos with no mean and no knob. */
+/* Fixed slice in nanos. */
 pub const SLICE_NS: u64 = 1_000_000;
 /* Fixed weight used for virtual time scaling. */
 #[cfg(test)]

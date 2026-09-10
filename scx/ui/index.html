@@ -126,16 +126,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .core-card .core-tq {
-      font-size: 0.6rem;
-      color: var(--text-secondary);
-      font-family: var(--font-mono);
-      margin-top: 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .core-card .core-depth {
+    .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
@@ -223,7 +214,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU queues, mean slices and placement
+          per-CPU queues, fixed slices and placement
         </p>
       </div>
       <div id="status-badge" style="font-size:0.75rem;
@@ -357,7 +348,7 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with mean and depth plus the
+    /* Per-CPU cards with fixed slice plus the
      * running estimate and the pid. Freq unknown
      * stays plain with no zero print. No sibling
      * stays plain with no badge. */
@@ -390,8 +381,7 @@
           : '';
         var pid = cpu.running_pid || 0;
         var est = cpu.running_est_ns || 0;
-        var tq = cpu.tq_ns || 0;
-        var depth = cpu.depth || 0;
+        var slice = cpu.tq_ns || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'
@@ -403,10 +393,8 @@
           ? '<div class="core-est">est -</div>'
           : '<div class="core-est">est ' + fmtSlice(est) +
             '</div>';
-        var tqLabel = '<div class="core-tq">tq ' +
-          fmtSlice(tq) + '</div>';
-        var depthLabel = '<div class="core-depth">' +
-          'depth ' + fmt(depth) + '</div>';
+        var sliceLabel = '<div class="core-slice">slice ' +
+          fmtSlice(slice) + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
@@ -415,36 +403,30 @@
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + estLabel + tqLabel + depthLabel +
+          pidLabel + estLabel + sliceLabel +
           '</div>';
       }).join('');
     }
 
     /* Summary prose, built from the live gauges.
-     * The tldr names the running count and the
-     * queued total. The explanation walks the
-     * insert and move split. */
-    function buildSummary(s, perCpu) {
+     * The tldr names the running count. The explanation
+     * walks the insert and move split. */
+    function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
       var req = s.requeues || 0;
       var done = s.completions || 0;
       var park = s.park_moves || 0;
       var steal = s.steal_moves || 0;
-      var total = 0;
-      for (var i = 0; i < perCpu.length; i++) {
-        total += perCpu[i].depth || 0;
-      }
       var placed = ins + req;
       var tldr, explanation;
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet. Queues hold ' +
-          fmt(total) + ' tasks.';
+          'no tasks have been placed yet.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks with ' + fmt(total) + ' queued.';
+          ' tasks.';
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
@@ -469,8 +451,7 @@
       el('status-badge').style.color = 'var(--success)';
 
       var s = data.stats || {};
-      var perCpu = data.per_cpu || [];
-      var summary = buildSummary(s, perCpu);
+      var summary = buildSummary(s);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;

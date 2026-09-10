@@ -8,8 +8,7 @@
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
  * EDF counts cover ordered inserts with clamp detail.
- * Web metrics adds per-CPU cards with mean and
- * depth.
+ * Web metrics adds per-CPU cards with fixed slice.
  */
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -72,8 +71,8 @@ pub struct Metrics {
 /*
  * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
- * per-CPU map on each poll. The mean holds the current
- * slice. The depth holds unfinished work with running.
+ * per-CPU map on each poll. The slice holds the fixed
+ * slice at 1ms.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
@@ -98,12 +97,9 @@ pub struct PerCpuMetrics {
     /* Pid now on the CPU. Zero when idle. */
     #[serde(default)]
     pub running_pid: u32,
-    /* Current mean slice in nanos. */
+    /* Current fixed slice in nanos. */
     #[serde(default)]
     pub tq_ns: u64,
-    /* Unfinished tasks with the running one. */
-    #[serde(default)]
-    pub depth: u64,
 }
 
 /*

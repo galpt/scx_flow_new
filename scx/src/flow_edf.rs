@@ -5,14 +5,11 @@
  * Deadline and queue helpers for the flow scheduler.
  * The functions mirror the BPF header so behavior
  * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no mean and no knob.
+ * The slice is fixed at 1ms with no knob.
  */
 
 /* Bound of moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
-/* Owner value for tasks with no accounting. */
-#[cfg(test)]
-pub const OWNER_NONE: u32 = 0xFFFF_FFFF;
 /* Base id of the per CPU ordered queues. */
 #[cfg(test)]
 pub const DSQ_BASE: u64 = 0x4000;
@@ -110,7 +107,8 @@ pub fn frontier_idle(waking_v: u64) -> u64 {
 pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (u64, u64, bool) {
     let clamped = clamp_vruntime(v, frontier, slice);
     let flag = clamped != v;
-    let scaled = crate::flow_mean::scale_by_weight(crate::flow_mean::clamp_est(est), weight);
+    let est_c = crate::flow_mean::clamp_est(est);
+    let scaled = crate::flow_mean::scale_by_weight(est_c, weight);
     let dl = deadline(clamped, scaled);
     (clamped, dl, flag)
 }
@@ -148,7 +146,8 @@ pub fn edf_insert_and_step(
     queued: u64,
 ) -> (u64, u64, u64, bool) {
     let (clamped, dl, flag) = edf_insert(v, frontier, slice, est, weight);
-    let scaled = crate::flow_mean::scale_by_weight(crate::flow_mean::clamp_est(est), weight);
+    let est_c = crate::flow_mean::clamp_est(est);
+    let scaled = crate::flow_mean::scale_by_weight(est_c, weight);
     let next_v = vruntime_add(clamped, scaled);
     let next = frontier_step(frontier, next_v, runnable, queued);
     (clamped, dl, next, flag)

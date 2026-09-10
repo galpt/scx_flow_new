@@ -4,7 +4,7 @@
  *
  * Periodic harness for the flow scheduler.
  * Each worker runs periodic jobs with start jitter
- * plus period plus execution plus priority class.
+ * plus period plus execution.
  * All threads run with the default policy with no
  * realtime use. One probe thread wakes each 10ms and
  * records wake delay as a light baseline. The control
@@ -47,7 +47,6 @@ struct thread_out {
     double sum_ratio;
     long nvcsw;
     long nivcsw;
-    int pi_class;
 };
 /* Probe counts for one run with light wakeups. */
 struct probe_out {
@@ -145,7 +144,6 @@ static void *worker_idx(void *arg)
     struct rusage ru_end;
     ensure_default();
     memset(out, 0, sizeof(*out));
-    out->pi_class = idx % 3;
     jitter = uniform_ns(&seed, 0, HARNESS_JITTER_MAX_NS);
     pthread_barrier_wait(&st->start_bar);
     t0 = now_ns();
@@ -272,7 +270,6 @@ int main(int argc, char **argv)
     struct probe_arg parg;
     pthread_t *threads = NULL;
     pthread_t probe;
-    int use_probe = 1;
     uint64_t wall_start = 0;
     uint64_t wall_end = 0;
     double wall_secs = 0.0;
@@ -354,19 +351,16 @@ int main(int argc, char **argv)
         }
     }
     parg.st = &st;
-    if (use_probe) {
-        if (pthread_create(&probe, NULL, probe_idx,
-            &parg) != 0) {
-            fprintf(stderr, "probe create failed\n");
-            return 1;
-        }
+    if (pthread_create(&probe, NULL, probe_idx,
+        &parg) != 0) {
+        fprintf(stderr, "probe create failed\n");
+        return 1;
     }
     pthread_barrier_wait(&st.start_bar);
     wall_start = now_ns();
     for (i = 0; i < nthreads; i++)
         pthread_join(threads[i], NULL);
-    if (use_probe)
-        pthread_join(probe, NULL);
+    pthread_join(probe, NULL);
     wall_end = now_ns();
     wall_secs = (double)(wall_end - wall_start) /
         1000000000.0;

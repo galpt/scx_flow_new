@@ -5,9 +5,9 @@
  * EDF unit tests for the flow scheduler.
  * The tests mirror the BPF header so behavior
  * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no mean and no knob.
+ * The slice is fixed at 1ms with no knob.
  * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement with no table in BPF.
+ * and never shape placement.
  */
 use crate::flow_edf::*;
 use crate::flow_mean::*;
@@ -268,7 +268,7 @@ fn ordered_insert_keeps_arrival_order_on_ties() {
 }
 
 #[test]
-fn cuts_kick_bounds_match_empty_only() {
+fn kick_bounds_match_empty_only() {
     assert!(may_kick(0));
     assert!(may_kick(1));
     assert!(!may_kick(2));
@@ -760,8 +760,6 @@ fn mask_range_and_live_fail_closed() {
 #[test]
 fn facade_matches_helpers() {
     assert_eq!(crate::flow::DISPATCH_BATCH, crate::flow_edf::DISPATCH_BATCH);
-    assert_eq!(crate::flow::OWNER_NONE, crate::flow_edf::OWNER_NONE);
-    assert_eq!(OWNER_NONE, 0xFFFF_FFFF);
     assert_eq!(crate::flow::DSQ_BASE, crate::flow_edf::DSQ_BASE);
     assert_eq!(crate::flow::DSQ_PARK, crate::flow_edf::DSQ_PARK);
     assert_eq!(crate::flow::EST_MIN_NS, crate::flow_mean::EST_MIN_NS);

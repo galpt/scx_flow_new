@@ -6,7 +6,7 @@
  * The functions mirror the BPF side so behavior stays
  * the same on both sides of the boundary. Frequency
  * plus LLC plus CPU cards stay display only and never
- * shape placement with no table in BPF.
+ * shape placement.
  */
 
 /* Compile time CPU bound. Mirrors the BPF header. */
@@ -132,7 +132,7 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
 /*
  * True when a donor queue may lose one task. Needs at
  * least two queued tasks, so thin donors keep their
- * last task for the owner.
+ * last task.
  */
 #[cfg(test)]
 pub fn donor_ok(depth: u64) -> bool {

@@ -5,7 +5,7 @@
  * Validated scheduling constants for the flow scheduler.
  * The defaults match the shared BPF header. Validation
  * keeps bad values from reaching the BPF object.
- * The slice is fixed at 1ms with no mean and no knob.
+ * The slice is fixed at 1ms with no knob.
  */
 use crate::flow::DISPATCH_BATCH;
 use crate::flow::EST_MAX_NS;

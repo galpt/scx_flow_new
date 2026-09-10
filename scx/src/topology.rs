@@ -5,7 +5,7 @@
  * Trimmed topology for the flow scheduler. Only the
  * static per CPU cards and the live frequency read are
  * needed. Frequency plus LLC plus CPU cards stay display
- * only and never shape placement with no table in BPF.
+ * only and never shape placement.
  * Zero means unknown and keeps a plain fallback.
  */
 use log::warn;
@@ -29,7 +29,7 @@ fn has_older(topo: &Topology, id: usize, core: usize) -> bool {
  * the scheduler keeps running without cards. Single
  * CPU and no sibling hosts keep plain per CPU cards.
  * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement with no table in BPF.
+ * and never shape placement.
  */
 pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
     let topo = match Topology::new() {
@@ -54,7 +54,6 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             running_est_ns: 0,
             running_pid: 0,
             tq_ns: crate::flow::SLICE_NS,
-            depth: 0,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -69,7 +68,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
  * CPU prints as one CPU with no peers. No sibling
  * prints as no SMT with plain per CPU behavior.
  * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement with no table in BPF.
+ * and never shape placement.
  */
 pub fn describe_topology(cards: &[crate::stats::PerCpuMetrics]) -> String {
     if cards.is_empty() {
@@ -101,8 +100,7 @@ pub fn parse_freq_khz(s: &str) -> u64 {
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement
- * or division. Frequency stays display only with no
- * table in BPF.
+ * or division. Frequency stays display only.
  */
 pub fn current_freq_khz(cpu: u32) -> u64 {
     std::fs::read_to_string(format!(
@@ -135,7 +133,7 @@ pub fn filter_allowed(
 /*
  * Synthetic card for tests. Builds one display only
  * card with the given id plus frequency plus LLC plus
- * thread role. Slice stays fixed at 1ms with no mean.
+ * thread role. Slice stays fixed at 1ms.
  */
 #[cfg(test)]
 pub fn synthetic_card(
@@ -153,7 +151,6 @@ pub fn synthetic_card(
         running_est_ns: 0,
         running_pid: 0,
         tq_ns: crate::flow::SLICE_NS,
-        depth: 0,
     }
 }
 

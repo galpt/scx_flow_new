@@ -31,14 +31,14 @@ enum flow_consts {
 	FLOW_WEIGHT = 1024ULL,
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 };
-/* Per task state at 32B with no grant and no owner. */
+/* Per task state at 32B. */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
 	u64 vruntime;
 	u64 deadline;
 };
-/* Per CPU state at 24B with no mean and no table. */
+/* Per CPU state at 24B. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
