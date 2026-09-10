@@ -11,7 +11,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
-- `scx/src/bpf/select_cpu.bpf.c` placement and LLC idle
+- `scx/src/bpf/select_cpu.bpf.c` placement with mask respect
 - `scx/src/bpf/enqueue.bpf.c` routing, insert, and kick
 - `scx/src/bpf/dispatch.bpf.c` own, park, and peer drains
 - `scx/src/bpf/lifecycle.bpf.c` running, stopping, enable,
@@ -19,18 +19,18 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/snapshot.rs` metrics and dashboard snapshots
 - `scx/src/flow.rs` facade that reexports the helpers
-- `scx/src/flow_mean.rs` mean plus estimate plus slice
+- `scx/src/flow_mean.rs` slice plus estimate helpers
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
 - `scx/src/flow_tests_edf.rs` tests only with S1 to S3
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
-- `scx/src/topology.rs` trimmed per-CPU cards
+- `scx/src/topology.rs` display only per-CPU cards
 - `scx/src/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
 - `tools/install_scx_flow.sh` overlay build installer
-- `tools/edf_harness/harness.c` periodic load worker
-- `tools/edf_harness/run.sh` calibration plus sweep
+- `tools/edf_harness/harness.c` periodic load plus probe worker
+- `tools/edf_harness/run.sh` calibration plus sweep plus control
 - `tools/edf_harness/README.md` harness note
 - `LICENSE` full license text, a real file
 
@@ -38,40 +38,39 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ### Order and deadlines
 
-Each CPU keeps an ordered queue with a per-CPU mean slice.
+Each CPU keeps an ordered queue with a fixed slice at 1ms.
 Queues hold EDF order first with arrival order for ties.
 The deadline adds clamped virtual time and scaled estimate.
 The weight is fixed at 1024 with no custom heap. The kernel
-queue orders by deadline with the mean as the slice.
+queue orders by deadline with the slice as the slice.
 
-### Mean slice
+### Fixed slice
 
-The per-CPU mean is the sum over unfinished work divided by
-the count with the running task included. The seed is 8ms
-with a floor of 500us and a ceiling of 32ms. Fresh tasks join
-with the current mean so the mean stays neutral. Estimates
-hold the last burst clamped at 1ns to 1 second with no
-smoothing. Mean accounting caps each sample at 32ms so one
-long burst never dominates the mean while the deadline still
-uses the full estimate.
+The slice is fixed at 1ms with no mean and no knob.
+Fresh tasks join with the slice so the start stays neutral.
+Estimates hold the last burst clamped at 1ns to 1 second
+with no smoothing and no accounting cap. The deadline still
+uses the full clamped estimate.
 
 ### Fairness
 
 The sleeper cap keeps lag at one slice
 behind the frontier, so a waking task gains at most one
-slice of advantage with wrap safe order. Each grant stores
-the mean at insert time. Blocked tasks complete and release
-at once. Runnable tasks requeue ordered with a refreshed
-estimate. Virtual time moves forward by scaled runtime and
-the frontier moves forward while work stays queued. An idle
-reset bounds to waking virtual time with no zero use, so new
-arrivals never inherit stale time.
+slice of advantage with wrap safe order. Blocked tasks
+complete at once. Runnable tasks requeue ordered with a
+refreshed estimate. Virtual time moves forward by scaled
+runtime and the frontier moves forward while work stays
+queued. An idle reset bounds to waking virtual time with
+no zero use, so new arrivals never inherit stale time.
 
 ### Placement
 
-Placement reuses the idle
-prior CPU first with no count, then the LLC idle CPU, then
-any idle CPU, then the prior and current CPUs.
+Placement uses any idle CPU in the mask,
+then the prior CPU, the current CPU, and the first allowed
+CPU. Pinned tasks and tasks that cannot move stay local.
+Empty masks park in order. Frequency plus LLC plus CPU cards
+stay display only and never shape placement with no table
+in BPF and no LLC or SMT preference.
 
 ### Dispatch
 
@@ -90,13 +89,12 @@ peer queue that allows the thief when the donor holds at
 least two tasks, moving past dead, foreign and failed heads
 to rescue movable work behind a bad head.
 
-### Kicks and hints
+### Kicks
 
 Kicks wake idle
 targets only when the queue was empty with a mask check and
-no busy preemption. Equal estimates skip the mean write.
-Hints use only estimate against mean. Stops restore the low
-hint when the CPU goes idle.
+no busy preemption. The queue length check uses at most one
+queued task after insert.
 
 ### Counts and queues
 
@@ -105,38 +103,27 @@ completions, park moves, steal moves and kicks, plus EDF
 enqueued, EDF clamped and EDF ordered. Per-CPU queues use ids
 `0x4000` plus the CPU id with up to 1024 CPUs. The park queue
 uses id `0x5000` for tasks with no allowed CPU. The watchdog
-is 30 seconds. Ops name is `flow`.
+is 30 seconds. Ops name is `flow`. Task state stays at 32B
+with no grant and no owner. Per-CPU state stays at 24B with
+no mean and no table. Counters stay at 96B.
 
 ### Measurement
 
 For A/B comparison, install
 one build, measure the same workload, then install the other
-build and compare with no other change.
+build and compare with no other change. The harness probe
+plus the control flag support baseline comparison with no
+scheduler change in the harness.
 
 ### Limits
 
 Version stays in
-4.2 line with no Pi path. Pi is deferred with no kill and
-no Pi use. Weight stays 1024 with no knob and no new maps
-plus no new queue ids plus no new option.
-
-### iEDF++
-
-The revert gate
-is `FLOW_GATE_IEDF` with batch plus grace plus shed plus
-guard behind it. The paper improved EDF is `iEDF`, this
-release proposes `iEDF++` with `M1` same deadline batching,
-`M2` overrun grace, `M3` fair overload shed, `M4` idle
-frontier guard, all behind `FLOW_GATE_IEDF`. The map is
-`M1=batch/M2=grace/M3=shed/M4=guard`. Batch window is 96us in a 64 to 128 window
-tiny past 500us floor, so sticky batching keeps warmth with
-no fair loss. Grace is 50us tiny past 120ms least period,
-so late accounting stays prompt with no kill. The harness
-cancels, the scheduler never kills. Shed keeps order in park
-with owner none plus grant plus frontier and no kill. Guard
-keeps old on zero with no stale zero use. A value of 100
-percent is a measured rate at feasible use only with no
-guarantee. There is no gate on 98.5.
+4.2 line at `4.2.7` with no Pi path. Pi is deferred with no
+kill and no Pi use. Weight stays 1024 with no knob and no
+new maps plus no new queue ids plus no new option. The slice
+stays fixed at 1ms with no mean plus no grant plus no owner
+plus no shed plus no sticky plus no grace plus no LLC table
+plus no hint plus no gate plus no epsilon.
 
 ### History
 
@@ -148,7 +135,11 @@ plus no new queue ids plus no new option. The map is
 `M1=batch/M2=grace/M3=shed/M4=guard`. The `4.2.6`
 cleanup removes frozen `fast_hits`, `linger_boosts` and
 `reuse_hits` with no behavior change, shrinking
-`flow_stats` from `120B` to `96B`.
+`flow_stats` from `120B` to `96B`. The `4.2.7` strip cuts
+mean plus grant plus owner plus shed plus sticky plus grace
+plus LLC table plus hint plus gates plus epsilons to a pure
+EDF core with a fixed slice at 1ms, task at 32B, per-CPU at
+24B, and counters at 96B.
 
 ## Build
 
@@ -222,10 +213,13 @@ install.
 ## Harness
 
 `tools/edf_harness` holds a periodic load worker with
-calibration plus sweep plus summary. Each thread draws
-start jitter plus period plus execution with priority
-recorded only and no scheduler use. See
-`tools/edf_harness/README.md` for levels plus metrics
+calibration plus sweep plus summary plus probe plus control.
+Each worker draws start jitter plus period plus execution
+with priority recorded only and no scheduler use. One probe
+wakes each 10ms and records wake delay as a light baseline.
+All threads run with the default policy with no realtime use.
+The binary is built on each run with no checked in binary.
+See `tools/edf_harness/README.md` for levels plus metrics
 plus outputs. A value of 100 percent is a measured rate
 at feasible use only with no guarantee. There is no
 gate on 98.5. Use `stress-ng` only as background load
