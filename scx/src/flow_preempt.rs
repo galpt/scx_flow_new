@@ -15,10 +15,10 @@ pub const DELAY_UNIT_NS: u64 = 32_000;
 /* Max delay in units at 250 near 8ms. */
 #[cfg(test)]
 pub const DELAY_MAX: u64 = 250;
-/* Armed delay in units at 62 near 1984us. */
-pub const DELAY_ARM: u64 = 62;
-/* Stand delay in units at 31 near 1ms. */
-pub const DELAY_STAND: u64 = 31;
+/* Armed delay in units at 16 near 512us. */
+pub const DELAY_ARM: u64 = 16;
+/* Stand delay in units at 8 near 256us. */
+pub const DELAY_STAND: u64 = 8;
 /* Window length in updates at 8. */
 #[cfg(test)]
 pub const DELAY_WIN_LEN: u64 = 8;
@@ -35,8 +35,8 @@ pub const CURSOR_STAND_BIT: u32 = 0x0000_0400;
 pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
 /*
- * Sample in 32us units from queued count. One slice
- * is 31 units, two slices arm at 62. Cap is 250 at
+ * Sample in 32us units from queued count. One queued
+ * is 31 units, half slice arms at 16. Cap is 250 at
  * 8ms with integer math only.
  */
 #[cfg(test)]
@@ -59,8 +59,8 @@ pub fn delay_decay(old: u8) -> u8 {
 }
 
 /*
- * True when the delay window is armed at 62. 62 is
- * 1984us in 32us units near two slices.
+ * True when the delay window is armed at 16. 16 is
+ * 512us in 32us units near half slice.
  */
 pub fn delay_armed(win: u8) -> bool {
     (win as u64) >= DELAY_ARM
@@ -68,8 +68,8 @@ pub fn delay_armed(win: u8) -> bool {
 
 /*
  * True when delay is armed with hysteresis. Arms
- * at 62, then holds while win stays at or past
- * stand at 31 with the latched flag. Persists
+ * at 16, then holds while win stays at or past
+ * stand at 8 with the latched flag. Persists
  * across idle with no decay sans traffic. Delay
  * shows stale when idle, see dashboard. Next
  * running decays at 1/8 per window.

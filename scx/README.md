@@ -68,7 +68,7 @@ across groups.
 ### Kicks
 
 Idle targets with at most 2 queued are kicked with a mask
-check. Busy targets need latched delay arm 62 stand 31
+check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
 floor plus atomic rate claim plus same group plus mask

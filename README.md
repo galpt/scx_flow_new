@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.14`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.15`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -98,7 +98,7 @@ in `scx/src/bpf/dispatch.bpf.c`.
 ### Kicks
 
 Idle targets with at most 2 queued are kicked with a mask
-check. Busy targets need latched delay arm 62 stand 31
+check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
 floor plus atomic rate claim plus same group plus mask
@@ -139,7 +139,7 @@ scheduler change in the harness.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. Groups stay fixed at two with no knob. The
-slice stays fixed at 1ms. Delay arms at 62 stands at 31
+slice stays fixed at 1ms. Delay arms at 16 stands at 8
 in 32us units with 1/8 decay and one kick per slice.
 Granule is quarter scaled slice floored at 64us.
 
@@ -201,7 +201,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.14`, state `enabled` and ops
+Expect version `4.2.15`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

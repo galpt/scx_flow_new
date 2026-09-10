@@ -136,10 +136,10 @@ pub struct PerCpuMetrics {
     /* Weight now on the CPU. 1024 when idle. Display only. */
     #[serde(default)]
     pub running_weight: u32,
-    /* Delay window in 32us units. 62 arms. Display only. */
+    /* Delay window in 32us units. 16 arms. Display only. */
     #[serde(default)]
     pub delay_win: u8,
-    /* True when latched arm 62 stand 31 holds. Display only. */
+    /* True when latched arm 16 stand 8 holds. Display only. */
     #[serde(default)]
     pub delay_armed: bool,
     /* Current fixed slice in nanos. */

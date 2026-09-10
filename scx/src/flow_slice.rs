@@ -89,10 +89,13 @@ pub fn nice_of(static_prio: i32) -> i32 {
 /*
  * Weight of one nice level from the table. Out of range
  * maps to 1024 with no trap, so unknown tasks stay
- * neutral.
+ * neutral. Nice 0 skips the table with no load.
  */
 #[cfg(test)]
 pub fn weight_of(nice: i32) -> u32 {
+    if nice == 0 {
+        return 1024;
+    }
     if nice < NICE_MIN || nice > NICE_MAX {
         return 1024;
     }

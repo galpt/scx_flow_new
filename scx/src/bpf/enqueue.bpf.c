@@ -278,7 +278,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Idle fast path first with one queued read. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
-		/* Needs latched arm 62 stand 31 plus deserved */
+		/* Needs latched arm 16 stand 8 plus deserved */
 		/* woken dl before frontier plus quarter gran */
 		/* plus atomic rate claim plus same group plus */
 		/* mask with one kick per slice. Frontier is */

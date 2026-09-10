@@ -49,8 +49,8 @@ enum flow_consts {
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 	FLOW_DELAY_UNIT_NS = 32000ULL,
 	FLOW_DELAY_MAX = 250ULL,
-	FLOW_DELAY_ARM = 62ULL,
-	FLOW_DELAY_STAND = 31ULL,
+	FLOW_DELAY_ARM = 16ULL,
+	FLOW_DELAY_STAND = 8ULL,
 	FLOW_DELAY_WIN_LEN = 8ULL,
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
 	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
@@ -254,9 +254,12 @@ static const u16 flow_weight_table[40] = {
 };
 /* Weight of one nice level from the table. */
 /* Out of range maps to 1024 with no trap. */
+/* Nice 0 skips the table with no load. */
 static __always_inline u32 flow_weight_of(s32 nice)
 {
 	s32 idx;
+	if (nice == 0)
+		return 1024;
 	if (nice < -20)
 		return 1024;
 	if (nice > 19)
@@ -389,7 +392,7 @@ static __always_inline bool flow_rate_claim(u32 *cursor)
 	return flow_rate_clear(old);
 }
 /* Delay sample in 32us units from queued count. */
-/* One slice is 31 units, two slices arm at 62. */
+/* One queued is 31 units, half slice arms at 16. */
 /* Cap is 250 at 8ms with integer math only. */
 static __always_inline u8 flow_delay_from_queued(
 	u64 queued)
@@ -410,15 +413,15 @@ static __always_inline u8 flow_delay_decay(u8 old)
 	u32 d = o - o / 8U;
 	return (u8)d;
 }
-/* True when the delay window is armed at 62. */
-/* 62 is 1984us in 32us units near two slices. */
+/* True when the delay window is armed at 16. */
+/* 16 is 512us in 32us units near half slice. */
 static __always_inline bool flow_delay_armed(u8 win)
 {
 	return (u32)win >= (u32)FLOW_DELAY_ARM;
 }
 /* True when delay is armed with hysteresis. */
-/* Arms at 62, then holds while win stays at or */
-/* past stand at 31 with the latched flag. */
+/* Arms at 16, then holds while win stays at or */
+/* past stand at 8 with the latched flag. */
 /* Persists across idle with no decay sans traffic. */
 /* Delay shows stale when idle, see dashboard. */
 /* Next running decays at 1/8 per window. */

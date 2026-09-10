@@ -50,8 +50,8 @@ fn delay_consts_match_header() {
     );
     assert_eq!(DELAY_UNIT_NS, 32_000);
     assert_eq!(DELAY_MAX, 250);
-    assert_eq!(DELAY_ARM, 62);
-    assert_eq!(DELAY_STAND, 31);
+    assert_eq!(DELAY_ARM, 16);
+    assert_eq!(DELAY_STAND, 8);
     assert_eq!(DELAY_WIN_LEN, 8);
     assert_eq!(GRANULE_FLOOR_NS, 64_000);
     assert_eq!(crate::flow_preempt::CURSOR_STAND_BIT, 0x400);
@@ -73,33 +73,33 @@ fn delay_sample_maps_queued_to_units() {
 }
 
 #[test]
-fn delay_armed_needs_62() {
+fn delay_armed_needs_16() {
     assert!(!delay_armed(0));
-    assert!(!delay_armed(31));
-    assert!(!delay_armed(61));
-    assert!(delay_armed(62));
-    assert!(delay_armed(63));
+    assert!(!delay_armed(8));
+    assert!(!delay_armed(15));
+    assert!(delay_armed(16));
+    assert!(delay_armed(17));
     assert!(delay_armed(250));
 }
 
 #[test]
-fn stand_holds_62_to_55_until_31() {
-    assert!(delay_armed_latched(62, false));
-    assert!(delay_armed_latched(55, true));
-    assert!(!delay_armed(55));
-    assert!(delay_armed_latched(31, true));
-    assert!(!delay_armed_latched(30, true));
-    assert!(!delay_armed_latched(55, false));
-    assert!(!delay_armed_latched(31, false));
+fn stand_holds_16_to_14_until_8() {
+    assert!(delay_armed_latched(16, false));
+    assert!(delay_armed_latched(14, true));
+    assert!(!delay_armed(14));
+    assert!(delay_armed_latched(8, true));
+    assert!(!delay_armed_latched(7, true));
+    assert!(!delay_armed_latched(14, false));
+    assert!(!delay_armed_latched(8, false));
     assert!(!delay_armed_latched(0, true));
     assert!(!stand_held(0));
     assert!(stand_held(crate::flow_preempt::CURSOR_STAND_BIT));
     assert!(!stand_held(CURSOR_RATE_BIT));
-    let win = delay_close(62, 0);
-    assert_eq!(win, 55);
+    let win = delay_close(16, 0);
+    assert_eq!(win, 14);
     assert!(delay_armed_latched(win, true));
     assert!(!delay_armed(win));
-    let mut w = 62u8;
+    let mut w = 16u8;
     let mut held = false;
     held = delay_armed_latched(w, held);
     assert!(held);
@@ -121,30 +121,31 @@ fn stand_holds_62_to_55_until_31() {
 fn delay_decay_holds_peaks_for_hysteresis() {
     assert_eq!(delay_decay(0), 0);
     assert_eq!(delay_decay(250), 219);
-    assert_eq!(delay_decay(62), 55);
+    assert_eq!(delay_decay(16), 14);
     assert_eq!(delay_decay(8), 7);
+    assert_eq!(delay_decay(62), 55);
     let mut win = 250u8;
     for _ in 0..3 {
         win = delay_close(win, 0);
     }
     assert!(delay_armed(win));
-    for _ in 0..12 {
+    for _ in 0..24 {
         win = delay_close(win, 0);
     }
     assert!(!delay_armed(win));
-    let mut w2 = 62u8;
+    let mut w2 = 16u8;
     w2 = delay_close(w2, 0);
     assert!(!delay_armed(w2));
-    let w3 = delay_close(62, 62);
+    let w3 = delay_close(16, 16);
     assert!(delay_armed(w3));
 }
 
 #[test]
 fn delay_window_push_fast_arm_slow_fall() {
-    let (w, c, n) = delay_push(0, 0, 0, 62);
-    assert_eq!(w, 62);
+    let (w, c, n) = delay_push(0, 0, 0, 16);
+    assert_eq!(w, 16);
     assert!(delay_armed(w));
-    assert_eq!(c, 62);
+    assert_eq!(c, 16);
     assert_eq!(n, 1);
     let mut win = 0u8;
     let mut cur = 0u8;
@@ -161,7 +162,7 @@ fn delay_window_push_fast_arm_slow_fall() {
     let mut w3 = w2;
     let mut c3 = 0u8;
     let mut n3 = 0u16;
-    for _ in 0..120 {
+    for _ in 0..240 {
         let (a, b, d) = delay_push(w3, c3, n3, 0);
         w3 = a;
         c3 = b;
@@ -313,20 +314,20 @@ fn preempt_needs_five_gates_fail_closed() {
     assert!(!preempt_ok(true, true, true, true, false));
     assert!(!preempt_ok(false, false, false, false, false));
     assert!(!preempt_ok(true, true, true, true, false));
-    let armed = delay_armed(61);
+    let armed = delay_armed(15);
     assert!(!preempt_ok(armed, true, true, true, true));
-    let armed2 = delay_armed(62);
+    let armed2 = delay_armed(16);
     assert!(preempt_ok(armed2, true, true, true, true));
     assert!(!preempt_ok(armed2, false, true, true, true));
 }
 
 #[test]
 fn disarmed_matches_prior_no_kick() {
-    for win in [0u8, 31, 61] {
+    for win in [0u8, 8, 15] {
         assert!(!delay_armed(win));
         assert!(!preempt_ok(delay_armed(win), true, true, true, true));
     }
-    for win in [62u8, 100, 250] {
+    for win in [16u8, 100, 250] {
         assert!(delay_armed(win));
         assert!(!preempt_ok(delay_armed(win), false, true, true, true));
         assert!(!preempt_ok(delay_armed(win), true, false, true, true));
@@ -359,8 +360,8 @@ fn facade_matches_preempt_helpers() {
         crate::flow_preempt::granule_for_weight(1024, 1_000_000)
     );
     assert_eq!(
-        crate::flow::delay_armed_latched(55, true),
-        crate::flow_preempt::delay_armed_latched(55, true)
+        crate::flow::delay_armed_latched(14, true),
+        crate::flow_preempt::delay_armed_latched(14, true)
     );
     assert_eq!(
         crate::flow::stand_held(0x400),

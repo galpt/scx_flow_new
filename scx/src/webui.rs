@@ -335,11 +335,11 @@ mod tests {
                 running_pid: 7,
                 running_nice: -5,
                 running_weight: 1218,
-                delay_win: 62,
+                delay_win: 16,
                 delay_armed: true,
                 ..Default::default()
             }],
-            version: "4.2.14".to_string(),
+            version: "4.2.15".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -377,9 +377,9 @@ mod tests {
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
         assert_eq!(back.per_cpu[0].running_weight, 1218);
-        assert_eq!(back.per_cpu[0].delay_win, 62);
+        assert_eq!(back.per_cpu[0].delay_win, 16);
         assert!(back.per_cpu[0].delay_armed);
-        assert_eq!(back.version, "4.2.14");
+        assert_eq!(back.version, "4.2.15");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);

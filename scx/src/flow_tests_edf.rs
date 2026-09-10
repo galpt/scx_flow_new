@@ -1701,9 +1701,9 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert_eq!(m3.slice_ns, 1_000_000);
     assert_eq!(m3.running_nice, 10);
     assert_eq!(m3.running_weight, 494);
-    let txt4 = "{\"id\":3,\"delay_win\":62,\"delay_armed\":true}";
+    let txt4 = "{\"id\":3,\"delay_win\":16,\"delay_armed\":true}";
     let m4: crate::stats::PerCpuMetrics = serde_json::from_str(txt4).unwrap();
-    assert_eq!(m4.delay_win, 62);
+    assert_eq!(m4.delay_win, 16);
     assert!(m4.delay_armed);
 }
 
