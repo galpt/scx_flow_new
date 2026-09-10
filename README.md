@@ -17,12 +17,16 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/lifecycle.bpf.c` running, stopping, enable,
   disable, exit, dequeue
 - `scx/src/main.rs` frontend and run loop
+- `scx/src/bpf_intf.rs` generated bindings for the shared header
+- `scx/src/bpf_skel.rs` generated skeleton for the BPF object
 - `scx/src/snapshot.rs` metrics and dashboard snapshots
 - `scx/src/flow.rs` facade that reexports the helpers
 - `scx/src/flow_slice.rs` slice plus estimate helpers
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
-- `scx/src/flow_tests_edf.rs` tests only with S1 to S3
+- `scx/src/flow_tests_edf.rs` tests for S1 to S3 plus slice,
+  estimate, EDF order, frontier, dispatch, steal, mask, and
+  config
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
 - `scx/src/topology.rs` display only per-CPU cards

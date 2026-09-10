@@ -43,12 +43,21 @@ least two tasks. Idle targets are kicked only when the queue was
 empty with a mask check and no busy preemption.
 
 The slice math and the queue rules live in
-`src/bpf/intf.h`, insert, accounting, dispatch and the
-ops table in `src/bpf/main.bpf.c`, the Rust mirrors
+`src/bpf/intf.h`, maps plus helpers plus the ops table in
+`src/bpf/main.bpf.c`, placement in
+`src/bpf/select_cpu.bpf.c`, inserts in
+`src/bpf/enqueue.bpf.c`, drains in
+`src/bpf/dispatch.bpf.c`, and lifecycle in
+`src/bpf/lifecycle.bpf.c`, the Rust mirrors
 in `src/flow_slice.rs` plus `src/flow_edf.rs` plus
 `src/flow_select.rs` with a thin facade in `src/flow.rs`
-and tests only in `src/flow_tests_edf.rs`, and constant
-validation in `src/config.rs`. Stats and the dashboard
+and tests for S1 to S3 plus slice, estimate, EDF order,
+frontier, dispatch, steal, mask, and config in
+`src/flow_tests_edf.rs`, constant validation in
+`src/config.rs`, generated bindings in `src/bpf_intf.rs`
+plus the generated skeleton in `src/bpf_skel.rs`, and
+snapshot plus topology in `src/snapshot.rs` plus
+`src/topology.rs`. Stats and the dashboard
 payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 

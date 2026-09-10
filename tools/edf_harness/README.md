@@ -125,9 +125,10 @@ falls the same way in both builds to near 0.66 at
 1.2 plus near 0.55 at 1.5. Switches stay comparable
 across targets on 16 CPUs with governor
 `performance`. Build `4.2.5` is a non regression
-plus reads neutral against build `4.2.4`. Build `4.2.7`
-keeps the same workload plus a 10ms probe plus control
-plus scheduler state for A and B comparison.
+plus reads neutral against build `4.2.4`. No `4.2.7`
+measurement exists yet. Build `4.2.7` keeps the same
+workload plus a 10ms probe plus control plus scheduler
+state ready for A and B comparison.
 
 A value of 100 percent is a measured rate at feasible
 use only with no guarantee. There is no threshold on 98.5.
