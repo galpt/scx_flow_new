@@ -48,11 +48,9 @@ static __always_inline u32 flow_drain_own(s32 cpu,
 	return moved;
 }
 static __always_inline u32 flow_drain_park(s32 cpu,
-	u32 budget)
+	u32 budget, u8 thief_group, u64 park)
 {
 	struct task_struct *p;
-	u64 park;
-	u8 thief_group;
 	u32 moved = 0;
 	if (cpu < 0)
 		return 0;
@@ -60,9 +58,6 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 		return 0;
 	if (budget == 0)
 		return 0;
-	thief_group = flow_group_of_cpu((u32)cpu,
-	    nr_cpu_ids);
-	park = flow_park_for_group(thief_group);
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, park, 0) {
 		struct flow_task_ctx *tctx;
@@ -178,7 +173,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved >= budget)
 		return;
 	if (scx_bpf_dsq_nr_queued(park) > 0)
-		moved += flow_drain_park(cpu, budget - moved);
+		moved += flow_drain_park(cpu,
+		    budget - moved, thief_group, park);
 	if (moved >= budget)
 		return;
 	own_left = scx_bpf_dsq_nr_queued(
