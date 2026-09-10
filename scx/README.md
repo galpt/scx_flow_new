@@ -51,7 +51,7 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.6` in 4.2 line with no Pi path. Pi is deferred
+is `4.2.7` in 4.2 line with no Pi path. Pi is deferred
 with no kill and no Pi use. Weight stays 1024 with no
 knob and no new maps plus no new queue ids plus no new
 option. The revert gate is `FLOW_GATE_IEDF` with batch
