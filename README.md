@@ -101,13 +101,14 @@ halves. Placement uses live table.
 Dispatch drains the local queue first, then the group park,
 then idle steals from same group peers only. Own keeps no
 group check, so a pinned single entry still runs where its
-mask allows. Park rechecks each task group on mask pass
-candidates with NULL as light plus immediate skip, so a
-stale cross entry never moves there. Peer keeps donor group
+mask allows. Park drains the thief group park only with no
+task recheck, so a stale cross entry may move on hetero
+hosts with strict on uniform hosts. Peer keeps donor group
 plus mask plus depth with no task recheck due to verifier
 jump plus BSS bounds, so a stale cross peer entry may move
-on hetero hosts with strict on uniform hosts. Tier 2 uses
-park only immediate halves with 995k under 1M. Strict on
+on hetero hosts with strict on uniform hosts. Tier 3 holds
+park plus peer by construction due to verifier jump plus
+BSS bounds at 1000001 plus 58286 plus 60190. Strict on
 uniform hosts. Best effort on hetero hosts. Dispatch uses
 halves. Placement uses live table. Each pass visits every
 queued task in
@@ -122,11 +123,12 @@ same group peers with a rotating cursor and take the first
 task in a peer queue that allows the thief when the donor
 holds at least two tasks. Cross group donors are skipped
 with no cross move and no counter. A stale cross task in
-a same group donor may move on hetero hosts. Cross group
+a same group donor may move on hetero hosts. A stale cross
+task in the group park may move on hetero hosts. Cross group
 picks in
-select plus enqueue count group skip. Park cross tasks
-count group skip at once per task. Isolation follows enqueue
-placement plus thief park choice plus donor group check,
+select plus enqueue count group skip. Isolation follows
+enqueue placement plus thief park choice plus donor group
+check,
 with pinned single entries kept by the mask. Perf hints set
 1024 for light and hog at init plus running with a weak
 guard as best effort. One policy keeps both groups at max

@@ -1,16 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-/* Dispatch keeps group isolation with park recheck. */
+/* Dispatch keeps group isolation by construction. */
 /* Own drains to the same CPU with no group check, so a */
 /* pinned single entry with the opposite group still runs */
 /* where its mask allows with steal held by the mask. Park */
-/* drains the thief park with task recheck on mask pass */
-/* candidates with NULL as light plus immediate skip. Peer */
-/* keeps donor group plus mask plus depth with no task */
-/* recheck due to verifier jump plus BSS bounds. Tier 2 */
-/* uses park only immediate halves with 995k under 1M. */
-/* Strict on uniform hosts. Best effort on hetero hosts. */
-/* Dispatch uses halves. Placement uses live table. */
+/* drains the thief group park only with enqueue parking by */
+/* task group and no task recheck. Peer keeps donor group */
+/* plus mask plus depth with no task recheck. Tier 3 holds */
+/* park plus peer by construction due to verifier jump plus */
+/* BSS bounds at 1000001 plus 58286 plus 60190. Strict on */
+/* uniform hosts. Best effort on hetero hosts. Dispatch uses */
+/* halves. Placement uses live table. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {
@@ -48,9 +48,11 @@ static __always_inline u32 flow_drain_own(s32 cpu,
 	return moved;
 }
 static __always_inline u32 flow_drain_park(s32 cpu,
-	u32 budget, u8 thief_group, u64 park)
+	u32 budget)
 {
 	struct task_struct *p;
+	u64 park;
+	u8 thief_group;
 	u32 moved = 0;
 	if (cpu < 0)
 		return 0;
@@ -58,10 +60,11 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 		return 0;
 	if (budget == 0)
 		return 0;
+	thief_group = flow_group_of_cpu((u32)cpu,
+	    nr_cpu_ids);
+	park = flow_park_for_group(thief_group);
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, park, 0) {
-		struct flow_task_ctx *tctx;
-		u8 g;
 		if (moved >= budget)
 			break;
 		p = bpf_task_from_pid(p->pid);
@@ -69,21 +72,6 @@ static __always_inline u32 flow_drain_park(s32 cpu,
 			continue;
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr)) {
-			bpf_task_release(p);
-			continue;
-		}
-		tctx = bpf_task_storage_get(&task_ctx_stor,
-		    p, 0, 0);
-		if (!tctx)
-			g = (u8)FLOW_GROUP_LIGHT;
-		else if (tctx->group ==
-		    (u8)FLOW_GROUP_HOG)
-			g = (u8)FLOW_GROUP_HOG;
-		else
-			g = (u8)FLOW_GROUP_LIGHT;
-		if (g != thief_group) {
-			__sync_fetch_and_add(
-			    &flow_stats.group_steal_skipped, 1);
 			bpf_task_release(p);
 			continue;
 		}
@@ -173,8 +161,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved >= budget)
 		return;
 	if (scx_bpf_dsq_nr_queued(park) > 0)
-		moved += flow_drain_park(cpu,
-		    budget - moved, thief_group, park);
+		moved += flow_drain_park(cpu, budget - moved);
 	if (moved >= budget)
 		return;
 	own_left = scx_bpf_dsq_nr_queued(

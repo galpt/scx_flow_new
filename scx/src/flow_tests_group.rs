@@ -11,7 +11,7 @@
  * 16ms demote plus 4ms burst plus 4ms low for 64 wins
  * near 2s plus 8 short blocks below 1ms with burn
  * below 4ms. Tier 0 models keep both drains. BPF ships
- * Tier 2 peer with donor only.
+ * Tier 3 park plus peer by construction.
  */
 use crate::flow::*;
 use std::collections::VecDeque;
@@ -460,9 +460,9 @@ fn inflate_adds_8ms_with_wrap() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 2 peer with donor
- * only and no task recheck, so hetero peer may move
- * cross with strict on uniform hosts.
+ * Tier 0 model only. BPF ships Tier 3 park plus peer by
+ * construction with no task recheck, so hetero entries may
+ * move cross with strict on uniform hosts.
  */
 #[test]
 fn drain_keeps_strict_isolation_tier0_model_only() {
@@ -485,9 +485,9 @@ fn drain_keeps_strict_isolation_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 2 peer with donor
- * only and no task recheck, so hetero peer may move
- * cross with strict on uniform hosts.
+ * Tier 0 model only. BPF ships Tier 3 park plus peer by
+ * construction with no task recheck, so hetero entries may
+ * move cross with strict on uniform hosts.
  */
 #[test]
 fn drain_skips_dead_plus_failed_with_no_cross_tier0_model_only() {
@@ -685,9 +685,10 @@ fn task_state_stays_48_with_wake_at_46() {
 }
 
 /*
- * Tier 0 model only for park plus peer. BPF ships Tier
- * 2 with park recheck plus peer donor only and no peer
- * task recheck, so hetero peer may move cross.
+ * Tier 0 model only for park plus peer. BPF ships Tier 3
+ * with no park plus peer task recheck by construction due
+ * to verifier jump plus BSS bounds, so hetero entries may
+ * move cross with strict on uniform hosts.
  */
 #[test]
 fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
@@ -709,9 +710,9 @@ fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 2 peer with donor
- * only and no task recheck due to verifier jump plus
- * BSS bounds, so a stale cross peer entry may move on
+ * Tier 0 model only. BPF ships Tier 3 park plus peer by
+ * construction with no task recheck due to verifier jump
+ * plus BSS bounds, so a stale cross entry may move on
  * hetero hosts with strict on uniform hosts.
  */
 #[test]
@@ -733,9 +734,9 @@ fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 2 peer with donor
- * only and no task recheck, so hetero peer may move
- * cross with strict on uniform hosts.
+ * Tier 0 model only. BPF ships Tier 3 park plus peer by
+ * construction with no task recheck, so hetero entries may
+ * move cross with strict on uniform hosts.
  */
 #[test]
 fn null_storage_defaults_to_light_tier0_model_only() {
@@ -758,9 +759,9 @@ fn null_storage_defaults_to_light_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 2 peer with donor
- * only and no task recheck, so hetero peer may move
- * cross with strict on uniform hosts.
+ * Tier 0 model only. BPF ships Tier 3 park plus peer by
+ * construction with no task recheck, so hetero entries may
+ * move cross with strict on uniform hosts.
  */
 #[test]
 fn mask_fail_never_counts_as_group_skip_tier0_model_only() {
