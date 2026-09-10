@@ -18,6 +18,8 @@ Tasks wait in per-CPU ordered queues, plus one park queue
 per group for tasks with no allowed CPU. Earliest deadline
 runs first with arrival order for ties. The deadline adds
 clamped virtual time and a scaled estimate at fixed weight.
+Exiting tasks run at once on this CPU via local with no
+order wait. Falls back when this CPU is not allowed.
 
 ### Fixed slice
 
@@ -53,16 +55,18 @@ never shape placement. Pinned subsets stay in mask.
 ### Dispatch
 
 Order is local queue, group park, then steals from idle
-peers with mask checks. An idle thief may rescue a lone
-queued task while busy thieves keep depth 2. Isolation
+peers with mask checks. An idle thief with no moved plus
+no own left may rescue a lone queued task past unmovable
+park leftovers while busy thieves keep depth 2. Isolation
 follows placement plus park choice with peer best effort
 across groups.
 
 ### Kicks
 
-Idle targets are kicked even with queued work with a mask
-check and no busy preemption. Park sends no kick and the
-next dispatch pass collects it.
+Idle targets with at most 2 queued are kicked with a mask
+check and no busy preemption. A missed wakeup is rescued
+on the next insert while deep queues stay quiet. Park
+sends no kick and the next dispatch pass collects it.
 
 Weight stays 1024 with no knob. The slice stays fixed
 at 1ms. The version is in `Cargo.toml`.

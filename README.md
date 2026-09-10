@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.10`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.11`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -48,7 +48,9 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Each CPU keeps an ordered queue plus one park queue per
 group. Earliest deadline runs first with arrival order
 for ties. The deadline adds clamped virtual time and a
-scaled burst estimate at fixed weight. The math lives in
+scaled burst estimate at fixed weight. Exiting tasks run
+at once on this CPU via local with no order wait. Falls
+back when this CPU is not allowed. The math lives in
 `scx/src/bpf/intf.h`, inserts in
 `scx/src/bpf/enqueue.bpf.c`.
 
@@ -81,17 +83,18 @@ ready is one. The order lives in
 ### Dispatch
 
 Order is local queue, group park, then steals from peers
-with mask checks. An idle thief may rescue a lone queued
-task, busy thieves keep depth 2. Every pass moves at
+with mask checks. An idle thief with no moved plus no own
+left may rescue a lone queued task past unmovable park
+leftovers, busy thieves keep depth 2. Every pass moves at
 least one task when movable work exists. The drains live
 in `scx/src/bpf/dispatch.bpf.c`.
 
 ### Kicks
 
-Only idle targets are kicked with a mask check and no
-busy preemption. A missed wakeup is rescued on later
-inserts. Park sends no kick and the next pass collects
-it.
+Only idle targets with at most 2 queued are kicked with
+a mask check and no busy preemption. A missed wakeup is
+rescued on the next insert while deep queues stay quiet.
+Park sends no kick and the next pass collects it.
 
 ### Counts and queues
 
@@ -173,7 +176,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.10`, state `enabled` and ops
+Expect version `4.2.11`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir
