@@ -63,28 +63,6 @@ Idle targets are kicked even with queued work with a mask
 check and no busy preemption. Park sends no kick and the
 next dispatch pass collects it.
 
-The slice math and the queue rules live in
-`src/bpf/intf.h`, maps plus helpers plus the ops table in
-`src/bpf/main.bpf.c`, placement in
-`src/bpf/select_cpu.bpf.c`, inserts in
-`src/bpf/enqueue.bpf.c`, drains in
-`src/bpf/dispatch.bpf.c`, and lifecycle plus classifier in
-`src/bpf/lifecycle.bpf.c`, the Rust mirrors
-in `src/flow_slice.rs` plus `src/flow_edf.rs` plus
-`src/flow_select.rs` plus `src/flow_group.rs` with a thin
-facade in `src/flow.rs`
-and tests for S1 to S3 plus slice, estimate, EDF order,
-frontier, dispatch, steal, mask, groups, classifier,
-and config in
-`src/flow_tests_edf.rs` plus `src/flow_tests_group.rs`,
-constant validation in
-`src/config.rs`, generated bindings in `src/bpf_intf.rs`
-plus the generated skeleton in `src/bpf_skel.rs`, and
-snapshot plus topology in `src/snapshot.rs` plus
-`src/topology.rs`. Stats and the dashboard
-payload live in `src/stats.rs`, `src/webui.rs` and
-`ui/index.html`.
-
 Weight stays 1024 with no knob. The slice stays fixed
 at 1ms. The current version is `4.2.10`.
 
@@ -128,8 +106,14 @@ button to download the full snapshot as JSON.
 - Lifecycle plus classifier: `src/bpf/lifecycle.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
   `src/flow_select.rs`, `src/flow_group.rs`
+- Facade: `src/flow.rs`
 - Tests: `src/flow_tests_edf.rs`,
   `src/flow_tests_group.rs`
+- Constant validation: `src/config.rs`
+- Generated bindings plus skeleton: `src/bpf_intf.rs`,
+  `src/bpf_skel.rs`
+- Snapshot plus topology: `src/snapshot.rs`,
+  `src/topology.rs`
 - Stats plus dashboard payload: `src/stats.rs`,
   `src/webui.rs`, `ui/index.html`
 
