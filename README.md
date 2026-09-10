@@ -115,12 +115,6 @@ scheduler change in the harness.
 Weight stays 1024 with no knob. Groups stay fixed at
 two with no knob. The slice stays fixed at 1ms.
 
-### History
-
-The `4.2.6` base is the last stable line. The `4.3.x`
-plus `4.4.0` lines were tried and failed with stalls
-and were abandoned.
-
 ## Build
 
 Full builds need a workspace checkout since path deps use
