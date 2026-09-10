@@ -19,7 +19,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/snapshot.rs` metrics and dashboard snapshots
 - `scx/src/flow.rs` facade that reexports the helpers
-- `scx/src/flow_mean.rs` slice plus estimate helpers
+- `scx/src/flow_slice.rs` slice plus estimate helpers
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
 - `scx/src/flow_tests_edf.rs` tests only with S1 to S3

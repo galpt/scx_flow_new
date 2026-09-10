@@ -13,8 +13,8 @@ pub use bpf_intf::*;
 mod config;
 mod flow;
 mod flow_edf;
-mod flow_mean;
 mod flow_select;
+mod flow_slice;
 #[cfg(test)]
 mod flow_tests_edf;
 mod snapshot;
@@ -299,16 +299,16 @@ mod tests {
     #[test]
     fn slice_matches_header() {
         assert_eq!(
-            crate::flow_mean::SLICE_NS,
+            crate::flow_slice::SLICE_NS,
             crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
         );
-        assert_eq!(crate::flow_mean::SLICE_NS, 1_000_000);
+        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
         assert_eq!(
-            crate::flow_mean::EST_MIN_NS,
+            crate::flow_slice::EST_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
         );
         assert_eq!(
-            crate::flow_mean::EST_MAX_NS,
+            crate::flow_slice::EST_MAX_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
         );
     }
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn edf_matches_header() {
         assert_eq!(
-            crate::flow_mean::WEIGHT,
+            crate::flow_slice::WEIGHT,
             crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64
         );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64, 1024);

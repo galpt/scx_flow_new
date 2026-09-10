@@ -8,6 +8,6 @@
  */
 
 pub use crate::flow_edf::*;
-pub use crate::flow_mean::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
+pub use crate::flow_slice::*;

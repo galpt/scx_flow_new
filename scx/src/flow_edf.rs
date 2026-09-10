@@ -123,8 +123,8 @@ pub fn frontier_idle_guarded(old: u64, waking_v: u64) -> u64 {
 pub fn edf_insert(v: u64, frontier: u64, slice: u64, est: u64, weight: u32) -> (u64, u64, bool) {
     let clamped = clamp_vruntime(v, frontier, slice);
     let flag = clamped != v;
-    let est_c = crate::flow_mean::clamp_est(est);
-    let scaled = crate::flow_mean::scale_by_weight(est_c, weight);
+    let est_c = crate::flow_slice::clamp_est(est);
+    let scaled = crate::flow_slice::scale_by_weight(est_c, weight);
     let dl = deadline(clamped, scaled);
     (clamped, dl, flag)
 }
@@ -203,8 +203,8 @@ pub fn edf_insert_and_step(
     queued: u64,
 ) -> (u64, u64, u64, bool) {
     let (clamped, dl, flag) = edf_insert(v, frontier, slice, est, weight);
-    let est_c = crate::flow_mean::clamp_est(est);
-    let scaled = crate::flow_mean::scale_by_weight(est_c, weight);
+    let est_c = crate::flow_slice::clamp_est(est);
+    let scaled = crate::flow_slice::scale_by_weight(est_c, weight);
     let next_v = vruntime_add(clamped, scaled);
     let next = frontier_step(frontier, next_v, runnable, queued);
     (clamped, dl, next, flag)

@@ -10,8 +10,8 @@
  * and never shape placement.
  */
 use crate::flow_edf::*;
-use crate::flow_mean::*;
 use crate::flow_select::*;
+use crate::flow_slice::*;
 use std::collections::VecDeque;
 
 #[test]
@@ -841,10 +841,10 @@ fn facade_matches_helpers() {
     assert_eq!(crate::flow::DISPATCH_BATCH, crate::flow_edf::DISPATCH_BATCH);
     assert_eq!(crate::flow::DSQ_BASE, crate::flow_edf::DSQ_BASE);
     assert_eq!(crate::flow::DSQ_PARK, crate::flow_edf::DSQ_PARK);
-    assert_eq!(crate::flow::EST_MIN_NS, crate::flow_mean::EST_MIN_NS);
-    assert_eq!(crate::flow::EST_MAX_NS, crate::flow_mean::EST_MAX_NS);
-    assert_eq!(crate::flow::SLICE_NS, crate::flow_mean::SLICE_NS);
-    assert_eq!(crate::flow::WEIGHT, crate::flow_mean::WEIGHT);
+    assert_eq!(crate::flow::EST_MIN_NS, crate::flow_slice::EST_MIN_NS);
+    assert_eq!(crate::flow::EST_MAX_NS, crate::flow_slice::EST_MAX_NS);
+    assert_eq!(crate::flow::SLICE_NS, crate::flow_slice::SLICE_NS);
+    assert_eq!(crate::flow::WEIGHT, crate::flow_slice::WEIGHT);
     assert_eq!(crate::flow::MAX_CPUS, crate::flow_select::MAX_CPUS);
     assert_eq!(
         crate::flow::STEAL_MIN_DEPTH,

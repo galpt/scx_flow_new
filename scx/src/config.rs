@@ -144,8 +144,8 @@ mod tests {
 
     #[test]
     fn slice_matches_flow() {
-        assert_eq!(Config::default().slice_ns, crate::flow_mean::SLICE_NS);
-        assert_eq!(crate::flow_mean::SLICE_NS, 1_000_000);
+        assert_eq!(Config::default().slice_ns, crate::flow_slice::SLICE_NS);
+        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
     }
 
     #[test]

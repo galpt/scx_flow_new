@@ -45,7 +45,7 @@ empty with a mask check and no busy preemption.
 The slice math and the queue rules live in
 `src/bpf/intf.h`, insert, accounting, dispatch and the
 ops table in `src/bpf/main.bpf.c`, the Rust mirrors
-in `src/flow_mean.rs` plus `src/flow_edf.rs` plus
+in `src/flow_slice.rs` plus `src/flow_edf.rs` plus
 `src/flow_select.rs` with a thin facade in `src/flow.rs`
 and tests only in `src/flow_tests_edf.rs`, and constant
 validation in `src/config.rs`. Stats and the dashboard
