@@ -272,7 +272,7 @@ group promote plus wake promote, pinned inflate, and
 group skip. Wake promote is the fast subset of promote
 by 8 short blocks. Park moves
 count dispatch moves from the group park. Steal moves count
-dispatch moves from same group peer queues. Kicks count idle
+dispatch moves from peer queues. Kicks count idle
 wakeup kicks sent only when the queue was empty. EDF
 enqueued counts deadline inserts. EDF clamped counts sleeper
 caps to one slice. EDF ordered counts kernel queue inserts
