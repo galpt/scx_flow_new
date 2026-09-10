@@ -754,6 +754,61 @@ fn completion_counts_once_per_grant() {
 }
 
 #[test]
+fn dispatch_own_park_then_steal_gate() {
+    let good = PendingTask {
+        allowed: vec![true, true, true],
+        exiting: false,
+        live: true,
+        fail: false,
+    };
+    let foreign = PendingTask {
+        allowed: vec![false, false, false],
+        exiting: false,
+        live: true,
+        fail: false,
+    };
+    let mut own = VecDeque::from([foreign.clone(), foreign.clone()]);
+    let mut park = VecDeque::new();
+    let mut peers: Vec<VecDeque<PendingTask>> = vec![
+        VecDeque::new(),
+        VecDeque::from([good.clone(), good.clone()]),
+        VecDeque::new(),
+    ];
+    let (a, b) = dispatch_own_park_model(&mut own, &mut park, 0, 32);
+    assert_eq!(a + b, 0);
+    assert_eq!(own.len(), 2);
+    let moved = a + b;
+    assert!(may_steal(own.len() as u64, park.len() as u64, moved));
+    let (stolen, _) = steal_model(&mut peers, 0, 0, 32 - moved, true);
+    assert_eq!(stolen, 1);
+    assert_eq!(a + b + stolen, 1);
+    let mut own2 = VecDeque::from([good.clone(), good.clone()]);
+    let mut park2 = VecDeque::new();
+    let mut peers2: Vec<VecDeque<PendingTask>> = vec![
+        VecDeque::new(),
+        VecDeque::from([good.clone(), good.clone()]),
+        VecDeque::new(),
+    ];
+    let (c, d) = dispatch_own_park_model(&mut own2, &mut park2, 0, 32);
+    assert_eq!(c, 2);
+    assert_eq!(d, 0);
+    assert!(own2.is_empty());
+    let moved2 = c + d;
+    assert!(may_steal(own2.len() as u64, park2.len() as u64, moved2));
+    let (stolen2, _) = steal_model(&mut peers2, 0, 0, 32 - moved2, true);
+    assert_eq!(stolen2, 1);
+    assert!(c + d + stolen2 <= 32);
+    let mut own3 = VecDeque::from([good.clone(), foreign.clone()]);
+    let mut park3 = VecDeque::new();
+    let (e, f) = dispatch_own_park_model(&mut own3, &mut park3, 0, 32);
+    assert_eq!(e, 1);
+    assert_eq!(own3.len(), 1);
+    let moved3 = e + f;
+    assert!(!may_steal(own3.len() as u64, park3.len() as u64, moved3));
+    assert!(e + f <= 32);
+}
+
+#[test]
 fn mask_range_and_live_fail_closed() {
     assert!(!may_run_on(-1, &[true, true]));
     assert!(!cpu_live(-1, 2));
