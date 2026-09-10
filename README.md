@@ -98,8 +98,12 @@ unmovable leftovers, while a busy CPU with moved work steals
 only when both queues are empty. Idle steals visit at most
 8 same group peers with a rotating cursor and take the first
 task in a peer queue that allows the thief when the donor
-holds at least two tasks. Cross group peers count as skipped
-with no cross move. Perf hints set 1024 for light and 512 for
+holds at least two tasks. Cross group peers are skipped
+with no cross move and no counter. Cross group picks in
+select plus enqueue count group skip. Drains hold no
+per-task group lookup. Isolation follows enqueue placement
+plus thief park choice plus donor group check, with pinned
+single entries kept by the mask. Perf hints set 1024 for light and 512 for
 hog at init plus running with a weak guard as best effort.
 
 ### Kicks

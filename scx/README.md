@@ -49,8 +49,12 @@ no moved work steals past unmovable leftovers, while a busy CPU
 with moved work steals only when both queues are empty. Idle steals
 scan same group peers only with a rotating cursor and take the
 first task in a peer queue that allows the thief when the
-donor holds at least two tasks. Cross group picks count
-as skipped. Idle targets are kicked only when the queue was
+donor holds at least two tasks. Cross group peers are
+skipped with no cross move and no counter. Cross group
+picks in select plus enqueue count group skip. Drains hold
+no per-task group lookup. Isolation follows enqueue
+placement plus thief park choice plus donor group check,
+with pinned single entries kept by the mask. Idle targets are kicked only when the queue was
 empty with a mask check and no busy preemption. Perf hints set
 1024 for light and 512 for hog at init plus running with a weak
 guard as best effort.
@@ -176,7 +180,11 @@ tasks so they run to exit, and skips dead, foreign and failed
 tasks, so one head never blocks later work there. Steals take
 the first task in a same group peer queue that allows the thief
 when the donor holds at least two tasks. Cross group peers
-count as skipped with no cross move. An idle CPU with no moved
+are skipped with no cross move and no counter. Cross group
+picks in select plus enqueue count group skip. Drains hold
+no per-task group lookup. Isolation follows enqueue placement
+plus thief park choice plus donor group check, with pinned
+single entries kept by the mask. An idle CPU with no moved
 work steals past unmovable leftovers, while a busy CPU with
 moved work steals only when both queues are empty. An idle kick
 is sent only when the queue was empty to a CPU in the task

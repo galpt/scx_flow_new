@@ -1,5 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+/* Dispatch keeps group isolation by construction with no */
+/* per task group lookup. Own drains to the same CPU, so a */
+/* pinned single entry with the opposite group still runs */
+/* where its mask allows with steal held by the mask. Park */
+/* drains the thief group park only with enqueue parking by */
+/* task group. Peer steals check donor group plus mask plus */
+/* depth with no task recheck, so a stale cross entry with */
+/* a wide mask would move. Enqueue never leaves such a */
+/* stale except a reclassify plus migration disabled wrap. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {

@@ -320,7 +320,9 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
  * the strict group check. Dead, foreign, failed,
  * and cross group heads stay, so one head never
  * blocks later work. Returns moved plus skipped
- * where skipped counts cross group heads.
+ * where skipped counts cross group heads. The BPF
+ * peer drain checks donor group only with no task
+ * recheck, so this model is stricter than dispatch.
  */
 #[cfg(test)]
 pub fn group_drain_model(
