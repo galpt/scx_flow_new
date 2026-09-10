@@ -263,7 +263,10 @@ mod tests {
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
-        assert_eq!(m2.per_cpu[0].tq_ns, 0);
+        assert_eq!(m2.per_cpu[0].slice_ns, 0);
+        let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
+        let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
+        assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
     }
 
     /* Full snapshot round trips through JSON. */
@@ -284,18 +287,19 @@ mod tests {
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
-                tq_ns: 8_000_000,
+                slice_ns: 1_000_000,
                 running_est_ns: 1_000_000,
                 running_pid: 7,
                 ..Default::default()
             }],
         };
         let txt = serde_json::to_string(&snap).unwrap();
+        assert!(txt.contains("slice_ns"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.edf_enqueued, 8);
         assert_eq!(back.stats.edf_clamped, 1);
         assert_eq!(back.stats.edf_ordered, 8);
-        assert_eq!(back.per_cpu[0].tq_ns, 8_000_000);
+        assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
     }
 }

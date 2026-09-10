@@ -98,8 +98,10 @@ pub struct PerCpuMetrics {
     #[serde(default)]
     pub running_pid: u32,
     /* Current fixed slice in nanos. */
-    #[serde(default)]
-    pub tq_ns: u64,
+    /* Renamed from tq_ns; old JSON with tq_ns still */
+    /* decodes via the alias for one release. */
+    #[serde(default, alias = "tq_ns")]
+    pub slice_ns: u64,
 }
 
 /*

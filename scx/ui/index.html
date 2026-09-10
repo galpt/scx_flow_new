@@ -381,7 +381,7 @@
           : '';
         var pid = cpu.running_pid || 0;
         var est = cpu.running_est_ns || 0;
-        var slice = cpu.tq_ns || 0;
+        var slice = cpu.slice_ns || cpu.tq_ns || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'

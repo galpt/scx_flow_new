@@ -53,7 +53,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             smt,
             running_est_ns: 0,
             running_pid: 0,
-            tq_ns: crate::flow::SLICE_NS,
+            slice_ns: crate::flow::SLICE_NS,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -150,7 +150,7 @@ pub fn synthetic_card(
         smt,
         running_est_ns: 0,
         running_pid: 0,
-        tq_ns: crate::flow::SLICE_NS,
+        slice_ns: crate::flow::SLICE_NS,
     }
 }
 

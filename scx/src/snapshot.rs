@@ -109,7 +109,7 @@ impl<'a> Scheduler<'a> {
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
-            e.tq_ns = crate::flow::SLICE_NS;
+            e.slice_ns = crate::flow::SLICE_NS;
             per_cpu.push(e);
         }
         let stats = self.get_metrics();
