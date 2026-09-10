@@ -199,12 +199,14 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 /*
  * True when one CPU sits on a free core. Needs the CPU
  * plus no sibling with a running task. Singletons with
- * none read as free, so SMT off is a no-op with no trap.
- * Out of range CPUs fail closed with no placement.
- * Follows the ring for up to 8 steps with no division.
+ * 0xffff read as free, so SMT off is a no-op with no
+ * trap. Out of range CPUs fail closed with no
+ * placement. Follows the partner table for up to 8
+ * steps with no division. Mirrors the BPF walk with
+ * the same table and the same bounds.
  */
 #[cfg(test)]
-pub fn core_free(cpu: i32, ring: &[i32], running: &[bool], nr: usize) -> bool {
+pub fn core_free(cpu: i32, partner: &[u16], running: &[bool], nr: usize) -> bool {
     if cpu < 0 {
         return false;
     }
@@ -218,13 +220,19 @@ pub fn core_free(cpu: i32, ring: &[i32], running: &[bool], nr: usize) -> bool {
     if running.get(c).copied().unwrap_or(false) {
         return false;
     }
-    let Some(&nxt) = ring.get(c) else {
+    let Some(&nxt) = partner.get(c) else {
         return true;
     };
-    if nxt == crate::flow_group::SIBLING_NONE {
+    if nxt == crate::flow_group::SIBLING_EMPTY {
         return true;
     }
-    if nxt < 0 {
+    if (nxt as usize) >= MAX_CPUS as usize {
+        return true;
+    }
+    if (nxt as usize) >= nr {
+        return true;
+    }
+    if nxt as usize == c {
         return true;
     }
     let mut cur = nxt as usize;
@@ -232,20 +240,26 @@ pub fn core_free(cpu: i32, ring: &[i32], running: &[bool], nr: usize) -> bool {
         if cur >= nr {
             return true;
         }
+        if (cur as u64) >= MAX_CPUS as u64 {
+            return true;
+        }
         if running.get(cur).copied().unwrap_or(false) {
             return false;
         }
-        let Some(&after) = ring.get(cur) else {
+        let Some(&after) = partner.get(cur) else {
             return true;
         };
-        if after == crate::flow_group::SIBLING_NONE || after < 0 {
+        if after == crate::flow_group::SIBLING_EMPTY {
+            return true;
+        }
+        if (after as usize) >= MAX_CPUS as usize {
+            return true;
+        }
+        if (after as usize) >= nr {
             return true;
         }
         let v = after as usize;
         if v == c || v == cur {
-            return true;
-        }
-        if v >= nr {
             return true;
         }
         cur = v;
@@ -257,33 +271,32 @@ pub fn core_free(cpu: i32, ring: &[i32], running: &[bool], nr: usize) -> bool {
 }
 
 /*
- * First free idle CPU in one group. Tier A model only.
+ * First free CPU in one group. Tier A model only.
  * Scans in id order with the table when ready, else
- * halves. Needs idle plus allowed plus free core.
- * Returns none when no such CPU lives.
+ * halves. Needs allowed plus group plus free core by
+ * running pid. No scx idle use and no claim, so a miss
+ * wastes no idle claim. Returns none when no such CPU
+ * lives. Strict iff ready is zero, best effort iff
+ * ready is one with live table in placement.
  */
 #[cfg(test)]
 pub fn pick_free_idle(
     allowed: &[bool],
-    idle: &[bool],
     group: u8,
     nr: usize,
     table: &[u8],
     ready: u8,
-    ring: &[i32],
+    partner: &[u16],
     running: &[bool],
 ) -> Option<u32> {
     for cpu in 0..nr {
         if !may_run_on(cpu as i32, allowed) {
             continue;
         }
-        if idle.get(cpu).copied().unwrap_or(false) != true {
-            continue;
-        }
         if crate::flow_group::group_live(cpu as u32, nr, table, ready) != group {
             continue;
         }
-        if !core_free(cpu as i32, ring, running, nr) {
+        if !core_free(cpu as i32, partner, running, nr) {
             continue;
         }
         return Some(cpu as u32);
@@ -295,7 +308,9 @@ pub fn pick_free_idle(
  * First idle CPU in one group. Tier B model only.
  * Scans in id order with the table when ready, else
  * halves. Needs idle plus allowed in the group.
- * Returns none when no such CPU lives.
+ * Returns none when no such CPU lives. Strict iff
+ * ready is zero, best effort iff ready is one with
+ * live table in placement.
  */
 #[cfg(test)]
 pub fn pick_idle_in_group(
@@ -323,12 +338,15 @@ pub fn pick_idle_in_group(
 
 /*
  * Full tiered select model. Mirrors the BPF order of
- * free idle plus any idle in the group plus previous
+ * free scan plus any idle in the group plus previous
  * plus current plus first in the group plus first.
- * Tier A prefers a free core. Tier B prefers any idle
- * in the group. Placement only with no dispatch use.
- * Singletons treat all idle as free, so Tier A equals
- * Tier B with prior order and no trap.
+ * Tier A scans for a free core with no claim, so a
+ * miss wastes no idle claim. Tier B prefers any idle
+ * in the group with claim only there. Placement only
+ * with no dispatch use. Singletons treat all running
+ * free as free, so Tier A equals Tier B order with no
+ * trap. Strict iff ready is zero, best effort iff
+ * ready is one with live table in placement.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered(
@@ -340,10 +358,10 @@ pub fn select_cpu_tiered(
     nr: usize,
     table: &[u8],
     ready: u8,
-    ring: &[i32],
+    partner: &[u16],
     running: &[bool],
 ) -> Option<u32> {
-    if let Some(c) = pick_free_idle(allowed, idle, group, nr, table, ready, ring, running) {
+    if let Some(c) = pick_free_idle(allowed, group, nr, table, ready, partner, running) {
         return Some(c);
     }
     if let Some(c) = pick_idle_in_group(allowed, idle, group, nr, table, ready) {

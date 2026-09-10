@@ -5,7 +5,7 @@ in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps one ordered queue per-CPU with a fixed slice at
 1ms plus two groups for light waits and hog burn, strict
-on uniform hosts and best effort on hetero hosts.
+iff ready is zero and best effort iff ready is one.
 It is deliberately knob-free. It uses per-CPU ordered
 EDF plus vruntime fairness plus the fixed slice.
 
@@ -51,22 +51,27 @@ Siblings stay in one group. First half of cores is light
 with the rest hog. One core with more than one CPU falls
 back to halves, so no group stays empty. One LLC splits
 cores globally. Two plus N LLCs split cores in each LLC,
-so each cache domain stays balanced. Cores take the LLC
+so each cache domain stays balanced. One core in one LLC
+keeps LIGHT as the default with no split, so a single
+core LLC never forces hog. Each LLC with an odd core
+count gives the extra core to hog, so per LLC bias
+matches the global bias with no knob. Cores take the LLC
 of the least id. Missing LLC folds to one domain with no
 pad. All singleton cores bypass LLC and use halves plus
 interleave exactly, so SMT off keeps prior state. Hetero
 cores interleave by max capacity plus max frequency plus
 least id with even slots to light and odd slots to hog
-and the extra core to hog. The same table is reused with
-no new tables. Task state stays at 48B with wake hits at
+and the extra core to hog. The same group table plus
+the sibling partner table are reused with no new maps.
+Task state stays at 48B with wake hits at
 off 46. Per-CPU state stays at 24B. Counters stay at 136B.
-Uniform hosts keep ready cleared when the core view matches
-halves, else ready set. Hetero hosts keep ready set. Strict
-on uniform hosts. Best effort on hetero hosts. Dispatch
+Ready stays cleared when the core view matches
+halves, else ready set. Strict iff ready is zero, best
+effort iff ready is one. Dispatch
 uses halves. Placement uses live table. Snapshot mirrors
 the live table when ready, else halves with no trap.
 Machines with one thread per core keep halves plus
-interleave exactly with preference as no-op and no trap.
+interleave exactly with core check as no-op and no trap.
 Burn moves light to hog at 16ms in a 32ms window or one burst
 at 4ms quiet down to 1ms floor during flood and returns
 hog to light after 4ms low for 64 wins near 2s
@@ -83,15 +88,20 @@ Cold tasks join light with a 4x gap against flaps.
 
 ### Placement
 
-Placement uses a free core idle CPU in the group and mask,
-then any idle CPU in the group and mask, then the prior CPU,
+Placement scans for a free core in the group and mask
+with no claim, then any idle CPU in the group and mask,
+then the prior CPU,
 the current CPU, and the first allowed
-CPU in the group. Tier A prefers a free core. Tier B prefers
-any idle in the group. Placement only with no dispatch use.
-Table is reused with no new tables. Singletons treat all
-idle as free, so Tier A is a no-op with prior order and no
-trap. The scan stays minimal with one extra idle pick and
-no loop. Pinned tasks and tasks that cannot move stay
+CPU in the group. Tier A scans for a free core with no
+claim, so a miss wastes no idle claim. Tier B prefers
+any idle in the group with claim only there. Placement
+only with no dispatch use.
+Group plus sibling tables are reused with no new maps.
+Singletons treat all running free as free, so the core
+check is a no-op with no trap. The scan is bounded at
+1024 with early exit in id order. Strict iff ready is
+zero, best effort iff ready is one with live table in
+placement. Pinned tasks and tasks that cannot move stay
 local with 8ms extra for pinned hog. Empty
 masks park in order in the task group. Live frequency plus
 CPU cards stay display only and never shape placement.
@@ -106,8 +116,8 @@ Dispatch drains the local queue first, then the group park,
 then idle steals from peers with mask only. Own keeps no
 group check, so a pinned single entry still runs where its
 mask allows. Park drains the thief group park only with no
-task recheck, so a stale cross entry may move on hetero
-hosts with strict on uniform hosts. Peer keeps mask
+task recheck, so a stale cross entry may move iff ready is
+one with strict park iff ready is zero. Peer keeps mask
 plus depth with idle rescue and no task recheck, so a
 depth 1 donor moves only when the thief is idle with no
 moved plus no own left plus no park left. Busy thieves
@@ -116,7 +126,7 @@ ships thief idle only due to verifier jump at 1000001 on
 asleep check, with donor asleep handled by idle kick.
 Tier 3 holds park only by construction due to verifier
 jump at 1000001 on donor check in the steal loop. Strict
-park on uniform hosts. Best effort peer plus hetero hosts.
+park iff ready is zero, best effort peer iff ready is one.
 Dispatch uses halves. Placement uses live table. Each pass
 visits every queued task in the local and park queues in
 order and moves live tasks when allowed, including exiting
@@ -128,9 +138,10 @@ with moved work steals only when both queues are empty.
 Idle steals scan peers only with a rotating cursor and
 take the first task in a peer queue that allows the thief
 when the donor meets min depth. Cross group tasks may move
-with no counter. A cross task in any donor may move on
-both uniform and hetero hosts. A stale cross task in the
-group park may move on hetero hosts. Cross group picks in
+with no counter. A cross task in any donor may move iff
+ready is one or zero with mask only. A stale cross task in
+the group park may move iff ready is one with strict park
+iff ready is zero. Cross group picks in
 select plus enqueue count group skip. Isolation follows
 enqueue placement plus thief park choice with peer best
 effort across groups, with pinned single entries kept by
@@ -179,8 +190,8 @@ Per-CPU state stays at 24B. Counters stay at 136B. The
 `4.4.0` lines were tried and failed with stalls and were
 abandoned. The `4.2.7` strip keeps a pure EDF core with
 the fixed slice. The `4.2.8` step adds two groups with
-burn only moves, strict on uniform hosts and best effort
-on hetero hosts. The `4.2.9` step keeps task at 48B plus
+burn only moves, strict iff ready is zero and best effort
+iff ready is one. The `4.2.9` step keeps task at 48B plus
 per-CPU at 24B plus counters at 136B with idle singleton
 rescue plus idle kick rescue plus running owner clear and
 no new knob. The `4.2.10` step keeps task at 48B plus
@@ -201,8 +212,8 @@ singleton equivalence and no new knob.
 
 ## Production Ready?
 
-Yes on uniform hosts. Hetero hosts get best effort
-grouping, see Limitations.
+Yes iff ready is zero. Hosts with ready is one get best
+effort grouping, see Limitations.
 
 ## Configuration
 
@@ -284,15 +295,16 @@ Dispatch drains the
 local queue first, then the group park, then idle steals
 from peers with mask only. Own keeps no group check. Park
 drains the thief group park only with no task recheck, so a
-stale cross entry may move on hetero hosts with strict on
-uniform hosts. Peer keeps mask plus depth with idle rescue
+stale cross entry may move iff ready is one with strict
+park iff ready is zero. Peer keeps mask plus depth with
+idle rescue
 and no task recheck, so a depth 1 donor moves only when
 the thief is idle with no moved plus no own left plus no
 park left. Busy thieves keep depth 2. Tier 0 models also
 donor asleep rescue. BPF ships thief idle only due to
 verifier jump at 1000001 on asleep check, with donor asleep
-handled by idle kick. Strict park on uniform hosts. Best
-effort peer plus hetero hosts. Dispatch uses halves.
+handled by idle kick. Strict park iff ready is zero, best
+effort peer iff ready is one. Dispatch uses halves.
 Placement uses live table. Each pass moves up to 32 tasks
 across local, park and steal. Each move in the local and
 park queues moves live tasks when allowed, including
@@ -301,8 +313,9 @@ and failed tasks, so one head never blocks later work
 there. Steals take the first task in a peer queue that
 allows the thief when the donor meets min depth. Cross
 group tasks may move with no counter. A cross task in any
-donor may move on both uniform and hetero hosts. A stale
-cross task in the group park may move on hetero hosts.
+donor may move iff ready is one or zero with mask only.
+A stale
+cross task in the group park may move iff ready is one.
 Cross group picks in select plus enqueue count group skip.
 Isolation follows enqueue placement plus thief park choice
 with peer best effort across groups, with pinned single
@@ -316,14 +329,18 @@ pass collects it.
 
 ## CPU choice
 
-CPU choice prefers a free core idle CPU in the group and
-mask, then any idle CPU in the group and mask, then the prior
+CPU choice scans for a free core in the group and mask
+with no claim, then any idle CPU in the group and mask,
+then the prior
 CPU in the group when allowed, then the current CPU
 in the group when allowed,
-then the first allowed CPU in the group. Tier A prefers a
-free core. Tier B prefers any idle in the group. Placement
-only with no dispatch use. Singletons treat all idle as
-free with prior order and no trap. Pinned tasks stay in
+then the first allowed CPU in the group. Tier A scans for
+a free core with no claim, so a miss wastes no idle claim.
+Tier B prefers any idle in the group with claim only
+there. Placement
+only with no dispatch use. Singletons treat all running
+free as free with core check as no-op and no trap.
+Pinned tasks stay in
 place. Tasks that cannot move stay on the current CPU.
 Live frequency plus
 CPU cards stay display only and never shape placement.
@@ -389,8 +406,8 @@ the same workload and no other change.
   check, with donor asleep handled by idle kick. Park
   trusts enqueue placement plus thief park choice with no
   task recheck due to verifier jump at 1000001 on donor
-  check, so stale cross entries may move on hetero hosts
-  with strict park on uniform hosts and best effort peer.
+  check, so stale cross entries may move iff ready is one
+  with strict park iff ready is zero and best effort peer.
   Own plus park moves keep order with mask respect.
 - Groups use a per CPU table when ready, else halves with
   extra to hog. Odd counts give the extra CPU to hog in
@@ -398,15 +415,19 @@ the same workload and no other change.
   CPU keeps all light with no peer scan through the same
   path. Cores split with extra to hog with siblings kept
   in one group. One LLC splits globally. Two plus N LLCs
-  split in each LLC. All singleton cores use halves plus
-  interleave exactly. Uniform hosts keep ready cleared when
-  the core view matches halves, else ready set. Hetero hosts
-  keep ready set with core interleave by max capacity plus
-  max frequency plus least id. Strict on uniform hosts. Best
-  effort on hetero
-  hosts. Dispatch uses halves. Placement uses live table.
-  Placement prefers a free core idle plus any idle in the
-  group with singletons as no-op. Snapshot mirrors the live
+  split in each LLC. One core in one LLC keeps LIGHT as
+  the default with no split. Each LLC with an odd core
+  count gives the extra core to hog. All singleton cores
+  use halves plus
+  interleave exactly. Ready stays cleared when
+  the core view matches halves, else ready set with core
+  interleave by max capacity plus max frequency plus least
+  id. Strict iff ready is zero, best effort iff ready is
+  one. Dispatch uses halves. Placement uses live table.
+  Placement scans for a free core with no claim plus any
+  idle in the
+  group with core check as no-op for singletons. Snapshot
+  mirrors the live
   table when ready, else halves
   with no trap.
 - The topology is snapshotted at attach, so a CPU
@@ -420,7 +441,7 @@ the same workload and no other change.
   effort with a weak guard at init plus running. One policy
   keeps both groups at max since groups use dedicated CPUs.
 - Machines with one thread per core keep halves plus
-  interleave exactly with preference as no-op and no trap.
+  interleave exactly with core check as no-op and no trap.
   A single CPU
   host runs with no peer scan through the same path.
 - Needs a kernel with sched_ext enabled.

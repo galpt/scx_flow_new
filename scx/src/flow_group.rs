@@ -16,8 +16,8 @@
  * below 1ms with burn below 4ms. Cold tasks join
  * light. The 4x gap keeps flips rare. A per CPU table
  * holds live groups when ready, else halves applies.
- * Short slices clamp with no pad. Strict on uniform
- * hosts. Best effort on hetero hosts with dispatch on
+ * Short slices clamp with no pad. Strict iff ready is
+ * zero, best effort iff ready is one with dispatch on
  * halves and placement on live.
  */
 
@@ -79,11 +79,11 @@ pub const PERF_HOG: u32 = 1024;
 /*
  * Group of one CPU by id halves with extra to hog.
  * Halves is the fallback when the table is not ready.
- * Dispatch keeps halves, so hetero placement is best
- * effort with strict on uniform hosts. One or no CPUs
- * keeps all light. Otherwise the low half is light and
- * the high half is hog, so an odd count gives the
- * extra CPU to hog.
+ * Dispatch keeps halves, so placement is best effort
+ * iff ready is one with strict iff ready is zero. One
+ * or no CPUs keeps all light. Otherwise the low half
+ * is light and the high half is hog, so an odd count
+ * gives the extra CPU to hog.
  */
 pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
     if nr <= 1 {
@@ -100,8 +100,8 @@ pub fn group_of_cpu(cpu: u32, nr: usize) -> u8 {
  * Reads the table when ready holds groups, else halves.
  * Bad values fall back to halves with no trap. Mirrors
  * the BPF live helper for snapshot use. Placement uses
- * live, dispatch keeps halves, so hetero is best effort
- * with strict on uniform hosts.
+ * live, dispatch keeps halves, so strict iff ready is
+ * zero, best effort iff ready is one.
  */
 pub fn group_live(cpu: u32, nr: usize, table: &[u8], ready: u8) -> u8 {
     if ready != 0 && (cpu as usize) < nr && (cpu as usize) < table.len() {
@@ -213,9 +213,8 @@ pub fn seed_groups(caps: &[u64], freqs: &[u64], nr: usize) -> ([u8; GROUP_TABLE_
     (table, 1)
 }
 
-/* None marker for the sibling ring. */
-#[cfg(test)]
-pub const SIBLING_NONE: i32 = -1;
+/* Empty marker for the sibling partner table. */
+pub const SIBLING_EMPTY: u16 = 0xffff;
 
 /*
  * Parse one sibling list from sysfs. Accepts comma
@@ -464,10 +463,16 @@ pub fn assign_cores_interleave(
  * globally. Two plus N LLCs split cores in each LLC,
  * so each cache domain stays balanced. Cores take the
  * LLC of the least id. Missing LLC folds to one domain
- * with no pad. All singleton cores bypass LLC and use
- * the prior halves plus interleave exactly, so SMT off
- * keeps state equivalence. Empty group falls back to
- * global, so no group stays empty with no trap.
+ * with no pad. One core in one LLC keeps LIGHT as the
+ * default with no split, so a single core LLC never
+ * forces hog. Each LLC with an odd core count gives
+ * the extra core to hog, so per LLC bias matches the
+ * global bias with no knob. All singleton cores bypass
+ * LLC and use the prior halves plus interleave exactly,
+ * so SMT off keeps state equivalence. Empty group falls
+ * back to global, so no group stays empty with no trap.
+ * Strict iff ready is zero, best effort iff ready is
+ * one with the same core view in both cases.
  */
 pub fn assign_by_llc(
     cores: &[Vec<u32>],
@@ -604,10 +609,12 @@ pub fn assign_by_llc(
  * cores from sibling lists with union find, then
  * assigns with LLC rules plus hetero interleave. All
  * singleton cores use the prior halves plus interleave
- * exactly. Uniform hosts keep ready cleared when the
- * core view matches halves, else ready set with best
- * effort. Short slices clamp with no pad. Single CPU
- * keeps ready cleared with all light.
+ * exactly. Ready stays cleared when the core view
+ * matches halves, else ready set. Strict iff ready is
+ * zero, best effort iff ready is one. Short slices
+ * clamp with no pad. Single CPU keeps ready cleared
+ * with all light. One core in one LLC keeps LIGHT with
+ * no split. Each odd LLC gives the extra core to hog.
  */
 pub fn seed_groups_topology(
     caps: &[u64],
@@ -655,14 +662,17 @@ pub fn seed_groups_topology(
 }
 
 /*
- * Sibling ring for free core checks. Each CPU maps to
- * the next CPU in the same core, ring order by id.
- * Singletons map to none, so the check is a no-op.
- * Capped at 1024 with no trap.
+ * Sibling partner table for BPF placement. Each CPU
+ * holds the next CPU in the same core in id order.
+ * Singletons hold 0xffff, so the free check is a
+ * no-op. Capped at 1024 with no trap. Mirrors the
+ * BPF walk of up to 8 steps with no division. Strict
+ * iff ready is zero, best effort iff ready is one
+ * with the same core view in both cases.
  */
-#[cfg(test)]
-pub fn sibling_ring(cores: &[Vec<u32>], nr: usize) -> Vec<i32> {
-    let mut out = vec![SIBLING_NONE; nr];
+pub fn sibling_table(cores: &[Vec<u32>], nr: usize) -> [u16; GROUP_TABLE_LEN] {
+    let mut out = [SIBLING_EMPTY; GROUP_TABLE_LEN];
+    let n = nr.min(GROUP_TABLE_LEN);
     for core in cores {
         if core.len() <= 1 {
             continue;
@@ -670,14 +680,14 @@ pub fn sibling_ring(cores: &[Vec<u32>], nr: usize) -> Vec<i32> {
         let mut sorted = core.clone();
         sorted.sort_unstable();
         for (i, &cpu) in sorted.iter().enumerate() {
-            if (cpu as usize) >= nr {
+            if (cpu as usize) >= n {
                 continue;
             }
             let nxt = sorted[(i + 1) % sorted.len()];
-            if (nxt as usize) >= nr {
+            if (nxt as usize) >= n {
                 continue;
             }
-            out[cpu as usize] = nxt as i32;
+            out[cpu as usize] = nxt as u16;
         }
     }
     out
@@ -753,8 +763,8 @@ pub fn burst_hot(delta: u64) -> bool {
  * 1ms, so per task worst case is one slice during
  * flood. Recomputed per stop with no new task field,
  * so task stays at 48B. Halves matches dispatch view
- * with no table cost in the stop path. Strict on
- * uniform hosts. Best effort on hetero hosts with
+ * with no table cost in the stop path. Strict iff
+ * ready is zero, best effort iff ready is one with
  * placement on the live table.
  */
 #[cfg(test)]
@@ -783,8 +793,8 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
  * Light depth from per CPU queued counts capped at 4.
  * Sums queued tasks over light CPUs in halves order
  * with early stop at 4. Halves matches the BPF depth
- * with no table use. Strict on uniform hosts. Best
- * effort on hetero hosts with placement on live.
+ * with no table use. Strict iff ready is zero, best
+ * effort iff ready is one with placement on live.
  * Missing entries count as zero, so short slices stay
  * quiet with no trap.
  */
@@ -808,8 +818,8 @@ pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
  * Hog depth from per CPU queued counts capped at 4.
  * Sums queued tasks over hog CPUs in halves order
  * with early stop at 4. Halves matches the BPF view
- * with no table use. Strict on uniform hosts. Best
- * effort on hetero hosts with placement on live.
+ * with no table use. Strict iff ready is zero, best
+ * effort iff ready is one with placement on live.
  * Missing entries count as zero, so short slices stay
  * quiet with no trap. Display only with no burst use.
  */
@@ -833,8 +843,8 @@ pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
  * Both depths from per CPU queued counts capped at 4.
  * Single pass over halves order with early stop when
  * both hit 4. Mirrors the BPF refresh with one pass
- * and bounded cost. Strict on uniform hosts. Best
- * effort on hetero hosts with placement on live.
+ * and bounded cost. Strict iff ready is zero, best
+ * effort iff ready is one with placement on live.
  * Missing entries count as zero.
  */
 #[cfg(test)]
@@ -1107,8 +1117,8 @@ pub struct GroupTask {
  * CPU in the mask plus the same group. Tier 0 model
  * only. BPF ships Tier 3 park only by construction
  * with no task recheck due to verifier jump at 1000001
- * on donor check, so a stale cross entry may move on
- * hetero hosts with strict park on uniform hosts and
+ * on donor check, so a stale cross entry may move iff
+ * ready is one with strict park iff ready is zero and
  * best effort peer across groups. Pinned single tasks
  * with one allowed CPU may cross with an inflated
  * deadline, so the caller checks that path before this
@@ -1136,15 +1146,16 @@ pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
  * model only. BPF ships Tier 3 park only by
  * construction with no task recheck due to verifier jump
  * at 1000001 on donor check, so a stale cross entry may
- * move on hetero hosts with strict park on uniform hosts
- * and best effort peer across groups. The scan keeps order
- * and moves each task that passes the strict group check.
- * Dead, foreign, failed, and cross group heads stay, so
- * one head never blocks later work. Returns moved plus
- * skipped where skipped counts cross group heads on mask
- * pass. The model keeps both drains plus merged skip. BPF
- * Tier 3 uses park only by construction with halves due
- * to verifier jump at 1000001 with peer mask only.
+ * move iff ready is one with strict park iff ready is
+ * zero and best effort peer across groups. The scan
+ * keeps order and moves each task that passes the
+ * strict group check. Dead, foreign, failed, and cross
+ * group heads stay, so one head never blocks later
+ * work. Returns moved plus skipped where skipped counts
+ * cross group heads on mask pass. The model keeps both
+ * drains plus merged skip. BPF Tier 3 uses park only by
+ * construction with halves due to verifier jump at
+ * 1000001 with peer mask only.
  */
 #[cfg(test)]
 pub fn group_drain_model(

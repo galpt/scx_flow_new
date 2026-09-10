@@ -462,8 +462,9 @@ fn inflate_adds_8ms_with_wrap() {
 /*
  * Tier 0 model only. BPF ships Tier 3 park only by
  * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross with strict park on
- * uniform hosts and best effort peer.
+ * so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort
+ * peer.
  */
 #[test]
 fn drain_keeps_strict_isolation_tier0_model_only() {
@@ -488,8 +489,9 @@ fn drain_keeps_strict_isolation_tier0_model_only() {
 /*
  * Tier 0 model only. BPF ships Tier 3 park only by
  * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross with strict park on
- * uniform hosts and best effort peer.
+ * so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort
+ * peer.
  */
 #[test]
 fn drain_skips_dead_plus_failed_with_no_cross_tier0_model_only() {
@@ -690,8 +692,8 @@ fn task_state_stays_48_with_wake_at_46() {
  * Tier 0 model only for park plus peer. BPF ships Tier 3
  * park only with no task recheck by construction due to
  * verifier jump at 1000001 on donor check, so hetero
- * entries may move cross with strict park on uniform
- * hosts and best effort peer.
+ * entries may move cross iff ready is one with strict
+ * park iff ready is zero and best effort peer.
  */
 #[test]
 fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
@@ -715,8 +717,8 @@ fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
 /*
  * Tier 0 model only. BPF ships Tier 3 park only by
  * construction with no task recheck plus peer mask only,
- * so a stale cross entry may move on hetero hosts with
- * strict park on uniform hosts and best effort peer.
+ * so a stale cross entry may move iff ready is one with
+ * strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
@@ -739,8 +741,9 @@ fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
 /*
  * Tier 0 model only. BPF ships Tier 3 park only by
  * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross with strict park on
- * uniform hosts and best effort peer.
+ * so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort
+ * peer.
  */
 #[test]
 fn null_storage_defaults_to_light_tier0_model_only() {
@@ -765,8 +768,9 @@ fn null_storage_defaults_to_light_tier0_model_only() {
 /*
  * Tier 0 model only. BPF ships Tier 3 park only by
  * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross with strict park on
- * uniform hosts and best effort peer.
+ * so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort
+ * peer.
  */
 #[test]
 fn mask_fail_never_counts_as_group_skip_tier0_model_only() {
@@ -940,8 +944,8 @@ fn seed_groups_sets_ready_only_when_hetero() {
 
 /*
  * Hetero keeps dispatch on halves while placement uses
- * live. Strict on uniform hosts. Best effort on hetero
- * hosts with verifier jump plus BSS bounds. Locks the
+ * live. Strict iff ready is zero, best effort iff ready
+ * is one with verifier jump plus BSS bounds. Locks the
  * documented split with no live use in dispatch.
  */
 #[test]
@@ -1197,6 +1201,40 @@ fn llc_n_splits_per_llc_with_fallback() {
 }
 
 /*
+ * Single core LLC keeps LIGHT as the default. One core
+ * in one LLC has no peer to split with, so the per LLC
+ * pass leaves it LIGHT with no trap. Each LLC with an
+ * odd core count gives the extra core to hog, so per
+ * LLC bias matches the global bias with no knob. Strict
+ * iff ready is zero, best effort iff ready is one.
+ */
+#[test]
+fn single_core_llc_keeps_light_default() {
+    let cores = vec![vec![0, 1], vec![2, 3], vec![4, 5]];
+    let llc = vec![0, 0, 0, 0, 1, 1];
+    let caps = vec![1024; 6];
+    let freqs = vec![4000000; 6];
+    let out = assign_by_llc(&cores, &llc, &caps, &freqs, 6, false);
+    assert_eq!(out.len(), 6);
+    assert_eq!(out[0], GROUP_LIGHT);
+    assert_eq!(out[1], GROUP_LIGHT);
+    assert_eq!(out[2], GROUP_HOG);
+    assert_eq!(out[3], GROUP_HOG);
+    assert_eq!(out[4], GROUP_LIGHT);
+    assert_eq!(out[5], GROUP_LIGHT);
+    let hetero = assign_by_llc(&cores, &llc, &caps, &freqs, 6, true);
+    assert_eq!(hetero[4], GROUP_LIGHT);
+    assert_eq!(hetero[5], GROUP_LIGHT);
+    assert!(hetero.contains(&GROUP_LIGHT));
+    assert!(hetero.contains(&GROUP_HOG));
+    let odd = vec![vec![0, 1], vec![2, 3], vec![4, 5]];
+    let one_llc = vec![0; 6];
+    let odd_out = assign_by_llc(&odd, &one_llc, &caps, &freqs, 6, false);
+    assert_eq!(odd_out.iter().filter(|&&g| g == GROUP_LIGHT).count(), 2);
+    assert_eq!(odd_out.iter().filter(|&&g| g == GROUP_HOG).count(), 4);
+}
+
+/*
  * All singleton cores bypass LLC exactly. The result
  * matches halves when uniform and CPU interleave when
  * hetero, so SMT off keeps prior state with no trap.
@@ -1246,8 +1284,8 @@ fn seed_topology_singleton_matches_prior() {
 
 /*
  * Uniform adjacent SMT keeps ready cleared. Eight CPUs
- * in four adjacent pairs split as halves, so strict
- * stays with no table use.
+ * in four adjacent pairs split as halves, so strict iff
+ * ready is zero stays with no table use.
  */
 #[test]
 fn seed_topology_uniform_adjacent_keeps_ready_cleared() {
@@ -1275,7 +1313,7 @@ fn seed_topology_uniform_adjacent_keeps_ready_cleared() {
 /*
  * Scattered SMT sets ready. Cores out of id order give
  * a core view that differs from halves, so the table
- * holds groups with best effort.
+ * holds groups with best effort iff ready is one.
  */
 #[test]
 fn seed_topology_scattered_sets_ready() {
@@ -1306,22 +1344,28 @@ fn seed_topology_scattered_sets_ready() {
 }
 
 /*
- * Sibling ring maps next in core. Pairs point at each
+ * Sibling table maps next in core. Pairs point at each
  * other. Triples ring in id order. Singletons map to
- * none, so the free check is a no-op.
+ * 0xffff, so the free check is a no-op. Mirrors the BPF
+ * walk with the same table and the same bounds.
  */
 #[test]
-fn sibling_ring_maps_next_with_none_for_singleton() {
+fn sibling_table_maps_next_with_empty_for_singleton() {
     let cores = vec![vec![0, 1], vec![2]];
-    let ring = sibling_ring(&cores, 3);
-    assert_eq!(ring, vec![1, 0, SIBLING_NONE]);
+    let table = sibling_table(&cores, 3);
+    assert_eq!(table[0], 1);
+    assert_eq!(table[1], 0);
+    assert_eq!(table[2], SIBLING_EMPTY);
     let tri = vec![vec![0, 1, 2]];
-    let ring2 = sibling_ring(&tri, 3);
-    assert_eq!(ring2, vec![1, 2, 0]);
+    let table2 = sibling_table(&tri, 3);
+    assert_eq!(table2[0], 1);
+    assert_eq!(table2[1], 2);
+    assert_eq!(table2[2], 0);
     let single = vec![vec![0], vec![1]];
-    let ring3 = sibling_ring(&single, 2);
-    assert_eq!(ring3, vec![SIBLING_NONE, SIBLING_NONE]);
-    assert_eq!(SIBLING_NONE, -1);
+    let table3 = sibling_table(&single, 2);
+    assert_eq!(table3[0], SIBLING_EMPTY);
+    assert_eq!(table3[1], SIBLING_EMPTY);
+    assert_eq!(SIBLING_EMPTY, 0xffff);
 }
 
 /*
@@ -1349,8 +1393,10 @@ fn smt_off_8c_keeps_halves_with_no_trap() {
     }
     let cores = build_cores(nr, &lists);
     assert!(cores_are_singletons(&cores));
-    let ring = sibling_ring(&cores, nr);
-    assert!(ring.iter().all(|&v| v == SIBLING_NONE));
+    let table = sibling_table(&cores, nr);
+    for cpu in 0..nr {
+        assert_eq!(table[cpu], SIBLING_EMPTY);
+    }
 }
 
 /*

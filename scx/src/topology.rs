@@ -134,11 +134,13 @@ pub fn read_cpuinfo_max_freq(cpu: u32) -> u64 {
  * capacity plus max frequency plus siblings plus LLC
  * for live CPUs, then assigns with core split plus LLC
  * rules plus hetero interleave. All singleton cores use
- * halves plus interleave exactly. Uniform hosts keep
- * ready cleared when the core view matches halves, else
- * ready set with best effort. Single CPU keeps ready
- * cleared with all light. Short slices clamp with no
- * pad.
+ * halves plus interleave exactly. Ready stays cleared
+ * when the core view matches halves, else ready set.
+ * Strict iff ready is zero, best effort iff ready is
+ * one. Single CPU keeps ready cleared with all light.
+ * Short slices clamp with no pad. One core in one LLC
+ * keeps LIGHT with no split. Each odd LLC gives the
+ * extra core to hog.
  */
 pub fn group_seed(nr: usize) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
     let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
@@ -175,6 +177,9 @@ pub fn read_thread_siblings(cpu: u32) -> Vec<u32> {
  * Sibling lists for live CPUs. Each entry holds the
  * sibling ids of one CPU in id order. Missing files
  * yield singletons with no trap. Capped at 1024.
+ * Empty entries count as sysfs fallbacks with
+ * singleton behavior. The caller logs the count once
+ * at start with no per CPU log.
  */
 pub fn sibling_lists(nr: usize) -> Vec<Vec<u32>> {
     let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
@@ -183,6 +188,29 @@ pub fn sibling_lists(nr: usize) -> Vec<Vec<u32>> {
         out.push(read_thread_siblings(cpu as u32));
     }
     out
+}
+
+/*
+ * Sibling partner table plus fallback count. Builds
+ * cores from sibling lists, then maps each CPU to the
+ * next CPU in the same core in id order. Singletons
+ * hold 0xffff, so the BPF free check is a no-op.
+ * Empty lists count as sysfs fallbacks with singleton
+ * behavior and no trap. Capped at 1024 with no new
+ * maps. The caller logs the count once at start.
+ */
+pub fn sibling_seed(nr: usize) -> ([u16; crate::flow_group::GROUP_TABLE_LEN], usize) {
+    let n = nr.min(MAX_CPUS).min(crate::flow_group::GROUP_TABLE_LEN);
+    let lists = sibling_lists(n);
+    let mut fallbacks = 0;
+    for v in &lists {
+        if v.is_empty() {
+            fallbacks += 1;
+        }
+    }
+    let cores = crate::flow_group::build_cores(n, &lists);
+    let table = crate::flow_group::sibling_table(&cores, n);
+    (table, fallbacks)
 }
 
 /*

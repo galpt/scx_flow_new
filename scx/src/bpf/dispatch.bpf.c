@@ -14,8 +14,8 @@
 /* jump at 1000001 on asleep check in the steal loop with */
 /* donor asleep handled by idle kick. Tier 3 holds park */
 /* only by construction due to verifier jump at 1000001 */
-/* on donor check in the steal loop. Strict park on */
-/* uniform hosts. Best effort peer plus hetero hosts. */
+/* on donor check in the steal loop. Strict park iff */
+/* ready is zero, best effort peer iff ready is one. */
 /* Dispatch uses halves. Placement uses live table. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)

@@ -154,7 +154,7 @@ static __always_inline bool flow_burst_hot(u64 delta)
 /* single slices. Deep floors at 1ms, so per task worst case */
 /* is the floor during flood. Halves keeps the view matched */
 /* to dispatch isolation with no BSS cost in stopping. */
-/* Strict on uniform hosts. Best effort on hetero hosts. */
+/* Strict iff ready is zero, best effort iff ready is one. */
 static __always_inline u64 flow_burst_allowance(u64 depth)
 {
 	if (depth >= 4)

@@ -34,6 +34,11 @@ volatile u64 flow_burst_allowance_ns;
 /* Halves is the fallback while ready is zero. */
 volatile u8 flow_group_by_cpu[1024];
 volatile u8 flow_group_ready;
+/* Sibling partner seeded by userspace at attach. */
+/* Each CPU holds the next CPU in the same core. */
+/* 0xffff means singleton with no sibling. */
+/* Placement only with no dispatch use. */
+volatile u16 flow_sibling_by_cpu[1024];
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -167,6 +172,93 @@ static __always_inline s32 flow_first_in_group(
 		if (bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
 			return cpu;
+	}
+	return -1;
+}
+/* True when one core holds no running task. */
+/* Needs self plus all siblings idle by pid. */
+/* Singletons read as free with no trap. */
+/* Missing state fails closed with no pick. */
+static __always_inline bool flow_core_free(u32 cpu)
+{
+	struct flow_cpu_state *st;
+	u16 nxt;
+	u32 cur;
+	s32 i;
+	if (!flow_cpu_live(cpu))
+		return false;
+	st = flow_cpu(cpu);
+	if (!st)
+		return false;
+	if (st->running_pid != 0)
+		return false;
+	if (cpu >= 1024)
+		return true;
+	nxt = flow_sibling_by_cpu[cpu];
+	if (nxt == (u16)0xffff)
+		return true;
+	if ((u32)nxt >= (u32)FLOW_MAX_CPUS)
+		return true;
+	if ((u64)nxt >= nr_cpu_ids)
+		return true;
+	if ((u32)nxt == cpu)
+		return true;
+	cur = (u32)nxt;
+	bpf_for(i, 0, 8) {
+		struct flow_cpu_state *sst;
+		u16 after;
+		if (!flow_cpu_live(cur))
+			return true;
+		sst = flow_cpu(cur);
+		if (!sst)
+			return false;
+		if (sst->running_pid != 0)
+			return false;
+		if (cur >= 1024)
+			return true;
+		after = flow_sibling_by_cpu[cur];
+		if (after == (u16)0xffff)
+			return true;
+		if ((u32)after >= (u32)FLOW_MAX_CPUS)
+			return true;
+		if ((u64)after >= nr_cpu_ids)
+			return true;
+		if ((u32)after == cpu)
+			return true;
+		if ((u32)after == cur)
+			return true;
+		cur = (u32)after;
+		if (cur == cpu)
+			return true;
+	}
+	return true;
+}
+/* First free core in one group in id order. */
+/* Scans up to 1024 with early exit on match. */
+/* Needs group plus mask plus free core by pid. */
+/* No claim here, so a miss wastes no idle claim. */
+static __always_inline s32 flow_free_in_group(
+	const struct task_struct *p, u8 group)
+{
+	s32 cpu;
+	bpf_for(cpu, 0, 1024) {
+		u8 g;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		g = flow_group_live((u32)cpu,
+		    nr_cpu_ids);
+		if (g != group)
+			continue;
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr))
+			continue;
+		if (!flow_core_free((u32)cpu))
+			continue;
+		return cpu;
 	}
 	return -1;
 }

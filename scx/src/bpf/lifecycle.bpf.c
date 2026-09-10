@@ -44,12 +44,13 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 /* at 4. Sums light plus hog queued tasks over per CPU */
 /* queues in halves order with early stop when both hit */
 /* 4. Halves matches dispatch isolation with no table */
-/* cost. Placement uses live table, so hetero is best */
-/* effort with strict on uniform hosts. Park stays out, */
-/* so the measure tracks CPU pressure only with one pass */
-/* and bounded cost. Stores depths plus allowance for */
-/* snapshot with no task field. Returns the allowance */
-/* for the burst check. Stopping only, never dispatch. */
+/* cost. Placement uses live table, so strict iff ready */
+/* is zero, best effort iff ready is one. Park stays */
+/* out, so the measure tracks CPU pressure only with */
+/* one pass and bounded cost. Stores depths plus */
+/* allowance for snapshot with no task field. Returns */
+/* the allowance for the burst check. Stopping only, */
+/* never dispatch. */
 static __always_inline u64 flow_refresh_pressure(void)
 {
 	u64 light = 0;
