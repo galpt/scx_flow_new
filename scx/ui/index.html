@@ -296,7 +296,7 @@
           <span class="stat-value" id="preempt-rate">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Preempt skip:</span>
+          Preempt skip (all):</span>
           <span class="stat-value" id="pskip-rate">0</span>
         </div>
       </div>
@@ -383,7 +383,7 @@
           <span class="stat-value" id="pkick">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Preempt skip:</span>
+          Preempt skip (all):</span>
           <span class="stat-value" id="pskip">0</span>
         </div>
       </div>
@@ -444,7 +444,8 @@
      * with no badge. Group shows live table when
      * ready, else halves. Nice plus weight stay
      * display only with dash when idle. Delay shows
-     * latched dot with hollow when clear. */
+     * latched dot with hollow when clear. Delay
+     * persists across idle, idle badge shows stale. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];

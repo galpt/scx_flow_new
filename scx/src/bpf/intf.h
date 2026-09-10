@@ -57,6 +57,12 @@ enum flow_consts {
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
 };
+/* Weight fits u16 for the running repack. */
+/* Nice minus 20 to 19 fits s16 for repack. */
+_Static_assert((FLOW_WEIGHT) <= 65535,
+    "weight fits u16");
+_Static_assert(20 <= 32767,
+    "nice fits s16");
 /* Per task state at 48B with group plus window plus wake. */
 struct flow_task_ctx {
 	u64 est_ns;
@@ -81,7 +87,9 @@ struct flow_cpu_state {
 	u8 delay_cur;
 	u16 delay_cnt;
 };
-/* Scheduler counters at 152B with group detail. */
+/* Counters at 152B with group detail. */
+/* Skipped lumps all fail-closed busy no-kicks. */
+/* Split needs 168B, so lumped keeps 152B. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -363,10 +371,20 @@ static __always_inline u32 flow_stand_clear(u32 cursor)
 	return cursor & ~(u32)FLOW_CURSOR_STAND_BIT;
 }
 /* True when the rate bit is clear for one kick. */
+/* Read only, so claim below does the atomic set. */
 static __always_inline bool flow_rate_clear(u32 cursor)
 {
 	return (cursor &
 	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
+}
+/* Atomically set rate and report prior clear. */
+/* One winner per slice with no check then set. */
+static __always_inline bool flow_rate_claim(u32 *cursor)
+{
+	u32 old;
+	old = __sync_fetch_and_or(cursor,
+	    (u32)FLOW_CURSOR_RATE_BIT);
+	return flow_rate_clear(old);
 }
 /* Delay sample in 32us units from queued count. */
 /* One slice is 31 units, two slices arm at 62. */
@@ -399,6 +417,9 @@ static __always_inline bool flow_delay_armed(u8 win)
 /* True when delay is armed with hysteresis. */
 /* Arms at 62, then holds while win stays at or */
 /* past stand at 31 with the latched flag. */
+/* Persists across idle with no decay sans traffic. */
+/* Idle badge plus delay dot shows the staleness. */
+/* Next running decays at 1/8 per window. */
 static __always_inline bool flow_delay_armed_latched(
 	u8 win, bool held)
 {
@@ -409,6 +430,10 @@ static __always_inline bool flow_delay_armed_latched(
 	return false;
 }
 /* Max of two delay samples with cap at 250. */
+/* Enqueue stamps max only, running owns count. */
+/* One count site keeps 8 runnings per window. */
+/* Max is idempotent, so a lost race drops at most */
+/* one sample with no count skew. */
 static __always_inline u8 flow_delay_max(u8 a,
 	u8 b)
 {
@@ -431,6 +456,9 @@ static __always_inline u8 flow_delay_close(u8 win,
 /* Base is slice times 1024 over weight quartered */
 /* with floor at 64us, so heavy keeps short and */
 /* light keeps long with no trap on zero input. */
+/* Heavy woken keeps short on purpose, so it kicks */
+/* easier. Earliness is judged in woken weight */
+/* domain, occupant weight stays out, see deserved. */
 static __always_inline u64 flow_granule_for_weight(
 	u32 weight, u64 slice)
 {
@@ -453,6 +481,8 @@ static __always_inline u64 flow_granule_for_weight(
 /* True when woken deadline beats frontier plus gran. */
 /* Frontier is the service floor, so beating it by */
 /* granule proves earliness with no occupant state. */
+/* Granule uses woken weight only, occupant weight */
+/* stays out after the frontier compare fix. */
 static __always_inline bool flow_deserved(u64 woken_dl,
 	u64 frontier, u64 granule)
 {
@@ -462,6 +492,8 @@ static __always_inline bool flow_deserved(u64 woken_dl,
 /* True when all five preempt gates pass. */
 /* Armed plus deserved plus rate clear plus same */
 /* group plus mask with fail closed on any clear. */
+/* One skipped count covers all fail-closed no-kicks. */
+/* Disarmed plus rate plus isolation share one count. */
 static __always_inline bool flow_preempt_ok(bool armed,
 	bool deserved, bool rate_clear, bool same_group,
 	bool mask_ok)

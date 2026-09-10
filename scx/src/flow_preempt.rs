@@ -69,7 +69,10 @@ pub fn delay_armed(win: u8) -> bool {
 /*
  * True when delay is armed with hysteresis. Arms
  * at 62, then holds while win stays at or past
- * stand at 31 with the latched flag.
+ * stand at 31 with the latched flag. Persists
+ * across idle with no decay sans traffic. Idle
+ * badge plus delay dot shows the staleness. Next
+ * running decays at 1/8 per window.
  */
 pub fn delay_armed_latched(win: u8, held: bool) -> bool {
     if delay_armed(win) {
@@ -92,6 +95,10 @@ pub fn stand_held(cursor: u32) -> bool {
 
 /*
  * Max of two delay samples with cap at 250.
+ * Enqueue stamps max only, running owns count.
+ * One count site keeps 8 runnings per window.
+ * Max is idempotent, so a lost race drops at most
+ * one sample with no count skew.
  */
 #[cfg(test)]
 pub fn delay_max(a: u8, b: u8) -> u8 {
@@ -117,6 +124,9 @@ pub fn delay_close(win: u8, cur: u8) -> u8 {
  * in the current window, then closes each 8 updates
  * with decay. Fast arm on a high sample, slow fall
  * by 1/8 per window for hysteresis. Integer only.
+ * Running owns this path. Enqueue uses stamp only
+ * with no count, so 8 means 8 runnings with no
+ * double count. Persists across idle with no decay.
  */
 #[cfg(test)]
 pub fn delay_push(win: u8, cur: u8, cnt: u16, sample: u8) -> (u8, u8, u16) {
@@ -140,6 +150,9 @@ pub fn delay_push(win: u8, cur: u8, cnt: u16, sample: u8) -> (u8, u8, u16) {
  * Base is slice times 1024 over weight quartered
  * with floor at 64us, so heavy keeps short and
  * light keeps long with no trap on zero input.
+ * Heavy woken keeps short on purpose, so it kicks
+ * easier. Earliness is judged in woken weight
+ * domain, occupant weight stays out, see deserved.
  */
 #[cfg(test)]
 pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
@@ -197,6 +210,7 @@ pub fn stand_clear(cursor: u32) -> u32 {
 
 /*
  * True when the rate bit is clear for one kick.
+ * Read only, so claim below does the atomic set.
  */
 #[cfg(test)]
 pub fn rate_clear(cursor: u32) -> bool {
@@ -212,9 +226,40 @@ pub fn rate_set(cursor: u32) -> u32 {
 }
 
 /*
+ * Atomically set rate and report prior clear. One
+ * winner per slice with no check then set. Models
+ * the BPF fetch_or claim in enqueue.
+ */
+#[cfg(test)]
+pub fn rate_claim(cursor: &mut u32) -> bool {
+    let old = *cursor;
+    *cursor |= CURSOR_RATE_BIT;
+    rate_clear(old)
+}
+
+/*
+ * Stamp one sample with max only and no count.
+ * Enqueue stamps, running owns count plus close,
+ * so 8 means 8 runnings with no double count.
+ * Max is idempotent, so a lost race drops at most
+ * one sample with no count skew.
+ */
+#[cfg(test)]
+pub fn delay_stamp(win: u8, cur: u8, sample: u8) -> (u8, u8) {
+    let sample = if (sample as u64) > DELAY_MAX {
+        250
+    } else {
+        sample
+    };
+    (delay_max(win, sample), delay_max(cur, sample))
+}
+
+/*
  * True when woken deadline beats frontier plus gran.
  * Frontier is the service floor, so beating it by
  * granule proves earliness with no occupant state.
+ * Granule uses woken weight only, occupant weight
+ * stays out after the frontier compare fix.
  */
 #[cfg(test)]
 pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
@@ -224,7 +269,9 @@ pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
 /*
  * True when all five preempt gates pass. Armed plus
  * deserved plus rate clear plus same group plus mask
- * with fail closed on any clear.
+ * with fail closed on any clear. One skipped count
+ * covers all fail-closed no-kicks. Disarmed plus
+ * rate plus isolation share one count at 152B.
  */
 #[cfg(test)]
 pub fn preempt_ok(

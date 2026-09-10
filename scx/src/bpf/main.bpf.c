@@ -113,6 +113,7 @@ static __always_inline void flow_on_cpu_dec(void)
 	}
 }
 /* Clear rate only plus keep peer plus stand. */
+/* Atomic clear, so a concurrent claim never loses. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -127,7 +128,8 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
-	st->cursor &= ~(u32)FLOW_CURSOR_RATE_BIT;
+	__sync_fetch_and_and(&st->cursor,
+	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Clear running only when the pid owns it, so a disable */
 /* plus an exit never clears a new owner after a switch. */
@@ -148,7 +150,8 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
-	st->cursor &= ~(u32)FLOW_CURSOR_RATE_BIT;
+	__sync_fetch_and_and(&st->cursor,
+	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */

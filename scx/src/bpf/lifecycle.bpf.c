@@ -40,9 +40,13 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->running_pid = (u32)p->pid;
 		st->running_nice = (s16)nice;
 		st->running_weight = (u16)w;
-		st->cursor &= ~(u32)FLOW_CURSOR_RATE_BIT;
-		/* Refresh delay with no loop. Keeps */
-		/* hysteresis with arm 62 stand 31. */
+		__sync_fetch_and_and(&st->cursor,
+		    ~(u32)FLOW_CURSOR_RATE_BIT);
+		/* Own count plus close with no loop. */
+		/* Enqueue stamps max only, so 8 means */
+		/* 8 runnings with no double count. */
+		/* Max is idempotent, persists across */
+		/* idle, next running decays at 1/8. */
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		q = scx_bpf_dsq_nr_queued(dsq);
 		sample = flow_delay_from_queued(q);
@@ -63,11 +67,11 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->delay_cnt = ncnt;
 		if (flow_delay_armed_latched(nwin,
 		    flow_stand_held(st->cursor)))
-			st->cursor =
-			    flow_stand_set(st->cursor);
+			__sync_fetch_and_or(&st->cursor,
+			    (u32)FLOW_CURSOR_STAND_BIT);
 		else
-			st->cursor =
-			    flow_stand_clear(st->cursor);
+			__sync_fetch_and_and(&st->cursor,
+			    ~(u32)FLOW_CURSOR_STAND_BIT);
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
@@ -268,8 +272,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
-	if (!tctx || !tctx->run_at ||
-	    tctx->run_at == (u64)-1) {
+	if (!tctx || !tctx->run_at) {
 		flow_clear_running(cpu);
 		flow_on_cpu_dec();
 		return;

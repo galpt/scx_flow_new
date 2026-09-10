@@ -263,55 +263,35 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
 		/* Kick idle plus busy preempt with delay. */
-		/* Idle keeps at most 2 queued with no storm. */
-		/* Busy needs latched arm 62 stand 31 plus */
-		/* deserved woken dl before frontier plus */
-		/* quarter gran plus rate clear plus same */
-		/* group plus mask with one kick per slice. */
-		/* Frontier is the floor, so beating it by */
-		/* granule proves earliness with no lookup. */
-		/* Fail closed with no kick plus skip count */
-		/* on any clear. No loop. */
+		/* Idle fast path first with one queued read. */
+		/* Busy stamps max only, running owns count. */
+		/* Needs latched arm 62 stand 31 plus deserved */
+		/* woken dl before frontier plus quarter gran */
+		/* plus atomic rate claim plus same group plus */
+		/* mask with one kick per slice. Frontier is */
+		/* the floor, so beating it by granule proves */
+		/* earliness with no lookup. Fail closed with */
+		/* no kick plus lumped skip on any clear. */
+		/* No loop. Delay persists across idle, next */
+		/* running decays, idle badge shows staleness. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u8 sample;
 			u8 win;
 			u8 cur;
-			u16 cnt;
-			u8 nwin;
-			u8 ncur;
-			u16 ncnt;
+			u8 swin;
+			u8 scur;
 			bool held;
 			bool armed;
 			bool is_deserved;
 			u64 granule;
-			bool rate_ok;
 			bool same;
 			bool mask_ok;
-			bool ok;
 			if (!st)
 				return;
 			q = scx_bpf_dsq_nr_queued(dsq);
-			sample = flow_delay_from_queued(q);
-			win = st->delay_win;
-			cur = st->delay_cur;
-			cnt = st->delay_cnt;
-			nwin = flow_delay_max(win, sample);
-			ncur = flow_delay_max(cur, sample);
-			ncnt = cnt + 1;
-			if ((u64)ncnt >=
-			    (u64)FLOW_DELAY_WIN_LEN) {
-				nwin = flow_delay_close(nwin,
-				    ncur);
-				ncur = 0;
-				ncnt = 0;
-			}
-			st->delay_win = nwin;
-			st->delay_cur = ncur;
-			st->delay_cnt = ncnt;
 			if (st->running_pid == 0) {
-				if (scx_bpf_dsq_nr_queued(
-				    dsq) >
+				if (q >
 				    (u64)FLOW_STEAL_MIN_DEPTH)
 					return;
 				scx_bpf_kick_cpu(cpu,
@@ -320,9 +300,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				    &flow_stats.kicks, 1);
 				return;
 			}
+			sample = flow_delay_from_queued(q);
+			win = st->delay_win;
+			cur = st->delay_cur;
+			swin = flow_delay_max(win, sample);
+			scur = flow_delay_max(cur, sample);
+			st->delay_win = swin;
+			st->delay_cur = scur;
 			held = flow_stand_held(st->cursor);
 			armed = flow_delay_armed_latched(
-			    st->delay_win, held);
+			    swin, held);
 			if (armed)
 				__sync_fetch_and_or(&st->cursor,
 				    (u32)FLOW_CURSOR_STAND_BIT);
@@ -333,25 +320,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    slice);
 			is_deserved = flow_deserved(dl,
 			    st->frontier, granule);
-			rate_ok = flow_rate_clear(
-			    st->cursor);
 			same = group ==
 			    flow_group_live((u32)cpu,
 			    nr_cpu_ids);
 			mask_ok =
 			    bpf_cpumask_test_cpu(
 			    (u32)cpu, p->cpus_ptr);
-			ok = flow_preempt_ok(armed,
-			    is_deserved, rate_ok, same,
-			    mask_ok);
-			if (!ok) {
+			if (!flow_preempt_ok(armed,
+			    is_deserved, true, same,
+			    mask_ok)) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped,
 				    1);
 				return;
 			}
-			__sync_fetch_and_or(&st->cursor,
-			    (u32)FLOW_CURSOR_RATE_BIT);
+			if (!flow_rate_claim(&st->cursor)) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				return;
+			}
 			scx_bpf_kick_cpu(cpu,
 			    SCX_KICK_PREEMPT);
 			__sync_fetch_and_add(

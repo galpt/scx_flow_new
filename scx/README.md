@@ -67,13 +67,18 @@ Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 62 stand 31
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
-floor plus clear rate plus same group plus mask with
-one kick per slice. Frontier is the service floor, so
-beating it by granule proves earliness with no occupant
-state. A missed wakeup is rescued on the next insert
-while deep queues stay quiet. Park sends no kick and the
-next dispatch pass collects it. Disarmed stays idle only.
-See `src/bpf/intf.h` plus `src/bpf/enqueue.bpf.c`.
+floor plus atomic rate claim plus same group plus mask
+with one kick per slice. Frontier is the service floor,
+so beating it by granule proves earliness with no
+occupant state. Heavy woken keeps short granule on
+purpose, judged in woken weight domain with no occupant
+weight. One skipped count covers all fail-closed busy
+no-kicks at 152B. Delay persists across idle, idle badge
+shows staleness. A missed wakeup is rescued on the next
+insert while deep queues stay quiet. Park sends no kick
+and the next dispatch pass collects it. Disarmed stays
+idle only. See `src/bpf/intf.h` plus
+`src/bpf/enqueue.bpf.c`.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is

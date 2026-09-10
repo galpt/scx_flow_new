@@ -236,6 +236,56 @@ fn rate_bit_gates_once_per_slice() {
 }
 
 #[test]
+fn rate_claim_wins_once_per_slice() {
+    let mut c = 0u32;
+    assert!(rate_claim(&mut c));
+    assert!(!rate_clear(c));
+    assert!(!rate_claim(&mut c));
+    assert!(!rate_clear(c));
+    assert_eq!(cursor_val(c), 0);
+    let mut d = CURSOR_RATE_BIT | 5;
+    assert!(!rate_claim(&mut d));
+    assert_eq!(cursor_val(d), 5);
+    let mut e = crate::flow_preempt::CURSOR_STAND_BIT | 5;
+    assert!(rate_claim(&mut e));
+    assert!(stand_held(e));
+    assert_eq!(cursor_val(e), 5);
+    assert!(!rate_claim(&mut e));
+}
+
+#[test]
+fn delay_stamp_has_no_count() {
+    let (w, c) = delay_stamp(0, 0, 62);
+    assert_eq!(w, 62);
+    assert_eq!(c, 62);
+    assert!(delay_armed(w));
+    let (w2, c2) = delay_stamp(100, 20, 10);
+    assert_eq!(w2, 100);
+    assert_eq!(c2, 20);
+    let (w3, c3) = delay_stamp(10, 10, 250);
+    assert_eq!(w3, 250);
+    assert_eq!(c3, 250);
+    let mut win = 0u8;
+    let mut cur = 0u8;
+    let mut cnt = 0u16;
+    for _ in 0..7 {
+        let (a, b, d) = delay_push(win, cur, cnt, 0);
+        win = a;
+        cur = b;
+        cnt = d;
+    }
+    assert_eq!(cnt, 7);
+    let (sw, sc) = delay_stamp(win, cur, 62);
+    assert_eq!(sw, 62);
+    assert_eq!(sc, 62);
+    assert_eq!(cnt, 7);
+    let (cw, cc, cn) = delay_push(sw, sc, cnt, 0);
+    assert_eq!(cn, 0);
+    assert_eq!(cc, 0);
+    assert!(delay_armed(cw));
+}
+
+#[test]
 fn cursor_store_keeps_rate_plus_stand() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
     let old = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;

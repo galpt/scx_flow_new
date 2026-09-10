@@ -16,6 +16,10 @@ pub const EST_MIN_NS: u64 = 1;
 pub const EST_MAX_NS: u64 = 1_000_000_000;
 /* Fixed slice in nanos. */
 pub const SLICE_NS: u64 = 1_000_000;
+/* Running repack holds weight in u16. */
+const _: () = assert!(2048 <= u16::MAX as u64);
+/* Running repack holds nice minus 20 to 19 in s16. */
+const _: () = assert!(-20 >= i16::MIN as i32 && 19 <= i16::MAX as i32);
 /* Fixed weight used for virtual time scaling. */
 #[cfg(test)]
 pub const WEIGHT: u64 = 1024;

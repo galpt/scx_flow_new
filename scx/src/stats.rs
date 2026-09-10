@@ -7,7 +7,9 @@
  * count fresh joins. Requeues count runnable slice ends.
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
- * Preempt counts cover busy kicks plus gate skips.
+ * Preempt counts cover busy kicks plus lumped skips.
+ * One skipped count covers all fail-closed no-kicks.
+ * Split needs 168B, so lumped keeps 152B.
  * EDF counts cover ordered inserts with clamp detail.
  * Group counts cover demote plus promote plus wake
  * promote plus pinned inflate plus steal skips. Wake
@@ -91,7 +93,7 @@ pub struct Metrics {
     #[stat(desc = "Busy kicks after armed delay")]
     #[serde(default)]
     pub preempt_kicks: u64,
-    #[stat(desc = "Busy kicks skipped by gates")]
+    #[stat(desc = "All fail-closed busy no-kicks")]
     #[serde(default)]
     pub preempt_skipped: u64,
 }
