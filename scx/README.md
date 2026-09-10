@@ -171,7 +171,7 @@ payload live in `src/stats.rs`, `src/webui.rs` and
 `ui/index.html`.
 
 Ops name is `flow` with a 30 second watchdog. Version
-is `4.2.9` in 4.2 line. Weight stays 1024 with no
+is `4.2.10` in 4.2 line. Weight stays 1024 with no
 knob. The slice stays fixed at 1ms.
 Task state stays at 48B with wake hits at off 46.
 Per-CPU state stays at 24B. Counters stay at 136B. The
@@ -183,7 +183,10 @@ burn only moves, strict on uniform hosts and best effort
 on hetero hosts. The `4.2.9` step keeps task at 48B plus
 per-CPU at 24B plus counters at 136B with idle singleton
 rescue plus idle kick rescue plus running owner clear and
-no new knob.
+no new knob. The `4.2.10` step keeps task at 48B plus
+per-CPU at 24B plus counters at 136B with core plus LLC
+grouping plus free core Tier in placement only plus
+singleton equivalence and no new knob.
 
 ## Typical Use Cases
 
@@ -368,7 +371,7 @@ device IRQs off the measured CPUs. For percentiles, run
 schbench with two message threads (`-m 2`) on an otherwise
 quiet machine. The harness probe wakes each 10ms and records
 wake delay as a light baseline with no realtime use. For
-4.2.9 compare light p95 from the probe plus schbench with
+4.2.10 compare light p95 from the probe plus schbench with
 the same workload and no other change.
 
 ## Limitations

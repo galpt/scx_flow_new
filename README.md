@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.9`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.10`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -197,13 +197,13 @@ For A/B comparison, install
 one build, measure the same workload, then install the other
 build and compare with no other change. The harness probe
 plus the control flag support baseline comparison with no
-scheduler change in the harness. For 4.2.9 compare light p95
+scheduler change in the harness. For 4.2.10 compare light p95
 from the probe plus schbench with the same workload.
 
 ### Limits
 
 Version stays in
-4.2 line at `4.2.9`. Weight stays 1024 with no knob.
+4.2 line at `4.2.10`. Weight stays 1024 with no knob.
 Groups stay fixed at two with no knob. The slice
 stays fixed at 1ms.
 
@@ -220,7 +220,10 @@ and best effort on hetero hosts, task at 48B, and
 counters at 136B with wake detail. The `4.2.9` step keeps
 task at 48B plus per-CPU at 24B plus counters at 136B with
 idle singleton rescue plus idle kick rescue plus running
-owner clear and no new knob. The `4.2.6` base is the last
+owner clear and no new knob. The `4.2.10` step keeps task
+at 48B plus per-CPU at 24B plus counters at 136B with core
+plus LLC grouping plus free core Tier in placement only
+plus singleton equivalence and no new knob. The `4.2.6` base is the last
 stable line. The `4.3.x` plus `4.4.0` lines were tried and
 failed with stalls and were abandoned.
 
@@ -282,7 +285,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.9`, state `enabled` and ops
+Expect version `4.2.10`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir
