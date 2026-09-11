@@ -396,8 +396,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			    (u32)FLOW_CPUPERF_IDLE;
 			/* M2 keeps the M1 predicate but maps */
 			/* the decayed EMA with no hard zero. */
-			/* Long idle still maps to zero via */
-			/* the 64 period decay to zero. */
+			/* Long sleep decays to zero before */
+			/* the climb, so zero delta maps zero. */
 			if (st)
 				perf = flow_cpuperf_from_ema(
 				    st->cpuperf_ema);

@@ -51,8 +51,9 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Read one CPU state without heap use. Failed
-     * lookups yield an idle view with fixed slice.
-     * Slice stays fixed at 1ms.
+     * lookups yield an idle view with fixed slice
+     * plus zero EMA. Slice stays fixed at 1ms.
+     * Zero EMA matches BSS plus init with no trap.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {

@@ -89,7 +89,8 @@ struct flow_task_ctx {
 /* cpuperf EMA at 32B base with 16B EMA tail. EMA holds */
 /* the proportional budget in nanos capped at 1ms, at */
 /* holds the last EMA update time in nanos. BSS zero */
-/* covers the cold start with no explicit init cost. */
+/* covers the cold start plus explicit zero kept as */
+/* verify for the 32B to 48B growth with no trap. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;

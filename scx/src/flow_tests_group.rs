@@ -1881,11 +1881,12 @@ fn least_keeps_bound_plus_halves_view() {
 }
 
 /*
- * Running sets the uniform cpu perf level at max.
- * Both groups share 1024 with no per group hint, so
- * the running path holds high with no EMA plus no
- * state growth. Locks the BPF header plus the Rust
- * mirror with no stats change.
+ * Running maps the stored EMA uniform both groups.
+ * Both groups share the same map from the stored
+ * EMA with no per group hint, so cold zero maps to
+ * zero until the first climb. Init plus no state
+ * holds max 1024. Locks the BPF header plus the
+ * Rust mirror with no stats change.
  */
 #[test]
 fn running_sets_cpuperf_level() {
@@ -1908,9 +1909,10 @@ fn running_sets_cpuperf_level() {
 /*
  * Idle restore needs blocked plus empty queues.
  * Only blocked with per CPU empty plus local empty
- * restores zero, so runnable never restores with any
- * queued work held high. Mirrors the BPF helper with
- * no EMA plus no state growth.
+ * restores, so runnable never restores with any
+ * queued work held high. Predicate holds with no
+ * EMA, M2 maps the decayed EMA with from_ema, so
+ * long idle still maps to zero.
  */
 #[test]
 fn idle_restore_needs_blocked_and_empty() {
@@ -1993,9 +1995,10 @@ fn ema_climb_vectors_match_spec() {
 
 /*
  * EMA decay halves whole periods plus Taylor residual.
- * Zero sleep keeps identity, at or past 64 periods maps
- * to zero, one half-life maps to half exactly via shift,
- * half of a half-life lands near 0.71x via the 2nd-order
+ * Zero sleep keeps identity, zero half keeps identity
+ * with no divide, at or past 64 periods maps to zero,
+ * one half-life maps to half exactly via shift, half
+ * of a half-life lands near 0.71x via the 2nd-order
  * Taylor with no float plus no loop.
  */
 #[test]

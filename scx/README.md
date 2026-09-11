@@ -130,6 +130,21 @@ No CLI knob changes this. See `src/bpf/intf.h` plus
 plus `src/topology.rs` plus `src/snapshot.rs` plus
 `ui/index.html`.
 
+### Cpu perf
+
+Running maps the stored EMA to 0 to 1024
+uniform both groups with no tier. Stopping
+decays by elapsed with 24ms half-life then
+climbs on the burst toward the 1ms budget
+with 12x in FP8, so boost follows load with
+fast attack plus slow decay. Blocked with
+empty queues maps the decayed EMA, long sleep
+with no burst still maps to zero via 64
+period decay. Init plus no state holds max
+1024. See `src/bpf/intf.h` plus
+`src/bpf/lifecycle.bpf.c` plus
+`src/bpf/main.bpf.c`.
+
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is
 in `Cargo.toml`.

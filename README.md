@@ -161,6 +161,21 @@ plus `scx/src/bpf/select_cpu.bpf.c` plus
 `scx/src/bpf/enqueue.bpf.c` plus `scx/src/topology.rs`
 plus `scx/src/snapshot.rs` plus `scx/ui/index.html`.
 
+### Cpu perf
+
+Running maps the stored EMA to 0 to 1024
+uniform both groups with no tier. Stopping
+decays by elapsed with 24ms half-life then
+climbs on the burst toward the 1ms budget
+with 12x in FP8, so boost follows load with
+fast attack plus slow decay. Blocked with
+empty queues maps the decayed EMA, long sleep
+with no burst still maps to zero via 64
+period decay. Init plus no state holds max
+1024. See `scx/src/bpf/intf.h` plus
+`scx/src/bpf/lifecycle.bpf.c` plus
+`scx/src/bpf/main.bpf.c`.
+
 ### Counts and queues
 
 Counters cover inserts, completions, steals, kicks,
