@@ -53,10 +53,13 @@ Each CPU keeps an ordered queue plus one park queue per
 group. Earliest deadline runs first with arrival order
 for ties. The deadline adds clamped virtual time and a
 scaled burst estimate at live weight from nice. Exiting
-tasks run at once on this CPU via local with no order
-wait. Falls back when this CPU is not allowed. The math
-lives in `scx/src/bpf/intf.h`, inserts in
-`scx/src/bpf/enqueue.bpf.c`.
+tasks run at once on the task CPU via LOCAL_ON with
+no order wait. The task CPU wins over the enqueuer,
+so an exit enqueued elsewhere still runs where the
+task lives. Single insert with an idle kick only
+plus no coalesce. Falls back when the task CPU is
+not allowed. The math lives in `scx/src/bpf/intf.h`,
+inserts in `scx/src/bpf/enqueue.bpf.c`.
 
 ### Fixed slice
 
@@ -132,7 +135,9 @@ skips when not pinned with no slide, single queued
 always kicks, deep stays quiet, pinned never skips.
 Delay persists across idle, delay shows stale
 when idle. A missed wakeup is rescued on the next
-insert while deep queues stay quiet. Park sends
+insert while deep queues stay quiet. Exiting uses
+a separate idle kick on the task CPU with no depth
+plus no coalesce plus no preempt. Park sends
 no kick and the next pass collects it. Disarmed
 stays idle only. See `scx/src/bpf/intf.h` plus
 `scx/src/bpf/main.bpf.c` plus

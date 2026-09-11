@@ -83,13 +83,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 est = 0;
 	u64 slice = (u64)FLOW_SLICE_NS;
 	/* Exiting tasks run at once on the task CPU */
-	/* with no order wait, so short exits never */
-	/* stall in a queue behind other work. Task */
-	/* CPU wins over the enqueuer, so an exit */
-	/* enqueued elsewhere still runs where the */
-	/* task lives. Falls back when the task CPU */
-	/* is not allowed. Idle kick only with no */
-	/* coalesce plus no preempt. */
+	/* via LOCAL_ON with no order wait, so short */
+	/* exits never stall in a queue behind other */
+	/* work. Task CPU wins over the enqueuer, so */
+	/* an exit enqueued elsewhere still runs where */
+	/* the task lives. Single insert plus return */
+	/* with no double enqueue. Falls back when the */
+	/* task CPU is not allowed. Idle kick only with */
+	/* no coalesce plus no preempt. */
 	if (p->flags & PF_EXITING) {
 		s32 tgt = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, tgt)) {

@@ -746,11 +746,12 @@ pub fn select_cpu_tiered_perf(
 /*
  * True when an exiting task may run at once on the task CPU.
  * Needs an exiting task with the task CPU allowed, so short
- * exits skip order wait with no queue stall. The task CPU
- * wins over the enqueuer, so an exit enqueued elsewhere
- * still runs where the task lives. Falls back to the normal
- * path exactly once when the task CPU is not allowed with
- * no double enqueue. Non-exiting tasks never take this path.
+ * exits skip order wait via LOCAL_ON with no queue stall.
+ * The task CPU wins over the enqueuer, so an exit enqueued
+ * elsewhere still runs where the task lives. Falls back
+ * to the normal path exactly once when the task CPU is
+ * not allowed with no double enqueue. Non-exiting tasks
+ * never take this path.
  */
 #[cfg(test)]
 pub fn exiting_local_ok(exiting: bool, tgt_allowed: bool) -> bool {
