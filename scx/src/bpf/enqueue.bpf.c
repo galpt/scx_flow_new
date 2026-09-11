@@ -20,7 +20,8 @@ static __always_inline bool flow_task_pinned(
 		return true;
 	return false;
 }
-/* Target in one group from selected plus first. */
+/* Target in one group from selected plus least. */
+/* Least picks lowest queued depth with lowest id on ties. */
 static __always_inline s32 flow_pick_in_group(
 	const struct task_struct *p, s32 sel,
 	u8 group)

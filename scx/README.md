@@ -49,8 +49,10 @@ ready is one.
 ### Placement
 
 Order is waker CPU when idle in group, free core in group,
-any idle in group, prior, current, then first allowed,
-and the task mask always wins. An idle core cannot
+any idle in group, prior, current, then least queued
+in group, then first allowed, and the task mask
+always wins. Least picks lowest queued depth with
+lowest id on ties. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
 park in order in the task group. Frequency cards stay
