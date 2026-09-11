@@ -82,17 +82,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u8 group;
 	u64 est = 0;
 	u64 slice = (u64)FLOW_SLICE_NS;
-	/* Exiting tasks run at once on this CPU with */
-	/* no order wait, so short exits never stall in */
-	/* a queue behind other work. Falls back when */
-	/* this CPU is not allowed. */
+	/* Exiting tasks run at once on the task CPU */
+	/* with no order wait, so short exits never */
+	/* stall in a queue behind other work. Task */
+	/* CPU wins over the enqueuer, so an exit */
+	/* enqueued elsewhere still runs where the */
+	/* task lives. Falls back when the task CPU */
+	/* is not allowed. Idle kick only with no */
+	/* coalesce plus no preempt. */
 	if (p->flags & PF_EXITING) {
-		s32 here =
-		    (s32)bpf_get_smp_processor_id();
-		if (flow_cpu_ok(p, here)) {
+		s32 tgt = scx_bpf_task_cpu(p);
+		if (flow_cpu_ok(p, tgt)) {
+			struct flow_cpu_state *tst;
 			scx_bpf_dsq_insert(p,
-			    (u64)SCX_DSQ_LOCAL, slice,
-			    enq_flags);
+			    (u64)SCX_DSQ_LOCAL_ON | (u64)tgt,
+			    slice, enq_flags);
+			tst = flow_cpu((u32)tgt);
+			if (tst && tst->running_pid == 0) {
+				scx_bpf_kick_cpu(tgt,
+				    SCX_KICK_IDLE);
+				__sync_fetch_and_add(
+				    &flow_stats.kicks, 1);
+			}
 			return;
 		}
 	}

@@ -322,8 +322,9 @@ fn kick_recent_needs_50us_with_zero_open() {
 /*
  * Coalesce needs q2 plus idle plus recent plus not
  * pinned. Q1 plus busy plus missing plus pinned stay
- * open with a kick. Park plus exiting stay out with
- * no kick use, see park plus exiting helpers.
+ * open with a kick. Park stays out with no kick use,
+ * see park helper. Exiting uses its own idle kick with
+ * no coalesce, see exiting helpers.
  */
 #[test]
 fn kick_coalesce_needs_q2_idle_recent_unpinned() {
@@ -395,12 +396,122 @@ fn kick_pinned_never_skips_no_slide() {
     assert!(kick_recent(kept + 10_000, kept));
 }
 
+/*
+ * Exiting fast path follows the task CPU with an idle
+ * kick. The task CPU wins over the enqueuer, so an exit
+ * enqueued elsewhere still runs where the task lives.
+ * Fallback runs the normal path exactly once with no
+ * double enqueue. Non-exiting tasks never take this path.
+ */
 #[test]
-fn exiting_runs_at_once_on_allowed_current() {
+fn exiting_runs_at_once_on_allowed_tgt() {
     assert!(exiting_local_ok(true, true));
     assert!(!exiting_local_ok(true, false));
     assert!(!exiting_local_ok(false, true));
     assert!(!exiting_local_ok(false, false));
+}
+
+/*
+ * Enqueuer differs from the task CPU. The decision follows
+ * the task CPU mask only, so an allowed task CPU wins even
+ * when the enqueuer is foreign, and a foreign task CPU
+ * falls back even when the enqueuer is allowed. Mirrors the
+ * BPF fix from here equals smp id to tgt equals task cpu.
+ */
+#[test]
+fn exiting_uses_task_cpu_not_enqueuer() {
+    let allowed = [false, true, true, false];
+    let enqueuer = 0;
+    let tgt = 1;
+    assert!(!may_run_on(enqueuer, &allowed));
+    assert!(may_run_on(tgt, &allowed));
+    assert!(exiting_local_ok(true, may_run_on(tgt, &allowed)));
+    let allowed2 = [true, false, false, false];
+    let enqueuer2 = 0;
+    let tgt2 = 1;
+    assert!(may_run_on(enqueuer2, &allowed2));
+    assert!(!may_run_on(tgt2, &allowed2));
+    assert!(!exiting_local_ok(true, may_run_on(tgt2, &allowed2)));
+    assert_eq!(stay_target(tgt, 4, &allowed), Some(1));
+    assert_eq!(stay_target(enqueuer, 4, &allowed), None);
+}
+
+/*
+ * Kick on idle with no depth plus no coalesce plus no rate.
+ * Any queue state kicks when the task CPU is idle with a
+ * live state, so q0 plus q1 plus q2 all wake at once.
+ */
+#[test]
+fn exiting_kick_on_idle() {
+    assert!(exiting_kick_ok(0, true));
+    assert!(exiting_local_ok(true, true) && exiting_kick_ok(0, true));
+}
+
+/*
+ * No kick when busy or when the target state is missing.
+ * Busy task CPUs stay quiet with no preempt, and a missing
+ * state fails closed with no kick. Mirrors the BPF tst plus
+ * running pid check with no kick at plus no coalesce.
+ */
+#[test]
+fn exiting_no_kick_when_busy_or_missing() {
+    assert!(!exiting_kick_ok(7, true));
+    assert!(!exiting_kick_ok(1, true));
+    assert!(!exiting_kick_ok(0, false));
+    assert!(!exiting_kick_ok(99, false));
+    assert!(!kick_idle_ok(3, 0, true));
+    assert!(exiting_local_ok(true, true));
+    assert!(!exiting_kick_ok(9, true));
+}
+
+/*
+ * Fallback runs the normal path exactly once with no double
+ * enqueue. An exiting task with a foreign task CPU skips the
+ * fast insert plus the fast kick, then the normal path
+ * inserts once. Counts model single insert plus no double.
+ */
+#[test]
+fn exiting_fallback_single_insert_no_double() {
+    let fast = exiting_local_ok(true, false);
+    assert!(!fast);
+    let fast_inserts = if fast { 1 } else { 0 };
+    let fast_kicks = if fast && exiting_kick_ok(0, true) {
+        1
+    } else {
+        0
+    };
+    let normal_inserts = if !fast { 1 } else { 0 };
+    assert_eq!(fast_inserts, 0);
+    assert_eq!(fast_kicks, 0);
+    assert_eq!(normal_inserts, 1);
+    assert_eq!(fast_inserts + normal_inserts, 1);
+    let fast_hit = exiting_local_ok(true, true);
+    assert!(fast_hit);
+    let hit_fast = if fast_hit { 1 } else { 0 };
+    let hit_normal = if !fast_hit { 1 } else { 0 };
+    assert_eq!(hit_fast, 1);
+    assert_eq!(hit_normal, 0);
+    assert_eq!(hit_fast + hit_normal, 1);
+}
+
+/*
+ * Non-exiting tasks never take the fast path and keep the
+ * normal kick rules. The fast gate stays closed for any tgt
+ * mask, park stays kickless, and the normal idle plus
+ * coalesce helpers stay unchanged.
+ */
+#[test]
+fn exiting_non_exiting_unchanged() {
+    assert!(!exiting_local_ok(false, true));
+    assert!(!exiting_local_ok(false, false));
+    assert!(kick_idle_ok(0, 0, true));
+    assert!(kick_idle_ok(1, 0, true));
+    assert!(!kick_idle_ok(3, 0, true));
+    assert!(!park_kick_ok());
+    let now = 1_000_000u64;
+    let recent = now - 10_000;
+    assert!(kick_coalesced(2, 0, true, false, now, recent));
+    assert!(!kick_coalesced(1, 0, true, false, now, recent));
 }
 
 #[test]

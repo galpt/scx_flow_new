@@ -744,14 +744,35 @@ pub fn select_cpu_tiered_perf(
 }
 
 /*
- * True when an exiting task may run at once on this CPU.
- * Needs an exiting task with this CPU allowed, so short
- * exits skip order wait with no queue stall. Falls back
- * when this CPU is not allowed.
+ * True when an exiting task may run at once on the task CPU.
+ * Needs an exiting task with the task CPU allowed, so short
+ * exits skip order wait with no queue stall. The task CPU
+ * wins over the enqueuer, so an exit enqueued elsewhere
+ * still runs where the task lives. Falls back to the normal
+ * path exactly once when the task CPU is not allowed with
+ * no double enqueue. Non-exiting tasks never take this path.
  */
 #[cfg(test)]
-pub fn exiting_local_ok(exiting: bool, current_allowed: bool) -> bool {
-    exiting && current_allowed
+pub fn exiting_local_ok(exiting: bool, tgt_allowed: bool) -> bool {
+    exiting && tgt_allowed
+}
+
+/*
+ * True when an exiting fast path may kick the task CPU.
+ * Needs the target state with no running task, so an idle
+ * task CPU wakes at once for the exit. No queued depth plus
+ * no coalesce plus no rate check, so q0 plus q1 plus q2 all
+ * kick when idle with no slide. Busy targets stay quiet. A
+ * missing state fails closed with no kick. Callers gate on
+ * exiting_local_ok first, so non-exiting plus fallback paths
+ * never kick here.
+ */
+#[cfg(test)]
+pub fn exiting_kick_ok(running_pid: u32, has_state: bool) -> bool {
+    if !has_state {
+        return false;
+    }
+    running_pid == 0
 }
 
 /*
@@ -791,7 +812,8 @@ pub fn kick_recent(now: u64, last: u64) -> bool {
  * q2 plus idle plus recent plus not pinned, so q1 always
  * kicks and deep stays quiet with no count. Pinned never
  * skips. No slide on skip, the caller keeps the old last.
- * Park plus exiting stay out with no kick use.
+ * Park stays out with no kick use. Exiting uses its own
+ * idle kick with no coalesce, see exiting_kick_ok.
  */
 #[cfg(test)]
 pub fn kick_coalesced(
