@@ -55,7 +55,9 @@ enum flow_consts {
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
 	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
-	FLOW_CURSOR_MASK = 0x7ffffbffULL,
+	FLOW_CURSOR_STORM_BIT = 0x800ULL,
+	FLOW_CURSOR_MASK = 0x7ffff3ffULL,
+	FLOW_STORM_DELAY_WIN = 62ULL,
 	FLOW_KICK_COALESCE_NS = 50000ULL,
 };
 /* Weight fits u16 for the running repack. */
@@ -344,8 +346,8 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 	return waking_v;
 }
 /* Next peer for steal scan with rotating cursor. */
-/* Masks rate plus stand, so one kick per slice keeps */
-/* the scan order with no extra state. */
+/* Masks rate plus stand plus storm, so two kicks per */
+/* slice keep the scan order with no extra state. */
 static __always_inline u32 flow_steal_next(u32 cursor,
 	u32 nr_cpus)
 {
@@ -355,20 +357,29 @@ static __always_inline u32 flow_steal_next(u32 cursor,
 	cur = cursor & (u32)FLOW_CURSOR_MASK;
 	return (cur + 1) % nr_cpus;
 }
-/* Cursor peer without rate plus stand. */
+/* Cursor peer without rate plus stand plus storm. */
 static __always_inline u32 flow_cursor_val(u32 cursor)
 {
 	return cursor & (u32)FLOW_CURSOR_MASK;
 }
 /* True when the stand latch is held in bit10. */
-/* Bits 0 to 9 hold peer, bit10 holds stand, top */
-/* holds rate, so rotation masks both flags. */
+/* Bits 0 to 9 hold peer, bit10 holds stand, bit11 */
+/* holds storm, top holds rate, so rotation masks all */
+/* three flags. */
 static __always_inline bool flow_stand_held(u32 cursor)
 {
 	return (cursor &
 	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
 }
-/* Store peer plus keep rate plus stand. */
+/* True when the storm slot is held in bit11. */
+/* Storm allows one extra kick per slice, so max is */
+/* two per slice per CPU with rate plus storm. */
+static __always_inline bool flow_storm_held(u32 cursor)
+{
+	return (cursor &
+	    (u32)FLOW_CURSOR_STORM_BIT) != 0;
+}
+/* Store peer plus keep rate plus stand plus storm. */
 /* Dispatch CAS keeps fresh flags, model */
 /* is sequential form, timing only. */
 static __always_inline u32 flow_cursor_store(u32 peer,
@@ -376,20 +387,36 @@ static __always_inline u32 flow_cursor_store(u32 peer,
 {
 	return (peer & (u32)FLOW_CURSOR_MASK) |
 	    (old & ((u32)FLOW_CURSOR_RATE_BIT |
-	    (u32)FLOW_CURSOR_STAND_BIT));
+	    (u32)FLOW_CURSOR_STAND_BIT |
+	    (u32)FLOW_CURSOR_STORM_BIT));
 }
-/* Set the stand latch plus keep peer plus rate. */
+/* Set the stand latch plus keep peer plus rate plus */
+/* storm. */
 static __always_inline u32 flow_stand_set(u32 cursor)
 {
 	return cursor | (u32)FLOW_CURSOR_STAND_BIT;
 }
-/* Clear the stand latch plus keep peer plus rate. */
+/* Clear the stand latch plus keep peer plus rate plus */
+/* storm. */
 static __always_inline u32 flow_stand_clear(u32 cursor)
 {
 	return cursor & ~(u32)FLOW_CURSOR_STAND_BIT;
 }
+/* Set the storm slot plus keep peer plus rate plus */
+/* stand. */
+static __always_inline u32 flow_storm_set(u32 cursor)
+{
+	return cursor | (u32)FLOW_CURSOR_STORM_BIT;
+}
+/* Clear the storm slot plus keep peer plus rate plus */
+/* stand. */
+static __always_inline u32 flow_storm_clear(u32 cursor)
+{
+	return cursor & ~(u32)FLOW_CURSOR_STORM_BIT;
+}
 /* True when the rate bit is clear for one kick. */
 /* Read only, so claim below does the atomic set. */
+/* Storm holds the second kick, see storm claim. */
 static __always_inline bool flow_rate_clear(u32 cursor)
 {
 	return (cursor &
@@ -397,12 +424,31 @@ static __always_inline bool flow_rate_clear(u32 cursor)
 }
 /* Atomically set rate and report prior clear. */
 /* One winner per slice with no check then set. */
+/* Storm adds one extra, so max is two per slice. */
 static __always_inline bool flow_rate_claim(u32 *cursor)
 {
 	u32 old;
 	old = __sync_fetch_and_or(cursor,
 	    (u32)FLOW_CURSOR_RATE_BIT);
 	return flow_rate_clear(old);
+}
+/* True when the storm slot is clear for a second kick. */
+/* Read only, so claim below does the atomic set. */
+static __always_inline bool flow_storm_clear_for_kick(
+	u32 cursor)
+{
+	return (cursor &
+	    (u32)FLOW_CURSOR_STORM_BIT) == 0;
+}
+/* Atomically set storm and report prior clear. */
+/* One extra winner per slice with no check then set. */
+/* Max is two per slice per CPU with rate plus storm. */
+static __always_inline bool flow_storm_claim(u32 *cursor)
+{
+	u32 old;
+	old = __sync_fetch_and_or(cursor,
+	    (u32)FLOW_CURSOR_STORM_BIT);
+	return flow_storm_clear_for_kick(old);
 }
 /* Delay sample in 32us units from queued count. */
 /* One queued is 31 units, half slice arms at 16. */
@@ -507,6 +553,36 @@ static __always_inline bool flow_deserved(u64 woken_dl,
 {
 	return flow_time_before(woken_dl,
 	    frontier + granule);
+}
+/* True when woken deadline beats frontier plus half */
+/* granule. Twice as strict as deserved, so only very */
+/* early wakeups pass. Uses woken weight only with no */
+/* floor on the half, storm only with no thrash. */
+static __always_inline bool flow_storm_deserved(
+	u64 woken_dl, u64 frontier, u64 granule)
+{
+	return flow_time_before(woken_dl,
+	    frontier + (granule >> 1));
+}
+/* True when delay shows storm at two queued. */
+/* 62 is delay from two queued, so storm needs at */
+/* least two queued with no extra state. */
+static __always_inline bool flow_storm_delay(u8 win)
+{
+	return (u64)win >= (u64)FLOW_STORM_DELAY_WIN;
+}
+/* True when a storm second kick may run. */
+/* Needs storm delay at 62 plus twice deserved with */
+/* half granule. Rate plus storm cap at two per slice */
+/* per CPU with atomic storm claim. First kick uses */
+/* rate, second uses storm, both clear per slice. */
+static __always_inline bool flow_storm_ok(u8 win,
+	u64 woken_dl, u64 frontier, u64 granule)
+{
+	if (!flow_storm_delay(win))
+		return false;
+	return flow_storm_deserved(woken_dl, frontier,
+	    granule);
 }
 /* True when all five preempt gates pass. */
 /* Armed plus deserved plus same group plus mask plus */

@@ -283,14 +283,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Needs latched arm 16 stand 8 plus deserved */
 		/* woken dl before frontier plus quarter gran */
 		/* plus same group plus mask plus atomic rate */
-		/* claim with one kick per slice. Frontier is */
-		/* the floor, so beating it by granule proves */
-		/* earliness with no lookup. Fail closed with */
-		/* no kick plus total plus reason in branch */
-		/* order armed plus deserved plus group plus */
-		/* mask plus rate. No loop. Delay persists */
-		/* across idle, next running decays, delay */
-		/* shows stale idle. */
+		/* claim with one kick per slice plus storm */
+		/* second at delay 62 plus half gran with max */
+		/* two per slice. Frontier is the floor, so */
+		/* beating it by granule proves earliness with */
+		/* no lookup. Fail closed with no kick plus */
+		/* total plus reason in branch order armed plus */
+		/* deserved plus group plus mask plus rate. */
+		/* Storm rechecks delay plus twice deserved */
+		/* after rate miss with atomic storm claim. */
+		/* No loop. Delay persists across idle, next */
+		/* running decays, delay shows stale idle. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u64 now;
@@ -410,6 +413,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				return;
 			}
 			if (!flow_rate_claim(&st->cursor)) {
+				if (flow_storm_ok(swin, dl,
+				    st->frontier, granule) &&
+				    flow_storm_claim(
+				    &st->cursor)) {
+					scx_bpf_kick_cpu(cpu,
+					    SCX_KICK_PREEMPT);
+					__sync_fetch_and_add(
+					    &flow_stats.preempt_kicks,
+					    1);
+					return;
+				}
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped,
 				    1);

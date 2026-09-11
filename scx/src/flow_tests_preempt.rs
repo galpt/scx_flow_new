@@ -45,8 +45,16 @@ fn delay_consts_match_header() {
         crate::bpf_intf::flow_consts_FLOW_CURSOR_STAND_BIT as u32
     );
     assert_eq!(
+        crate::flow_preempt::CURSOR_STORM_BIT,
+        crate::bpf_intf::flow_consts_FLOW_CURSOR_STORM_BIT as u32
+    );
+    assert_eq!(
         CURSOR_MASK,
         crate::bpf_intf::flow_consts_FLOW_CURSOR_MASK as u32
+    );
+    assert_eq!(
+        STORM_DELAY_WIN,
+        crate::bpf_intf::flow_consts_FLOW_STORM_DELAY_WIN as u64
     );
     assert_eq!(DELAY_UNIT_NS, 32_000);
     assert_eq!(DELAY_MAX, 250);
@@ -55,7 +63,9 @@ fn delay_consts_match_header() {
     assert_eq!(DELAY_WIN_LEN, 8);
     assert_eq!(GRANULE_FLOOR_NS, 64_000);
     assert_eq!(crate::flow_preempt::CURSOR_STAND_BIT, 0x400);
-    assert_eq!(CURSOR_MASK, 0x7fff_fbff);
+    assert_eq!(crate::flow_preempt::CURSOR_STORM_BIT, 0x800);
+    assert_eq!(CURSOR_MASK, 0x7fff_f3ff);
+    assert_eq!(STORM_DELAY_WIN, 62);
 }
 
 #[test]
@@ -212,6 +222,7 @@ fn frontier_deserved_beats_floor_by_granule() {
 #[test]
 fn rate_bit_gates_once_per_slice() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
+    use crate::flow_preempt::CURSOR_STORM_BIT;
     assert!(rate_clear(0));
     assert!(rate_clear(5));
     assert!(rate_clear(CURSOR_MASK));
@@ -219,6 +230,11 @@ fn rate_bit_gates_once_per_slice() {
     assert!(!rate_clear(CURSOR_RATE_BIT | 5));
     assert_eq!(cursor_val(CURSOR_RATE_BIT | 5), 5);
     assert_eq!(cursor_val(CURSOR_STAND_BIT | 5), 5);
+    assert_eq!(cursor_val(CURSOR_STORM_BIT | 5), 5);
+    assert_eq!(
+        cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 5),
+        5
+    );
     assert_eq!(cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 5), 5);
     assert_eq!(cursor_val(5), 5);
     assert_eq!(cursor_val(0), 0);
@@ -231,9 +247,15 @@ fn rate_bit_gates_once_per_slice() {
     let masked_stand = cursor_val(CURSOR_STAND_BIT | 2);
     assert_eq!(masked_stand, 2);
     assert_eq!(steal_next(masked_stand, 4), 3);
+    let masked_storm = cursor_val(CURSOR_STORM_BIT | 2);
+    assert_eq!(masked_storm, 2);
+    assert_eq!(steal_next(masked_storm, 4), 3);
     let both = cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
     assert_eq!(both, 2);
     assert_eq!(steal_next(both, 4), steal_next(2, 4));
+    let all = cursor_val(CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 2);
+    assert_eq!(all, 2);
+    assert_eq!(steal_next(all, 4), steal_next(2, 4));
 }
 
 #[test]
@@ -252,6 +274,10 @@ fn rate_claim_wins_once_per_slice() {
     assert!(stand_held(e));
     assert_eq!(cursor_val(e), 5);
     assert!(!rate_claim(&mut e));
+    let mut f = crate::flow_preempt::CURSOR_STORM_BIT | 5;
+    assert!(rate_claim(&mut f));
+    assert!(storm_held(f));
+    assert_eq!(cursor_val(f), 5);
 }
 
 #[test]
@@ -289,14 +315,22 @@ fn delay_stamp_has_no_count() {
 #[test]
 fn cursor_store_keeps_rate_plus_stand() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
-    let old = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
-    assert_eq!(cursor_store(2, old), CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    use crate::flow_preempt::CURSOR_STORM_BIT;
+    let old = CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 7;
+    assert_eq!(
+        cursor_store(2, old),
+        CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 2
+    );
     assert_eq!(cursor_store(2, 0), 2);
     assert_eq!(cursor_store(2, CURSOR_RATE_BIT | 7), CURSOR_RATE_BIT | 2);
     assert_eq!(cursor_store(2, CURSOR_STAND_BIT | 7), CURSOR_STAND_BIT | 2);
+    assert_eq!(cursor_store(2, CURSOR_STORM_BIT | 7), CURSOR_STORM_BIT | 2);
     assert_eq!(stand_set(5), CURSOR_STAND_BIT | 5);
     assert!(stand_held(stand_set(5)));
     assert!(!stand_held(stand_clear(stand_set(5))));
+    assert_eq!(storm_set(5), CURSOR_STORM_BIT | 5);
+    assert!(storm_held(storm_set(5)));
+    assert!(!storm_held(storm_clear(storm_set(5))));
     assert_eq!(cursor_val(cursor_store(2, old)), 2);
     assert_eq!(
         steal_next(cursor_val(cursor_store(9, old)), 16),
@@ -411,14 +445,19 @@ fn delay_max_concurrent_keeps_bound() {
 #[test]
 fn cursor_cas_keeps_fresh_flags() {
     use crate::flow_preempt::CURSOR_STAND_BIT;
+    use crate::flow_preempt::CURSOR_STORM_BIT;
     let old = 7u32;
-    let fresh = CURSOR_RATE_BIT | CURSOR_STAND_BIT | 7;
+    let fresh = CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 7;
     let peer = 2u32;
     let stale = cursor_store(peer, old);
     let kept = cursor_store(peer, fresh);
     assert_eq!(stale, 2);
-    assert_eq!(kept, CURSOR_RATE_BIT | CURSOR_STAND_BIT | 2);
+    assert_eq!(
+        kept,
+        CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT | 2
+    );
     assert!(stand_held(kept));
+    assert!(storm_held(kept));
     assert!(!rate_clear(kept));
     assert!(rate_clear(stale));
     assert_eq!(cursor_store(peer, old), cursor_store(peer, old));
@@ -491,4 +530,82 @@ fn storm_line_needs_two_queued() {
     assert!(!delay_armed(15));
     assert_eq!(skip_reason(false, true, true, true, true), Some(1));
     assert_eq!(skip_reason(true, true, true, true, false), Some(5));
+    assert_eq!(STORM_DELAY_WIN, 62);
+    assert!(storm_delay(62));
+    assert!(storm_delay(100));
+    assert!(!storm_delay(61));
+    assert!(!storm_delay(31));
+    assert!(!storm_delay(0));
+    assert_eq!(crate::flow_preempt::CURSOR_STORM_BIT, 0x800);
+    assert_eq!(CURSOR_MASK, 0x7fff_f3ff);
+}
+
+/*
+ * Storm needs delay at 62 plus twice deserved with half
+ * granule. Twice as strict as deserved, so only very
+ * early wakeups earn the second kick. Max is two per
+ * slice per CPU with rate plus storm.
+ */
+#[test]
+fn storm_needs_delay_plus_twice_deserved() {
+    let slice = 1_000_000u64;
+    let gran = granule_for_weight(1024, slice);
+    assert_eq!(gran, 250_000);
+    let frontier = 100_000_000u64;
+    assert!(deserved(frontier, frontier, gran));
+    assert!(storm_deserved(frontier, frontier, gran));
+    assert!(deserved(frontier + 100_000, frontier, gran));
+    assert!(storm_deserved(frontier + 100_000, frontier, gran));
+    assert!(deserved(frontier + 124_999, frontier, gran));
+    assert!(storm_deserved(frontier + 124_999, frontier, gran));
+    assert!(deserved(frontier + 125_000, frontier, gran));
+    assert!(!storm_deserved(frontier + 125_000, frontier, gran));
+    assert!(deserved(frontier + 200_000, frontier, gran));
+    assert!(!storm_deserved(frontier + 200_000, frontier, gran));
+    assert!(!deserved(frontier + gran, frontier, gran));
+    assert!(!storm_deserved(frontier + gran, frontier, gran));
+    assert!(storm_ok(62, frontier, frontier, gran));
+    assert!(storm_ok(100, frontier, frontier, gran));
+    assert!(!storm_ok(61, frontier, frontier, gran));
+    assert!(!storm_ok(31, frontier, frontier, gran));
+    assert!(!storm_ok(62, frontier + gran, frontier, gran));
+    assert!(!storm_ok(62, frontier + 200_000, frontier, gran));
+    assert!(storm_ok(62, frontier + 100_000, frontier, gran));
+}
+
+/*
+ * Storm claim wins one extra per slice. Rate plus storm
+ * cap at two per slice per CPU, both clear per slice.
+ */
+#[test]
+fn storm_claim_wins_one_extra_per_slice() {
+    let mut c = 0u32;
+    assert!(storm_clear_for_kick(c));
+    assert!(!storm_held(c));
+    assert!(storm_claim(&mut c));
+    assert!(storm_held(c));
+    assert!(!storm_clear_for_kick(c));
+    assert!(!storm_claim(&mut c));
+    assert_eq!(cursor_val(c), 0);
+    let mut d = crate::flow_preempt::CURSOR_STORM_BIT | 5;
+    assert!(!storm_claim(&mut d));
+    assert_eq!(cursor_val(d), 5);
+    let mut e = CURSOR_RATE_BIT | 5;
+    assert!(storm_claim(&mut e));
+    assert!(!rate_clear(e));
+    assert!(storm_held(e));
+    assert_eq!(cursor_val(e), 5);
+    let mut f = 0u32;
+    assert!(rate_claim(&mut f));
+    assert!(storm_claim(&mut f));
+    assert!(!rate_clear(f));
+    assert!(!storm_clear_for_kick(f));
+    assert_eq!(cursor_val(f), 0);
+    assert_eq!(storm_set(5), crate::flow_preempt::CURSOR_STORM_BIT | 5);
+    assert!(storm_held(storm_set(5)));
+    assert!(!storm_held(storm_clear(storm_set(5))));
+    assert_eq!(cursor_val(storm_set(1023)), 1023);
+    let masked = cursor_val(crate::flow_preempt::CURSOR_STORM_BIT | 2);
+    assert_eq!(masked, 2);
+    assert_eq!(steal_next(masked, 4), 3);
 }
