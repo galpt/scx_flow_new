@@ -30,11 +30,16 @@ volatile u64 flow_light_depth;
 volatile u64 flow_hog_depth;
 volatile u64 flow_burst_allowance_ns;
 /* Per CPU group table seeded by userspace at attach. */
+/* Seeded by online rank with write by id, offline stays */
+/* light inert, skewed forces ready one, dense full keeps */
+/* prior halves exactly. Snapshot covers online only. */
 /* Ready is zero until the table holds live groups. */
 /* Halves is the fallback while ready is zero. */
 volatile u8 flow_group_by_cpu[1024];
 volatile u8 flow_group_ready;
 /* Sibling partner seeded by userspace at attach. */
+/* Seeded by online rank with write by id, offline plus */
+/* singleton holds 0xffff inert. Dense full matches prior. */
 /* Each CPU holds the next CPU in the same core. */
 /* 0xffff means singleton with no sibling. */
 /* Placement only with no dispatch use. */
@@ -159,6 +164,7 @@ static __always_inline void flow_clear_running_if_owner(
 }
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */
+/* Table holds online rank with write by id, offline inert. */
 /* Bad values fall back to halves with no trap. */
 static __always_inline u8 flow_group_live(u32 cpu,
 	u64 nr)

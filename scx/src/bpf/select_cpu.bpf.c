@@ -57,7 +57,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* in Tier A, so a miss wastes no idle claim. */
 	/* Tier B claims only the returned idle CPU. */
 	/* Strict iff ready is zero, best effort iff */
-	/* ready is one with live table in placement. */
+	/* ready is one with live table in placement seeded */
+	/* by online rank with offline inert. */
 	picked = flow_free_in_group(p, group);
 	if (picked >= 0)
 		return picked;

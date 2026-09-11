@@ -1496,3 +1496,207 @@ fn weight_leaves_groups_unchanged() {
     assert_eq!(light_depth(&[1, 0, 0, 0], 4), 1);
     assert_eq!(hog_depth(&[0, 0, 1, 0], 4), 1);
 }
+
+/*
+ * Online dense checks rank order with no gaps.
+ * Empty counts as dense with no trap. Sparse plus
+ * short plus gaps count as not dense.
+ */
+#[test]
+fn online_dense_checks_rank_order() {
+    assert!(online_is_dense(&[]));
+    assert!(online_is_dense(&[0]));
+    assert!(online_is_dense(&[0, 1, 2, 3]));
+    assert!(!online_is_dense(&[0, 2, 4, 6]));
+    assert!(!online_is_dense(&[1, 2, 3]));
+    assert!(!online_is_dense(&[0, 1, 3]));
+}
+
+/*
+ * Online skew forces the live table when short or
+ * sparse. Dense full stays false, so prior state
+ * holds with no change. Empty stays false.
+ */
+#[test]
+fn online_skew_forces_live_when_short() {
+    let full: Vec<u32> = (0..16).collect();
+    assert!(!online_skewed(&full, 16));
+    let short: Vec<u32> = (0..8).collect();
+    assert!(online_skewed(&short, 16));
+    let sparse = vec![0, 2, 4, 6, 8, 10, 12, 14];
+    assert!(online_skewed(&sparse, 16));
+    assert!(!online_skewed(&[], 16));
+    let dense8: Vec<u32> = (0..8).collect();
+    assert!(!online_skewed(&dense8, 8));
+}
+
+/*
+ * Seed online sparse evens holds 4 plus 4 by id.
+ * First half ranks stay light, rest stay hog, offline
+ * stays light inert. Skewed forces ready one even when
+ * uniform, so SMT off keeps groups over online only.
+ */
+#[test]
+fn seed_online_sparse_evens_holds_4_plus_4() {
+    let online = vec![0, 2, 4, 6, 8, 10, 12, 14];
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
+    assert_eq!(r, 1);
+    for &id in &[0, 2, 4, 6] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+    for &id in &[8, 10, 12, 14] {
+        assert_eq!(t[id as usize], GROUP_HOG);
+    }
+    for &id in &[1, 3, 5, 7, 9, 11, 13, 15] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+    for &id in &online {
+        let live = group_live(id, 16, &t, r);
+        let want = if id < 8 { GROUP_LIGHT } else { GROUP_HOG };
+        // Rank halves match id halves here, so live holds
+        // the same 4 plus 4 with no drift.
+        assert_eq!(live, want);
+    }
+}
+
+/*
+ * Seed online dense short holds 4 plus 4 over online.
+ * Offline stays light inert with no trap. Ready stays
+ * one, so placement uses the live table with no halves
+ * drift over possible.
+ */
+#[test]
+fn seed_online_dense_short_holds_4_plus_4() {
+    let online: Vec<u32> = (0..8).collect();
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
+    assert_eq!(r, 1);
+    for cpu in 0..4 {
+        assert_eq!(t[cpu], GROUP_LIGHT);
+    }
+    for cpu in 4..8 {
+        assert_eq!(t[cpu], GROUP_HOG);
+    }
+    for cpu in 8..16 {
+        assert_eq!(t[cpu], GROUP_LIGHT);
+    }
+}
+
+/*
+ * Seed online dense full matches prior with no change.
+ * Table plus ready stay identical, so SMT on keeps
+ * prior state with no stall.
+ */
+#[test]
+fn seed_online_dense_full_matches_prior() {
+    for nr in [2, 4, 8] {
+        let online: Vec<u32> = (0..nr as u32).collect();
+        let caps = vec![1024; nr];
+        let freqs = vec![4000000; nr];
+        let (t1, r1) = seed_groups(&caps, &freqs, nr);
+        let (t2, r2) = seed_groups_online(&caps, &freqs, &online, nr);
+        // Dense full reuses the prior path, so the table
+        // stays all light with ready cleared when uniform.
+        assert_eq!(r1, r2);
+        assert_eq!(t1, t2);
+    }
+    let online: Vec<u32> = (0..4).collect();
+    let caps = vec![1024, 1024, 512, 512];
+    let freqs = vec![4000000; 4];
+    let (t1, r1) = seed_groups(&caps, &freqs, 4);
+    let (t2, r2) = seed_groups_online(&caps, &freqs, &online, 4);
+    assert_eq!(r1, 1);
+    assert_eq!(r2, 1);
+    assert_eq!(t1, t2);
+}
+
+/*
+ * Topology seed online sparse evens holds 4 plus 4.
+ * All singleton online cores use rank halves exactly
+ * with offline inert. Ready stays one from skew with
+ * no trap.
+ */
+#[test]
+fn seed_topology_online_sparse_evens_holds_4_plus_4() {
+    let online = vec![0, 2, 4, 6, 8, 10, 12, 14];
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let lists: Vec<Vec<u32>> = online.iter().map(|&id| vec![id]).collect();
+    let llc = vec![0; 8];
+    let (t, r) = seed_groups_topology_online(&caps, &freqs, &online, &lists, &llc, 16);
+    assert_eq!(r, 1);
+    for &id in &[0, 2, 4, 6] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+    for &id in &[8, 10, 12, 14] {
+        assert_eq!(t[id as usize], GROUP_HOG);
+    }
+    for &id in &[1, 3, 5, 7, 9, 11, 13, 15] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+}
+
+/*
+ * Topology seed online dense full matches prior.
+ * Table plus ready stay identical, so SMT on keeps
+ * prior state with no change.
+ */
+#[test]
+fn seed_topology_online_dense_full_matches_prior() {
+    let online: Vec<u32> = (0..8).collect();
+    let caps = vec![1024; 8];
+    let freqs = vec![4000000; 8];
+    let lists: Vec<Vec<u32>> = (0..8).map(|c| vec![c]).collect();
+    let llc = vec![0; 8];
+    let (t1, r1) = seed_groups_topology(&caps, &freqs, 8, &lists, &llc);
+    let (t2, r2) = seed_groups_topology_online(&caps, &freqs, &online, &lists, &llc, 8);
+    assert_eq!(r1, r2);
+    assert_eq!(t1, t2);
+    assert_eq!(r1, 0);
+}
+
+/*
+ * Build online cores ignores offline ids with no trap.
+ * Only ids in the online set join, so offline siblings
+ * stay out and cores stay singleton.
+ */
+#[test]
+fn build_cores_online_ignores_offline() {
+    let online = vec![0, 2];
+    let lists = vec![vec![0, 1], vec![2, 3]];
+    let cores = build_cores_online(&online, &lists);
+    assert!(cores_are_singletons(&cores));
+    assert_eq!(cores.len(), 2);
+    let table = sibling_table_online(&cores, &online);
+    assert_eq!(table[0], SIBLING_EMPTY);
+    assert_eq!(table[2], SIBLING_EMPTY);
+    assert_eq!(table[1], SIBLING_EMPTY);
+    assert_eq!(table[3], SIBLING_EMPTY);
+}
+
+/*
+ * Sibling online pairs ring by id with offline inert.
+ * Pairs point at each other, singletons plus offline
+ * hold empty with no trap. Dense full matches prior.
+ */
+#[test]
+fn sibling_online_pairs_ring_by_id() {
+    let cores = vec![vec![0, 1], vec![2]];
+    let online = vec![0, 1, 2];
+    let table = sibling_table_online(&cores, &online);
+    assert_eq!(table[0], 1);
+    assert_eq!(table[1], 0);
+    assert_eq!(table[2], SIBLING_EMPTY);
+    let dense: Vec<u32> = (0..4).collect();
+    let lists = vec![vec![0, 1], vec![0, 1], vec![2, 3], vec![2, 3]];
+    let cores2 = build_cores_online(&dense, &lists);
+    assert_eq!(cores2.len(), 2);
+    let table2 = sibling_table_online(&cores2, &dense);
+    assert_eq!(table2[0], 1);
+    assert_eq!(table2[1], 0);
+    assert_eq!(table2[2], 3);
+    assert_eq!(table2[3], 2);
+}

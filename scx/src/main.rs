@@ -113,7 +113,9 @@ pub(crate) struct Scheduler<'a> {
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
     /* Static per-CPU cards seeded at attach. */
     cpu_static: Vec<stats::PerCpuMetrics>,
-    /* Live frequency cache for the cards. */
+    /* Online ids once at init in rank order. */
+    online_cpus: Vec<u32>,
+    /* Live frequency cache by online rank. */
     cur_freq_khz: Vec<u64>,
     freq_read_at: Option<std::time::Instant>,
     started_at: std::time::Instant,
@@ -150,18 +152,28 @@ impl<'a> Scheduler<'a> {
         /* only and never shape placement. Max frequency */
         /* plus capacity plus LLC plus siblings seed groups. */
         let cards = topology::web_cpu_static();
-        /* Seed the per CPU group table. Uniform hosts keep */
-        /* ready cleared with halves fallback and no trap. */
-        /* All singleton cores keep prior halves plus */
-        /* interleave exactly with no trap. */
-        let nr_groups = cards
-            .iter()
-            .map(|c| c.id as usize + 1)
-            .max()
-            .unwrap_or(0)
-            .min(MAX_CPUS);
-        let (group_table, group_ready) = topology::group_seed(nr_groups);
-        let (sibling_table, sibling_fallbacks) = topology::sibling_seed(nr_groups);
+        /* Online ids once at init in rank order. Snapshot */
+        /* plus seeding share one order with no re-read. */
+        /* Rank based seed writes by id, offline stays */
+        /* light inert, skewed forces ready one, dense full */
+        /* keeps prior table plus ready exactly. */
+        let mut online = topology::online_cpus();
+        if online.is_empty() {
+            online = cards.iter().map(|c| c.id).collect();
+            online.sort_unstable();
+            online.dedup();
+        }
+        let mut possible = topology::possible_nr();
+        if possible == 0 {
+            possible = online
+                .iter()
+                .max()
+                .map(|m| *m as usize + 1)
+                .unwrap_or(0)
+                .min(MAX_CPUS);
+        }
+        let (group_table, group_ready) = topology::group_seed_online(&online, possible);
+        let (sibling_table, sibling_fallbacks) = topology::sibling_seed_online(&online);
         if let Some(bss) = skel.maps.bss_data.as_mut() {
             bss.flow_group_by_cpu = group_table;
             bss.flow_group_ready = group_ready;
@@ -185,15 +197,23 @@ impl<'a> Scheduler<'a> {
         /* Static cards seed the start log and the cards. */
         /* Frequency stays display only here. */
         info!("Topology: {}", topology::describe_topology(&cards));
+        info!(
+            "online: {} cpus over possible {} with ready {}",
+            online.len(),
+            possible,
+            group_ready
+        );
         info!("siblings: {} fallbacks to singleton", sibling_fallbacks);
         let cpu_static = if opts.no_webui { Vec::new() } else { cards };
+        let freq_cap = online.len().min(MAX_CPUS);
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
             webui_tx,
             cpu_static,
-            cur_freq_khz: Vec::with_capacity(MAX_CPUS),
+            online_cpus: online,
+            cur_freq_khz: Vec::with_capacity(freq_cap),
             freq_read_at: None,
             started_at: std::time::Instant::now(),
             group_table,

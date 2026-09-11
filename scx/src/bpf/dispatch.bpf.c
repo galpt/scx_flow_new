@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
 /* Dispatch keeps park isolation by construction. */
+/* Userspace seeds by online rank with write by id, offline */
+/* light inert, skewed forces ready one, dense full keeps */
+/* prior halves. Snapshot covers online only. */
 /* Own drains to the same CPU with no group check, so a */
 /* pinned single entry with the opposite group still runs */
 /* where its mask allows with steal held by the mask. Park */
@@ -16,7 +19,8 @@
 /* only by construction due to verifier jump at 1000001 */
 /* on donor check in the steal loop. Strict park iff */
 /* ready is zero, best effort peer iff ready is one. */
-/* Dispatch uses halves. Placement uses live table. */
+/* Dispatch uses halves. Placement uses live table seeded */
+/* by online rank with offline inert. */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {

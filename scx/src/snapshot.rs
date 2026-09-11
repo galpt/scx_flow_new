@@ -83,13 +83,14 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Dashboard snapshot. Merges the static cards with
-     * live state. Gauges only, no deltas. Frequency
-     * plus LLC plus CPU cards stay display only and
-     * never feed placement or division. Slice stays
+     * live state by online rank. Gauges only, no deltas.
+     * Frequency plus LLC plus CPU cards stay display only
+     * and never feed placement or division. Slice stays
      * fixed at 1ms. Group follows the live table when
-     * ready, else halves fallback with no trap. Version
-     * plus timestamp plus topology plus depths plus
-     * allowance join the counters for one screenshot
+     * ready, else halves fallback with no trap. Offline
+     * stays out, so per CPU count matches online count.
+     * Version plus timestamp plus topology plus depths
+     * plus allowance join the counters for one screenshot
      * plus one JSON log.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
@@ -103,29 +104,35 @@ impl<'a> Scheduler<'a> {
             )
         };
         let nr = nr_raw.min(crate::MAX_CPUS);
+        let online = if self.online_cpus.is_empty() {
+            (0..nr as u32).collect::<Vec<u32>>()
+        } else {
+            self.online_cpus.clone()
+        };
         let now = std::time::Instant::now();
         let old = self
             .freq_read_at
             .is_none_or(|t| now.duration_since(t).as_secs() >= 1);
         if old {
             self.cur_freq_khz.clear();
-            for cpu in 0..nr {
+            for &id in &online {
                 self.cur_freq_khz
-                    .push(crate::topology::current_freq_khz(cpu as u32));
+                    .push(crate::topology::current_freq_khz(id));
             }
             self.freq_read_at = Some(now);
         }
-        let mut per_cpu = Vec::with_capacity(nr);
-        for cpu in 0..nr {
+        let mut per_cpu = Vec::with_capacity(online.len());
+        for (rank, &id) in online.iter().enumerate() {
+            let cpu = id as usize;
             let mut e = self
                 .cpu_static
                 .iter()
-                .find(|v| v.id == cpu as u32)
+                .find(|v| v.id == id)
                 .cloned()
                 .unwrap_or_default();
-            e.id = cpu as u32;
-            e.cur_freq_khz = self.cur_freq_khz.get(cpu).copied().unwrap_or(0);
-            e.group = crate::flow::group_live(cpu as u32, nr, &self.group_table, self.group_ready);
+            e.id = id;
+            e.cur_freq_khz = self.cur_freq_khz.get(rank).copied().unwrap_or(0);
+            e.group = crate::flow::group_live(id, nr, &self.group_table, self.group_ready);
             let st = self.read_cpu(cpu);
             e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;

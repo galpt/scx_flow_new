@@ -129,6 +129,9 @@ static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
 }
 /* Group of one CPU by id halves with extra to hog. */
 /* Halves is the fallback when the group table is not ready. */
+/* Userspace seeds by online rank with write by id, offline */
+/* stays light inert, skewed forces ready one, dense full */
+/* keeps halves exactly. Snapshot covers online only. */
 static __always_inline u8 flow_group_of_cpu(u32 cpu,
 	u64 nr)
 {

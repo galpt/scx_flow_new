@@ -86,8 +86,9 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 /* at 4. Sums light plus hog queued tasks over per CPU */
 /* queues in halves order with early stop when both hit */
 /* 4. Halves matches dispatch isolation with no table */
-/* cost. Placement uses live table, so strict iff ready */
-/* is zero, best effort iff ready is one. Park stays */
+/* cost. Placement uses live table seeded by online rank */
+/* with offline inert, so strict iff ready is zero, best */
+/* effort iff ready is one. Park stays */
 /* out, so the measure tracks CPU pressure only with */
 /* one pass and bounded cost. Stores depths plus */
 /* allowance for snapshot with no task field. Returns */

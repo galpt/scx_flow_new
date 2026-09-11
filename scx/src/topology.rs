@@ -242,6 +242,227 @@ pub fn llc_ids(nr: usize) -> Vec<u32> {
 }
 
 /*
+ * Parse one CPU list from sysfs. Accepts comma plus
+ * range form such as 0-7 plus 0,2,4 plus 0-3,8-11.
+ * Trims space plus newline. Bad tokens stay out with
+ * no trap. Ids at or past the table bound stay out,
+ * so the cap holds with no extra use. Sorted with no
+ * dup, so rank order stays stable.
+ */
+pub fn parse_cpu_list(s: &str) -> Vec<u32> {
+    let mut out = crate::flow_group::parse_siblings_list(s);
+    out.retain(|&id| (id as usize) < MAX_CPUS);
+    out
+}
+
+/*
+ * Read one CPU list file from sysfs. Missing files
+ * yield empty with no trap. Values cap at the table
+ * bound with no extra use. Sorted with no dup.
+ */
+pub fn read_cpu_list_file(path: &str) -> Vec<u32> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| parse_cpu_list(&s))
+        .unwrap_or_default()
+}
+
+/*
+ * Online CPUs once at init. Reads the online file a
+ * single time, so the group table plus snapshot share
+ * one rank order. Missing files fall back to topology
+ * cards with no trap. Sorted with no dup and capped
+ * at the table bound. Empty stays empty with no pad.
+ */
+pub fn online_cpus() -> Vec<u32> {
+    let mut out = read_cpu_list_file("/sys/devices/system/cpu/online");
+    if !out.is_empty() {
+        return out;
+    }
+    let topo = match Topology::new() {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    out = topo
+        .all_cpus
+        .keys()
+        .map(|&id| id as u32)
+        .filter(|&id| (id as usize) < MAX_CPUS)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/*
+ * Possible CPUs from sysfs. Missing files fall back
+ * to online with no trap. Sorted with no dup and
+ * capped at the table bound. Empty stays empty.
+ */
+pub fn possible_cpus() -> Vec<u32> {
+    let out = read_cpu_list_file("/sys/devices/system/cpu/possible");
+    if !out.is_empty() {
+        return out;
+    }
+    online_cpus()
+}
+
+/*
+ * Possible CPU count for skew checks. Holds max id
+ * plus one capped at the table bound. Missing files
+ * fall back to online max plus one with no trap.
+ * Empty stays zero with no division.
+ */
+pub fn possible_nr() -> usize {
+    let poss = possible_cpus();
+    if let Some(&m) = poss.iter().max() {
+        return (m as usize + 1)
+            .min(MAX_CPUS)
+            .min(crate::flow_group::GROUP_TABLE_LEN);
+    }
+    let on = online_cpus();
+    if let Some(&m) = on.iter().max() {
+        return (m as usize + 1)
+            .min(MAX_CPUS)
+            .min(crate::flow_group::GROUP_TABLE_LEN);
+    }
+    0
+}
+
+/*
+ * Sibling lists by online rank. Each entry holds the
+ * sibling ids of one online CPU in rank order. Missing
+ * files yield singletons with no trap. Capped at 1024.
+ * Empty entries count as sysfs fallbacks with singleton
+ * behavior. Rank order matches the online ids order.
+ */
+pub fn sibling_lists_online(online: &[u32]) -> Vec<Vec<u32>> {
+    let mut ids: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&id| (id as usize) < MAX_CPUS)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        out.push(read_thread_siblings(id));
+    }
+    out
+}
+
+/*
+ * LLC ids by online rank. Reads the host topology once.
+ * Missing topology yields empty for one domain with no
+ * pad. Missing CPUs read as zero with no trap. Values
+ * seed per LLC split with no division. Rank order
+ * matches the online ids order.
+ */
+pub fn llc_ids_online(online: &[u32]) -> Vec<u32> {
+    let mut ids: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&id| (id as usize) < MAX_CPUS)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let topo = match Topology::new() {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let v = topo
+            .all_cpus
+            .get(&(id as usize))
+            .map(|c| c.llc_id as u32)
+            .unwrap_or(0);
+        out.push(v);
+    }
+    out
+}
+
+/*
+ * Seed the per CPU group table by online rank plus
+ * write by id. Reads capacity plus max frequency plus
+ * siblings plus LLC for online CPUs only, then assigns
+ * with core split plus LLC rules plus hetero interleave
+ * in rank order. Offline ids stay light inert with no
+ * trap. Dense full keeps prior table plus ready exactly.
+ * Skewed forces ready one even when uniform, so SMT off
+ * holds 4 plus 4 over online only. Strict iff ready is
+ * zero, best effort iff ready is one. Single online
+ * keeps ready cleared with all light.
+ */
+pub fn group_seed_online(
+    online: &[u32],
+    possible: usize,
+) -> ([u8; crate::flow_group::GROUP_TABLE_LEN], u8) {
+    let mut ids: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&id| (id as usize) < MAX_CPUS)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() <= 1 {
+        return (
+            [crate::flow_group::GROUP_LIGHT; crate::flow_group::GROUP_TABLE_LEN],
+            0,
+        );
+    }
+    // Dense full reuses the prior path exactly, so prior
+    // state holds with no drift plus no extra branch.
+    if !crate::flow_group::online_skewed(&ids, possible) {
+        return group_seed(ids.len());
+    }
+    let mut caps = Vec::with_capacity(ids.len());
+    let mut freqs = Vec::with_capacity(ids.len());
+    for &id in &ids {
+        caps.push(read_cpu_capacity(id));
+        freqs.push(read_cpuinfo_max_freq(id));
+    }
+    let lists = sibling_lists_online(&ids);
+    let llc = llc_ids_online(&ids);
+    crate::flow_group::seed_groups_topology_online(&caps, &freqs, &ids, &lists, &llc, possible)
+}
+
+/*
+ * Sibling partner table by online rank plus fallback
+ * count. Builds online cores from sibling lists, then
+ * maps each online CPU to the next online CPU in the
+ * same core in id order. Singletons plus offline hold
+ * 0xffff, so the BPF free check is a no-op. Empty lists
+ * count as sysfs fallbacks with singleton behavior and
+ * no trap. Dense full matches the prior table exactly.
+ */
+pub fn sibling_seed_online(online: &[u32]) -> ([u16; crate::flow_group::GROUP_TABLE_LEN], usize) {
+    let mut ids: Vec<u32> = online
+        .iter()
+        .copied()
+        .filter(|&id| (id as usize) < MAX_CPUS)
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    // Dense reuses the prior path exactly, so prior state
+    // holds with no drift. Sparse keeps write by id with
+    // offline inert.
+    if crate::flow_group::online_is_dense(&ids) {
+        return sibling_seed(ids.len());
+    }
+    let lists = sibling_lists_online(&ids);
+    let mut fallbacks = 0;
+    for v in &lists {
+        if v.is_empty() {
+            fallbacks += 1;
+        }
+    }
+    let cores = crate::flow_group::build_cores_online(&ids, &lists);
+    let table = crate::flow_group::sibling_table_online(&cores, &ids);
+    (table, fallbacks)
+}
+
+/*
  * Live frequency of one CPU in kilohertz. Reads the
  * cpufreq file. Missing files yield zero for unknown.
  * The value is display only and never feeds placement
@@ -373,5 +594,28 @@ mod tests {
             describe_topology(&unknown),
             "topology: 1 CPU, no SMT, freq unknown"
         );
+    }
+
+    #[test]
+    fn cpu_list_parses_ranges_and_sparse() {
+        assert_eq!(parse_cpu_list("0-7\n"), (0..8).collect::<Vec<u32>>());
+        assert_eq!(parse_cpu_list("0,2,4"), vec![0, 2, 4]);
+        assert_eq!(parse_cpu_list("0-3,8-11"), vec![0, 1, 2, 3, 8, 9, 10, 11]);
+        assert_eq!(parse_cpu_list("0-1"), vec![0, 1]);
+        assert!(parse_cpu_list("").is_empty());
+        assert!(parse_cpu_list("abc").is_empty());
+        assert_eq!(parse_cpu_list("  0-2  "), vec![0, 1, 2]);
+        assert_eq!(parse_cpu_list("0-15"), (0..16).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn online_lists_keep_rank_order() {
+        let online = vec![0, 2, 4, 6, 8, 10, 12, 14];
+        assert!(!crate::flow_group::online_is_dense(&online));
+        assert!(crate::flow_group::online_skewed(&online, 16));
+        let dense: Vec<u32> = (0..8).collect();
+        assert!(crate::flow_group::online_is_dense(&dense));
+        assert!(crate::flow_group::online_skewed(&dense, 16));
+        assert!(!crate::flow_group::online_skewed(&dense, 8));
     }
 }

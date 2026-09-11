@@ -40,8 +40,10 @@ with a refreshed estimate.
 
 Two groups split physical cores with siblings kept in one
 group and cache local shares where the hardware allows.
-All singleton cores use halves exactly, so SMT off keeps
-prior state. Strict when ready is zero, best effort when
+All singleton cores use halves exactly, so dense full
+keeps prior state. Online ranks seed by id with offline
+light inert, skewed forces ready one, snapshot covers
+online only. Strict when ready is zero, best effort when
 ready is one.
 
 ### Placement
@@ -53,7 +55,8 @@ stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
 park in order in the task group. Frequency cards stay
 display only and never shape placement. Pinned subsets
-stay in mask. See `src/bpf/select_cpu.bpf.c` plus
+stay in mask. Groups seed by online rank with write by
+id. See `src/bpf/select_cpu.bpf.c` plus
 `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
@@ -63,7 +66,8 @@ peers with mask checks. An idle thief with no moved plus
 no own left may rescue a lone queued task past unmovable
 park leftovers while busy thieves keep depth 2. Isolation
 follows placement plus park choice with peer best effort
-across groups.
+across groups. Dispatch uses halves while placement uses
+the live table seeded by online rank.
 
 ### Kicks
 
@@ -161,9 +165,11 @@ baseline with no realtime use.
 
 - Groups are strict when ready is zero and best effort
   when ready is one. Dispatch uses halves while placement
-  uses the live table. Peer steal is mask only.
-- Topology is snapshotted at attach, so a CPU hotplug
-  needs a restart.
+  uses the live table seeded by online rank with offline
+  light inert. Peer steal is mask only.
+- Topology plus online set is snapshotted at attach, so
+  a CPU hotplug needs a restart. Snapshot covers online
+  only with per CPU count matching online count.
 - Unknown frequency stays unknown with no effect on
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path

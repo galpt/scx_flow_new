@@ -662,6 +662,264 @@ pub fn seed_groups_topology(
 }
 
 /*
+ * True when online ids form dense 0 plus 1 plus 2
+ * with no gaps. Empty counts as dense with no trap.
+ * The caller passes sorted ids with no sort here.
+ */
+pub fn online_is_dense(online: &[u32]) -> bool {
+    for (rank, &id) in online.iter().enumerate() {
+        if id as usize != rank {
+            return false;
+        }
+    }
+    true
+}
+
+/*
+ * True when the online set skews from possible.
+ * Needs len past possible or gaps or dense short,
+ * so SMT off plus isolated plus hotplug all force
+ * the live table with no halves fallback. Empty
+ * stays false with no trap. Dense full stays false,
+ * so prior state holds with no change.
+ */
+pub fn online_skewed(online: &[u32], possible_nr: usize) -> bool {
+    if online.is_empty() {
+        return false;
+    }
+    let want = possible_nr.min(GROUP_TABLE_LEN);
+    if online.len().min(GROUP_TABLE_LEN) != want {
+        return true;
+    }
+    !online_is_dense(online)
+}
+
+/*
+ * Build cores from online ids with union find.
+ * Each rank holds the sibling ids of one online CPU.
+ * Only ids in the online set join, so offline ids
+ * stay out with no trap. Missing lists mean singleton
+ * cores with no trap. Cores hold ids sorted plus cores
+ * sorted by least id, so order stays stable. No
+ * division, so no zero risk. Mirrors build cores for
+ * dense with rank mapping for sparse.
+ */
+pub fn build_cores_online(online: &[u32], lists: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    use std::collections::HashMap;
+    let n = online.len().min(GROUP_TABLE_LEN);
+    if n == 0 {
+        return Vec::new();
+    }
+    let ids: Vec<u32> = online[..n].to_vec();
+    let mut id_to_rank: HashMap<u32, usize> = HashMap::with_capacity(n);
+    for (rank, &id) in ids.iter().enumerate() {
+        id_to_rank.insert(id, rank);
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        let mut r = x;
+        while p[r] != r {
+            r = p[r];
+        }
+        while p[x] != x {
+            let nxt = p[x];
+            p[x] = r;
+            x = nxt;
+        }
+        r
+    }
+    for (rank, sibs) in lists.iter().enumerate().take(n) {
+        for &s in sibs {
+            let Some(&other) = id_to_rank.get(&s) else {
+                continue;
+            };
+            if other == rank {
+                continue;
+            }
+            let a = find(&mut parent, rank);
+            let b = find(&mut parent, other);
+            if a != b {
+                if a < b {
+                    parent[b] = a;
+                } else {
+                    parent[a] = b;
+                }
+            }
+        }
+    }
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    for (rank, &id) in ids.iter().enumerate() {
+        let r = find(&mut parent, rank);
+        map.entry(r).or_default().push(id);
+    }
+    let mut cores: Vec<Vec<u32>> = map.into_values().collect();
+    for c in cores.iter_mut() {
+        c.sort_unstable();
+    }
+    cores.sort_by_key(|c| c[0]);
+    cores
+}
+
+/*
+ * Seed the per CPU group table by online rank plus
+ * write by id. Sorts live ranks by capacity plus
+ * frequency plus rank, then assigns even slots to
+ * light and odd slots to hog. Odd counts give the
+ * extra rank to hog, so counts match halves with no
+ * knob. Offline ids stay light inert with no trap.
+ * Dense full keeps prior ready plus table exactly.
+ * Skewed plus hetero both force ready one, so SMT off
+ * holds 4 plus 4 over online only with no stall.
+ * Strict iff ready is zero, best effort iff ready is
+ * one with dispatch on halves and placement on live.
+ */
+pub fn seed_groups_online(
+    caps_rank: &[u64],
+    freqs_rank: &[u64],
+    online: &[u32],
+    possible_nr: usize,
+) -> ([u8; GROUP_TABLE_LEN], u8) {
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let n = online
+        .len()
+        .min(GROUP_TABLE_LEN)
+        .min(caps_rank.len().min(freqs_rank.len()));
+    if n <= 1 {
+        return (table, 0);
+    }
+    let ids: Vec<u32> = online[..online.len().min(GROUP_TABLE_LEN)]
+        .iter()
+        .copied()
+        .take(n)
+        .collect();
+    if ids.len() <= 1 {
+        return (table, 0);
+    }
+    let live_caps: Vec<u64> = caps_rank[..n].to_vec();
+    let live_freqs: Vec<u64> = freqs_rank[..n].to_vec();
+    let hetero = hetero_needed(&live_caps, &live_freqs);
+    let skewed = online_skewed(&online[..online.len().min(GROUP_TABLE_LEN)], possible_nr);
+    if !hetero && !skewed {
+        return (table, 0);
+    }
+    // Uniform skewed keeps rank halves, hetero keeps
+    // interleave, so the table holds 4 plus 4 over online
+    // only with offline inert.
+    let assign: Vec<u8> = if hetero {
+        assign_sorted_interleave(&live_caps, &live_freqs, n)
+    } else {
+        (0..n).map(|rank| group_of_cpu(rank as u32, n)).collect()
+    };
+    for (rank, &id) in ids.iter().enumerate() {
+        if (id as usize) < GROUP_TABLE_LEN && rank < assign.len() {
+            table[id as usize] = assign[rank];
+        }
+    }
+    (table, 1)
+}
+
+/*
+ * Seed the per CPU group table by online rank with
+ * topology. Builds online cores from sibling lists,
+ * then assigns with LLC rules plus hetero interleave
+ * in rank order. All singleton online cores use the
+ * rank halves plus interleave exactly. Offline ids
+ * stay light inert with no trap. Dense full keeps
+ * prior table plus ready exactly. Skewed forces ready
+ * one even when uniform, so SMT off holds groups over
+ * online only with no halves drift. Strict iff ready
+ * is zero, best effort iff ready is one. Short slices
+ * clamp with no pad. Single online keeps ready cleared
+ * with all light.
+ */
+pub fn seed_groups_topology_online(
+    caps_rank: &[u64],
+    freqs_rank: &[u64],
+    online: &[u32],
+    lists_rank: &[Vec<u32>],
+    llc_rank: &[u32],
+    possible_nr: usize,
+) -> ([u8; GROUP_TABLE_LEN], u8) {
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let n = online
+        .len()
+        .min(GROUP_TABLE_LEN)
+        .min(caps_rank.len().min(freqs_rank.len()));
+    if n <= 1 {
+        return (table, 0);
+    }
+    let ids: Vec<u32> = online[..online.len().min(GROUP_TABLE_LEN)]
+        .iter()
+        .copied()
+        .take(n)
+        .collect();
+    if ids.len() <= 1 {
+        return (table, 0);
+    }
+    let live_caps: Vec<u64> = caps_rank[..n].to_vec();
+    let live_freqs: Vec<u64> = freqs_rank[..n].to_vec();
+    let mut live_lists: Vec<Vec<u32>> = Vec::with_capacity(n);
+    for rank in 0..n {
+        live_lists.push(lists_rank.get(rank).cloned().unwrap_or_default());
+    }
+    let mut live_llc: Vec<u32> = Vec::with_capacity(n);
+    for rank in 0..n {
+        live_llc.push(llc_rank.get(rank).copied().unwrap_or(0));
+    }
+    let hetero = hetero_needed(&live_caps, &live_freqs);
+    let online_trimmed: Vec<u32> = online[..online.len().min(GROUP_TABLE_LEN)]
+        .iter()
+        .copied()
+        .take(n)
+        .collect();
+    let skewed = online_skewed(&online[..online.len().min(GROUP_TABLE_LEN)], possible_nr);
+    let cores_id = build_cores_online(&online_trimmed, &live_lists);
+    if cores_are_singletons(&cores_id) {
+        return seed_groups_online(&live_caps, &live_freqs, &online_trimmed, possible_nr);
+    }
+    // Map id cores to rank cores for the dense assign.
+    use std::collections::HashMap;
+    let mut id_to_rank: HashMap<u32, usize> = HashMap::with_capacity(n);
+    for (rank, &id) in online_trimmed.iter().enumerate() {
+        id_to_rank.insert(id, rank);
+    }
+    let mut cores_rank: Vec<Vec<u32>> = Vec::with_capacity(cores_id.len());
+    for core in &cores_id {
+        let mut ranks: Vec<u32> = Vec::with_capacity(core.len());
+        for &id in core {
+            if let Some(&r) = id_to_rank.get(&id) {
+                ranks.push(r as u32);
+            }
+        }
+        ranks.sort_unstable();
+        if !ranks.is_empty() {
+            cores_rank.push(ranks);
+        }
+    }
+    cores_rank.sort_by_key(|c| c[0]);
+    let assign = assign_by_llc(&cores_rank, &live_llc, &live_caps, &live_freqs, n, hetero);
+    if !hetero && !skewed {
+        let mut same = true;
+        for (rank, g) in assign.iter().enumerate().take(n) {
+            if *g != group_of_cpu(rank as u32, n) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return (table, 0);
+        }
+    }
+    for (rank, &id) in online_trimmed.iter().enumerate() {
+        if (id as usize) < GROUP_TABLE_LEN && rank < assign.len() {
+            table[id as usize] = assign[rank];
+        }
+    }
+    (table, 1)
+}
+
+/*
  * Sibling partner table for BPF placement. Each CPU
  * holds the next CPU in the same core in id order.
  * Singletons hold 0xffff, so the free check is a
@@ -685,6 +943,50 @@ pub fn sibling_table(cores: &[Vec<u32>], nr: usize) -> [u16; GROUP_TABLE_LEN] {
             }
             let nxt = sorted[(i + 1) % sorted.len()];
             if (nxt as usize) >= n {
+                continue;
+            }
+            out[cpu as usize] = nxt as u16;
+        }
+    }
+    out
+}
+
+/*
+ * Sibling partner table by online id for BPF placement.
+ * Each online CPU holds the next online CPU in the same
+ * core in id order. Singletons plus offline hold 0xffff,
+ * so the free check is a no-op with no trap. Offline
+ * stays inert with no write. Capped at 1024 with no
+ * trap. Mirrors the BPF walk with the same bounds.
+ * Dense full matches the prior table exactly.
+ */
+pub fn sibling_table_online(cores_id: &[Vec<u32>], online: &[u32]) -> [u16; GROUP_TABLE_LEN] {
+    let mut out = [SIBLING_EMPTY; GROUP_TABLE_LEN];
+    use std::collections::HashSet;
+    let set: HashSet<u32> = online
+        .iter()
+        .copied()
+        .filter(|&id| (id as usize) < GROUP_TABLE_LEN)
+        .collect();
+    for core in cores_id {
+        if core.len() <= 1 {
+            continue;
+        }
+        let mut sorted = core.clone();
+        sorted.sort_unstable();
+        sorted.retain(|id| set.contains(id));
+        if sorted.len() <= 1 {
+            continue;
+        }
+        for (i, &cpu) in sorted.iter().enumerate() {
+            if (cpu as usize) >= GROUP_TABLE_LEN {
+                continue;
+            }
+            let nxt = sorted[(i + 1) % sorted.len()];
+            if (nxt as usize) >= GROUP_TABLE_LEN {
+                continue;
+            }
+            if !set.contains(&nxt) {
                 continue;
             }
             out[cpu as usize] = nxt as u16;

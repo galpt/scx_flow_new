@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.16`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.17`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -80,7 +80,9 @@ and the task mask always wins. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Groups split physical cores with
 siblings kept together and cache local shares where
-the hardware allows. Strict when ready is zero, best
+the hardware allows. Online ranks seed by id with offline
+light inert, skewed forces ready one, dense full keeps
+prior state. Strict when ready is zero, best
 effort when ready is one. The order lives in
 `scx/src/bpf/select_cpu.bpf.c` plus
 `scx/src/bpf/enqueue.bpf.c`, seeding in
@@ -92,7 +94,9 @@ Order is local queue, group park, then steals from peers
 with mask checks. An idle thief with no moved plus no own
 left may rescue a lone queued task past unmovable park
 leftovers, busy thieves keep depth 2. Every pass moves at
-least one task when movable work exists. The drains live
+least one task when movable work exists. Dispatch uses
+halves while placement uses the live table seeded by
+online rank. Snapshot covers online only. The drains live
 in `scx/src/bpf/dispatch.bpf.c`.
 
 ### Kicks
@@ -207,7 +211,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.16`, state `enabled` and ops
+Expect version `4.2.17`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir
