@@ -1841,3 +1841,127 @@ fn facade_matches_weight_helpers() {
         crate::flow_edf::clamp_vruntime_w(0, 100, crate::flow_slice::SLICE_NS, 1024)
     );
 }
+
+/*
+ * Tiered least fallback picks the smallest queued
+ * depth with lowest id on ties. Earlier tiers still
+ * win when they hit, so the least step only covers
+ * the old first fallback. Placement keeps live with
+ * strict iff ready is zero. Mirrors BPF select at
+ * 4.2.19 with halves untouched in dispatch.
+ */
+#[test]
+fn tiered_least_fallback_picks_least() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let partner = vec![SIBLING_EMPTY; 4];
+    let running = vec![true; 4];
+    let allowed = vec![true; 4];
+    let idle = vec![false; 4];
+    let queued = vec![5, 1, 3, 9];
+    let got = select_cpu_tiered_least(
+        9,
+        9,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &queued,
+    );
+    assert_eq!(got, Some(1));
+    let tie = vec![2, 2, 2, 2];
+    let got2 = select_cpu_tiered_least(
+        9,
+        9,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &tie,
+    );
+    assert_eq!(got2, Some(0));
+    let empty: Vec<u64> = vec![];
+    let got3 = select_cpu_tiered_least(
+        9,
+        9,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &empty,
+    );
+    assert_eq!(got3, Some(0));
+    let narrow = vec![false, true, false, false];
+    let got4 = select_cpu_tiered_least(
+        9,
+        9,
+        &narrow,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &queued,
+    );
+    assert_eq!(got4, Some(1));
+}
+
+/*
+ * Pick in group least prefers the selected CPU when
+ * allowed plus in group, else the least queued in the
+ * group with lowest id on ties. No allowed CPU in the
+ * group yields none for park use. Mirrors BPF enqueue
+ * pick at 4.2.19 with live view plus frozen bounds.
+ */
+#[test]
+fn pick_in_group_least_prefers_selected_else_least() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let allowed = vec![true; 4];
+    let queued = vec![5, 1, 3, 9];
+    assert_eq!(
+        pick_in_group_least(0, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
+        Some(0)
+    );
+    assert_eq!(
+        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
+        Some(1)
+    );
+    assert_eq!(
+        pick_in_group_least(-1, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
+        Some(1)
+    );
+    assert_eq!(
+        pick_in_group_least(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued),
+        Some(1)
+    );
+    let narrow = vec![false, false, true, true];
+    assert_eq!(
+        pick_in_group_least(0, &narrow, GROUP_LIGHT, nr, &table, 0, &queued),
+        None
+    );
+    let empty = vec![false; 4];
+    assert_eq!(
+        pick_in_group_least(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued),
+        None
+    );
+}

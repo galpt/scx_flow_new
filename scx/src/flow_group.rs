@@ -1541,3 +1541,90 @@ pub fn first_in_group_live(
     }
     None
 }
+
+/*
+ * Least queued allowed CPU in one group for tests.
+ * Scans 0 to nr in id order with halves, so the
+ * bound matches the BPF first helper. Needs group
+ * plus mask plus queued depth. Picks the smallest
+ * queued depth with lowest id on ties by strict
+ * less only, so equal depths keep the first id.
+ * Missing queued entries read as zero, so short
+ * slices stay quiet with no trap. Returns none
+ * when no allowed CPU lives in the group. Mirrors
+ * the BPF least scan with halves view and frozen
+ * constants.
+ */
+#[cfg(test)]
+pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let mut best_q: u64 = 0;
+    for cpu in 0..nr {
+        if group_of_cpu(cpu as u32, nr) != group {
+            continue;
+        }
+        if allowed.get(cpu).copied().unwrap_or(false) != true {
+            continue;
+        }
+        let q = queued.get(cpu).copied().unwrap_or(0);
+        match best {
+            None => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            Some(_) if q < best_q => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            _ => {}
+        }
+    }
+    best
+}
+
+/*
+ * Least queued allowed CPU in one live group for
+ * tests. Scans 0 to nr in id order with the table
+ * when ready, else halves, so the bound matches the
+ * BPF first helper used by select plus enqueue.
+ * Needs live group plus mask plus queued depth.
+ * Picks the smallest queued depth with lowest id
+ * on ties by strict less only. Missing queued
+ * entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Placement
+ * keeps live, dispatch keeps halves, constants
+ * frozen. Mirrors the BPF least scan.
+ */
+#[cfg(test)]
+pub fn least_in_group_live(
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    queued: &[u64],
+) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let mut best_q: u64 = 0;
+    for cpu in 0..nr {
+        if group_live(cpu as u32, nr, table, ready) != group {
+            continue;
+        }
+        if allowed.get(cpu).copied().unwrap_or(false) != true {
+            continue;
+        }
+        let q = queued.get(cpu).copied().unwrap_or(0);
+        match best {
+            None => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            Some(_) if q < best_q => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            _ => {}
+        }
+    }
+    best
+}

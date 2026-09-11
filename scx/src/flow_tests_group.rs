@@ -1770,3 +1770,112 @@ fn sibling_online_pairs_ring_by_id() {
     assert_eq!(table2[2], 3);
     assert_eq!(table2[3], 2);
 }
+
+/*
+ * Least in group picks the smallest queued depth
+ * with lowest id on ties by strict less only. Halves
+ * view only with no live table use. Bound is 0 to nr
+ * with no extra pass. Missing queued reads as zero.
+ * Mirrors the BPF least scan at 4.2.19.
+ */
+#[test]
+fn least_in_group_picks_least_with_lowest_id_tie() {
+    let all = vec![true; 8];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[0, 0, 0, 0]), Some(0));
+    assert_eq!(
+        least_in_group(&all, GROUP_HOG, 8, &[0, 0, 0, 0, 0, 0, 0, 0]),
+        Some(4)
+    );
+    let q = vec![5, 1, 3, 0, 9, 9, 9, 9];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &q), Some(3));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &q), Some(4));
+    let tie = vec![2, 2, 2, 2, 7, 7, 7, 7];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &tie), Some(0));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &tie), Some(4));
+    let mut narrow = vec![false; 8];
+    narrow[6] = true;
+    assert_eq!(least_in_group(&narrow, GROUP_LIGHT, 8, &q), None);
+    assert_eq!(least_in_group(&narrow, GROUP_HOG, 8, &q), Some(6));
+    assert_eq!(least_in_group(&[], GROUP_LIGHT, 0, &[]), None);
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[]), Some(0));
+}
+
+/*
+ * Least in live group uses the table when ready else
+ * halves with the same least plus tie rule. Strict
+ * iff ready is zero, best effort iff ready is one
+ * with live table in placement. Missing queued reads
+ * as zero with no trap. Mirrors BPF select plus
+ * enqueue fallback at 4.2.19.
+ */
+#[test]
+fn least_in_group_live_uses_table_with_least() {
+    let all = vec![true; 4];
+    let mut table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    table[0] = GROUP_HOG;
+    table[1] = GROUP_HOG;
+    table[2] = GROUP_LIGHT;
+    table[3] = GROUP_LIGHT;
+    let q = vec![10, 1, 5, 0];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q),
+        Some(3)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &q),
+        Some(1)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 0, &q),
+        Some(1)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 0, &q),
+        Some(3)
+    );
+    let tie = vec![4, 4, 4, 4];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &tie),
+        Some(2)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &tie),
+        Some(0)
+    );
+    assert_eq!(
+        least_in_group_live(&[], GROUP_LIGHT, 0, &table, 1, &[]),
+        None
+    );
+    let empty_q: Vec<u64> = vec![];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &empty_q),
+        Some(2)
+    );
+}
+
+/*
+ * Least keeps the bound plus halves view with frozen
+ * constants. Scans 0 to nr only with no wrap, so out
+ * of range allowed entries never win. Halves splits
+ * low half light plus high half hog with extra to
+ * hog on odd counts. Single CPU keeps all light.
+ */
+#[test]
+fn least_keeps_bound_plus_halves_view() {
+    let mut allowed = vec![false; 16];
+    allowed[15] = true;
+    let zero16 = [0u64; 16];
+    assert_eq!(least_in_group(&allowed, GROUP_LIGHT, 8, &zero16), None);
+    assert_eq!(least_in_group(&allowed, GROUP_HOG, 8, &zero16), None);
+    assert_eq!(least_in_group(&allowed, GROUP_HOG, 16, &zero16), Some(15));
+    assert_eq!(group_of_cpu(0, 8), GROUP_LIGHT);
+    assert_eq!(group_of_cpu(4, 8), GROUP_HOG);
+    assert_eq!(group_of_cpu(0, 1), GROUP_LIGHT);
+    let all8 = [true; 8];
+    let zero8 = [0u64; 8];
+    assert_eq!(first_in_group(&all8, GROUP_LIGHT, 8), Some(0));
+    assert_eq!(
+        least_in_group(&all8, GROUP_LIGHT, 8, &zero8),
+        first_in_group(&all8, GROUP_LIGHT, 8)
+    );
+}

@@ -183,13 +183,25 @@ static __always_inline u8 flow_group_live(u32 cpu,
 		return (u8)FLOW_GROUP_LIGHT;
 	return flow_group_of_cpu(cpu, nr);
 }
-/* First allowed CPU in one group in id order. */
+/* Least queued allowed CPU in one group. */
+/* Scans 0 to 1024 with early break on nr plus */
+/* max, so the bound matches the prior first. */
+/* Needs live group plus mask plus queued depth. */
+/* Picks the smallest queued depth with lowest id */
+/* on ties by strict less only, so equal depths */
+/* keep the first id with no extra pass. Missing */
+/* queues read via the dsq count with no storage */
+/* lookup and no new loop. Placement keeps live, */
+/* dispatch keeps halves, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
+	s32 best = -1;
+	u64 best_q = 0;
 	s32 cpu;
 	bpf_for(cpu, 0, 1024) {
 		u8 g;
+		u64 q;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= nr_cpu_ids)
@@ -200,11 +212,17 @@ static __always_inline s32 flow_first_in_group(
 		    nr_cpu_ids);
 		if (g != group)
 			continue;
-		if (bpf_cpumask_test_cpu((u32)cpu,
+		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
-			return cpu;
+			continue;
+		q = scx_bpf_dsq_nr_queued(
+		    flow_dsq_for_cpu((u32)cpu));
+		if (best < 0 || q < best_q) {
+			best = cpu;
+			best_q = q;
+		}
 	}
-	return -1;
+	return best;
 }
 /* True when one core holds no running task. */
 /* Needs self plus all siblings idle by pid. */

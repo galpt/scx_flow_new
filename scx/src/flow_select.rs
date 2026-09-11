@@ -448,6 +448,93 @@ pub fn select_cpu_tiered(
 }
 
 /*
+ * Full tiered select model with least queued fallback.
+ * Mirrors the BPF order of waker plus free plus any
+ * idle plus previous plus current plus least in the
+ * group plus first. The least step scans 0 to nr in
+ * id order with live plus mask plus queued depth and
+ * picks the smallest depth with lowest id on ties by
+ * strict less only, so equal depths keep the first
+ * id. Missing queued entries read as zero with no
+ * trap. Placement keeps live, dispatch keeps halves,
+ * constants frozen. Strict iff ready is zero, best
+ * effort iff ready is one with live table use.
+ */
+#[cfg(test)]
+pub fn select_cpu_tiered_least(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    partner: &[u16],
+    running: &[bool],
+    queued: &[u64],
+) -> Option<u32> {
+    if waker_first_ok(cur, allowed, group, nr, table, ready, running) {
+        return Some(cur as u32);
+    }
+    if let Some(c) = pick_free_idle(allowed, group, nr, table, ready, partner, running) {
+        return Some(c);
+    }
+    if let Some(c) = pick_idle_in_group(allowed, idle, group, nr, table, ready) {
+        return Some(c);
+    }
+    for &cpu in &[prev, cur] {
+        if may_run_on(cpu, allowed)
+            && crate::flow_group::group_live(cpu as u32, nr, table, ready) == group
+            && (cpu as usize) < nr
+            && cpu >= 0
+        {
+            return Some(cpu as u32);
+        }
+    }
+    if let Some(c) =
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+    {
+        return Some(c);
+    }
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(cpu as u32);
+        }
+    }
+    None
+}
+
+/*
+ * Target CPU in one group from selected plus least.
+ * Mirrors the BPF pick in group used by enqueue. A
+ * valid allowed selected CPU in the group wins.
+ * Otherwise the least queued allowed CPU in the group
+ * wins with lowest id on ties. No allowed CPU in the
+ * group yields none for park use. Placement keeps
+ * live, dispatch keeps halves, constants frozen.
+ */
+#[cfg(test)]
+pub fn pick_in_group_least(
+    selected: i32,
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    queued: &[u64],
+) -> Option<u32> {
+    if selected >= 0
+        && may_run_on(selected, allowed)
+        && (selected as usize) < nr
+        && crate::flow_group::group_live(selected as u32, nr, table, ready) == group
+    {
+        return Some(selected as u32);
+    }
+    crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+}
+
+/*
  * True when an exiting task may run at once on this CPU.
  * Needs an exiting task with this CPU allowed, so short
  * exits skip order wait with no queue stall. Falls back
