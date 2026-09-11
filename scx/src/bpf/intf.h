@@ -53,6 +53,7 @@ enum flow_consts {
 	FLOW_DELAY_STAND = 8ULL,
 	FLOW_DELAY_WIN_LEN = 8ULL,
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
+	FLOW_DESERVED_SLACK_NS = 32000ULL,
 	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
@@ -497,16 +498,19 @@ static __always_inline u64 flow_granule_for_weight(
 		return (u64)FLOW_GRANULE_FLOOR_NS;
 	return gran;
 }
-/* True when woken deadline beats frontier plus gran. */
+/* True when woken deadline beats frontier plus gran plus slack. */
 /* Frontier is the service floor, so beating it by */
 /* granule proves earliness with no occupant state. */
+/* Slack is 32us bounded at half the 64us floor, so */
+/* near misses ease with no storm. Wrap safe via */
+/* time before on the summed bound with no branch. */
 /* Granule uses woken weight only, occupant weight */
 /* stays out after the frontier compare fix. */
 static __always_inline bool flow_deserved(u64 woken_dl,
 	u64 frontier, u64 granule)
 {
 	return flow_time_before(woken_dl,
-	    frontier + granule);
+	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
 }
 /* True when all five preempt gates pass. */
 /* Armed plus deserved plus same group plus mask plus */

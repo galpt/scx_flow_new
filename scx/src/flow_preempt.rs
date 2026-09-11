@@ -25,6 +25,9 @@ pub const DELAY_WIN_LEN: u64 = 8;
 /* Granule floor in nanos at 64us. */
 #[cfg(test)]
 pub const GRANULE_FLOOR_NS: u64 = 64_000;
+/* Deserved slack in nanos at 32us. */
+#[cfg(test)]
+pub const DESERVED_SLACK_NS: u64 = 32_000;
 /* Rate bit in the cursor top bit. */
 #[cfg(test)]
 pub const CURSOR_RATE_BIT: u32 = 0x8000_0000;
@@ -257,15 +260,24 @@ pub fn delay_stamp(win: u8, cur: u8, sample: u8) -> (u8, u8) {
 }
 
 /*
- * True when woken deadline beats frontier plus gran.
- * Frontier is the service floor, so beating it by
- * granule proves earliness with no occupant state.
- * Granule uses woken weight only, occupant weight
- * stays out after the frontier compare fix.
+ * True when woken deadline beats frontier plus gran
+ * plus slack. Frontier is the service floor, so
+ * beating it by granule proves earliness with no
+ * occupant state. Slack is 32us bounded at half the
+ * 64us floor, so near misses ease with no storm.
+ * Wrap safe via wrapping add plus signed compare
+ * with no branch. Granule uses woken weight only,
+ * occupant weight stays out after the frontier
+ * compare fix.
  */
 #[cfg(test)]
 pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
-    (woken_dl.wrapping_sub(frontier.wrapping_add(granule)) as i64) < 0
+    (woken_dl.wrapping_sub(
+        frontier
+            .wrapping_add(granule)
+            .wrapping_add(DESERVED_SLACK_NS),
+    ) as i64)
+        < 0
 }
 
 /*

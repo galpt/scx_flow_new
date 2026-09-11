@@ -37,6 +37,10 @@ fn delay_consts_match_header() {
         crate::bpf_intf::flow_consts_FLOW_GRANULE_FLOOR_NS as u64
     );
     assert_eq!(
+        DESERVED_SLACK_NS,
+        crate::bpf_intf::flow_consts_FLOW_DESERVED_SLACK_NS as u64
+    );
+    assert_eq!(
         CURSOR_RATE_BIT,
         crate::bpf_intf::flow_consts_FLOW_CURSOR_RATE_BIT as u32
     );
@@ -54,6 +58,8 @@ fn delay_consts_match_header() {
     assert_eq!(DELAY_STAND, 8);
     assert_eq!(DELAY_WIN_LEN, 8);
     assert_eq!(GRANULE_FLOOR_NS, 64_000);
+    assert_eq!(DESERVED_SLACK_NS, 32_000);
+    assert_eq!(DESERVED_SLACK_NS * 2, GRANULE_FLOOR_NS);
     assert_eq!(crate::flow_preempt::CURSOR_STAND_BIT, 0x400);
     assert_eq!(CURSOR_MASK, 0x7fff_fbff);
 }
@@ -195,18 +201,61 @@ fn frontier_deserved_beats_floor_by_granule() {
     let slice = 1_000_000u64;
     let gran = granule_for_weight(1024, slice);
     assert_eq!(gran, 250_000);
+    assert_eq!(DESERVED_SLACK_NS, 32_000);
     let frontier = 100_000_000u64;
+    let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
     assert!(deserved(frontier, frontier, gran));
     assert!(deserved(frontier + 100_000, frontier, gran));
-    assert!(!deserved(frontier + gran, frontier, gran));
-    assert!(!deserved(frontier + gran + 1, frontier, gran));
+    assert!(deserved(frontier + gran, frontier, gran));
+    assert!(deserved(bound.wrapping_sub(1), frontier, gran));
+    assert!(!deserved(bound, frontier, gran));
+    assert!(!deserved(bound.wrapping_add(1), frontier, gran));
     assert!(!deserved(frontier + 1_000_000, frontier, gran));
     let old = u64::MAX - 10;
     let wrap_gran = 20u64;
     let wrap_sum = old.wrapping_add(wrap_gran);
     assert_eq!(wrap_sum, 9);
+    let wrap_bound = old.wrapping_add(wrap_gran).wrapping_add(DESERVED_SLACK_NS);
+    assert_eq!(wrap_bound, 32_009);
     assert!(deserved(5, old, wrap_gran));
-    assert!(!deserved(20, old, wrap_gran));
+    assert!(deserved(wrap_bound.wrapping_sub(1), old, wrap_gran));
+    assert!(!deserved(wrap_bound, old, wrap_gran));
+    assert!(!deserved(wrap_bound.wrapping_add(1), old, wrap_gran));
+}
+
+/*
+ * Slack eases the deserved bound by 32us with a
+ * strict miss by one pass plus exact boundary fail.
+ * Zero slack collapses to the old granule only
+ * compare with no behavior change.
+ */
+#[test]
+fn deserved_slack_eases_by_32us() {
+    let slice = 1_000_000u64;
+    let gran = granule_for_weight(1024, slice);
+    assert_eq!(gran, 250_000);
+    assert_eq!(DESERVED_SLACK_NS, 32_000);
+    assert_eq!(DESERVED_SLACK_NS * 2, GRANULE_FLOOR_NS);
+    let frontier = 100_000_000u64;
+    let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
+    assert_eq!(bound, frontier + gran + 32_000);
+    assert!(deserved(frontier + gran, frontier, gran));
+    assert!(deserved(bound.wrapping_sub(1), frontier, gran));
+    assert!(!deserved(bound, frontier, gran));
+    assert!(!deserved(bound.wrapping_add(1), frontier, gran));
+    let old = |woken_dl: u64| (woken_dl.wrapping_sub(frontier.wrapping_add(gran)) as i64) < 0;
+    assert!(!old(frontier + gran));
+    assert!(old(frontier + gran - 1));
+    assert!(!old(frontier + gran + 1));
+    let zero_slack = |woken_dl: u64| {
+        (woken_dl.wrapping_sub(frontier.wrapping_add(gran).wrapping_add(0)) as i64) < 0
+    };
+    assert_eq!(zero_slack(frontier + gran - 1), old(frontier + gran - 1));
+    assert_eq!(zero_slack(frontier + gran), old(frontier + gran));
+    assert_eq!(zero_slack(frontier + gran + 1), old(frontier + gran + 1));
+    assert!(deserved(frontier + gran, frontier, gran) != old(frontier + gran));
+    assert!(deserved(bound.wrapping_sub(1), frontier, gran));
+    assert!(!old(bound.wrapping_sub(1)));
 }
 
 #[test]
