@@ -281,6 +281,20 @@ pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
 }
 
 /*
+ * Effective same group under S1 perf bypass. Perf forces
+ * true with no recount, strict keeps the live check.
+ * Mirrors the BPF busy-kick bypass in enqueue where
+ * flow_perf_enabled forces same true before the branch
+ * checks, so pskip_group stays flat in perf with no new
+ * counter. Callers apply this before preempt_ok plus
+ * skip_reason with no signature change.
+ */
+#[cfg(test)]
+pub fn same_override(same_group: bool, perf: bool) -> bool {
+    if perf { true } else { same_group }
+}
+
+/*
  * True when all five preempt gates pass. Armed plus
  * deserved plus same group plus mask plus rate clear
  * with fail closed on any clear. Branch order is armed

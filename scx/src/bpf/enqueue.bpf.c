@@ -390,6 +390,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			same = group ==
 			    flow_group_live((u32)cpu,
 			    nr_cpu_ids);
+			/* S1 perf bypasses group with no recount, */
+			/* so pskip_g stays flat in perf. */
+			if (flow_perf_enabled())
+				same = true;
 			mask_ok =
 			    bpf_cpumask_test_cpu(
 			    (u32)cpu, p->cpus_ptr);

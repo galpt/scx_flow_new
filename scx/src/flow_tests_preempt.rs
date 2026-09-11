@@ -541,3 +541,40 @@ fn storm_line_needs_two_queued() {
     assert_eq!(skip_reason(false, true, true, true, true), Some(1));
     assert_eq!(skip_reason(true, true, true, true, false), Some(5));
 }
+
+/*
+ * S1 perf bypasses the group gate with no recount.
+ * Strict keeps the live check, so cross group fails
+ * with reason 3. Perf forces same true before the
+ * branch checks, so the same cross group wake kicks
+ * with no group count. Other gates stay frozen, so
+ * armed plus deserved plus mask plus rate still fail
+ * in perf with the same branch order. Mirrors the BPF
+ * if flow_perf_enabled same true in enqueue with no
+ * preempt_ok signature change.
+ */
+#[test]
+fn same_override_bypasses_group_without_recount() {
+    assert!(!same_override(false, false));
+    assert!(same_override(true, false));
+    assert!(same_override(false, true));
+    assert!(same_override(true, true));
+    assert_eq!(skip_reason(true, true, false, true, true), Some(3));
+    assert!(!preempt_ok(true, true, true, false, true));
+    let eff = same_override(false, true);
+    assert!(eff);
+    assert_eq!(skip_reason(true, true, eff, true, true), None);
+    assert!(preempt_ok(true, true, true, eff, true));
+    assert_ne!(skip_reason(true, true, eff, true, true), Some(3));
+    assert_eq!(skip_reason(false, true, eff, true, true), Some(1));
+    assert_eq!(skip_reason(true, false, eff, true, true), Some(2));
+    assert_eq!(skip_reason(true, true, eff, false, true), Some(4));
+    assert_eq!(skip_reason(true, true, eff, true, false), Some(5));
+    assert!(!preempt_ok(false, true, true, eff, true));
+    assert!(!preempt_ok(true, false, true, eff, true));
+    assert!(!preempt_ok(true, true, true, eff, false));
+    assert!(!preempt_ok(true, true, false, eff, true));
+    let strict = same_override(false, false);
+    assert!(!strict);
+    assert_eq!(skip_reason(true, true, strict, true, true), Some(3));
+}
