@@ -41,8 +41,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->running_nice = (s16)nice;
 		st->running_weight = (u16)w;
 		__sync_fetch_and_and(&st->cursor,
-		    ~((u32)FLOW_CURSOR_RATE_BIT |
-		    (u32)FLOW_CURSOR_STORM_BIT));
+		    ~(u32)FLOW_CURSOR_RATE_BIT);
 		/* Own count plus close with no loop. */
 		/* Enqueue stamps max only, so 8 means */
 		/* 8 runnings with no double count. */

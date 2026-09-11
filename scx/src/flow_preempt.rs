@@ -30,15 +30,9 @@ pub const GRANULE_FLOOR_NS: u64 = 64_000;
 pub const CURSOR_RATE_BIT: u32 = 0x8000_0000;
 /* Stand bit in cursor bit10 with peer in 0 to 9. */
 pub const CURSOR_STAND_BIT: u32 = 0x0000_0400;
-/* Storm bit in cursor bit11 for one extra kick. */
+/* Cursor peer mask without rate plus stand. */
 #[cfg(test)]
-pub const CURSOR_STORM_BIT: u32 = 0x0000_0800;
-/* Cursor peer mask without rate plus stand plus storm. */
-#[cfg(test)]
-pub const CURSOR_MASK: u32 = 0x7fff_f3ff;
-/* Storm delay line at 62 for two queued. */
-#[cfg(test)]
-pub const STORM_DELAY_WIN: u64 = 62;
+pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
 /*
  * Sample in 32us units from queued count. One queued
@@ -92,22 +86,11 @@ pub fn delay_armed_latched(win: u8, held: bool) -> bool {
 
 /*
  * True when the stand latch is held in bit10.
- * Bits 0 to 9 hold peer, bit10 holds stand, bit11
- * holds storm, top holds rate, so rotation masks all
- * three flags.
+ * Bits 0 to 9 hold peer, bit10 holds stand, top
+ * holds rate, so rotation masks both flags.
  */
 pub fn stand_held(cursor: u32) -> bool {
     (cursor & CURSOR_STAND_BIT) != 0
-}
-
-/*
- * True when the storm slot is held in bit11.
- * Storm allows one extra kick per slice, so max is
- * two per slice per CPU with rate plus storm.
- */
-#[cfg(test)]
-pub fn storm_held(cursor: u32) -> bool {
-    (cursor & CURSOR_STORM_BIT) != 0
 }
 
 /*
@@ -193,7 +176,7 @@ pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
 }
 
 /*
- * Cursor peer without rate plus stand plus storm.
+ * Cursor peer without rate plus stand.
  */
 #[cfg(test)]
 pub fn cursor_val(cursor: u32) -> u32 {
@@ -201,19 +184,18 @@ pub fn cursor_val(cursor: u32) -> u32 {
 }
 
 /*
- * Store peer plus keep rate plus stand plus storm.
- * Masks the peer, so rotation keeps order with no
- * extra state. Dispatch CAS keeps fresh flags, model
+ * Store peer plus keep rate plus stand. Masks the
+ * peer, so rotation keeps order with no extra
+ * state. Dispatch CAS keeps fresh flags, model
  * is sequential form, timing only.
  */
 #[cfg(test)]
 pub fn cursor_store(peer: u32, old: u32) -> u32 {
-    (peer & CURSOR_MASK) | (old & (CURSOR_RATE_BIT | CURSOR_STAND_BIT | CURSOR_STORM_BIT))
+    (peer & CURSOR_MASK) | (old & (CURSOR_RATE_BIT | CURSOR_STAND_BIT))
 }
 
 /*
- * Set the stand latch plus keep peer plus rate plus
- * storm.
+ * Set the stand latch plus keep peer plus rate.
  */
 #[cfg(test)]
 pub fn stand_set(cursor: u32) -> u32 {
@@ -221,8 +203,7 @@ pub fn stand_set(cursor: u32) -> u32 {
 }
 
 /*
- * Clear the stand latch plus keep peer plus rate plus
- * storm.
+ * Clear the stand latch plus keep peer plus rate.
  */
 #[cfg(test)]
 pub fn stand_clear(cursor: u32) -> u32 {
@@ -230,27 +211,8 @@ pub fn stand_clear(cursor: u32) -> u32 {
 }
 
 /*
- * Set the storm slot plus keep peer plus rate plus
- * stand.
- */
-#[cfg(test)]
-pub fn storm_set(cursor: u32) -> u32 {
-    cursor | CURSOR_STORM_BIT
-}
-
-/*
- * Clear the storm slot plus keep peer plus rate plus
- * stand.
- */
-#[cfg(test)]
-pub fn storm_clear(cursor: u32) -> u32 {
-    cursor & !CURSOR_STORM_BIT
-}
-
-/*
  * True when the rate bit is clear for one kick.
  * Read only, so claim below does the atomic set.
- * Storm holds the second kick, see storm claim.
  */
 #[cfg(test)]
 pub fn rate_clear(cursor: u32) -> bool {
@@ -268,35 +230,13 @@ pub fn rate_set(cursor: u32) -> u32 {
 /*
  * Atomically set rate and report prior clear. One
  * winner per slice with no check then set. Models
- * the BPF fetch_or claim in enqueue. Storm adds one
- * extra, so max is two per slice.
+ * the BPF fetch_or claim in enqueue.
  */
 #[cfg(test)]
 pub fn rate_claim(cursor: &mut u32) -> bool {
     let old = *cursor;
     *cursor |= CURSOR_RATE_BIT;
     rate_clear(old)
-}
-
-/*
- * True when the storm slot is clear for a second kick.
- * Read only, so claim below does the atomic set.
- */
-#[cfg(test)]
-pub fn storm_clear_for_kick(cursor: u32) -> bool {
-    (cursor & CURSOR_STORM_BIT) == 0
-}
-
-/*
- * Atomically set storm and report prior clear. One
- * extra winner per slice with no check then set.
- * Max is two per slice per CPU with rate plus storm.
- */
-#[cfg(test)]
-pub fn storm_claim(cursor: &mut u32) -> bool {
-    let old = *cursor;
-    *cursor |= CURSOR_STORM_BIT;
-    storm_clear_for_kick(old)
 }
 
 /*
@@ -326,42 +266,6 @@ pub fn delay_stamp(win: u8, cur: u8, sample: u8) -> (u8, u8) {
 #[cfg(test)]
 pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
     (woken_dl.wrapping_sub(frontier.wrapping_add(granule)) as i64) < 0
-}
-
-/*
- * True when woken deadline beats frontier plus half
- * granule. Twice as strict as deserved, so only very
- * early wakeups pass. Uses woken weight only with no
- * floor on the half, storm only with no thrash.
- */
-#[cfg(test)]
-pub fn storm_deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
-    (woken_dl.wrapping_sub(frontier.wrapping_add(granule >> 1)) as i64) < 0
-}
-
-/*
- * True when delay shows storm at two queued. 62 is
- * delay from two queued, so storm needs at least two
- * queued with no extra state.
- */
-#[cfg(test)]
-pub fn storm_delay(win: u8) -> bool {
-    (win as u64) >= STORM_DELAY_WIN
-}
-
-/*
- * True when a storm second kick may run. Needs storm
- * delay at 62 plus twice deserved with half granule.
- * Rate plus storm cap at two per slice per CPU with
- * atomic storm claim. First kick uses rate, second
- * uses storm, both clear per slice.
- */
-#[cfg(test)]
-pub fn storm_ok(win: u8, woken_dl: u64, frontier: u64, granule: u64) -> bool {
-    if !storm_delay(win) {
-        return false;
-    }
-    storm_deserved(woken_dl, frontier, granule)
 }
 
 /*
