@@ -75,11 +75,13 @@ arrivals never inherit stale time. The rules live in
 
 ### Placement
 
-Order is waker CPU when idle in group, free core in group,
-any idle in group, prior, current, then least queued
-in group, then first allowed, and the task mask
-always wins. Least picks lowest queued depth with
-lowest id on ties. An idle core cannot
+Strict order is waker CPU when idle in group,
+free core in group, any idle in group, prior,
+current, then least queued in group, then first
+allowed, and the task mask always wins. Least picks
+lowest queued depth with lowest id on ties.
+Perf widens each miss to any allowed, see governor
+mode. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Groups split physical cores with
 siblings kept together and cache local shares where
@@ -93,14 +95,16 @@ effort when ready is one. The order lives in
 
 ### Dispatch
 
-Order is local queue, group park, then steals from peers
-with mask checks. An idle thief with no moved plus no own
-left may rescue a lone queued task past unmovable park
-leftovers, busy thieves keep depth 2. Every pass moves at
-least one task when movable work exists. Dispatch uses
-halves while placement uses the live table seeded by
-online rank. Snapshot covers online only. The drains live
-in `scx/src/bpf/dispatch.bpf.c`.
+Strict order is local queue, group park, then steals
+from peers with mask checks. An idle thief with no moved
+plus no own left may rescue a lone queued task past
+unmovable park leftovers, busy thieves keep depth 2.
+Perf leaves dispatch on halves, see governor mode.
+Every pass moves at least one task when movable work
+exists. Dispatch uses halves while placement uses
+the live table seeded by online rank. Snapshot covers
+online only. The drains live in
+`scx/src/bpf/dispatch.bpf.c`.
 
 ### Kicks
 
@@ -108,9 +112,10 @@ Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
-floor plus 32us slack plus same group plus mask
+floor plus 32us slack plus same group strict plus mask
 plus atomic rate claim with one kick per slice
-alone, bounded extra on overlap. Frontier is
+alone, bounded extra on overlap. Perf bypasses group,
+see governor mode. Frontier is
 the service floor, so beating it by granule
 plus slack proves earliness with no occupant
 state. Short heavy granule is stricter, tempering
@@ -133,6 +138,23 @@ stays idle only. See `scx/src/bpf/intf.h` plus
 `scx/src/bpf/main.bpf.c` plus
 `scx/src/bpf/enqueue.bpf.c` plus
 `scx/src/flow_select.rs`.
+
+### Governor mode
+
+Strict keeps group isolation with mask win.
+Perf widens placement to any allowed on miss
+with same tier order plus least over any.
+Perf bypasses the kick group gate with no recount,
+so group skips stay flat in perf. Unanimous
+performance over online CPUs sets perf one,
+else strict zero. Polls online only on the 1s tick
+with BSS write on transition only. Dashboard shows
+strict plus perf in the mode cell with governor tip.
+Dispatch stays on halves with no perf widen.
+No CLI knob changes this. See `scx/src/bpf/intf.h`
+plus `scx/src/bpf/select_cpu.bpf.c` plus
+`scx/src/bpf/enqueue.bpf.c` plus `scx/src/topology.rs`
+plus `scx/src/snapshot.rs` plus `scx/ui/index.html`.
 
 ### Counts and queues
 

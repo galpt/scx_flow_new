@@ -537,10 +537,11 @@ static __always_inline bool flow_kick_recent(u64 now,
 	return now - last <
 	    (u64)FLOW_KICK_COALESCE_NS;
 }
-/* True when perf widening is on for placement. */
+/* True when perf mode is on for S0 plus S1. */
 /* BSS flag holds zero for strict plus one for perf. */
 /* Zero init keeps 4.2.21 paths bit identical. */
-/* Perf keeps tier order with wider any allowed set. */
+/* S0 keeps tier order with wider any allowed set, */
+/* S1 bypasses the kick group gate with no recount. */
 /* Mask always wins in both modes with no new knob. */
 /* Extern lives in the function body, so bindgen keeps */
 /* no host copy with BSS only in main. */

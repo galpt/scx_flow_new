@@ -48,13 +48,14 @@ volatile u16 flow_sibling_by_cpu[1024];
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_kick_at[1024];
-/* Placement widen flag for S0 with zero init strict. */
+/* Governor flag for S0 plus S1 with zero init strict. */
 /* Zero keeps 4.2.21 paths bit identical with group plus */
-/* mask isolation. One widens the candidate set to any */
-/* allowed on in group miss with same tier order. */
-/* Mask always wins in both modes with no CLI knob. */
-/* Userspace writes on governor transition only. */
-/* No per CPU array with no S1 use. */
+/* mask isolation. One widens placement to any allowed */
+/* on in group miss with same tier order plus bypasses */
+/* the kick group gate with no recount. Mask always wins */
+/* in both modes with no CLI knob. Userspace writes on */
+/* governor transition only. Single flag with no per CPU */
+/* array. */
 volatile u8 flow_perf_mode;
 static __always_inline u64 flow_now(void)
 {

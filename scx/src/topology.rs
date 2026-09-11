@@ -212,11 +212,11 @@ pub fn perf_unanimous(governors: &[String]) -> bool {
 
 /*
  * Display governor for the dashboard plus snapshot.
- * Empty reads as unknown. Unanimous reads as the
- * first full string with suffix, so EPP stays visible.
- * Same base across all reads as the base. Mixed bases
- * read as mixed with no list. Unknown alone stays
- * unknown with no trap.
+ * Empty reads as unknown. Unanimous with same suffix
+ * reads as the first full string, so EPP stays visible.
+ * Unanimous with differing suffix reads as the base.
+ * Mixed bases read as mixed with no list. Unknown alone
+ * stays unknown with no trap.
  */
 pub fn display_governor(governors: &[String]) -> String {
     if governors.is_empty() {

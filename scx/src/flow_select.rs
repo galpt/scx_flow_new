@@ -389,21 +389,22 @@ pub fn waker_first_ok(
 }
 
 /*
- * Full tiered select model. Mirrors the BPF order of
- * waker CPU first plus free scan plus any idle in the
- * group plus previous plus current plus first in
- * the group plus first. Waker wins when idle with
- * no running task plus allowed plus in group. An
- * idle core cannot stack, so locality is free.
- * Every other case keeps current behavior. Tier A
- * scans for a free core with no claim, so a miss
- * wastes no idle claim. Tier B prefers any idle
- * in the group with claim only there. Placement
- * only with no dispatch use. Singletons treat all
- * running free as free, so Tier A equals Tier B
+ * Full tiered select model with first fallback.
+ * Mirrors the BPF order of waker CPU first plus free
+ * scan plus any idle in the group plus previous plus
+ * current plus first in the group plus first. Waker
+ * wins when idle with no running task plus allowed
+ * plus in group. An idle core cannot stack, so
+ * locality is free. Every other case keeps current
+ * behavior. Tier A scans for a free core with no
+ * claim, so a miss wastes no idle claim. Tier B
+ * prefers any idle in the group with claim only there.
+ * Placement only with no dispatch use. Singletons treat
+ * all running free as free, so Tier A equals Tier B
  * order with no trap. Strict iff ready is zero,
  * best effort iff ready is one with live table
- * in placement.
+ * in placement. First model only, see tiered least
+ * for the live least used by select plus enqueue.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered(
