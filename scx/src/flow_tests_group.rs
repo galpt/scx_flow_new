@@ -1879,3 +1879,51 @@ fn least_keeps_bound_plus_halves_view() {
         first_in_group(&all8, GROUP_LIGHT, 8)
     );
 }
+
+/*
+ * Running sets the uniform cpu perf level at max.
+ * Both groups share 1024 with no per group hint, so
+ * the running path holds high with no EMA plus no
+ * state growth. Locks the BPF header plus the Rust
+ * mirror with no stats change.
+ */
+#[test]
+fn running_sets_cpuperf_level() {
+    assert_eq!(CPUPERF_LEVEL, 1024);
+    assert_eq!(CPUPERF_IDLE, 0);
+    assert_eq!(CPUPERF_LEVEL, PERF_LIGHT);
+    assert_eq!(CPUPERF_LEVEL, PERF_HOG);
+    assert_eq!(perf_for_group(GROUP_LIGHT), CPUPERF_LEVEL);
+    assert_eq!(perf_for_group(GROUP_HOG), CPUPERF_LEVEL);
+    assert_eq!(
+        CPUPERF_LEVEL,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_LEVEL as u32
+    );
+    assert_eq!(
+        CPUPERF_IDLE,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_IDLE as u32
+    );
+}
+
+/*
+ * Idle restore needs blocked plus empty queues.
+ * Only blocked with per CPU empty plus local empty
+ * restores zero, so runnable never restores with any
+ * queued work held high. Mirrors the BPF helper with
+ * no EMA plus no state growth.
+ */
+#[test]
+fn idle_restore_needs_blocked_and_empty() {
+    assert!(should_restore_hint(false, 0, 0));
+    assert!(!should_restore_hint(true, 0, 0));
+    assert!(!should_restore_hint(false, 1, 0));
+    assert!(!should_restore_hint(false, 0, 1));
+    assert!(!should_restore_hint(false, 1, 1));
+    assert!(!should_restore_hint(true, 1, 0));
+    assert!(!should_restore_hint(true, 0, 1));
+    assert!(!should_restore_hint(true, 1, 1));
+    assert!(!should_restore_hint(false, 2, 0));
+    assert!(!should_restore_hint(false, 0, 7));
+    assert!(!should_restore_hint(true, u64::MAX, u64::MAX));
+    assert!(should_restore_hint(false, 0, 0));
+}

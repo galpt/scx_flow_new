@@ -5,20 +5,14 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_task_ctx *tctx;
 	struct flow_cpu_state *st;
 	s32 cpu;
-	u8 group;
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	if (tctx)
 		tctx->run_at = flow_now();
-	if (tctx && tctx->group ==
-	    (u8)FLOW_GROUP_HOG)
-		group = (u8)FLOW_GROUP_HOG;
-	else
-		group = (u8)FLOW_GROUP_LIGHT;
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
-			    flow_perf_for_group(group));
+			    (u32)FLOW_CPUPERF_LEVEL);
 	}
 	if (cpu < 0)
 		goto inc;
@@ -277,6 +271,21 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (!tctx || !tctx->run_at) {
 		flow_clear_running(cpu);
 		flow_on_cpu_dec();
+		if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
+			u64 dsq_nr;
+			u64 local_nr;
+			dsq_nr = scx_bpf_dsq_nr_queued(
+			    flow_dsq_for_cpu((u32)cpu));
+			local_nr = scx_bpf_dsq_nr_queued(
+			    (u64)SCX_DSQ_LOCAL_ON |
+			    (u64)cpu);
+			if (flow_should_restore_hint(runnable,
+			    dsq_nr, local_nr)) {
+				if (scx_bpf_cpuperf_set)
+					scx_bpf_cpuperf_set(cpu,
+					    (u32)FLOW_CPUPERF_IDLE);
+			}
+		}
 		return;
 	}
 	if (now >= tctx->run_at)
@@ -296,15 +305,18 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx->vruntime = nv;
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		struct flow_cpu_state *st;
+		u64 dsq_nr;
+		u64 local_nr;
+		dsq_nr = scx_bpf_dsq_nr_queued(
+		    flow_dsq_for_cpu((u32)cpu));
+		local_nr = scx_bpf_dsq_nr_queued(
+		    (u64)SCX_DSQ_LOCAL_ON |
+		    (u64)cpu);
 		st = flow_cpu((u32)cpu);
 		if (st) {
 			if (!runnable) {
-				u64 dsq;
-				dsq = flow_dsq_for_cpu((u32)cpu);
-				if (scx_bpf_dsq_nr_queued(dsq) == 0 &&
-				    scx_bpf_dsq_nr_queued(
-				    (u64)SCX_DSQ_LOCAL_ON |
-				    (u64)cpu) == 0) {
+				if (dsq_nr == 0 &&
+				    local_nr == 0) {
 					if (nv != 0)
 						st->frontier =
 						    flow_frontier_idle(nv);
@@ -317,6 +329,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				st->frontier = flow_frontier_max(
 				    st->frontier, nv);
 			}
+		}
+		if (flow_should_restore_hint(runnable,
+		    dsq_nr, local_nr)) {
+			if (scx_bpf_cpuperf_set)
+				scx_bpf_cpuperf_set(cpu,
+				    (u32)FLOW_CPUPERF_IDLE);
 		}
 	}
 	if (runnable) {

@@ -406,7 +406,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		struct flow_cpu_state *st;
 		u32 key;
 		u64 dsq;
-		u8 group;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= n)
@@ -436,10 +435,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->delay_win = 0;
 		st->delay_cur = 0;
 		st->delay_cnt = 0;
-		group = flow_group_live((u32)cpu, n);
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
-			    flow_perf_for_group(group));
+			    (u32)FLOW_CPUPERF_LEVEL);
 	}
 	if ((u64)FLOW_DSQ_PARK >= (u64)SCX_DSQ_LOCAL_ON) {
 		scx_bpf_error("dsq id over bound");

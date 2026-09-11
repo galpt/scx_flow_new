@@ -75,6 +75,12 @@ pub const PERF_LIGHT: u32 = 1024;
 /* Perf hint of hog at max. */
 #[cfg(test)]
 pub const PERF_HOG: u32 = 1024;
+/* Cpu perf level at max for running. */
+#[cfg(test)]
+pub const CPUPERF_LEVEL: u32 = 1024;
+/* Cpu perf idle at zero for blocked empty. */
+#[cfg(test)]
+pub const CPUPERF_IDLE: u32 = 0;
 
 /*
  * Group of one CPU by id halves with extra to hog.
@@ -1019,6 +1025,18 @@ pub fn perf_for_group(group: u8) -> u32 {
     } else {
         PERF_LIGHT
     }
+}
+
+/*
+ * True when a stopping task should restore the idle hint.
+ * Bang-bang edge at M1 with no EMA plus no state growth.
+ * Needs blocked plus per CPU queue empty plus local empty,
+ * so runnable never restores with any queued work held high.
+ * Mirrors the BPF helper for stopping use.
+ */
+#[cfg(test)]
+pub fn should_restore_hint(runnable: bool, dsq_nr: u64, local_nr: u64) -> bool {
+    !runnable && dsq_nr == 0 && local_nr == 0
 }
 
 /*

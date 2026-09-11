@@ -42,6 +42,8 @@ enum flow_consts {
 	FLOW_PINNED_INFLATE_NS = (8ULL * 1000ULL * 1000ULL),
 	FLOW_PERF_LIGHT = 1024ULL,
 	FLOW_PERF_HOG = 1024ULL,
+	FLOW_CPUPERF_LEVEL = 1024ULL,
+	FLOW_CPUPERF_IDLE = 0ULL,
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	FLOW_STEAL_BOUND = 8ULL,
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
@@ -163,6 +165,15 @@ static __always_inline u32 flow_perf_for_group(u8 group)
 	if (group == (u8)FLOW_GROUP_HOG)
 		return (u32)FLOW_PERF_HOG;
 	return (u32)FLOW_PERF_LIGHT;
+}
+/* True when a stopping task should restore the idle hint. */
+/* Bang-bang edge at M1 with no EMA plus no state growth. */
+/* Needs blocked plus per CPU queue empty plus local empty, */
+/* so runnable never restores with any queued work held high. */
+static __always_inline bool flow_should_restore_hint(
+	bool runnable, u64 dsq_nr, u64 local_nr)
+{
+	return !runnable && dsq_nr == 0 && local_nr == 0;
 }
 /* True when one window of 32ms has passed. */
 static __always_inline bool flow_win_ready(u64 now,
