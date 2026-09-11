@@ -1562,6 +1562,76 @@ fn seed_online_sparse_evens_holds_4_plus_4() {
 }
 
 /*
+ * Seed online sparse odd holds 3 plus 4 by rank.
+ * First three ranks stay light, rest stay hog with
+ * extra to hog, offline stays light inert. Skewed
+ * forces ready one even when uniform, so SMT off
+ * keeps groups over online only.
+ */
+#[test]
+fn seed_online_sparse_odd_holds_3_plus_4() {
+    let online = vec![0, 2, 4, 6, 8, 10, 12];
+    let caps = vec![1024; 7];
+    let freqs = vec![4000000; 7];
+    let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
+    assert_eq!(r, 1);
+    for &id in &[0, 2, 4] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+    for &id in &[6, 8, 10, 12] {
+        assert_eq!(t[id as usize], GROUP_HOG);
+    }
+    for &id in &[1, 3, 5, 7, 9, 11, 13, 14, 15] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+    /* Rank halves give 3 light plus 4 hog with no drift. */
+    let light = online
+        .iter()
+        .filter(|&&id| t[id as usize] == GROUP_LIGHT)
+        .count();
+    let hog = online
+        .iter()
+        .filter(|&&id| t[id as usize] == GROUP_HOG)
+        .count();
+    assert_eq!(light, 3);
+    assert_eq!(hog, 4);
+}
+
+/*
+ * Seed online sparse hetero holds 4 plus 4 by rank.
+ * Table holds interleave over rank with offline inert,
+ * so fast ranks spread with no id use. Hetero plus
+ * skew keep ready one, so placement uses live.
+ */
+#[test]
+fn seed_online_sparse_hetero_holds_4_plus_4() {
+    let online = vec![0, 2, 4, 6, 8, 10, 12, 14];
+    let caps = vec![2048, 1024, 2048, 1024, 512, 512, 256, 256];
+    let freqs = vec![4000000; 8];
+    assert!(hetero_needed(&caps, &freqs));
+    let (t, r) = seed_groups_online(&caps, &freqs, &online, 16);
+    assert_eq!(r, 1);
+    let want = assign_sorted_interleave(&caps, &freqs, 8);
+    for (rank, &id) in online.iter().enumerate() {
+        assert_eq!(t[id as usize], want[rank]);
+    }
+    /* Counts stay 4 plus 4 with offline light inert. */
+    let light = online
+        .iter()
+        .filter(|&&id| t[id as usize] == GROUP_LIGHT)
+        .count();
+    let hog = online
+        .iter()
+        .filter(|&&id| t[id as usize] == GROUP_HOG)
+        .count();
+    assert_eq!(light, 4);
+    assert_eq!(hog, 4);
+    for &id in &[1, 3, 5, 7, 9, 11, 13, 15] {
+        assert_eq!(t[id as usize], GROUP_LIGHT);
+    }
+}
+
+/*
  * Seed online dense short holds 4 plus 4 over online.
  * Offline stays light inert with no trap. Ready stays
  * one, so placement uses the live table with no halves
