@@ -246,9 +246,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 dsq;
 		s32 nice;
 		u32 w;
+		u64 target = 0;
+		u64 ref_f = 0;
 		st = flow_cpu((u32)cpu);
 		if (st)
-			frontier = st->frontier;
+			target = st->frontier;
+		ref_f = flow_ref_frontier(p, sel);
+		/* Normal path only, park plus no tctx keep */
+		/* ref only. Corrected feeds clamp plus */
+		/* deserved with max wrap safety. */
+		frontier = flow_frontier_max(ref_f, target);
 		nice = flow_nice_of(p);
 		w = flow_weight_of(nice);
 		clamped = flow_clamp_vruntime_w(v, frontier,
@@ -367,7 +374,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			granule = flow_granule_for_weight(w,
 			    slice);
 			is_deserved = flow_deserved(dl,
-			    st->frontier, granule);
+			    frontier, granule);
 			same = group ==
 			    flow_group_live((u32)cpu,
 			    nr_cpu_ids);

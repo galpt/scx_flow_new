@@ -102,6 +102,20 @@ pub fn frontier_max(old: u64, next: u64) -> u64 {
 }
 
 /*
+ * Corrected frontier for the normal enqueue path.
+ * Takes the max of the selected ref frontier and
+ * the target frontier with wrap safety. The
+ * corrected value feeds both the clamp plus
+ * deadline and the deserved compare, so both see
+ * the same floor. Park plus no tctx paths keep
+ * ref only with no use here.
+ */
+#[cfg(test)]
+pub fn corrected_frontier(ref_frontier: u64, target_frontier: u64) -> u64 {
+    frontier_max(ref_frontier, target_frontier)
+}
+
+/*
  * Frontier for an idle CPU from the waking virtual
  * time. The waking value bounds the reset with no
  * zero use, so a new arrival never inherits stale

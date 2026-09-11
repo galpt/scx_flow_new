@@ -1965,3 +1965,68 @@ fn pick_in_group_least_prefers_selected_else_least() {
         None
     );
 }
+
+/*
+ * Corrected frontier takes the max with wrap. Ref
+ * past target wins, target past ref wins, equal
+ * stays, zero follows max, wrap follows before.
+ * Mirrors the BPF normal path max of ref plus
+ * target with no park plus no tctx use.
+ */
+#[test]
+fn corrected_frontier_takes_max_with_wrap() {
+    assert_eq!(corrected_frontier(100, 90), 100);
+    assert_eq!(corrected_frontier(90, 100), 100);
+    assert_eq!(corrected_frontier(100, 100), 100);
+    assert_eq!(corrected_frontier(0, 0), 0);
+    assert_eq!(corrected_frontier(100_000_000, 0), 100_000_000);
+    assert_eq!(corrected_frontier(0, 100_000_000), 100_000_000);
+    assert_eq!(corrected_frontier(90_000_000, 100_000_000), 100_000_000);
+    assert_eq!(corrected_frontier(100_000_000, 90_000_000), 100_000_000);
+    let old = u64::MAX - 100;
+    let next = 50u64;
+    assert!(time_before(old, next));
+    assert_eq!(corrected_frontier(old, next), next);
+    assert_eq!(corrected_frontier(next, old), next);
+    assert_eq!(corrected_frontier(old, next), frontier_max(old, next));
+    assert_eq!(corrected_frontier(next, old), frontier_max(next, old));
+    assert_eq!(
+        crate::flow::corrected_frontier(100, 90),
+        corrected_frontier(100, 90)
+    );
+}
+
+/*
+ * Corrected frontier feeds clamp plus deserved with
+ * one floor. A ref past target lifts the clamp and
+ * widens deserved at once, so both see the same
+ * max with no split view. Park plus no tctx keep
+ * ref only with no use here.
+ */
+#[test]
+fn corrected_frontier_feeds_clamp_and_deserved() {
+    let slice = SLICE_NS;
+    let target = 90_000_000u64;
+    let reference = 100_000_000u64;
+    let corrected = corrected_frontier(reference, target);
+    assert_eq!(corrected, reference);
+    let v = 0u64;
+    let weight = 1024u32;
+    let est = 500_000u64;
+    let clamped_corrected = clamp_vruntime_w(v, corrected, slice, weight);
+    let clamped_target = clamp_vruntime_w(v, target, slice, weight);
+    assert_eq!(clamped_corrected, corrected.wrapping_sub(slice));
+    assert_eq!(clamped_target, target.wrapping_sub(slice));
+    assert!(time_before(clamped_target, clamped_corrected));
+    let (_, dl_corrected, _) = edf_insert(v, corrected, slice, est, weight);
+    let (_, dl_target, _) = edf_insert(v, target, slice, est, weight);
+    assert!(time_before(dl_target, dl_corrected));
+    let gran = crate::flow_preempt::granule_for_weight(weight, slice);
+    let woken_dl = 95_000_000u64;
+    let deserved_target = crate::flow_preempt::deserved(woken_dl, target, gran);
+    let deserved_corrected = crate::flow_preempt::deserved(woken_dl, corrected, gran);
+    assert!(!deserved_target);
+    assert!(deserved_corrected);
+    let deserved_raw = crate::flow_preempt::deserved(woken_dl, corrected, gran);
+    assert_eq!(deserved_corrected, deserved_raw);
+}
