@@ -22,6 +22,9 @@ static __always_inline bool flow_task_pinned(
 }
 /* Target in one group from selected plus least. */
 /* Least picks lowest queued depth with lowest id on ties. */
+/* Strict keeps group only, perf widens to any allowed on */
+/* miss with same least rule over the widened set. Mask */
+/* always wins with no dispatch use. */
 static __always_inline s32 flow_pick_in_group(
 	const struct task_struct *p, s32 sel,
 	u8 group)
@@ -32,12 +35,19 @@ static __always_inline s32 flow_pick_in_group(
 		    nr_cpu_ids);
 		if (g == group)
 			return sel;
+		if (flow_perf_enabled())
+			return sel;
 		__sync_fetch_and_add(
 		    &flow_stats.group_steal_skipped, 1);
 	}
 	first = flow_first_in_group(p, group);
 	if (first >= 0)
 		return first;
+	if (flow_perf_enabled()) {
+		first = flow_first_allowed(p);
+		if (first >= 0)
+			return first;
+	}
 	return -1;
 }
 static __always_inline u64 flow_ref_frontier(
@@ -147,11 +157,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    (s32)bpf_get_smp_processor_id();
 		struct flow_cpu_state *wst =
 		    flow_cpu((u32)waker);
-		/* Waker CPU first, see select. */
+		/* Waker CPU first, see select. Strict needs in */
+		/* group, perf takes any allowed idle with mask win. */
 		if (wst && wst->running_pid == 0 &&
 		    flow_cpu_ok(p, waker) &&
-		    flow_group_live((u32)waker,
-		    nr_cpu_ids) == group)
+		    (flow_group_live((u32)waker,
+		    nr_cpu_ids) == group || flow_perf_enabled()))
 			cpu = waker;
 		else
 			cpu = flow_pick_in_group(p, sel,

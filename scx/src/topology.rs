@@ -134,6 +134,125 @@ pub fn read_cpuinfo_max_freq(cpu: u32) -> u64 {
 }
 
 /*
+ * Base governor without the diagnostic suffix. Trims
+ * space plus cuts at the paren plus space, so
+ * performance with suffix still reads as performance.
+ * Empty stays empty with no trap. The suffix never
+ * feeds the unanimity check.
+ */
+pub fn governor_base(g: &str) -> &str {
+    let t = g.trim();
+    if let Some(idx) = t.find('(') {
+        return t[..idx].trim();
+    }
+    if let Some(idx) = t.find(' ') {
+        return t[..idx].trim();
+    }
+    t
+}
+
+/*
+ * Governor of one CPU with diagnostic suffix only.
+ * Reads the scaling governor file. Missing files yield
+ * unknown with no trap. Appends the EPP plus platform
+ * suffix when present, so powersave with performance
+ * EPP stays visible. The suffix is display only and
+ * never feeds the unanimity check, see base.
+ */
+pub fn read_governor(cpu: u32) -> String {
+    let base = std::fs::read_to_string(format!(
+        "{}{}{}{}",
+        "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "scaling_governor"
+    ))
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .unwrap_or_else(|| "unknown".to_string());
+    if base == "unknown" {
+        return base;
+    }
+    let epp = std::fs::read_to_string(format!(
+        "{}{}{}{}",
+        "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "energy_performance_preference"
+    ))
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty());
+    let pp = std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match (epp, pp) {
+        (Some(e), Some(p)) => format!("{base} (epp:{e} pp:{p})"),
+        (Some(e), None) => format!("{base} (epp:{e})"),
+        (None, Some(p)) => format!("{base} (pp:{p})"),
+        (None, None) => base,
+    }
+}
+
+/*
+ * True when every governor reads performance. Needs a
+ * non empty list with each base at performance, so a
+ * single powersave plus mixed plus unknown plus empty
+ * stays strict with no trap. The EPP plus platform
+ * suffix never feeds this check, see base. Online
+ * CPUs only with no per CPU array in BPF.
+ */
+pub fn perf_unanimous(governors: &[String]) -> bool {
+    if governors.is_empty() {
+        return false;
+    }
+    for g in governors {
+        if governor_base(g) != "performance" {
+            return false;
+        }
+    }
+    true
+}
+
+/*
+ * Display governor for the dashboard plus snapshot.
+ * Empty reads as unknown. Unanimous reads as the
+ * first full string with suffix, so EPP stays visible.
+ * Same base across all reads as the base. Mixed bases
+ * read as mixed with no list. Unknown alone stays
+ * unknown with no trap.
+ */
+pub fn display_governor(governors: &[String]) -> String {
+    if governors.is_empty() {
+        return "unknown".to_string();
+    }
+    let first = governor_base(&governors[0]).to_string();
+    let mut same = true;
+    for g in governors.iter().skip(1) {
+        if governor_base(g) != first {
+            same = false;
+            break;
+        }
+    }
+    if !same {
+        return "mixed".to_string();
+    }
+    if first == "unknown" || first.is_empty() {
+        return "unknown".to_string();
+    }
+    if governors.len() == 1 {
+        return governors[0].clone();
+    }
+    let mut suffix_same = true;
+    for g in governors.iter().skip(1) {
+        if g != &governors[0] {
+            suffix_same = false;
+            break;
+        }
+    }
+    if suffix_same {
+        return governors[0].clone();
+    }
+    first
+}
+
+/*
  * Seed the per CPU group table plus ready flag. Reads
  * capacity plus max frequency plus siblings plus LLC
  * for live CPUs, then assigns with core split plus LLC
@@ -617,5 +736,80 @@ mod tests {
         assert!(crate::flow_group::online_is_dense(&dense));
         assert!(crate::flow_group::online_skewed(&dense, 16));
         assert!(!crate::flow_group::online_skewed(&dense, 8));
+    }
+
+    /* Governor base strips the diagnostic suffix only. */
+    #[test]
+    fn governor_base_strips_suffix_only() {
+        assert_eq!(governor_base("performance"), "performance");
+        assert_eq!(
+            governor_base("performance (epp:performance)"),
+            "performance"
+        );
+        assert_eq!(
+            governor_base("powersave (epp:performance pp:balanced)"),
+            "powersave"
+        );
+        assert_eq!(governor_base("powersave"), "powersave");
+        assert_eq!(governor_base("unknown"), "unknown");
+        assert_eq!(governor_base("  performance  "), "performance");
+        assert_eq!(governor_base(""), "");
+    }
+
+    /* Unanimous performance needs every base at perf. */
+    #[test]
+    fn perf_unanimous_needs_every_perf() {
+        let all: Vec<String> = vec!["performance".into(), "performance".into()];
+        assert!(perf_unanimous(&all));
+        let suffixed: Vec<String> = vec![
+            "performance (epp:performance)".into(),
+            "performance (epp:powersave)".into(),
+        ];
+        assert!(perf_unanimous(&suffixed));
+        let single: Vec<String> = vec!["performance".into()];
+        assert!(perf_unanimous(&single));
+    }
+
+    /* Mixed plus unknown plus empty stay strict. */
+    #[test]
+    fn perf_mixed_and_unknown_stay_strict() {
+        let mixed: Vec<String> = vec!["performance".into(), "powersave".into()];
+        assert!(!perf_unanimous(&mixed));
+        let mixed_suffix: Vec<String> = vec![
+            "performance (epp:performance)".into(),
+            "powersave (epp:performance)".into(),
+        ];
+        assert!(!perf_unanimous(&mixed_suffix));
+        let unknown: Vec<String> = vec!["unknown".into(), "performance".into()];
+        assert!(!perf_unanimous(&unknown));
+        let all_unknown: Vec<String> = vec!["unknown".into(), "unknown".into()];
+        assert!(!perf_unanimous(&all_unknown));
+        let empty: Vec<String> = Vec::new();
+        assert!(!perf_unanimous(&empty));
+        let powersave: Vec<String> = vec!["powersave".into(), "powersave".into()];
+        assert!(!perf_unanimous(&powersave));
+    }
+
+    /* Display keeps suffix when unanimous else mixed. */
+    #[test]
+    fn display_governor_keeps_suffix_when_unanimous() {
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(display_governor(&empty), "unknown");
+        let perf: Vec<String> = vec![
+            "performance (epp:performance)".into(),
+            "performance (epp:performance)".into(),
+        ];
+        assert_eq!(display_governor(&perf), "performance (epp:performance)");
+        let power: Vec<String> = vec!["powersave".into(), "powersave".into()];
+        assert_eq!(display_governor(&power), "powersave");
+        let mixed: Vec<String> = vec!["performance".into(), "powersave".into()];
+        assert_eq!(display_governor(&mixed), "mixed");
+        let unknown: Vec<String> = vec!["unknown".into(), "unknown".into()];
+        assert_eq!(display_governor(&unknown), "unknown");
+        let suffixed_mixed: Vec<String> = vec![
+            "performance (epp:performance)".into(),
+            "powersave (epp:performance)".into(),
+        ];
+        assert_eq!(display_governor(&suffixed_mixed), "mixed");
     }
 }

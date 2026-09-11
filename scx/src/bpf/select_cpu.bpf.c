@@ -40,14 +40,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		group = (u8)FLOW_GROUP_HOG;
 	else
 		group = (u8)FLOW_GROUP_LIGHT;
-	/* Waker CPU first when idle in group with mask. */
+	/* Waker CPU first when idle with mask plus group. */
+	/* Strict needs in group, perf takes any allowed idle. */
 	/* An idle core cannot stack, so locality is free. */
-	/* Every other case keeps current behavior. */
+	/* Every other case keeps current behavior. Mask wins. */
 	wst = flow_cpu((u32)this_cpu);
 	if (wst && wst->running_pid == 0 &&
 	    flow_cpu_ok(p, this_cpu) &&
-	    flow_group_live((u32)this_cpu,
-	    nr_cpu_ids) == group)
+	    (flow_group_live((u32)this_cpu,
+	    nr_cpu_ids) == group || flow_perf_enabled()))
 		return this_cpu;
 	/* Tier A scans for a free core in the group. */
 	/* Tier B below prefers any idle in the group. */
@@ -58,15 +59,23 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* Tier B claims only the returned idle CPU. */
 	/* Strict iff ready is zero, best effort iff */
 	/* ready is one with live table in placement seeded */
-	/* by online rank with offline inert. */
+	/* by online rank with offline inert. S0 perf keeps */
+	/* tier order with wider any allowed on miss. */
 	picked = flow_free_in_group(p, group);
 	if (picked >= 0)
 		return picked;
+	if (flow_perf_enabled()) {
+		picked = flow_free_any(p);
+		if (picked >= 0)
+			return picked;
+	}
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0 && flow_cpu_ok(p, picked)) {
 		u8 g = flow_group_live((u32)picked,
 		    nr_cpu_ids);
 		if (g == group)
+			return picked;
+		if (flow_perf_enabled())
 			return picked;
 		__sync_fetch_and_add(
 		    &flow_stats.group_steal_skipped, 1);
@@ -74,18 +83,23 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	if (flow_cpu_ok(p, prev_cpu)) {
 		u8 g = flow_group_live((u32)prev_cpu,
 		    nr_cpu_ids);
-		if (g == group)
+		if (g == group || flow_perf_enabled())
 			return prev_cpu;
 	}
 	if (flow_cpu_ok(p, this_cpu)) {
 		u8 g = flow_group_live((u32)this_cpu,
 		    nr_cpu_ids);
-		if (g == group)
+		if (g == group || flow_perf_enabled())
 			return this_cpu;
 	}
 	first = flow_first_in_group(p, group);
 	if (first >= 0)
 		return first;
+	if (flow_perf_enabled()) {
+		first = flow_first_allowed(p);
+		if (first >= 0)
+			return first;
+	}
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;

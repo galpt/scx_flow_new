@@ -123,6 +123,12 @@ pub(crate) struct Scheduler<'a> {
     group_table: [u8; crate::flow_group::GROUP_TABLE_LEN],
     /* Zero keeps halves fallback in snapshot. */
     group_ready: u8,
+    /* Placement widen flag. Zero is strict, one is perf. */
+    perf_mode: u8,
+    /* Governor display with EPP plus platform suffix. */
+    governor: String,
+    /* Last governor poll for the 1s tick writer. */
+    governor_read_at: Option<std::time::Instant>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -174,10 +180,24 @@ impl<'a> Scheduler<'a> {
         }
         let (group_table, group_ready) = topology::group_seed_online(&online, possible);
         let (sibling_table, sibling_fallbacks) = topology::sibling_seed_online(&online);
+        /* Governor poll once at init over online only. */
+        /* Unanimous performance sets perf one, else zero. */
+        /* Display keeps the suffix with no BSS array. */
+        let governors: Vec<String> = online
+            .iter()
+            .map(|&id| topology::read_governor(id))
+            .collect();
+        let perf_mode: u8 = if topology::perf_unanimous(&governors) {
+            1
+        } else {
+            0
+        };
+        let governor = topology::display_governor(&governors);
         if let Some(bss) = skel.maps.bss_data.as_mut() {
             bss.flow_group_by_cpu = group_table;
             bss.flow_group_ready = group_ready;
             bss.flow_sibling_by_cpu = sibling_table;
+            bss.flow_perf_mode = perf_mode;
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
@@ -204,6 +224,7 @@ impl<'a> Scheduler<'a> {
             group_ready
         );
         info!("siblings: {} fallbacks to singleton", sibling_fallbacks);
+        info!("governor: {} with perf_mode {}", governor, perf_mode);
         let cpu_static = if opts.no_webui { Vec::new() } else { cards };
         let freq_cap = online.len().min(MAX_CPUS);
         Ok(Self {
@@ -218,6 +239,9 @@ impl<'a> Scheduler<'a> {
             started_at: std::time::Instant::now(),
             group_table,
             group_ready,
+            perf_mode,
+            governor,
+            governor_read_at: None,
         })
     }
 

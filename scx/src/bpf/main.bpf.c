@@ -48,6 +48,14 @@ volatile u16 flow_sibling_by_cpu[1024];
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_kick_at[1024];
+/* Placement widen flag for S0 with zero init strict. */
+/* Zero keeps 4.2.21 paths bit identical with group plus */
+/* mask isolation. One widens the candidate set to any */
+/* allowed on in group miss with same tier order. */
+/* Mask always wins in both modes with no CLI knob. */
+/* Userspace writes on governor transition only. */
+/* No per CPU array with no S1 use. */
+volatile u8 flow_perf_mode;
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -302,6 +310,65 @@ static __always_inline s32 flow_free_in_group(
 		    nr_cpu_ids);
 		if (g != group)
 			continue;
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr))
+			continue;
+		if (!flow_core_free((u32)cpu))
+			continue;
+		return cpu;
+	}
+	return -1;
+}
+/* Least queued allowed CPU in any group for S0 perf. */
+/* Scans 0 to 1024 with early break on nr plus max. */
+/* Needs mask plus queued depth with no group check. */
+/* Picks the smallest queued depth with lowest id on */
+/* ties by strict less only, so equal depths keep the */
+/* first id with no extra pass. Perf only on in group */
+/* miss with same rule over the widened set. Mask */
+/* always wins with no dispatch use. */
+static __always_inline s32 flow_first_allowed(
+	const struct task_struct *p)
+{
+	s32 best = -1;
+	u64 best_q = 0;
+	s32 cpu;
+	bpf_for(cpu, 0, 1024) {
+		u64 q;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
+		if (!bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr))
+			continue;
+		q = scx_bpf_dsq_nr_queued(
+		    flow_dsq_for_cpu((u32)cpu));
+		if (best < 0 || q < best_q) {
+			best = cpu;
+			best_q = q;
+		}
+	}
+	return best;
+}
+/* First free core in any group for S0 perf in id order. */
+/* Scans up to 1024 with early exit on match. */
+/* Needs mask plus free core by pid with no group check. */
+/* Perf only on in group miss with same order. Mask */
+/* always wins with no claim plus no dispatch use. */
+static __always_inline s32 flow_free_any(
+	const struct task_struct *p)
+{
+	s32 cpu;
+	bpf_for(cpu, 0, 1024) {
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
+		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+			break;
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
 			continue;

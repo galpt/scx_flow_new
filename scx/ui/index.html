@@ -230,6 +230,14 @@
           font-family:var(--font-mono);white-space:nowrap">
           Download JSON
         </button>
+        <div id="mode-badge" title="governor unknown"
+          style="font-size:0.75rem;
+          padding:3px 10px;border-radius:999px;
+          border:1px solid var(--border-hover);
+          color:var(--text-secondary);
+          font-family:var(--font-mono);white-space:nowrap">
+          strict
+        </div>
         <div id="status-badge" style="font-size:0.75rem;
           padding:3px 10px;border-radius:999px;
           border:1px solid var(--success);
@@ -637,6 +645,14 @@
       el('status-badge').style.borderColor =
         'var(--success)';
       el('status-badge').style.color = 'var(--success)';
+
+      /* Mode cell with strict plus perf plus governor tip. */
+      /* Perf widens placement to any allowed on miss. */
+      /* Strict keeps group isolation with mask win. */
+      var perf = data.perf_mode === 1 ? 'perf' : 'strict';
+      var gov = data.governor || 'unknown';
+      el('mode-badge').textContent = perf;
+      el('mode-badge').title = gov;
 
       var s = data.stats || {};
       var summary = buildSummary(s);

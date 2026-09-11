@@ -58,9 +58,10 @@ fn jt(v: &Value) -> String {
 
 /* Merged dashboard object for one snapshot. */
 /* Full log with version plus timestamp plus topology */
-/* plus depths plus allowance plus stats plus per-CPU. */
-/* Same object serves stats polling plus snapshot */
-/* download on loopback with no new exposure. */
+/* plus depths plus allowance plus mode plus governor */
+/* plus stats plus per-CPU. Same object serves stats */
+/* polling plus snapshot download on loopback with no */
+/* new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -69,6 +70,8 @@ fn merged(snap: &WebMetrics) -> Value {
         "light_depth": snap.light_depth,
         "hog_depth": snap.hog_depth,
         "burst_allowance_ns": snap.burst_allowance_ns,
+        "perf_mode": snap.perf_mode,
+        "governor": snap.governor.clone(),
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
     })
@@ -260,7 +263,9 @@ mod tests {
         assert!(v.get("light_depth").is_some());
         assert!(v.get("hog_depth").is_some());
         assert!(v.get("burst_allowance_ns").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(8));
+        assert!(v.get("perf_mode").is_some());
+        assert!(v.get("governor").is_some());
+        assert_eq!(v.as_object().map(|o| o.len()), Some(10));
     }
 
     /* Old snapshots without new fields still decode. */
@@ -296,6 +301,8 @@ mod tests {
         assert_eq!(m.light_depth, 0);
         assert_eq!(m.hog_depth, 0);
         assert_eq!(m.burst_allowance_ns, 0);
+        assert_eq!(m.perf_mode, 0);
+        assert_eq!(m.governor, "");
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
@@ -357,6 +364,8 @@ mod tests {
             light_depth: 1,
             hog_depth: 2,
             burst_allowance_ns: 2_000_000,
+            perf_mode: 1,
+            governor: "performance (epp:performance)".to_string(),
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("slice_ns"));
@@ -379,6 +388,8 @@ mod tests {
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
         assert!(txt.contains("burst_allowance_ns"));
+        assert!(txt.contains("perf_mode"));
+        assert!(txt.contains("governor"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.edf_enqueued, 8);
@@ -408,6 +419,14 @@ mod tests {
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
         assert_eq!(back.burst_allowance_ns, 2_000_000);
+        assert_eq!(back.perf_mode, 1);
+        assert_eq!(back.governor, "performance (epp:performance)");
+        let v = merged(&snap);
+        assert_eq!(v.get("perf_mode").and_then(|x| x.as_u64()), Some(1));
+        assert_eq!(
+            v.get("governor").and_then(|x| x.as_str()),
+            Some("performance (epp:performance)")
+        );
     }
 
     /* Dashboard shows stale next to delay when idle. */
@@ -440,5 +459,14 @@ mod tests {
         assert!(html.contains("id=\"pskip-g\""));
         assert!(html.contains("id=\"pskip-m\""));
         assert!(html.contains("id=\"pskip-r\""));
+    }
+
+    /* Dashboard shows the strict plus perf mode cell. */
+    #[test]
+    fn dashboard_shows_mode_cell() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"mode-badge\""));
+        assert!(html.contains("perf_mode"));
+        assert!(html.contains("governor"));
     }
 }

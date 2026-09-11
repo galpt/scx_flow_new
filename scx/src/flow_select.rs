@@ -535,6 +535,214 @@ pub fn pick_in_group_least(
 }
 
 /*
+ * Least queued allowed CPU in any group for S0 perf.
+ * Scans in id order with mask only and no group check.
+ * Picks the smallest queued depth with lowest id on
+ * ties by strict less only, so equal depths keep the
+ * first id. Missing queued entries read as zero with
+ * no trap. Returns none when no allowed CPU lives.
+ * Mirrors the BPF widened least over any allowed.
+ */
+#[cfg(test)]
+pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    let mut best_q: u64 = 0;
+    for cpu in 0..nr {
+        if allowed.get(cpu).copied().unwrap_or(false) != true {
+            continue;
+        }
+        if (cpu as u64) >= MAX_CPUS as u64 {
+            continue;
+        }
+        let q = queued.get(cpu).copied().unwrap_or(0);
+        match best {
+            None => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            Some(_) if q < best_q => {
+                best = Some(cpu as u32);
+                best_q = q;
+            }
+            _ => {}
+        }
+    }
+    best
+}
+
+/*
+ * First free CPU in any group for S0 perf. Scans in
+ * id order with mask plus free core by running pid.
+ * No group check, so cross group idle cores win on
+ * in group miss. Returns none when no such CPU lives.
+ * Mirrors the BPF widened free scan with mask win.
+ */
+#[cfg(test)]
+pub fn pick_free_any(
+    allowed: &[bool],
+    nr: usize,
+    partner: &[u16],
+    running: &[bool],
+) -> Option<u32> {
+    for cpu in 0..nr {
+        if !may_run_on(cpu as i32, allowed) {
+            continue;
+        }
+        if !core_free(cpu as i32, partner, running, nr) {
+            continue;
+        }
+        return Some(cpu as u32);
+    }
+    None
+}
+
+/*
+ * True when the waker CPU may keep the task in S0
+ * perf. Needs idle with no running task plus allowed.
+ * Perf skips the group check, so any allowed idle
+ * waker wins. Strict callers use waker_first_ok with
+ * group, see tiered perf below. Mask always wins.
+ */
+#[cfg(test)]
+pub fn waker_first_ok_perf(waker: i32, allowed: &[bool], nr: usize, running: &[bool]) -> bool {
+    if waker < 0 {
+        return false;
+    }
+    if (waker as usize) >= nr {
+        return false;
+    }
+    if (waker as u64) >= MAX_CPUS as u64 {
+        return false;
+    }
+    if !may_run_on(waker, allowed) {
+        return false;
+    }
+    if running.get(waker as usize).copied().unwrap_or(true) {
+        return false;
+    }
+    true
+}
+
+/*
+ * Target CPU in one group with S0 perf widening.
+ * Mirrors the BPF pick in group with the flag. A
+ * valid allowed selected CPU in the group wins. Perf
+ * takes any allowed selected CPU on group miss. Then
+ * the least in group wins, then perf takes the least
+ * any on miss with lowest depth plus lowest id. No
+ * allowed CPU yields none for park use. Mask wins.
+ */
+#[cfg(test)]
+pub fn pick_in_group_widened(
+    selected: i32,
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    queued: &[u64],
+    perf: bool,
+) -> Option<u32> {
+    if selected >= 0 && may_run_on(selected, allowed) && (selected as usize) < nr {
+        if crate::flow_group::group_live(selected as u32, nr, table, ready) == group {
+            return Some(selected as u32);
+        }
+        if perf {
+            return Some(selected as u32);
+        }
+    }
+    if let Some(c) =
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+    {
+        return Some(c);
+    }
+    if perf {
+        if let Some(c) = least_any(allowed, nr, queued) {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/*
+ * Full tiered select with S0 perf widening. Mirrors
+ * the BPF order of waker plus free plus any idle plus
+ * previous plus current plus least plus first. Strict
+ * keeps group checks, perf widens each miss to any
+ * allowed with same order. Waker perf skips group.
+ * Free perf scans any free core on miss. Idle perf
+ * takes any idle on miss. Previous plus current perf
+ * take any allowed on group miss. Least perf takes
+ * least any on miss with lowest depth plus lowest id.
+ * First stays any allowed. Mask always wins.
+ */
+#[cfg(test)]
+pub fn select_cpu_tiered_perf(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    group: u8,
+    nr: usize,
+    table: &[u8],
+    ready: u8,
+    partner: &[u16],
+    running: &[bool],
+    queued: &[u64],
+    perf: bool,
+) -> Option<u32> {
+    if perf {
+        if waker_first_ok_perf(cur, allowed, nr, running) {
+            return Some(cur as u32);
+        }
+    } else if waker_first_ok(cur, allowed, group, nr, table, ready, running) {
+        return Some(cur as u32);
+    }
+    if let Some(c) = pick_free_idle(allowed, group, nr, table, ready, partner, running) {
+        return Some(c);
+    }
+    if perf {
+        if let Some(c) = pick_free_any(allowed, nr, partner, running) {
+            return Some(c);
+        }
+    }
+    if let Some(c) = pick_idle_in_group(allowed, idle, group, nr, table, ready) {
+        return Some(c);
+    }
+    if perf {
+        if let Some(c) = pick_any_idle(allowed, idle) {
+            return Some(c);
+        }
+    }
+    for &cpu in &[prev, cur] {
+        if may_run_on(cpu, allowed) && (cpu as usize) < nr && cpu >= 0 {
+            if crate::flow_group::group_live(cpu as u32, nr, table, ready) == group {
+                return Some(cpu as u32);
+            }
+            if perf {
+                return Some(cpu as u32);
+            }
+        }
+    }
+    if let Some(c) =
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, queued)
+    {
+        return Some(c);
+    }
+    if perf {
+        if let Some(c) = least_any(allowed, nr, queued) {
+            return Some(c);
+        }
+    }
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(cpu as u32);
+        }
+    }
+    None
+}
+
+/*
  * True when an exiting task may run at once on this CPU.
  * Needs an exiting task with this CPU allowed, so short
  * exits skip order wait with no queue stall. Falls back

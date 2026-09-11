@@ -537,4 +537,16 @@ static __always_inline bool flow_kick_recent(u64 now,
 	return now - last <
 	    (u64)FLOW_KICK_COALESCE_NS;
 }
+/* True when perf widening is on for placement. */
+/* BSS flag holds zero for strict plus one for perf. */
+/* Zero init keeps 4.2.21 paths bit identical. */
+/* Perf keeps tier order with wider any allowed set. */
+/* Mask always wins in both modes with no new knob. */
+/* Extern lives in the function body, so bindgen keeps */
+/* no host copy with BSS only in main. */
+static __always_inline bool flow_perf_enabled(void)
+{
+	extern volatile u8 flow_perf_mode;
+	return flow_perf_mode != 0;
+}
 #endif

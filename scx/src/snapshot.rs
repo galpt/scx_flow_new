@@ -95,8 +95,10 @@ impl<'a> Scheduler<'a> {
      * ready, else halves fallback with no trap. Offline
      * stays out, so per CPU count matches online count.
      * Version plus timestamp plus topology plus depths
-     * plus allowance join the counters for one screenshot
-     * plus one JSON log.
+     * plus allowance plus mode plus governor join the
+     * counters for one screenshot plus one JSON log.
+     * Governor polls online only on the 1s tick with a
+     * transition only BSS write, so strict stays quiet.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let (nr_raw, light_depth, hog_depth, burst_allowance_ns) = {
@@ -125,6 +127,34 @@ impl<'a> Scheduler<'a> {
                     .push(crate::topology::current_freq_khz(id));
             }
             self.freq_read_at = Some(now);
+        }
+        let gov_old = self
+            .governor_read_at
+            .is_none_or(|t| now.duration_since(t).as_secs() >= 1);
+        if gov_old {
+            let governors: Vec<String> = online
+                .iter()
+                .map(|&id| crate::topology::read_governor(id))
+                .collect();
+            let mode: u8 = if crate::topology::perf_unanimous(&governors) {
+                1
+            } else {
+                0
+            };
+            let gov = crate::topology::display_governor(&governors);
+            self.governor = gov;
+            if mode != self.perf_mode {
+                self.perf_mode = mode;
+                if let Some(bss) = self.skel.maps.bss_data.as_mut() {
+                    bss.flow_perf_mode = mode;
+                }
+                log::info!(
+                    "governor: {} with perf_mode {}",
+                    self.governor,
+                    self.perf_mode
+                );
+            }
+            self.governor_read_at = Some(now);
         }
         let mut per_cpu = Vec::with_capacity(online.len());
         for (rank, &id) in online.iter().enumerate() {
@@ -168,6 +198,8 @@ impl<'a> Scheduler<'a> {
             light_depth,
             hog_depth,
             burst_allowance_ns,
+            perf_mode: self.perf_mode,
+            governor: self.governor.clone(),
         }
     }
 }

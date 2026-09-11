@@ -173,8 +173,9 @@ pub struct PerCpuMetrics {
  * The run loop pushes one per iteration. The web thread
  * keeps the newest behind a lock for the handlers.
  * Version plus timestamp plus topology plus depths plus
- * allowance join stats plus per-CPU for one screenshot
- * plus one JSON log with back compat defaults.
+ * allowance plus perf mode plus governor join stats plus
+ * per-CPU for one screenshot plus one JSON log with back
+ * compat defaults.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
@@ -201,6 +202,12 @@ pub struct WebMetrics {
     /* Burst line in nanos for the light depth. */
     #[serde(default)]
     pub burst_allowance_ns: u64,
+    /* Placement widen flag. Zero is strict, one is perf. */
+    #[serde(default)]
+    pub perf_mode: u8,
+    /* Governor display with EPP plus platform suffix. */
+    #[serde(default)]
+    pub governor: String,
 }
 
 impl Metrics {

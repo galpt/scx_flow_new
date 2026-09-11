@@ -2030,3 +2030,221 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
     let deserved_raw = crate::flow_preempt::deserved(woken_dl, corrected, gran);
     assert_eq!(deserved_corrected, deserved_raw);
 }
+
+/*
+ * S0 strict keeps group isolation with mask win.
+ * Perf widens to any allowed on in group miss with
+ * same tier order. Least keeps lowest depth plus
+ * lowest id over the widened set. Mask always wins.
+ */
+#[test]
+fn s0_strict_keeps_isolation_perf_widens_on_miss() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    // Halves at 4: 0,1 light plus 2,3 hog.
+    let allowed = vec![true; 4];
+    let queued = vec![5, 1, 3, 0];
+    // Strict least in light is 1, perf same when hit.
+    assert_eq!(
+        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        Some(1)
+    );
+    assert_eq!(
+        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        Some(1)
+    );
+    // Narrow to hog only: strict light misses, perf widens.
+    let narrow = vec![false, false, true, true];
+    assert_eq!(
+        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        None
+    );
+    assert_eq!(
+        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        Some(3)
+    );
+    // Selected cross group: strict skips to least, perf keeps it.
+    assert_eq!(
+        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        Some(1)
+    );
+    assert_eq!(
+        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        Some(2)
+    );
+    // Mask wins in both modes with no allowed.
+    let empty = vec![false; 4];
+    assert_eq!(
+        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued, false),
+        None
+    );
+    assert_eq!(
+        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued, true),
+        None
+    );
+    // Least any keeps lowest depth plus lowest id.
+    let tie = vec![2, 2, 1, 1];
+    assert_eq!(least_any(&allowed, nr, &tie), Some(2));
+    assert_eq!(least_any(&narrow, nr, &tie), Some(2));
+    assert_eq!(least_any(&empty, nr, &tie), None);
+}
+
+/*
+ * S0 tiered perf keeps order with wider any allowed.
+ * Strict free plus idle plus prev plus least stay in
+ * group, perf falls to any on each miss. Mask wins.
+ */
+#[test]
+fn s0_tiered_perf_keeps_order_with_wider_set() {
+    use crate::flow_group::GROUP_LIGHT;
+    use crate::flow_group::GROUP_TABLE_LEN;
+    use crate::flow_group::SIBLING_EMPTY;
+    let nr = 4;
+    let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
+    let partner = vec![SIBLING_EMPTY; 4];
+    // All idle plus free: strict and perf both take 0.
+    let allowed = vec![true; 4];
+    let idle = vec![true; 4];
+    let running = vec![false; 4];
+    let queued = vec![0; 4];
+    assert_eq!(
+        select_cpu_tiered_perf(
+            -1,
+            0,
+            &allowed,
+            &idle,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &partner,
+            &running,
+            &queued,
+            false
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        select_cpu_tiered_perf(
+            -1,
+            0,
+            &allowed,
+            &idle,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &partner,
+            &running,
+            &queued,
+            true
+        ),
+        Some(0)
+    );
+    // Light masked out: strict falls to first hog, perf widens least.
+    let hog_only = vec![false, false, true, true];
+    let idle_hog = vec![false, false, true, true];
+    let strict = select_cpu_tiered_perf(
+        -1,
+        0,
+        &hog_only,
+        &idle_hog,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &queued,
+        false,
+    );
+    let perf = select_cpu_tiered_perf(
+        -1,
+        0,
+        &hog_only,
+        &idle_hog,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &queued,
+        true,
+    );
+    assert_eq!(strict, Some(2));
+    assert_eq!(perf, Some(2));
+    // Waker cross group: strict skips, perf keeps waker.
+    let running_busy = vec![true, true, true, false];
+    let idle_none = vec![false; 4];
+    let queued_busy = vec![5, 5, 5, 0];
+    // Waker 3 is hog with idle core, group light.
+    let s = select_cpu_tiered_perf(
+        0,
+        3,
+        &allowed,
+        &idle_none,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running_busy,
+        &queued_busy,
+        false,
+    );
+    let p = select_cpu_tiered_perf(
+        0,
+        3,
+        &allowed,
+        &idle_none,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running_busy,
+        &queued_busy,
+        true,
+    );
+    assert_ne!(s, p);
+    assert_eq!(p, Some(3));
+    // Mask wins: no allowed yields none in both modes.
+    let empty = vec![false; 4];
+    assert_eq!(
+        select_cpu_tiered_perf(
+            -1,
+            0,
+            &empty,
+            &idle,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &partner,
+            &running,
+            &queued,
+            false
+        ),
+        None
+    );
+    assert_eq!(
+        select_cpu_tiered_perf(
+            -1,
+            0,
+            &empty,
+            &idle,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &partner,
+            &running,
+            &queued,
+            true
+        ),
+        None
+    );
+}
