@@ -44,6 +44,11 @@ enum flow_consts {
 	FLOW_PERF_HOG = 1024ULL,
 	FLOW_CPUPERF_LEVEL = 1024ULL,
 	FLOW_CPUPERF_IDLE = 0ULL,
+	FLOW_CPUPERF_BUDGET_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_CPUPERF_HALF_LIFE_NS = (24ULL * 1000ULL * 1000ULL),
+	FLOW_CPUPERF_ALPHA = 3072ULL,
+	FLOW_CPUPERF_FP_SHIFT = 8ULL,
+	FLOW_CPUPERF_FP_ONE = 256ULL,
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	FLOW_STEAL_BOUND = 8ULL,
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
@@ -79,7 +84,12 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 32B with delay plus rate. */
+/* Per CPU state at 48B with delay plus rate plus EMA. */
+/* Frontier plus running plus cursor plus delay plus */
+/* cpuperf EMA at 32B base with 16B EMA tail. EMA holds */
+/* the proportional budget in nanos capped at 1ms, at */
+/* holds the last EMA update time in nanos. BSS zero */
+/* covers the cold start with no explicit init cost. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
@@ -90,6 +100,8 @@ struct flow_cpu_state {
 	u8 delay_win;
 	u8 delay_cur;
 	u16 delay_cnt;
+	u64 cpuperf_ema;
+	u64 cpuperf_ema_at;
 };
 /* Counters at 200B with group plus coalesce plus */
 /* split skip reasons. Total keeps the sum for compat, */
@@ -168,12 +180,113 @@ static __always_inline u32 flow_perf_for_group(u8 group)
 }
 /* True when a stopping task should restore the idle hint. */
 /* Bang-bang edge at M1 with no EMA plus no state growth. */
+/* M2 keeps the predicate but maps the value through the */
+/* EMA with from_ema, so long idle still decays to zero. */
 /* Needs blocked plus per CPU queue empty plus local empty, */
 /* so runnable never restores with any queued work held high. */
 static __always_inline bool flow_should_restore_hint(
 	bool runnable, u64 dsq_nr, u64 local_nr)
 {
 	return !runnable && dsq_nr == 0 && local_nr == 0;
+}
+/* Climb the EMA toward the 1ms budget with a gap step. */
+/* Pure-EMA proportional at M2 with uniform both groups. */
+/* Delta clamps to the budget first with u64 order, so a */
+/* long burst never overshoots in one step. Step is gap */
+/* times delta times alpha over budget times FP_ONE at */
+/* 12x in FP8, so a full slice saturates at once with a */
+/* fast attack. Adds min step gap, so max stays capped. */
+/* Names use FLOW_CPUPERF prefix to guard FP clashes. */
+static __always_inline u64 flow_ema_climb(u64 ema,
+	u64 delta)
+{
+	u64 budget = (u64)FLOW_CPUPERF_BUDGET_NS;
+	u64 alpha = (u64)FLOW_CPUPERF_ALPHA;
+	u64 one = (u64)FLOW_CPUPERF_FP_ONE;
+	u64 d;
+	u64 gap;
+	u64 step;
+	u64 denom;
+	if (ema >= budget)
+		return budget;
+	gap = budget - ema;
+	d = delta > budget ? budget : delta;
+	if (d == 0 || gap == 0)
+		return ema;
+	denom = budget * one;
+	if (denom == 0)
+		return ema;
+	step = gap * d * alpha / denom;
+	if (step > gap)
+		step = gap;
+	return ema + step;
+}
+/* Decay the EMA by sleep with half-life halves plus Taylor. */
+/* Shifts whole half-lives then scales the residual below one */
+/* half with a 2nd-order Taylor of 0.5 to the r power at r is */
+/* rem over half. Fixed point at FP_ONE 256 holds ln2 times */
+/* 256 at 177 plus quad times 256 at 61, so t is rem times */
+/* 256 over half in 0 to 255 with dec1 plus inc2 in u64 order */
+/* with no float plus no loop. Zero sleep keeps identity. */
+/* Zero half keeps identity with no divide. At or past 64 */
+/* periods returns zero, so long idle still maps to zero. */
+static __always_inline u64 flow_ema_decay(u64 ema,
+	u64 sleep, u64 half)
+{
+	u64 periods;
+	u64 rem;
+	u64 one;
+	u64 t;
+	u64 dec1;
+	u64 inc2;
+	u64 out;
+	if (ema == 0)
+		return 0;
+	if (sleep == 0)
+		return ema;
+	if (half == 0)
+		return ema;
+	periods = sleep / half;
+	rem = sleep % half;
+	if (periods >= 64)
+		return 0;
+	if (periods > 0) {
+		ema = ema >> periods;
+		if (ema == 0)
+			return 0;
+	}
+	if (rem == 0)
+		return ema;
+	one = (u64)FLOW_CPUPERF_FP_ONE;
+	t = rem * one / half;
+	dec1 = ema * 177ULL * t / (one * one);
+	inc2 = ema * 61ULL * t * t /
+	    (one * one * one);
+	out = ema + inc2;
+	if (out < dec1)
+		return 0;
+	out = out - dec1;
+	if (out > ema)
+		out = ema;
+	return out;
+}
+/* Map the EMA budget to a 0 to 1024 cpuperf hint. */
+/* Zero maps to zero, budget maps to 1024, over maps to */
+/* 1024 with clamp, so uniform both groups with no tier. */
+static __always_inline u32 flow_cpuperf_from_ema(u64 ema)
+{
+	u64 budget = (u64)FLOW_CPUPERF_BUDGET_NS;
+	u64 v;
+	if (ema == 0)
+		return 0;
+	if (ema >= budget)
+		return 1024;
+	if (budget == 0)
+		return 1024;
+	v = ema * 1024ULL / budget;
+	if (v > 1024ULL)
+		return 1024;
+	return (u32)v;
 }
 /* True when one window of 32ms has passed. */
 static __always_inline bool flow_win_ready(u64 now,

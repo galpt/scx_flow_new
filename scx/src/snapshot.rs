@@ -65,6 +65,8 @@ impl<'a> Scheduler<'a> {
             delay_win: 0,
             delay_cur: 0,
             delay_cnt: 0,
+            cpuperf_ema: 0,
+            cpuperf_ema_at: 0,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;

@@ -9,27 +9,34 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	cpu = scx_bpf_task_cpu(p);
 	if (tctx)
 		tctx->run_at = flow_now();
-	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
-		if (scx_bpf_cpuperf_set)
-			scx_bpf_cpuperf_set(cpu,
-			    (u32)FLOW_CPUPERF_LEVEL);
-	}
 	if (cpu < 0)
 		goto inc;
 	if (!flow_cpu_live((u32)cpu))
 		goto inc;
 	st = flow_cpu((u32)cpu);
 	if (st) {
-		u64 est = tctx ?
-		    flow_clamp_est(tctx->est_ns) : 0;
-		s32 nice = flow_nice_of(p);
-		u32 w = flow_weight_of(nice);
+		u32 perf;
+		u64 est;
+		s32 nice;
+		u32 w;
 		u64 dsq;
 		u64 q;
 		u8 sample;
 		u8 nwin;
 		u8 ncur;
 		u16 ncnt;
+		/* Pure-EMA hint at M2 uniform both groups. */
+		/* No group branch, so light plus hog share */
+		/* the same map from the stored EMA. Cold */
+		/* zero maps to zero until the first climb. */
+		perf = flow_cpuperf_from_ema(
+		    st->cpuperf_ema);
+		if (scx_bpf_cpuperf_set)
+			scx_bpf_cpuperf_set(cpu, perf);
+		est = tctx ?
+		    flow_clamp_est(tctx->est_ns) : 0;
+		nice = flow_nice_of(p);
+		w = flow_weight_of(nice);
 		st->running_est = est;
 		st->running_pid = (u32)p->pid;
 		st->running_nice = (s16)nice;
@@ -66,6 +73,11 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		else
 			__sync_fetch_and_and(&st->cursor,
 			    ~(u32)FLOW_CURSOR_STAND_BIT);
+	} else {
+		/* No state, so hold max with no EMA read. */
+		if (scx_bpf_cpuperf_set)
+			scx_bpf_cpuperf_set(cpu,
+			    (u32)FLOW_CPUPERF_LEVEL);
 	}
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
@@ -272,8 +284,28 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		flow_clear_running(cpu);
 		flow_on_cpu_dec();
 		if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
+			struct flow_cpu_state *est;
 			u64 dsq_nr;
 			u64 local_nr;
+			u64 now_e = now;
+			/* Decay only with no climb at M2. */
+			/* Elapsed is wrap safe via time before, */
+			/* so a zero at stays zero with no under. */
+			est = flow_cpu((u32)cpu);
+			if (est) {
+				u64 at = est->cpuperf_ema_at;
+				u64 elapsed = 0;
+				if (at != 0 &&
+				    !flow_time_before(now_e,
+				    at))
+					elapsed = now_e - at;
+				est->cpuperf_ema =
+				    flow_ema_decay(
+				    est->cpuperf_ema,
+				    elapsed,
+				    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
+				est->cpuperf_ema_at = now_e;
+			}
 			dsq_nr = scx_bpf_dsq_nr_queued(
 			    flow_dsq_for_cpu((u32)cpu));
 			local_nr = scx_bpf_dsq_nr_queued(
@@ -281,9 +313,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			    (u64)cpu);
 			if (flow_should_restore_hint(runnable,
 			    dsq_nr, local_nr)) {
+				u32 perf =
+				    (u32)FLOW_CPUPERF_IDLE;
+				/* M2 maps the decayed EMA. */
+				/* Long idle still maps to zero. */
+				if (est)
+					perf =
+					    flow_cpuperf_from_ema(
+					    est->cpuperf_ema);
 				if (scx_bpf_cpuperf_set)
 					scx_bpf_cpuperf_set(cpu,
-					    (u32)FLOW_CPUPERF_IDLE);
+					    perf);
 			}
 		}
 		return;
@@ -313,6 +353,26 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		    (u64)SCX_DSQ_LOCAL_ON |
 		    (u64)cpu);
 		st = flow_cpu((u32)cpu);
+		/* Pure-EMA update at M2 before frontier. */
+		/* Elapsed is wrap safe via time before with */
+		/* zero at staying zero. Decays then climbs */
+		/* when delta is past zero, then stamps now. */
+		if (st) {
+			u64 at = st->cpuperf_ema_at;
+			u64 elapsed = 0;
+			u64 ema;
+			if (at != 0 &&
+			    !flow_time_before(now, at))
+				elapsed = now - at;
+			ema = flow_ema_decay(st->cpuperf_ema,
+			    elapsed,
+			    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
+			if (delta > 0)
+				ema = flow_ema_climb(ema,
+				    delta);
+			st->cpuperf_ema = ema;
+			st->cpuperf_ema_at = now;
+		}
 		if (st) {
 			if (!runnable) {
 				if (dsq_nr == 0 &&
@@ -332,9 +392,18 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		}
 		if (flow_should_restore_hint(runnable,
 		    dsq_nr, local_nr)) {
+			u32 perf =
+			    (u32)FLOW_CPUPERF_IDLE;
+			/* M2 keeps the M1 predicate but maps */
+			/* the decayed EMA with no hard zero. */
+			/* Long idle still maps to zero via */
+			/* the 64 period decay to zero. */
+			if (st)
+				perf = flow_cpuperf_from_ema(
+				    st->cpuperf_ema);
 			if (scx_bpf_cpuperf_set)
 				scx_bpf_cpuperf_set(cpu,
-				    (u32)FLOW_CPUPERF_IDLE);
+				    perf);
 		}
 	}
 	if (runnable) {

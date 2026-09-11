@@ -435,6 +435,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->delay_win = 0;
 		st->delay_cur = 0;
 		st->delay_cnt = 0;
+		/* BSS zero already covers the EMA tail, */
+		/* so verify plus keep explicit zero for */
+		/* the 32B to 48B growth with no trap. */
+		st->cpuperf_ema = 0;
+		st->cpuperf_ema_at = 0;
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);

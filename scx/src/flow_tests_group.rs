@@ -1927,3 +1927,168 @@ fn idle_restore_needs_blocked_and_empty() {
     assert!(!should_restore_hint(true, u64::MAX, u64::MAX));
     assert!(should_restore_hint(false, 0, 0));
 }
+
+/*
+ * Cpu perf EMA consts match the header at M2.
+ * Budget is 1ms, half-life is 24ms, alpha is 3072
+ * at 12x in FP8 with shift 8 plus one 256. Names use
+ * the FLOW_CPUPERF prefix to guard FP clashes.
+ */
+#[test]
+fn cpuperf_consts_match_header() {
+    assert_eq!(CPUPERF_BUDGET_NS, 1_000_000);
+    assert_eq!(CPUPERF_HALF_LIFE_NS, 24_000_000);
+    assert_eq!(CPUPERF_ALPHA, 3072);
+    assert_eq!(CPUPERF_FP_SHIFT, 8);
+    assert_eq!(CPUPERF_FP_ONE, 256);
+    assert_eq!(CPUPERF_FP_ONE, 1 << CPUPERF_FP_SHIFT);
+    assert_eq!(
+        CPUPERF_BUDGET_NS,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_BUDGET_NS as u64
+    );
+    assert_eq!(
+        CPUPERF_HALF_LIFE_NS,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_HALF_LIFE_NS as u64
+    );
+    assert_eq!(
+        CPUPERF_ALPHA,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_ALPHA as u64
+    );
+    assert_eq!(
+        CPUPERF_FP_SHIFT,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_FP_SHIFT as u64
+    );
+    assert_eq!(
+        CPUPERF_FP_ONE,
+        crate::bpf_intf::flow_consts_FLOW_CPUPERF_FP_ONE as u64
+    );
+}
+
+/*
+ * EMA climb climbs toward the budget with gap math.
+ * Delta clamps to the budget first with u64 order, so
+ * a long burst never overshoots in one step. Alpha at
+ * 12x gives a fast attack: a full slice from zero
+ * saturates at once, a quarter slice also saturates,
+ * half plus 10us lands mid between half and max, max
+ * stays capped with no wrap.
+ */
+#[test]
+fn ema_climb_vectors_match_spec() {
+    assert_eq!(ema_climb(0, 250_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 1_000_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 2_000_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 0), 0);
+    let mid = ema_climb(CPUPERF_BUDGET_NS / 2, 10_000);
+    assert!(mid > CPUPERF_BUDGET_NS / 2);
+    assert!(mid < CPUPERF_BUDGET_NS);
+    assert_eq!(mid, 560_000);
+    assert_eq!(ema_climb(CPUPERF_BUDGET_NS, 0), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(CPUPERF_BUDGET_NS, 500_000), CPUPERF_BUDGET_NS);
+    assert_eq!(
+        ema_climb(CPUPERF_BUDGET_NS, CPUPERF_BUDGET_NS),
+        CPUPERF_BUDGET_NS
+    );
+}
+
+/*
+ * EMA decay halves whole periods plus Taylor residual.
+ * Zero sleep keeps identity, at or past 64 periods maps
+ * to zero, one half-life maps to half exactly via shift,
+ * half of a half-life lands near 0.71x via the 2nd-order
+ * Taylor with no float plus no loop.
+ */
+#[test]
+fn ema_decay_vectors_match_spec() {
+    assert_eq!(ema_decay(750_000, 0, CPUPERF_HALF_LIFE_NS), 750_000);
+    assert_eq!(ema_decay(0, 1_000_000, CPUPERF_HALF_LIFE_NS), 0);
+    assert_eq!(
+        ema_decay(
+            CPUPERF_BUDGET_NS,
+            64 * CPUPERF_HALF_LIFE_NS,
+            CPUPERF_HALF_LIFE_NS
+        ),
+        0
+    );
+    assert_eq!(
+        ema_decay(
+            CPUPERF_BUDGET_NS,
+            65 * CPUPERF_HALF_LIFE_NS,
+            CPUPERF_HALF_LIFE_NS
+        ),
+        0
+    );
+    assert_eq!(
+        ema_decay(
+            CPUPERF_BUDGET_NS,
+            CPUPERF_HALF_LIFE_NS,
+            CPUPERF_HALF_LIFE_NS
+        ),
+        CPUPERF_BUDGET_NS / 2
+    );
+    assert_eq!(
+        ema_decay(1_000_001, CPUPERF_HALF_LIFE_NS, CPUPERF_HALF_LIFE_NS),
+        500_000
+    );
+    let half_half = ema_decay(
+        CPUPERF_BUDGET_NS,
+        CPUPERF_HALF_LIFE_NS / 2,
+        CPUPERF_HALF_LIFE_NS,
+    );
+    assert!(half_half > 700_000 && half_half < 730_000);
+    assert_eq!(half_half, 713_867);
+    assert_eq!(ema_decay(1_000_000, 1, 0), 1_000_000);
+}
+
+/*
+ * Cpu perf maps the EMA budget to 0 to 1024.
+ * Zero maps to zero, half maps to 512, budget maps to
+ * 1024, over maps to 1024 with clamp, so uniform both
+ * groups with no tier branch.
+ */
+#[test]
+fn cpuperf_from_ema_vectors_match_spec() {
+    assert_eq!(cpuperf_from_ema(0), 0);
+    assert_eq!(cpuperf_from_ema(CPUPERF_BUDGET_NS / 2), 512);
+    assert_eq!(cpuperf_from_ema(CPUPERF_BUDGET_NS / 4), 256);
+    assert_eq!(cpuperf_from_ema(CPUPERF_BUDGET_NS), 1024);
+    assert_eq!(cpuperf_from_ema(CPUPERF_BUDGET_NS * 2), 1024);
+    assert_eq!(cpuperf_from_ema(u64::MAX), 1024);
+}
+
+/*
+ * EMA elapsed stays wrap safe via time before.
+ * Zero at stays zero with no under, now before at
+ * stays zero across wrap, else now minus at.
+ */
+#[test]
+fn cpuperf_elapsed_is_wrap_safe() {
+    assert_eq!(cpuperf_elapsed(0, 1_000_000), 0);
+    assert_eq!(cpuperf_elapsed(100, 100), 0);
+    assert_eq!(cpuperf_elapsed(100, 200), 100);
+    assert_eq!(cpuperf_elapsed(200, 100), 0);
+    assert_eq!(cpuperf_elapsed(u64::MAX, 10), 11);
+}
+
+/*
+ * Cpu state grows 32B to 48B with the EMA tail at M2.
+ * EMA plus at append with no reorder, so old offsets
+ * stay stable. EMA stays BPF internal with no export,
+ * so per CPU metrics keep no EMA field. Stats keep
+ * 200B with no new counter.
+ */
+#[test]
+fn cpu_state_grows_to_48_with_ema_tail() {
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 48);
+    let base = std::mem::MaybeUninit::<crate::bpf_intf::flow_cpu_state>::uninit();
+    let ptr = base.as_ptr();
+    let off_ema = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema) as usize - ptr as usize };
+    let off_at = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema_at) as usize - ptr as usize };
+    assert_eq!(off_ema, 32);
+    assert_eq!(off_at, 40);
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
+    assert_eq!(
+        std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
+        200
+    );
+}

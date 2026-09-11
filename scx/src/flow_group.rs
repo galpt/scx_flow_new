@@ -81,6 +81,21 @@ pub const CPUPERF_LEVEL: u32 = 1024;
 /* Cpu perf idle at zero for blocked empty. */
 #[cfg(test)]
 pub const CPUPERF_IDLE: u32 = 0;
+/* Cpu perf EMA budget in nanos at 1ms. */
+#[cfg(test)]
+pub const CPUPERF_BUDGET_NS: u64 = 1_000_000;
+/* Cpu perf EMA half-life in nanos at 24ms. */
+#[cfg(test)]
+pub const CPUPERF_HALF_LIFE_NS: u64 = 24_000_000;
+/* Cpu perf EMA climb alpha at 12x in FP8. */
+#[cfg(test)]
+pub const CPUPERF_ALPHA: u64 = 3072;
+/* Cpu perf fixed point shift at 8. */
+#[cfg(test)]
+pub const CPUPERF_FP_SHIFT: u64 = 8;
+/* Cpu perf fixed point one at 256. */
+#[cfg(test)]
+pub const CPUPERF_FP_ONE: u64 = 256;
 
 /*
  * Group of one CPU by id halves with extra to hog.
@@ -1030,6 +1045,8 @@ pub fn perf_for_group(group: u8) -> u32 {
 /*
  * True when a stopping task should restore the idle hint.
  * Bang-bang edge at M1 with no EMA plus no state growth.
+ * M2 keeps the predicate but maps the value through the
+ * EMA with from_ema, so long idle still decays to zero.
  * Needs blocked plus per CPU queue empty plus local empty,
  * so runnable never restores with any queued work held high.
  * Mirrors the BPF helper for stopping use.
@@ -1037,6 +1054,120 @@ pub fn perf_for_group(group: u8) -> u32 {
 #[cfg(test)]
 pub fn should_restore_hint(runnable: bool, dsq_nr: u64, local_nr: u64) -> bool {
     !runnable && dsq_nr == 0 && local_nr == 0
+}
+
+/*
+ * Climb the EMA toward the 1ms budget with a gap step.
+ * Pure-EMA proportional at M2 with uniform both groups.
+ * Delta clamps to the budget first with u64 order, so a
+ * long burst never overshoots in one step. Step is gap
+ * times delta times alpha over budget times FP_ONE at
+ * 12x in FP8, so a full slice saturates at once with a
+ * fast attack. Adds min step gap, so max stays capped.
+ * Mirrors the BPF helper with the same op order.
+ */
+#[cfg(test)]
+pub fn ema_climb(ema: u64, delta: u64) -> u64 {
+    if ema >= CPUPERF_BUDGET_NS {
+        return CPUPERF_BUDGET_NS;
+    }
+    let gap = CPUPERF_BUDGET_NS - ema;
+    let d = delta.min(CPUPERF_BUDGET_NS);
+    if d == 0 || gap == 0 {
+        return ema;
+    }
+    let denom = CPUPERF_BUDGET_NS * CPUPERF_FP_ONE;
+    if denom == 0 {
+        return ema;
+    }
+    let step = gap * d * CPUPERF_ALPHA / denom;
+    let step = step.min(gap);
+    ema + step
+}
+
+/*
+ * Decay the EMA by sleep with half-life halves plus Taylor.
+ * Shifts whole half-lives then scales the residual below one
+ * half with a 2nd-order Taylor of 0.5 to the r power at r is
+ * rem over half. Fixed point at FP_ONE 256 holds ln2 times
+ * 256 at 177 plus quad times 256 at 61, so t is rem times
+ * 256 over half in 0 to 255 with dec1 plus inc2 in u64 order
+ * with no float plus no loop. Zero sleep keeps identity.
+ * Zero half keeps identity with no divide. At or past 64
+ * periods returns zero, so long idle still maps to zero.
+ * Mirrors the BPF helper with the same op order.
+ */
+#[cfg(test)]
+pub fn ema_decay(ema: u64, sleep: u64, half: u64) -> u64 {
+    if ema == 0 {
+        return 0;
+    }
+    if sleep == 0 {
+        return ema;
+    }
+    if half == 0 {
+        return ema;
+    }
+    let periods = sleep / half;
+    let rem = sleep % half;
+    if periods >= 64 {
+        return 0;
+    }
+    let mut e = ema;
+    if periods > 0 {
+        e >>= periods;
+        if e == 0 {
+            return 0;
+        }
+    }
+    if rem == 0 {
+        return e;
+    }
+    let one = CPUPERF_FP_ONE;
+    let t = rem * one / half;
+    let dec1 = e * 177 * t / (one * one);
+    let inc2 = e * 61 * t * t / (one * one * one);
+    let out = e + inc2;
+    if out < dec1 {
+        return 0;
+    }
+    let out = out - dec1;
+    if out > e { e } else { out }
+}
+
+/*
+ * Map the EMA budget to a 0 to 1024 cpuperf hint.
+ * Zero maps to zero, budget maps to 1024, over maps to
+ * 1024 with clamp, so uniform both groups with no tier.
+ * Mirrors the BPF helper with the same clamp.
+ */
+#[cfg(test)]
+pub fn cpuperf_from_ema(ema: u64) -> u32 {
+    if ema == 0 {
+        return 0;
+    }
+    if ema >= CPUPERF_BUDGET_NS {
+        return 1024;
+    }
+    let v = ema * 1024 / CPUPERF_BUDGET_NS;
+    if v > 1024 { 1024 } else { v as u32 }
+}
+
+/*
+ * Elapsed since the last EMA stamp with wrap safety.
+ * Zero at stays zero with no under. A now before at
+ * stays zero via the signed before check, so wrap holds
+ * with no extra branch. Mirrors the BPF stopping use.
+ */
+#[cfg(test)]
+pub fn cpuperf_elapsed(at: u64, now: u64) -> u64 {
+    if at == 0 {
+        return 0;
+    }
+    if crate::flow_edf::time_before(now, at) {
+        return 0;
+    }
+    now.wrapping_sub(at)
 }
 
 /*
