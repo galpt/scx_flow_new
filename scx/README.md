@@ -75,7 +75,7 @@ Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
-floor plus atomic rate claim plus same group plus mask
+floor plus same group plus mask plus atomic rate claim
 with one kick per slice alone, bounded extra on
 overlap. Frontier is the service floor, so beating
 it by granule proves earliness with no occupant
@@ -83,9 +83,10 @@ state. Short heavy granule is stricter, tempering
 the deadline lead, net easiness is deadline math.
 Quarter bounds theft near 25% of a slice, floor
 at 64us covers switch cost. Uses woken weight only.
-One skipped count covers all fail-closed busy
-no-kicks. One coalesced count covers q2 idle skips
-in 50us at 160B. Second queued to idle in 50us
+Total plus five reasons cover all fail-closed busy
+no-kicks in branch order armed plus deserved plus group
+plus mask plus rate. One coalesced count covers q2 idle
+skips in 50us at 200B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep stays quiet, pinned never skips.
 Delay persists across idle, delay shows stale

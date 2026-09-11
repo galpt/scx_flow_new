@@ -7,12 +7,13 @@
  * count fresh joins. Requeues count runnable slice ends.
  * Completions count blocks and exits. Park and steal
  * moves count dispatch moves. Kicks count idle wakeups.
- * Preempt counts cover busy kicks plus lumped skips.
- * One skipped count covers all fail-closed no-kicks.
- * Coalesced counts q2 idle skips in 50us at 160B.
- * EDF counts cover ordered inserts with clamp detail.
- * Group counts cover demote plus promote plus wake
- * promote plus pinned inflate plus steal skips. Wake
+ * Preempt counts cover busy kicks plus total skips plus
+ * five reasons in branch order armed plus deserved plus
+ * group plus mask plus rate. Total keeps the sum for
+ * compat. Coalesced counts q2 idle skips in 50us at
+ * 200B. EDF counts cover ordered inserts with clamp
+ * detail. Group counts cover demote plus promote plus
+ * wake promote plus pinned inflate plus steal skips. Wake
  * promote is the fast subset of promote by 8 short
  * blocks. Web metrics adds per-CPU cards with fixed
  * slice plus group plus delay plus depths plus pressure
@@ -93,12 +94,27 @@ pub struct Metrics {
     #[stat(desc = "Busy kicks after armed delay")]
     #[serde(default)]
     pub preempt_kicks: u64,
-    #[stat(desc = "All fail-closed busy no-kicks")]
+    #[stat(desc = "Total fail-closed busy no-kicks")]
     #[serde(default)]
     pub preempt_skipped: u64,
     #[stat(desc = "Q2 idle kicks skipped in 50us")]
     #[serde(default)]
     pub kick_coalesced: u64,
+    #[stat(desc = "Busy no-kicks for disarmed delay")]
+    #[serde(default)]
+    pub preempt_skipped_armed: u64,
+    #[stat(desc = "Busy no-kicks for undeserved deadline")]
+    #[serde(default)]
+    pub preempt_skipped_deserved: u64,
+    #[stat(desc = "Busy no-kicks for cross group")]
+    #[serde(default)]
+    pub preempt_skipped_group: u64,
+    #[stat(desc = "Busy no-kicks for mask miss")]
+    #[serde(default)]
+    pub preempt_skipped_mask: u64,
+    #[stat(desc = "Busy no-kicks for rate held")]
+    #[serde(default)]
+    pub preempt_skipped_rate: u64,
 }
 
 /*
@@ -195,7 +211,8 @@ impl Metrics {
             ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
             demote={} promote={} wpromote={} pinfl={} gskip={} \
-            pkick={} pskip={} kcoal={}",
+            pkick={} pskip={} kcoal={} \
+            pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -218,6 +235,11 @@ impl Metrics {
             self.preempt_kicks,
             self.preempt_skipped,
             self.kick_coalesced,
+            self.preempt_skipped_armed,
+            self.preempt_skipped_deserved,
+            self.preempt_skipped_group,
+            self.preempt_skipped_mask,
+            self.preempt_skipped_rate,
         )?;
         Ok(())
     }
@@ -253,6 +275,21 @@ impl Metrics {
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
             kick_coalesced: self.kick_coalesced.wrapping_sub(rhs.kick_coalesced),
+            preempt_skipped_armed: self
+                .preempt_skipped_armed
+                .wrapping_sub(rhs.preempt_skipped_armed),
+            preempt_skipped_deserved: self
+                .preempt_skipped_deserved
+                .wrapping_sub(rhs.preempt_skipped_deserved),
+            preempt_skipped_group: self
+                .preempt_skipped_group
+                .wrapping_sub(rhs.preempt_skipped_group),
+            preempt_skipped_mask: self
+                .preempt_skipped_mask
+                .wrapping_sub(rhs.preempt_skipped_mask),
+            preempt_skipped_rate: self
+                .preempt_skipped_rate
+                .wrapping_sub(rhs.preempt_skipped_rate),
         }
     }
 }

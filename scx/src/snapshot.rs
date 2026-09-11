@@ -41,6 +41,11 @@ impl<'a> Scheduler<'a> {
             preempt_kicks: s.preempt_kicks,
             preempt_skipped: s.preempt_skipped,
             kick_coalesced: s.kick_coalesced,
+            preempt_skipped_armed: s.preempt_skipped_armed,
+            preempt_skipped_deserved: s.preempt_skipped_deserved,
+            preempt_skipped_group: s.preempt_skipped_group,
+            preempt_skipped_mask: s.preempt_skipped_mask,
+            preempt_skipped_rate: s.preempt_skipped_rate,
         }
     }
 

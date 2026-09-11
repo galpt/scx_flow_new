@@ -251,7 +251,9 @@ impl<'a> Scheduler<'a> {
             "exit ins={} req={} done={} park={} steal={} \
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
             demote={} promote={} wpromote={} pinfl={} gskip={} \
-            pkick={} pskip={} kcoal={} runtime={} oncpu={}",
+            pkick={} pskip={} kcoal={} \
+            pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
+            runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -270,6 +272,11 @@ impl<'a> Scheduler<'a> {
             m.preempt_kicks,
             m.preempt_skipped,
             m.kick_coalesced,
+            m.preempt_skipped_armed,
+            m.preempt_skipped_deserved,
+            m.preempt_skipped_group,
+            m.preempt_skipped_mask,
+            m.preempt_skipped_rate,
             runtime,
             oncpu,
         );
@@ -421,10 +428,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_160() {
+    fn sched_stats_size_is_200() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            160
+            200
         );
     }
 

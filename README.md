@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.17`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.18`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -105,7 +105,7 @@ Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
-floor plus atomic rate claim plus same group plus mask
+floor plus same group plus mask plus atomic rate claim
 with one kick per slice alone, bounded extra on
 overlap. Frontier is the service floor, so beating
 it by granule proves earliness with no occupant
@@ -113,9 +113,10 @@ state. Short heavy granule is stricter, tempering
 the deadline lead, net easiness is deadline math.
 Quarter bounds theft near 25% of a slice, floor
 at 64us covers switch cost. Uses woken weight only.
-One skipped count covers all fail-closed busy
-no-kicks. One coalesced count covers q2 idle skips
-in 50us at 160B. Second queued to idle in 50us
+Total plus five reasons cover all fail-closed busy
+no-kicks in branch order armed plus deserved plus group
+plus mask plus rate. One coalesced count covers q2 idle
+skips in 50us at 200B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep stays quiet, pinned never skips.
 Delay persists across idle, delay shows stale
@@ -130,12 +131,13 @@ stays idle only. See `scx/src/bpf/intf.h` plus
 ### Counts and queues
 
 Counters cover inserts, completions, steals, kicks,
-preempt kicks plus skips plus coalesced, EDF order
-events, group moves, and skips. The dashboard shows
-them per group and per CPU with delay dots plus rates
-and a one-click JSON log download at `/api/snapshot`.
-The payload lives in `scx/src/stats.rs`,
-`scx/src/webui.rs` and `scx/ui/index.html`.
+preempt kicks plus total skips plus five split reasons
+plus coalesced, EDF order events, group moves, and
+skips. The dashboard shows them per group and per CPU
+with delay dots plus rates and a one-click JSON log
+download at `/api/snapshot`. The payload lives in
+`scx/src/stats.rs`, `scx/src/webui.rs` and
+`scx/ui/index.html`.
 
 ### Measurement
 
@@ -211,7 +213,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.17`, state `enabled` and ops
+Expect version `4.2.18`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

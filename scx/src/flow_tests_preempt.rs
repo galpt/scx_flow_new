@@ -424,3 +424,71 @@ fn cursor_cas_keeps_fresh_flags() {
     assert_eq!(cursor_store(peer, old), cursor_store(peer, old));
     assert_eq!(cursor_val(kept), peer);
 }
+
+/*
+ * Split reasons follow branch order armed plus deserved
+ * plus group plus mask plus rate. First fail wins, rate
+ * last as the atomic claim. Total plus reason both count
+ * at 200B, so the sum of reasons equals the total.
+ */
+#[test]
+fn skip_reason_follows_branch_order() {
+    assert_eq!(skip_reason(true, true, true, true, true), None);
+    assert_eq!(skip_reason(false, true, true, true, true), Some(1));
+    assert_eq!(skip_reason(true, false, true, true, true), Some(2));
+    assert_eq!(skip_reason(true, true, false, true, true), Some(3));
+    assert_eq!(skip_reason(true, true, true, false, true), Some(4));
+    assert_eq!(skip_reason(true, true, true, true, false), Some(5));
+    assert_eq!(skip_reason(false, false, false, false, false), Some(1));
+    assert_eq!(skip_reason(true, false, false, false, false), Some(2));
+    assert_eq!(skip_reason(true, true, false, false, false), Some(3));
+    assert_eq!(skip_reason(true, true, true, false, false), Some(4));
+    assert_eq!(skip_reason_name(0), "kick");
+    assert_eq!(skip_reason_name(1), "armed");
+    assert_eq!(skip_reason_name(2), "deserved");
+    assert_eq!(skip_reason_name(3), "group");
+    assert_eq!(skip_reason_name(4), "mask");
+    assert_eq!(skip_reason_name(5), "rate");
+}
+
+/*
+ * Skip reason matches the five gate check. None means
+ * all gates pass, some means at least one gate fails.
+ */
+#[test]
+fn skip_reason_matches_preempt_ok() {
+    for armed in [false, true] {
+        for deserved in [false, true] {
+            for same in [false, true] {
+                for mask in [false, true] {
+                    for rate in [false, true] {
+                        let ok = preempt_ok(armed, deserved, rate, same, mask);
+                        let reason = skip_reason(armed, deserved, same, mask, rate);
+                        assert_eq!(reason.is_none(), ok);
+                        if !ok {
+                            assert!(reason.is_some());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(preempt_ok(true, true, true, true, true));
+    assert_eq!(skip_reason(true, true, true, true, true), None);
+}
+
+/*
+ * Delay 62 is the storm line at two queued. Armed needs
+ * 16, so storm needs both armed plus queued depth. Rate
+ * holds one kick per slice, storm would add a second.
+ */
+#[test]
+fn storm_line_needs_two_queued() {
+    assert_eq!(delay_from_queued(1), 31);
+    assert_eq!(delay_from_queued(2), 62);
+    assert!(delay_armed(62));
+    assert!(delay_armed(16));
+    assert!(!delay_armed(15));
+    assert_eq!(skip_reason(false, true, true, true, true), Some(1));
+    assert_eq!(skip_reason(true, true, true, true, false), Some(5));
+}

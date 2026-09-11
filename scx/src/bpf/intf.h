@@ -88,9 +88,11 @@ struct flow_cpu_state {
 	u8 delay_cur;
 	u16 delay_cnt;
 };
-/* Counters at 160B with group plus coalesce. */
-/* Skipped lumps all fail-closed busy no-kicks. */
-/* Coalesced counts q2 idle skips in 50us. */
+/* Counters at 200B with group plus coalesce plus */
+/* split skip reasons. Total keeps the sum for compat, */
+/* reasons split fail-closed busy no-kicks in branch */
+/* order armed plus deserved plus group plus mask plus */
+/* rate. Coalesced counts q2 idle skips in 50us. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -112,7 +114,13 @@ struct flow_sched_stats {
 	u64 preempt_kicks;
 	u64 preempt_skipped;
 	u64 kick_coalesced;
+	u64 preempt_skipped_armed;
+	u64 preempt_skipped_deserved;
+	u64 preempt_skipped_group;
+	u64 preempt_skipped_mask;
+	u64 preempt_skipped_rate;
 };
+
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
 {
@@ -501,10 +509,12 @@ static __always_inline bool flow_deserved(u64 woken_dl,
 	    frontier + granule);
 }
 /* True when all five preempt gates pass. */
-/* Armed plus deserved plus rate clear plus same */
-/* group plus mask with fail closed on any clear. */
-/* One skipped count covers all fail-closed no-kicks. */
-/* Disarmed plus rate plus isolation share one count. */
+/* Armed plus deserved plus same group plus mask plus */
+/* rate clear with fail closed on any clear. Branch */
+/* order is armed plus deserved plus group plus mask */
+/* plus rate, rate last as the atomic claim. Each fail */
+/* counts total plus its reason at 200B. Disarmed plus */
+/* rate plus isolation no longer share one count. */
 static __always_inline bool flow_preempt_ok(bool armed,
 	bool deserved, bool rate_clear, bool same_group,
 	bool mask_ok)

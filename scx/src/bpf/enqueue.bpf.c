@@ -282,13 +282,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Dual max drops one sample max, decay intact. */
 		/* Needs latched arm 16 stand 8 plus deserved */
 		/* woken dl before frontier plus quarter gran */
-		/* plus atomic rate claim plus same group plus */
-		/* mask with one kick per slice. Frontier is */
+		/* plus same group plus mask plus atomic rate */
+		/* claim with one kick per slice. Frontier is */
 		/* the floor, so beating it by granule proves */
 		/* earliness with no lookup. Fail closed with */
-		/* no kick plus lumped skip on any clear. */
-		/* No loop. Delay persists across idle, next */
-		/* running decays, delay shows stale idle. */
+		/* no kick plus total plus reason in branch */
+		/* order armed plus deserved plus group plus */
+		/* mask plus rate. No loop. Delay persists */
+		/* across idle, next running decays, delay */
+		/* shows stale idle. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u64 now;
@@ -371,17 +373,48 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			mask_ok =
 			    bpf_cpumask_test_cpu(
 			    (u32)cpu, p->cpus_ptr);
-			if (!flow_preempt_ok(armed,
-			    is_deserved, true, same,
-			    mask_ok)) {
+			if (!armed) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_armed,
+				    1);
+				return;
+			}
+			if (!is_deserved) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_deserved,
+				    1);
+				return;
+			}
+			if (!same) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_group,
+				    1);
+				return;
+			}
+			if (!mask_ok) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_mask,
 				    1);
 				return;
 			}
 			if (!flow_rate_claim(&st->cursor)) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_rate,
 				    1);
 				return;
 			}

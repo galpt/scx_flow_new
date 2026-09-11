@@ -300,6 +300,26 @@
           <span class="stat-value" id="pskip-rate">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
+          Skip armed:</span>
+          <span class="stat-value" id="pskip-a-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip deserved:</span>
+          <span class="stat-value" id="pskip-d-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip group:</span>
+          <span class="stat-value" id="pskip-g-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip mask:</span>
+          <span class="stat-value" id="pskip-m-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip rate:</span>
+          <span class="stat-value" id="pskip-r-rate">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
           Coalesce rate:</span>
           <span class="stat-value" id="coalesce-rate">0</span>
         </div>
@@ -389,6 +409,26 @@
         <div><span style="color:var(--text-muted)">
           Preempt skip (all):</span>
           <span class="stat-value" id="pskip">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip armed:</span>
+          <span class="stat-value" id="pskip-a">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip deserved:</span>
+          <span class="stat-value" id="pskip-d">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip group:</span>
+          <span class="stat-value" id="pskip-g">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip mask:</span>
+          <span class="stat-value" id="pskip-m">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Skip rate:</span>
+          <span class="stat-value" id="pskip-r">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Kick coalesced:</span>
@@ -647,6 +687,21 @@
       var pskipR = prevStats ?
         rateOf(s.preempt_skipped || 0,
           prevStats.preempt_skipped || 0, dt) : 0;
+      var pskipAR = prevStats ?
+        rateOf(s.preempt_skipped_armed || 0,
+          prevStats.preempt_skipped_armed || 0, dt) : 0;
+      var pskipDR = prevStats ?
+        rateOf(s.preempt_skipped_deserved || 0,
+          prevStats.preempt_skipped_deserved || 0, dt) : 0;
+      var pskipGR = prevStats ?
+        rateOf(s.preempt_skipped_group || 0,
+          prevStats.preempt_skipped_group || 0, dt) : 0;
+      var pskipMR = prevStats ?
+        rateOf(s.preempt_skipped_mask || 0,
+          prevStats.preempt_skipped_mask || 0, dt) : 0;
+      var pskipRR = prevStats ?
+        rateOf(s.preempt_skipped_rate || 0,
+          prevStats.preempt_skipped_rate || 0, dt) : 0;
       var coalesceR = prevStats ?
         rateOf(s.kick_coalesced || 0,
           prevStats.kick_coalesced || 0, dt) : 0;
@@ -657,6 +712,11 @@
       el('skip-rate').textContent = fmtRate(skipR);
       el('preempt-rate').textContent = fmtRate(preemptR);
       el('pskip-rate').textContent = fmtRate(pskipR);
+      el('pskip-a-rate').textContent = fmtRate(pskipAR);
+      el('pskip-d-rate').textContent = fmtRate(pskipDR);
+      el('pskip-g-rate').textContent = fmtRate(pskipGR);
+      el('pskip-m-rate').textContent = fmtRate(pskipMR);
+      el('pskip-r-rate').textContent = fmtRate(pskipRR);
       el('coalesce-rate').textContent = fmtRate(coalesceR);
       prevStats = {
         group_demote: s.group_demote || 0,
@@ -666,6 +726,11 @@
         group_steal_skipped: s.group_steal_skipped || 0,
         preempt_kicks: s.preempt_kicks || 0,
         preempt_skipped: s.preempt_skipped || 0,
+        preempt_skipped_armed: s.preempt_skipped_armed || 0,
+        preempt_skipped_deserved: s.preempt_skipped_deserved || 0,
+        preempt_skipped_group: s.preempt_skipped_group || 0,
+        preempt_skipped_mask: s.preempt_skipped_mask || 0,
+        preempt_skipped_rate: s.preempt_skipped_rate || 0,
         kick_coalesced: s.kick_coalesced || 0
       };
       prevAt = nowMs;
@@ -709,6 +774,16 @@
         fmt(s.preempt_kicks || 0);
       el('pskip').textContent =
         fmt(s.preempt_skipped || 0);
+      el('pskip-a').textContent =
+        fmt(s.preempt_skipped_armed || 0);
+      el('pskip-d').textContent =
+        fmt(s.preempt_skipped_deserved || 0);
+      el('pskip-g').textContent =
+        fmt(s.preempt_skipped_group || 0);
+      el('pskip-m').textContent =
+        fmt(s.preempt_skipped_mask || 0);
+      el('pskip-r').textContent =
+        fmt(s.preempt_skipped_rate || 0);
       el('kcoal').textContent =
         fmt(s.kick_coalesced || 0);
 

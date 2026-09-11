@@ -283,6 +283,11 @@ mod tests {
         assert_eq!(m.stats.group_steal_skipped, 0);
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
+        assert_eq!(m.stats.preempt_skipped_armed, 0);
+        assert_eq!(m.stats.preempt_skipped_deserved, 0);
+        assert_eq!(m.stats.preempt_skipped_group, 0);
+        assert_eq!(m.stats.preempt_skipped_mask, 0);
+        assert_eq!(m.stats.preempt_skipped_rate, 0);
         assert_eq!(m.stats.kick_coalesced, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
@@ -327,6 +332,11 @@ mod tests {
                 preempt_kicks: 6,
                 preempt_skipped: 7,
                 kick_coalesced: 2,
+                preempt_skipped_armed: 1,
+                preempt_skipped_deserved: 2,
+                preempt_skipped_group: 1,
+                preempt_skipped_mask: 1,
+                preempt_skipped_rate: 2,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -341,7 +351,7 @@ mod tests {
                 delay_armed: true,
                 ..Default::default()
             }],
-            version: "4.2.17".to_string(),
+            version: "4.2.18".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -359,6 +369,11 @@ mod tests {
         assert!(txt.contains("group_wake_promote"));
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
+        assert!(txt.contains("preempt_skipped_armed"));
+        assert!(txt.contains("preempt_skipped_deserved"));
+        assert!(txt.contains("preempt_skipped_group"));
+        assert!(txt.contains("preempt_skipped_mask"));
+        assert!(txt.contains("preempt_skipped_rate"));
         assert!(txt.contains("kick_coalesced"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
@@ -376,6 +391,11 @@ mod tests {
         assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.stats.preempt_kicks, 6);
         assert_eq!(back.stats.preempt_skipped, 7);
+        assert_eq!(back.stats.preempt_skipped_armed, 1);
+        assert_eq!(back.stats.preempt_skipped_deserved, 2);
+        assert_eq!(back.stats.preempt_skipped_group, 1);
+        assert_eq!(back.stats.preempt_skipped_mask, 1);
+        assert_eq!(back.stats.preempt_skipped_rate, 2);
         assert_eq!(back.stats.kick_coalesced, 2);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
@@ -383,7 +403,7 @@ mod tests {
         assert_eq!(back.per_cpu[0].running_weight, 1218);
         assert_eq!(back.per_cpu[0].delay_win, 16);
         assert!(back.per_cpu[0].delay_armed);
-        assert_eq!(back.version, "4.2.17");
+        assert_eq!(back.version, "4.2.18");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
@@ -404,5 +424,21 @@ mod tests {
         assert!(html.contains("id=\"kcoal\""));
         assert!(html.contains("id=\"coalesce-rate\""));
         assert!(html.contains("kick_coalesced"));
+    }
+
+    /* Dashboard shows the five split skip cells. */
+    #[test]
+    fn dashboard_shows_split_skip_cells() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("preempt_skipped_armed"));
+        assert!(html.contains("preempt_skipped_deserved"));
+        assert!(html.contains("preempt_skipped_group"));
+        assert!(html.contains("preempt_skipped_mask"));
+        assert!(html.contains("preempt_skipped_rate"));
+        assert!(html.contains("id=\"pskip-a\""));
+        assert!(html.contains("id=\"pskip-d\""));
+        assert!(html.contains("id=\"pskip-g\""));
+        assert!(html.contains("id=\"pskip-m\""));
+        assert!(html.contains("id=\"pskip-r\""));
     }
 }

@@ -270,10 +270,12 @@ pub fn deserved(woken_dl: u64, frontier: u64, granule: u64) -> bool {
 
 /*
  * True when all five preempt gates pass. Armed plus
- * deserved plus rate clear plus same group plus mask
- * with fail closed on any clear. One skipped count
- * covers all fail-closed no-kicks. Disarmed plus
- * rate plus isolation share one count at 160B.
+ * deserved plus same group plus mask plus rate clear
+ * with fail closed on any clear. Branch order is armed
+ * plus deserved plus group plus mask plus rate, rate
+ * last as the atomic claim. Each fail counts total plus
+ * its reason at 200B. Disarmed plus rate plus isolation
+ * no longer share one count.
  */
 #[cfg(test)]
 pub fn preempt_ok(
@@ -284,4 +286,55 @@ pub fn preempt_ok(
     mask_ok: bool,
 ) -> bool {
     armed && is_deserved && is_rate_clear && same_group && mask_ok
+}
+
+/*
+ * Skip reason in branch order armed plus deserved plus
+ * group plus mask plus rate. Returns none when all gates
+ * pass, else the first failing gate. Mirrors the BPF
+ * sequential checks in enqueue with rate last as the
+ * atomic claim. Total plus reason both count at 200B.
+ * Zero means kick, one to five name the reason in order.
+ */
+#[cfg(test)]
+pub fn skip_reason(
+    armed: bool,
+    is_deserved: bool,
+    same_group: bool,
+    mask_ok: bool,
+    is_rate_clear: bool,
+) -> Option<u8> {
+    if !armed {
+        return Some(1);
+    }
+    if !is_deserved {
+        return Some(2);
+    }
+    if !same_group {
+        return Some(3);
+    }
+    if !mask_ok {
+        return Some(4);
+    }
+    if !is_rate_clear {
+        return Some(5);
+    }
+    None
+}
+
+/*
+ * Name of one skip reason for dominance logs. Zero is
+ * kick with no skip, one to five follow branch order.
+ */
+#[cfg(test)]
+pub fn skip_reason_name(reason: u8) -> &'static str {
+    match reason {
+        0 => "kick",
+        1 => "armed",
+        2 => "deserved",
+        3 => "group",
+        4 => "mask",
+        5 => "rate",
+        _ => "unknown",
+    }
 }
