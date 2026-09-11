@@ -290,10 +290,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Dual max drops one sample max, decay intact. */
 		/* Needs latched arm 16 stand 8 plus deserved */
 		/* woken dl before frontier plus quarter gran */
-		/* plus same group plus mask plus atomic rate */
-		/* claim with one kick per slice. Frontier is */
-		/* the floor, so beating it by granule proves */
-		/* earliness with no lookup. Fail closed with */
+		/* plus 32us slack plus same group plus mask */
+		/* plus atomic rate claim with one kick per */
+		/* slice. Frontier is the floor, so beating */
+		/* it by granule plus slack proves earliness */
+		/* with no lookup. Fail closed with */
 		/* no kick plus total plus reason in branch */
 		/* order armed plus deserved plus group plus */
 		/* mask plus rate. No loop. Delay persists */

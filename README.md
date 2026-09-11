@@ -7,7 +7,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.20`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.21`
 - `scx/build.rs` BPF build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, shared helpers, ops table
@@ -25,14 +25,15 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/flow_edf.rs` deadline plus runtime plus frontier
 - `scx/src/flow_select.rs` placement plus steal plus mask
 - `scx/src/flow_group.rs` groups plus classifier plus parks
-- `scx/src/flow_preempt.rs` delay plus granule plus rate
+- `scx/src/flow_preempt.rs` delay plus granule plus slack
+  plus rate
 - `scx/src/flow_tests_edf.rs` tests for S1 to S3 plus slice,
   estimate, weight, EDF order, frontier, dispatch, steal,
   mask, and config
 - `scx/src/flow_tests_group.rs` tests for split plus parks plus
   classifier plus isolation plus inflate
 - `scx/src/flow_tests_preempt.rs` tests for delay plus
-  granule plus rate plus fail closed
+  granule plus slack plus rate plus fail closed
 - `scx/src/config.rs` validated constants with tests
 - `scx/src/stats.rs` stats server and web snapshot
 - `scx/src/topology.rs` display only per-CPU cards
@@ -107,14 +108,17 @@ Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 16 stand 8
 in 32us units plus deserved woken deadline before
 frontier plus quarter granule weight aware with 64us
-floor plus same group plus mask plus atomic rate claim
-with one kick per slice alone, bounded extra on
-overlap. Frontier is the service floor, so beating
-it by granule proves earliness with no occupant
+floor plus 32us slack plus same group plus mask
+plus atomic rate claim with one kick per slice
+alone, bounded extra on overlap. Frontier is
+the service floor, so beating it by granule
+plus slack proves earliness with no occupant
 state. Short heavy granule is stricter, tempering
 the deadline lead, net easiness is deadline math.
 Quarter bounds theft near 25% of a slice, floor
-at 64us covers switch cost. Uses woken weight only.
+at 64us covers switch cost plus slack at 32us
+bounded at half floor with no storm. Uses
+woken weight only.
 Total plus five reasons cover all fail-closed busy
 no-kicks in branch order armed plus deserved plus group
 plus mask plus rate. One coalesced count covers q2 idle
@@ -155,7 +159,8 @@ Weight follows nice from minus 20 to 19 with center 1024
 and no knob. Groups stay fixed at two with no knob. The
 slice stays fixed at 1ms. Delay arms at 16 stands at 8
 in 32us units with 1/8 decay and one kick per slice.
-Granule is quarter scaled slice floored at 64us.
+Granule is quarter scaled slice floored at 64us
+plus 32us slack bounded at half floor.
 
 ## Build
 
@@ -215,7 +220,7 @@ into the workspace path when missing, then overlays
 `scx` into `scheds/experimental/scx_flow`, builds in
 release mode and installs to `/usr/local/bin`. Without
 root it copies the binary to the repo dir instead.
-Expect version `4.2.20`, state `enabled` and ops
+Expect version `4.2.21`, state `enabled` and ops
 containing `flow`. To roll back, stop the loader,
 restore the prior binary and start the loader again.
 Set `CLEAN` to `1` to remove the workspace target dir

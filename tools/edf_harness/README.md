@@ -92,6 +92,9 @@ plus `schbench` as cross checks with no threshold.
 
 ## Results (4.2.4 vs 4.2.5)
 
+Historical, not 4.2.21. Table stays verbatim
+for reference with no retitle.
+
 Comparison of `4.2.4` against `4.2.5` with the
 same workload plus the same host CPUs plus the same
 governor. Light protocol uses `DURATION=15` plus
@@ -136,6 +139,15 @@ percentiles with the same host plus governor plus seeds.
 
 A value of 100 percent is a measured rate at feasible
 use only with no guarantee. There is no threshold on 98.5.
+
+## Results (4.2.21)
+
+No 4.2.21 measurement yet with `n>=2` harness
+sweep. The 4.2.4 vs 4.2.5 table above stays
+historical and is not a 4.2.21 claim. Fill
+with light protocol `DURATION=15` plus
+`REPEATS=2` on the same host plus governor
+plus seeds when measured.
 
 ## Files
 

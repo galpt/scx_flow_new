@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  *
- * Delay plus granule plus rate helpers for the flow
- * scheduler. The functions mirror the BPF header so
+ * Delay plus granule plus slack plus rate helpers
+ * for the flow scheduler. The functions mirror the BPF header so
  * behavior stays the same on both sides of the
  * boundary. Units stay in 32us with no space with
  * integer math only and no float use.
