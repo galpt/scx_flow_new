@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="4.2.32"
+VER="4.2.33"
 # Pinned upstream ref, same as repo CI.
 SCX_REF="7cec98c51376a9d38b05a1e39e30cf7e5909cf16"
 UPSTREAM="https://github.com/sched-ext/scx"

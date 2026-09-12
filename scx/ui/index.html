@@ -510,29 +510,20 @@
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Energy</p>
       <div class="sys-grid">
-        <div class="energy-hero"><span style="color:var(--text-muted)">
-          Daily saved:</span>
+        <div class="energy-hero" style="grid-column:1/-1"><span style="color:var(--text-muted)">
+          Saved:</span>
           <span class="stat-value" id="energy-daily">unavailable</span>
+          <span class="stat-value" id="energy-yearly" style="display:none">unavailable</span>
           <a class="energy-ref" href="#energy-note-1"
             style="display:none">[1]<span
             class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
           <a class="energy-ref" href="#energy-note-2"
             style="display:none">[2]<span
             class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
-        </div>
-        <div class="energy-hero"><span style="color:var(--text-muted)">
-          Daily energy:</span>
-          <span class="stat-value" id="energy-daily-kwh">unavailable</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Yearly saved:</span>
-          <span class="stat-value" id="energy-yearly">unavailable</span>
-          <a class="energy-ref" href="#energy-note-1"
-            style="display:none">[1]<span
-            class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
-          <a class="energy-ref" href="#energy-note-2"
-            style="display:none">[2]<span
-            class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
+          Daily energy:</span>
+          <span class="stat-value" id="energy-daily-kwh">unavailable</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Yearly energy:</span>
@@ -1093,12 +1084,12 @@
       } else {
         var conf = energy.low_confidence ?
           ' (low confidence)' : '';
-        el('energy-daily').textContent =
-          fmtSignedPct(energy.daily_pct) + conf;
+        var shared = fmtSignedPct(energy.headline_pct) + conf +
+          ' across ' + (energy.accepted_pairs || 0) + ' pairs';
+        el('energy-daily').textContent = shared;
+        el('energy-yearly').textContent = shared;
         el('energy-daily-kwh').textContent =
-          fmtSignedKwh(energy.daily_kwh) + ' / day';
-        el('energy-yearly').textContent =
-          fmtSignedPct(energy.yearly_pct) + ' projection';
+          fmtSignedKwh(energy.daily_kwh) + ' / day estimate';
         el('energy-yearly-kwh').textContent =
           fmtSignedKwh(energy.yearly_kwh) + ' / yr projection';
         el('energy-since').textContent =
