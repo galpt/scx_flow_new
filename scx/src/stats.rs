@@ -162,10 +162,104 @@ pub struct PerCpuMetrics {
     #[serde(default)]
     pub delay_armed: bool,
     /* Current fixed slice in nanos. */
-    /* Renamed from tq_ns; old JSON with tq_ns still */
+    /* Renamed from tq_ns, and old JSON with tq_ns still */
     /* decodes via the alias for one release. */
     #[serde(default, alias = "tq_ns")]
     pub slice_ns: u64,
+    /* Lifetime active nanos from BPF. Full u64 wrap deltas. */
+    /* Display only for the energy probe plausibility. */
+    #[serde(default)]
+    pub active_ns: u64,
+}
+
+impl PerCpuMetrics {
+    /*
+     * Active delta since one older card. Full u64 wrap,
+     * so BPF lifetime growth never traps in userspace.
+     */
+    pub fn active_delta(&self, prev: &Self) -> u64 {
+        self.active_ns.wrapping_sub(prev.active_ns)
+    }
+}
+
+/* Default state text of the energy object. Unavailable */
+/* keeps old JSON honest with no silent zero headline. */
+fn default_energy_state() -> String {
+    "unavailable".to_string()
+}
+
+/*
+ * Energy savings view for the web dashboard. One nested
+ * object with defaults on every field, so old JSON
+ * without energy still decodes into the unavailable
+ * state. Headline plus daily plus yearly share one
+ * savings ratio from measured package joules. Daily
+ * plus yearly plus since running energies come from the
+ * same saved W over different spans. Trace holds
+ * the live derivation in monospace for the page.
+ */
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EnergyMetrics {
+    /* Probe state. unavailable, baseline, collecting, backoff. */
+    #[serde(default = "default_energy_state")]
+    pub state: String,
+    /* True once three accepted pairs back the headline. */
+    #[serde(default)]
+    pub has_headline: bool,
+    /* True with three to four pairs. Yearly stays a projection. */
+    #[serde(default)]
+    pub low_confidence: bool,
+    /* Saved percent from the ratio of sums. Signed. */
+    #[serde(default)]
+    pub headline_pct: f64,
+    /* Accepted pairs in the sums. */
+    #[serde(default)]
+    pub accepted_pairs: u64,
+    /* Rejected pairs kept out of the sums. */
+    #[serde(default)]
+    pub rejected_pairs: u64,
+    /* Daily saved percent. Same ratio as the headline. */
+    #[serde(default)]
+    pub daily_pct: f64,
+    /* Daily saved energy in kWh. */
+    #[serde(default)]
+    pub daily_kwh: f64,
+    /* Yearly saved percent. Same ratio as the headline. */
+    #[serde(default)]
+    pub yearly_pct: f64,
+    /* Yearly saved energy in kWh, a projection. */
+    #[serde(default)]
+    pub yearly_kwh: f64,
+    /* Saved energy since attach in kWh, an estimate. */
+    #[serde(default)]
+    pub since_running_kwh: f64,
+    /* Seconds left in the running arm or settle. */
+    #[serde(default)]
+    pub countdown_s: u64,
+    /* Live derivation in monospace for the page. */
+    #[serde(default)]
+    pub trace: String,
+}
+
+impl Default for EnergyMetrics {
+    /* Missing energy means unavailable, never zero headline. */
+    fn default() -> Self {
+        Self {
+            state: default_energy_state(),
+            has_headline: false,
+            low_confidence: false,
+            headline_pct: 0.0,
+            accepted_pairs: 0,
+            rejected_pairs: 0,
+            daily_pct: 0.0,
+            daily_kwh: 0.0,
+            yearly_pct: 0.0,
+            yearly_kwh: 0.0,
+            since_running_kwh: 0.0,
+            countdown_s: 0,
+            trace: String::new(),
+        }
+    }
 }
 
 /*
@@ -208,6 +302,9 @@ pub struct WebMetrics {
     /* Governor display with EPP plus platform suffix. */
     #[serde(default)]
     pub governor: String,
+    /* Energy savings view. Defaults to unavailable. */
+    #[serde(default)]
+    pub energy: EnergyMetrics,
 }
 
 impl Metrics {

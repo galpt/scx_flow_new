@@ -60,6 +60,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             delay_win: 0,
             delay_armed: false,
             slice_ns: crate::flow::SLICE_NS,
+            active_ns: 0,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -642,6 +643,7 @@ pub fn synthetic_card(
         delay_win: 0,
         delay_armed: false,
         slice_ns: crate::flow::SLICE_NS,
+        active_ns: 0,
     }
 }
 

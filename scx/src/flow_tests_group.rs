@@ -1931,7 +1931,7 @@ fn idle_restore_needs_blocked_and_empty() {
 }
 
 /*
- * Cpu perf EMA consts match the header at M2.
+ * CPU perf EMA consts match the header at M2.
  * Budget is 1ms, half-life is 24ms, alpha is 3072
  * at 12x in FP8 with shift 8 plus one 256. Names use
  * the FLOW_CPUPERF prefix to guard FP clashes.
@@ -1970,7 +1970,7 @@ fn cpuperf_consts_match_header() {
  * EMA climb climbs toward the budget with gap math.
  * Delta clamps to the budget first with u64 order, so
  * a long burst never overshoots in one step. Alpha at
- * 12x gives a fast attack: a full slice from zero
+ * 12x gives a fast attack, so a full slice from zero
  * saturates at once, a quarter slice also saturates,
  * half plus 10us lands mid between half and max, max
  * stays capped with no wrap.
@@ -2044,7 +2044,7 @@ fn ema_decay_vectors_match_spec() {
 }
 
 /*
- * Cpu perf maps the EMA budget to 0 to 1024.
+ * CPU perf maps the EMA budget to 0 to 1024.
  * Zero maps to zero, half maps to 512, budget maps to
  * 1024, over maps to 1024 with clamp, so uniform both
  * groups with no tier branch.
@@ -2074,21 +2074,23 @@ fn cpuperf_elapsed_is_wrap_safe() {
 }
 
 /*
- * Cpu state grows 32B to 48B with the EMA tail at M2.
- * EMA plus at append with no reorder, so old offsets
- * stay stable. EMA stays BPF internal with no export,
- * so per CPU metrics keep no EMA field. Stats keep
+ * CPU state grows 48B to 56B with the active tail.
+ * Active appends with no reorder, so old offsets
+ * stay stable. Active feeds the energy probe with
+ * full u64 wrap deltas in userspace. Stats keep
  * 200B with no new counter.
  */
 #[test]
-fn cpu_state_grows_to_48_with_ema_tail() {
-    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 48);
+fn cpu_state_grows_to_56_with_active_tail() {
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
     let base = std::mem::MaybeUninit::<crate::bpf_intf::flow_cpu_state>::uninit();
     let ptr = base.as_ptr();
     let off_ema = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema) as usize - ptr as usize };
     let off_at = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema_at) as usize - ptr as usize };
+    let off_active = unsafe { std::ptr::addr_of!((*ptr).active_ns) as usize - ptr as usize };
     assert_eq!(off_ema, 32);
     assert_eq!(off_at, 40);
+    assert_eq!(off_active, 48);
     assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     assert_eq!(
         std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),

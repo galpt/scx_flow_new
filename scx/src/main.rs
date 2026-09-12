@@ -23,6 +23,7 @@ mod flow_tests_edf;
 mod flow_tests_group;
 #[cfg(test)]
 mod flow_tests_preempt;
+mod rapl;
 mod snapshot;
 mod stats;
 mod topology;
@@ -129,6 +130,16 @@ pub(crate) struct Scheduler<'a> {
     governor: String,
     /* Last governor poll for the 1s tick writer. */
     governor_read_at: Option<std::time::Instant>,
+    /* Package energy reader. None parks the probe. */
+    rapl: Option<crate::rapl::RaplReader>,
+    /* A/B probe over package joules on the 1s tick. */
+    probe: crate::snapshot::EnergyProbe,
+    /* Last forced perf written to BSS. */
+    probe_force: u8,
+    /* Latest energy view for the dashboard. */
+    energy: crate::stats::EnergyMetrics,
+    /* Last RAPL sample for the 1s tick cadence. */
+    rapl_read_at: Option<std::time::Instant>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -225,6 +236,12 @@ impl<'a> Scheduler<'a> {
         );
         info!("siblings: {} fallbacks to singleton", sibling_fallbacks);
         info!("governor: {} with perf_mode {}", governor, perf_mode);
+        let rapl = crate::rapl::RaplReader::open_default();
+        if rapl.is_some() {
+            info!("RAPL package zone open for the energy probe");
+        } else {
+            log::warn!("RAPL unavailable, energy probe parked");
+        }
         let cpu_static = if opts.no_webui { Vec::new() } else { cards };
         let freq_cap = online.len().min(MAX_CPUS);
         Ok(Self {
@@ -242,6 +259,11 @@ impl<'a> Scheduler<'a> {
             perf_mode,
             governor,
             governor_read_at: None,
+            rapl,
+            probe: crate::snapshot::EnergyProbe::new(),
+            probe_force: 0,
+            energy: crate::stats::EnergyMetrics::default(),
+            rapl_read_at: None,
         })
     }
 
@@ -446,8 +468,12 @@ mod tests {
     }
 
     #[test]
-    fn cpu_size_with_ema_is_48() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 48);
+    fn cpu_size_with_ema_and_active_is_56() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
+        assert_eq!(
+            std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, active_ns),
+            48
+        );
     }
 
     #[test]

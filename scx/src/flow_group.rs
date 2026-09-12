@@ -75,25 +75,25 @@ pub const PERF_LIGHT: u32 = 1024;
 /* Perf hint of hog at max. */
 #[cfg(test)]
 pub const PERF_HOG: u32 = 1024;
-/* Cpu perf level at max for running. */
+/* CPU perf level at max for running. */
 #[cfg(test)]
 pub const CPUPERF_LEVEL: u32 = 1024;
-/* Cpu perf idle at zero for blocked empty. */
+/* CPU perf idle at zero for blocked empty. */
 #[cfg(test)]
 pub const CPUPERF_IDLE: u32 = 0;
-/* Cpu perf EMA budget in nanos at 1ms. */
+/* CPU perf EMA budget in nanos at 1ms. */
 #[cfg(test)]
 pub const CPUPERF_BUDGET_NS: u64 = 1_000_000;
-/* Cpu perf EMA half-life in nanos at 24ms. */
+/* CPU perf EMA half-life in nanos at 24ms. */
 #[cfg(test)]
 pub const CPUPERF_HALF_LIFE_NS: u64 = 24_000_000;
-/* Cpu perf EMA climb alpha at 12x in FP8. */
+/* CPU perf EMA climb alpha at 12x in FP8. */
 #[cfg(test)]
 pub const CPUPERF_ALPHA: u64 = 3072;
-/* Cpu perf fixed point shift at 8. */
+/* CPU perf fixed point shift at 8. */
 #[cfg(test)]
 pub const CPUPERF_FP_SHIFT: u64 = 8;
-/* Cpu perf fixed point one at 256. */
+/* CPU perf fixed point one at 256. */
 #[cfg(test)]
 pub const CPUPERF_FP_ONE: u64 = 256;
 

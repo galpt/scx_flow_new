@@ -57,6 +57,14 @@ volatile u64 flow_kick_at[1024];
 /* governor transition only. Single flag with no per CPU */
 /* array. */
 volatile u8 flow_perf_mode;
+/* Probe force for A/B arms with zero init strict. */
+/* Zero keeps strict paths bit identical with group plus */
+/* mask isolation. One widens placement with natural */
+/* hints on the perf arm with no governor write, so the */
+/* probe measures the grouping split with no hint split. */
+/* Userspace writes on arm transition only. Single flag */
+/* with no per CPU array. */
+volatile u8 flow_probe_perf;
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -170,6 +178,39 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_weight = 1024;
 	__sync_fetch_and_and(&st->cursor,
 	    ~(u32)FLOW_CURSOR_RATE_BIT);
+}
+/* Charge one leftover run segment at most once. */
+/* stopping owns the normal charge plus clears run at, so */
+/* a later disable plus exit sees zero with no second charge. */
+/* Disable plus exit funnel here only when stopping never ran */
+/* for the segment. Release never charges, the task segment */
+/* still ends through stopping plus disable plus exit. Check */
+/* CPU plus live plus clock before clearing run at, so a */
+/* rejected funnel keeps the segment for the second funnel. */
+/* Atomic add matches flow stats with no lost update. */
+static __always_inline void flow_charge_leftover(s32 cpu,
+	struct flow_task_ctx *tctx)
+{
+	struct flow_cpu_state *st;
+	u64 start;
+	u64 now;
+	if (!tctx)
+		return;
+	start = tctx->run_at;
+	if (start == 0)
+		return;
+	if (cpu < 0)
+		return;
+	if (!flow_cpu_live((u32)cpu))
+		return;
+	now = flow_now();
+	if (flow_time_before(now, start))
+		return;
+	st = flow_cpu((u32)cpu);
+	if (!st)
+		return;
+	tctx->run_at = 0;
+	__sync_fetch_and_add(&st->active_ns, now - start);
 }
 /* Live group of one CPU from table plus halves fallback. */
 /* Reads the table when ready holds groups, else halves. */
@@ -440,6 +481,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		/* the 32B to 48B growth with no trap. */
 		st->cpuperf_ema = 0;
 		st->cpuperf_ema_at = 0;
+		/* Active starts at zero with lifetime growth, */
+		/* so verify plus keep explicit zero for the */
+		/* 48B to 56B growth with no trap. */
+		st->active_ns = 0;
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);
@@ -480,6 +525,7 @@ SCX_OPS_DEFINE(flow_ops,
 	       .enable			= (void *)flow_enable,
 	       .disable			= (void *)flow_disable,
 	       .exit_task		= (void *)flow_exit_task,
+	       .cpu_release		= (void *)flow_cpu_release,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,

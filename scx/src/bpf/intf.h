@@ -84,13 +84,14 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 48B with delay plus rate plus EMA. */
+/* Per CPU state at 56B with delay plus rate plus EMA plus active. */
 /* Frontier plus running plus cursor plus delay plus */
-/* cpuperf EMA at 32B base with 16B EMA tail. EMA holds */
+/* cpuperf EMA at 32B base with 16B EMA tail plus 8B active tail. EMA holds */
 /* the proportional budget in nanos capped at 1ms, at */
-/* holds the last EMA update time in nanos. BSS zero */
+/* holds the last EMA update time in nanos. Active holds */
+/* lifetime active nanos charged once per run segment. BSS zero */
 /* covers the cold start plus explicit zero kept as */
-/* verify for the 32B to 48B growth with no trap. */
+/* verify for the 48B to 56B growth with no trap. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
@@ -103,6 +104,7 @@ struct flow_cpu_state {
 	u16 delay_cnt;
 	u64 cpuperf_ema;
 	u64 cpuperf_ema_at;
+	u64 active_ns;
 };
 /* Counters at 200B with group plus coalesce plus */
 /* split skip reasons. Total keeps the sum for compat, */
@@ -664,8 +666,12 @@ static __always_inline bool flow_kick_recent(u64 now,
 }
 /* True when perf mode is on for S0 plus S1. */
 /* BSS flag holds zero for strict plus one for perf. */
-/* Zero init keeps 4.2.21 paths bit identical. */
-/* S0 keeps tier order with wider any allowed set, */
+/* Zero init keeps 4.2.21 paths bit identical. Probe */
+/* force joins here, so one predicate covers grouping in */
+/* select plus enqueue with strict default bit for bit. */
+/* Perf arms widen placement with natural hints only, so */
+/* the probe measures the grouping split with no hint */
+/* split. S0 keeps tier order with wider any allowed set, */
 /* S1 bypasses the kick group gate with no recount. */
 /* Mask always wins in both modes with no new knob. */
 /* Extern lives in the function body, so bindgen keeps */
@@ -673,6 +679,7 @@ static __always_inline bool flow_kick_recent(u64 now,
 static __always_inline bool flow_perf_enabled(void)
 {
 	extern volatile u8 flow_perf_mode;
-	return flow_perf_mode != 0;
+	extern volatile u8 flow_probe_perf;
+	return flow_perf_mode != 0 || flow_probe_perf != 0;
 }
 #endif

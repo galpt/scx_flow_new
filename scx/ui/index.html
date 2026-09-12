@@ -263,6 +263,60 @@
         id="summary-explanation"></p>
     </div>
 
+    <!-- Energy with daily plus yearly savings plus trace -->
+    <div class="card" style="margin-bottom:16px">
+      <p class="section-label">Energy</p>
+      <div class="sys-grid">
+        <div><span style="color:var(--text-muted)">
+          Daily saved:</span>
+          <span class="stat-value" id="energy-daily">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Daily energy:</span>
+          <span class="stat-value" id="energy-daily-kwh">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Yearly saved:</span>
+          <span class="stat-value" id="energy-yearly">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Yearly energy:</span>
+          <span class="stat-value" id="energy-yearly-kwh">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Since running:</span>
+          <span class="stat-value" id="energy-since">unavailable</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Pairs:</span>
+          <span class="stat-value" id="energy-pairs">unavailable</span>
+        </div>
+      </div>
+      <p id="energy-formula" style="margin-top:8px;
+        font-family: Georgia, 'Times New Roman', Times, serif;
+        font-size:0.875rem;color:var(--text-primary)">
+        <i>E_saved</i> = (<i>P_perf</i> − <i>P_strict</i>) × <i>t</i> ÷ 1000
+      </p>
+      <div id="energy-legend" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-secondary)">
+        <p>E_saved is saved energy in kWh over the span.</p>
+        <p>P_perf is mean perf power in W over kept seconds in all accepted pairs.</p>
+        <p>P_strict is mean strict power in W over kept seconds in all accepted pairs.</p>
+        <p>t is hours in the span.</p>
+      </div>
+      <p id="energy-live" style="margin-top:4px;
+        font-family: Georgia, 'Times New Roman', Times, serif;
+        font-size:0.75rem;color:var(--text-secondary)">waiting for 3 accepted pairs</p>
+      <pre id="energy-trace" style="margin-top:8px;
+        font-family:var(--font-mono);font-size:0.6875rem;
+        line-height:1.5;color:var(--text-secondary);
+        white-space:pre-wrap;word-break:break-word;">unavailable</pre>
+      <p id="energy-note" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-muted)"></p>
+      <p id="energy-footnote" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-muted)">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</p>
+    </div>
+
     <!-- Groups with depths plus pressure plus rates -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Groups</p>
@@ -640,6 +694,121 @@
       return d / dt;
     }
 
+    /* Signed percent with two decimals for savings. */
+    function fmtSignedPct(x) {
+      x = +x || 0;
+      return (x >= 0 ? '+' : '') +
+        x.toFixed(2) + ' %';
+    }
+
+    /* Signed kWh with two decimals. */
+    function fmtSignedKwh(x) {
+      x = +x || 0;
+      return (x >= 0 ? '+' : '') +
+        x.toFixed(2) + ' kWh';
+    }
+
+    /* Live numbers in the same shape as the formula. */
+    /* Aggregate saved W over one day in all accepted pairs. */
+    function fmtLiveNum(x) {
+      var s = (+x || 0).toFixed(3);
+      if (s.charAt(0) === '-') {
+        s = '−' + s.slice(1);
+      }
+      return s;
+    }
+
+    /* Energy cells plus trace plus note from one snapshot. */
+    /* Runs on the single one second poll with no extra timer */
+    /* plus no stored history, so a restart resets the view. */
+    function updateEnergy(data) {
+      var energy = data.energy || {};
+      var state = energy.state || 'unavailable';
+      el('energy-trace').textContent =
+        energy.trace || state;
+      var note = '';
+      if (state === 'unavailable') {
+        el('energy-daily').textContent = 'unavailable';
+        el('energy-daily-kwh').textContent = 'unavailable';
+        el('energy-yearly').textContent = 'unavailable';
+        el('energy-yearly-kwh').textContent = 'unavailable';
+        el('energy-since').textContent = 'unavailable';
+        el('energy-pairs').textContent = 'unavailable';
+        note = 'No package counter found. ' +
+          'The probe needs energy reads.';
+      } else if (state === 'baseline') {
+        el('energy-daily').textContent = 'baseline';
+        el('energy-daily-kwh').textContent = 'baseline';
+        el('energy-yearly').textContent = 'baseline';
+        el('energy-yearly-kwh').textContent = 'baseline';
+        el('energy-since').textContent = 'baseline';
+        el('energy-pairs').textContent = 'baseline';
+        note = 'Paused while the governor reads ' +
+          'performance. Showing baseline.';
+      } else if (!energy.has_headline) {
+        var have = energy.accepted_pairs || 0;
+        var waiting = 'collecting ' + have + '/3 pairs';
+        el('energy-daily').textContent = waiting;
+        el('energy-daily-kwh').textContent = waiting;
+        el('energy-yearly').textContent = waiting;
+        el('energy-yearly-kwh').textContent = waiting;
+        el('energy-since').textContent = waiting;
+        el('energy-pairs').textContent =
+          have + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        note = 'Collecting pairs. ' +
+          'Headlines need 3 accepted pairs.';
+      } else {
+        var conf = energy.low_confidence ?
+          ' (low confidence)' : '';
+        el('energy-daily').textContent =
+          fmtSignedPct(energy.daily_pct) + conf;
+        el('energy-daily-kwh').textContent =
+          fmtSignedKwh(energy.daily_kwh) + ' / day';
+        el('energy-yearly').textContent =
+          fmtSignedPct(energy.yearly_pct) + ' projection';
+        el('energy-yearly-kwh').textContent =
+          fmtSignedKwh(energy.yearly_kwh) + ' / yr projection';
+        el('energy-since').textContent =
+          fmtSignedKwh(energy.since_running_kwh) + ' estimate';
+        el('energy-pairs').textContent =
+          (energy.accepted_pairs || 0) + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        if (energy.low_confidence) {
+          note = 'Low confidence with 3 to 4 pairs. ' +
+            'Yearly is a projection.';
+        }
+      }
+      if (state === 'backoff') {
+        note = 'Cooling down after bad reads. ' + note;
+      }
+      /* Perf disclosure with natural hints plus duty plus scope. */
+      /* Perf arms widen placement with natural hints at about */
+      /* 45 percent duty, headline extrapolates strict versus */
+      /* forced perf with no hint pin. */
+      if (state !== 'unavailable') {
+        var duty = 'Perf arms widen placement with natural ' +
+          'hints at about 45 percent duty. Headline ' +
+          'extrapolates strict versus forced perf.';
+        note = note ? note + ' ' + duty : duty;
+      }
+      var live = '';
+      if (state === 'unavailable') {
+        live = 'waiting for package counter';
+      } else if (state === 'baseline') {
+        live = 'paused for baseline';
+      } else if (!energy.has_headline) {
+        live = 'waiting for 3 accepted pairs';
+      } else {
+        var saveW = (energy.daily_kwh || 0) * 1000 / 24;
+        live = '(' + fmtLiveNum(saveW) +
+          ' W) × 24 h ÷ 1000 = ' +
+          fmtLiveNum(energy.daily_kwh) + ' kWh';
+      }
+      el('energy-live').textContent = live;
+      el('energy-note').textContent = note;
+    }
+
     function updateUI(data) {
       el('status-badge').textContent = '● running';
       el('status-badge').style.borderColor =
@@ -653,6 +822,13 @@
       var gov = data.governor || 'unknown';
       el('mode-badge').textContent = perf;
       el('mode-badge').title = gov;
+
+      /* Energy savings with daily plus yearly plus trace. */
+      /* Unavailable stays literal, baseline stays paused, */
+      /* collecting waits for three pairs, headlines show */
+      /* one ratio in percent plus kWh. Yearly */
+      /* is a projection, since running is an estimate. */
+      updateEnergy(data);
 
       var s = data.stats || {};
       var summary = buildSummary(s);

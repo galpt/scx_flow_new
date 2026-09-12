@@ -29,6 +29,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		/* No group branch, so light plus hog share */
 		/* the same map from the stored EMA. Cold */
 		/* zero maps to zero until the first climb. */
+		/* Perf arm keeps natural hints with no pin, */
+		/* so the probe measures the grouping split */
+		/* with no hint split. */
 		perf = flow_cpuperf_from_ema(
 		    st->cpuperf_ema);
 		if (scx_bpf_cpuperf_set)
@@ -279,10 +282,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
-	/* No minus one check: zero init plus never minus one. */
+	/* No minus one check, since zero init plus never minus one. */
 	if (!tctx || !tctx->run_at) {
-		flow_clear_running(cpu);
-		flow_on_cpu_dec();
+		flow_clear_running_if_owner(cpu,
+		    (u32)p->pid);
+		if (!tctx)
+			flow_on_cpu_dec();
 		if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 			struct flow_cpu_state *est;
 			u64 dsq_nr;
@@ -317,6 +322,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    (u32)FLOW_CPUPERF_IDLE;
 				/* M2 maps the decayed EMA. */
 				/* Long idle still maps to zero. */
+				/* Perf arm keeps natural hints */
+				/* with no pin, so the probe */
+				/* measures the grouping split */
+				/* with no hint split. */
 				if (est)
 					perf =
 					    flow_cpuperf_from_ema(
@@ -372,6 +381,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    delta);
 			st->cpuperf_ema = ema;
 			st->cpuperf_ema_at = now;
+			/* Charge this segment once with fetch add. */
+			/* Run at clears earlier, so disable plus exit */
+			/* later see zero with no second charge. */
+			__sync_fetch_and_add(&st->active_ns, delta);
 		}
 		if (st) {
 			if (!runnable) {
@@ -398,6 +411,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			/* the decayed EMA with no hard zero. */
 			/* Long sleep decays to zero before */
 			/* the climb, so zero delta maps zero. */
+			/* Perf arm keeps natural hints */
+			/* with no pin, so the probe */
+			/* measures the grouping split */
+			/* with no hint split. */
 			if (st)
 				perf = flow_cpuperf_from_ema(
 				    st->cpuperf_ema);
@@ -434,11 +451,14 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
-	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
+	s32 cpu = scx_bpf_task_cpu(p);
+	flow_clear_running_if_owner(cpu,
 	    (u32)p->pid);
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	/* Charge a segment stopping never saw, at most once. */
+	flow_charge_leftover(cpu, tctx);
 	if (tctx->deadline == (u64)-1)
 		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
@@ -448,14 +468,27 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct scx_exit_task_args *args)
 {
 	struct flow_task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
 	(void)args;
-	flow_clear_running_if_owner(scx_bpf_task_cpu(p),
+	flow_clear_running_if_owner(cpu,
 	    (u32)p->pid);
 	tctx = flow_lookup(p);
 	if (!tctx)
 		return;
+	/* Charge a segment stopping never saw, at most once. */
+	flow_charge_leftover(cpu, tctx);
 	if (tctx->deadline == (u64)-1)
 		return;
 	__sync_fetch_and_add(&flow_stats.completions, 1);
 	tctx->deadline = (u64)-1;
+}
+void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,
+	struct scx_cpu_release_args *args)
+{
+	(void)args;
+	/* Clear the stale running view with no charge. */
+	/* The task segment still ends through stopping plus */
+	/* disable plus exit, which own the single charge */
+	/* through run at, so release never double counts. */
+	flow_clear_running(cpu);
 }
