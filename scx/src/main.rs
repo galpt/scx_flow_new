@@ -194,10 +194,7 @@ impl<'a> Scheduler<'a> {
         /* Governor poll once at init over online only. */
         /* Unanimous performance sets perf one, else zero. */
         /* Display keeps the suffix with no BSS array. */
-        let governors: Vec<String> = online
-            .iter()
-            .map(|&id| topology::read_governor(id))
-            .collect();
+        let governors = topology::collect_governors(&online);
         let perf_mode: u8 = if topology::perf_unanimous(&governors) {
             1
         } else {

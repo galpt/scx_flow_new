@@ -910,10 +910,7 @@ impl<'a> Scheduler<'a> {
             .governor_read_at
             .is_none_or(|t| now.duration_since(t).as_secs() >= 1);
         if gov_old {
-            let governors: Vec<String> = online
-                .iter()
-                .map(|&id| crate::topology::read_governor(id))
-                .collect();
+            let governors = crate::topology::collect_governors(&online);
             let mode: u8 = if crate::topology::perf_unanimous(&governors) {
                 1
             } else {

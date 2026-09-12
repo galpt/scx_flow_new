@@ -478,7 +478,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.26".to_string(),
+            version: "4.2.27".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -542,7 +542,7 @@ mod tests {
             back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
             9_000
         );
-        assert_eq!(back.version, "4.2.26");
+        assert_eq!(back.version, "4.2.27");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);

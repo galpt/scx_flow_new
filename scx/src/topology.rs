@@ -153,14 +153,28 @@ pub fn governor_base(g: &str) -> &str {
 }
 
 /*
- * Governor of one CPU with diagnostic suffix only.
- * Reads the scaling governor file. Missing files yield
- * unknown with no trap. Appends the EPP plus platform
- * suffix when present, so powersave with performance
- * EPP stays visible. The suffix is display only and
- * never feeds the unanimity check, see base.
+ * Platform profile once per tick. The file is machine
+ * global with one value for all CPUs. Missing files
+ * yield nothing with no trap, same as the per CPU
+ * path today. Callers read once per tick, then thread
+ * the value into the per CPU path.
  */
-pub fn read_governor(cpu: u32) -> String {
+pub fn read_platform_profile() -> Option<String> {
+    std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/*
+ * Governor of one CPU with a given platform value.
+ * Reads the scaling governor plus EPP files per CPU.
+ * The platform value is machine global and passed in,
+ * so the tick reads the file once. Missing files yield
+ * unknown plus no suffix with no trap, same as today.
+ * The suffix is display only and never feeds base.
+ */
+pub fn read_governor_with_profile(cpu: u32, platform: Option<&str>) -> String {
     let base = std::fs::read_to_string(format!(
         "{}{}{}{}",
         "/sys/devices/system/cpu/cpu", cpu, "/cpufreq/", "scaling_governor"
@@ -179,8 +193,7 @@ pub fn read_governor(cpu: u32) -> String {
     .ok()
     .map(|s| s.trim().to_string())
     .filter(|s| !s.is_empty());
-    let pp = std::fs::read_to_string("/sys/firmware/acpi/platform_profile")
-        .ok()
+    let pp = platform
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     match (epp, pp) {
@@ -189,6 +202,46 @@ pub fn read_governor(cpu: u32) -> String {
         (None, Some(p)) => format!("{base} (pp:{p})"),
         (None, None) => base,
     }
+}
+
+/*
+ * Governor of one CPU with diagnostic suffix only.
+ * Reads the scaling governor file. Missing files yield
+ * unknown with no trap. Appends the EPP plus platform
+ * suffix when present, so powersave with performance
+ * EPP stays visible. The suffix is display only and
+ * never feeds the unanimity check, see base.
+ */
+#[allow(dead_code)]
+pub fn read_governor(cpu: u32) -> String {
+    read_governor_with_profile(cpu, read_platform_profile().as_deref())
+}
+
+/*
+ * Governors for one tick with one platform read.
+ * Calls the provider exactly once per collection, then
+ * threads the value into each per CPU read. Empty stays
+ * empty with one call and no trap. Output matches per
+ * CPU reads with the same value, see the tests.
+ */
+pub fn collect_governors_with<F>(cpus: &[u32], mut provider: F) -> Vec<String>
+where
+    F: FnMut() -> Option<String>,
+{
+    let platform = provider();
+    cpus.iter()
+        .map(|&id| read_governor_with_profile(id, platform.as_deref()))
+        .collect()
+}
+
+/*
+ * Governors for one tick over online CPUs. Reads the
+ * platform profile once per call, so a 16 CPU tick pays
+ * one slow read, not sixteen. Missing files yield the
+ * same strings as per CPU reads with no trap.
+ */
+pub fn collect_governors(cpus: &[u32]) -> Vec<String> {
+    collect_governors_with(cpus, read_platform_profile)
 }
 
 /*
@@ -813,5 +866,44 @@ mod tests {
             "powersave (epp:performance)".into(),
         ];
         assert_eq!(display_governor(&suffixed_mixed), "mixed");
+    }
+
+    /* Provider runs once per collection over N CPUs. */
+    #[test]
+    fn collect_governors_reads_platform_once() {
+        let cpus: Vec<u32> = (0..16).collect();
+        let mut calls = 0;
+        let got = collect_governors_with(&cpus, || {
+            calls += 1;
+            Some("balanced".to_string())
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(got.len(), 16);
+    }
+
+    /* Batched output matches per CPU reads exactly. */
+    #[test]
+    fn collect_governors_matches_per_cpu_reads() {
+        let cpus: Vec<u32> = (0..8).collect();
+        for platform in [
+            None,
+            Some("balanced".to_string()),
+            Some("performance".to_string()),
+        ] {
+            let want: Vec<String> = cpus
+                .iter()
+                .map(|&id| read_governor_with_profile(id, platform.as_deref()))
+                .collect();
+            let got = collect_governors_with(&cpus, || platform.clone());
+            assert_eq!(got, want);
+        }
+        let empty: Vec<u32> = Vec::new();
+        let mut calls = 0;
+        let got = collect_governors_with(&empty, || {
+            calls += 1;
+            None
+        });
+        assert!(got.is_empty());
+        assert_eq!(calls, 1);
     }
 }
