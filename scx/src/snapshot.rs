@@ -38,12 +38,41 @@ pub(crate) const PROBE_MIN_KEPT: usize = 20;
 /* Settle seconds between arms. Thirty plus three plus thirty */
 /* plus three makes the sixty six second pair cycle. */
 pub(crate) const PROBE_SETTLE_SECS: u64 = 3;
-/* Intra arm noise bound in W. Light steady stdev is 1.269 */
-/* in the RAPL probe data, times 1.5 is 1.9, rounded to 2.0. */
-pub(crate) const PROBE_STD_BOUND_W: f64 = 2.0;
-/* Outlier bound over the arm median in W. Idle spikes reach */
-/* near plus 7 over typical in the RAPL probe data, light plus 5. */
-pub(crate) const PROBE_OUTLIER_BOUND_W: f64 = 7.0;
+/* Relative noise bound. Idle CV 21.7 percent plus soak light 11.2 */
+/* percent need headroom, light 4.2 percent plus load 2.0 percent */
+/* stay well under, so 0.15 splits steady arms from churn. */
+pub(crate) const PROBE_STD_REL: f64 = 0.15;
+/* Noise floor in W. Idle median near 7 W times 0.15 is near 1.0, */
+/* so 1.5 W rejects idle churn while light near 30 W uses 4.5 W, */
+/* load near 100 W uses 15.0 W with no false trip. */
+pub(crate) const PROBE_STD_FLOOR_W: f64 = 1.5;
+/* Relative outlier bound. Idle spike 127 percent must reject, */
+/* light hump 18.7 percent plus load hump 5.2 percent must pass, */
+/* so 0.35 splits the probe spikes with margin. */
+pub(crate) const PROBE_OUTLIER_REL: f64 = 0.35;
+/* Outlier floor in W. Idle median near 7 W times 0.35 is near 2.4, */
+/* so 3.0 W rejects idle spikes while light near 30 W uses 10.5 W, */
+/* load near 100 W uses 35.0 W with no false trip. */
+pub(crate) const PROBE_OUTLIER_FLOOR_W: f64 = 3.0;
+/* Trim retry bound. One retry drops at most two farthest from */
+/* median samples on noise plus outlier fails only, then all */
+/* stats recompute from the trimmed set with no cherry pick. */
+pub(crate) const PROBE_TRIM_MAX: usize = 2;
+/* Waiting entry bound in W. Idle near 7 W sits well under, light */
+/* near 30 W sits well over, so 15.0 W marks the idle floor. */
+pub(crate) const PROBE_WAIT_ENTER_W: f64 = 15.0;
+/* Waiting exit bound in W. Hysteresis over entry keeps flap out, */
+/* light near 30 W clears 20.0 W while idle near 7 W stays under. */
+pub(crate) const PROBE_WAIT_EXIT_W: f64 = 20.0;
+/* Waiting entry debounce ticks. Five low W ticks prove idle, */
+/* missed ticks freeze the count with no reset plus no advance. */
+pub(crate) const PROBE_WAIT_ENTER_TICKS: u32 = 5;
+/* Waiting exit debounce ticks. Five high W ticks prove load, */
+/* missed ticks freeze the count with no reset plus no advance. */
+pub(crate) const PROBE_WAIT_EXIT_TICKS: u32 = 5;
+/* Waiting timeout seconds. One hundred eighty seconds parks idle, */
+/* then one pair attempts with re wait on still idle W. */
+pub(crate) const PROBE_WAIT_TIMEOUT_SECS: u64 = 180;
 /* Accepted pairs before headlines. One pair never headlines, */
 /* three to four pairs carry a low confidence hint. Three */
 /* is policy, not measurement. */
@@ -69,6 +98,7 @@ pub(crate) enum ProbeState {
     Unavailable,
     Baseline,
     Collecting,
+    Waiting,
     Backoff,
 }
 
@@ -101,6 +131,8 @@ pub(crate) struct ArmStats {
     std_w: f64,
     min_w: f64,
     max_w: f64,
+    /* Dropped farthest from median samples on one retry. */
+    trimmed: u64,
 }
 
 /* Why one arm stayed out of the sums. */
@@ -167,10 +199,16 @@ pub(crate) fn probe_p99(v: &[f64]) -> f64 {
 /*
  * Judge one arm as a unit. Drops the lead plus tail window,
  * then checks kept count plus noise plus outlier plus per
- * CPU plausibility in order. Any failure rejects the whole
- * arm, so the pair falls with it and nothing is cherry
- * picked. Empty active snapshots pass vacuously, so an old
- * BPF object without the active tail still measures.
+ * CPU plausibility in order. Noise rejects past max floor
+ * plus relative share of median, outlier rejects past max
+ * floor plus relative share of median. One retry drops at
+ * most two farthest from median samples on noise plus
+ * outlier fails only, then all stats recompute from the
+ * trimmed set. Too few plus implausible never trim, nor
+ * below kept minimum. Any failure rejects the whole arm,
+ * so the pair falls with it and nothing is cherry picked.
+ * Empty active snapshots pass vacuously, so an old BPF
+ * object without the active tail still measures.
  */
 pub(crate) fn evaluate_arm(
     samples: &[ArmSample],
@@ -179,6 +217,8 @@ pub(crate) fn evaluate_arm(
     active_end: &[stats::PerCpuMetrics],
 ) -> Result<ArmStats, ArmReject> {
     let mut watts: Vec<f64> = Vec::new();
+    let mut kept_joules: Vec<f64> = Vec::new();
+    let mut kept_dt: Vec<f64> = Vec::new();
     let mut joules = 0.0;
     let mut secs = 0.0;
     let mut min_w = f64::INFINITY;
@@ -191,6 +231,8 @@ pub(crate) fn evaluate_arm(
             continue;
         }
         watts.push(s.watts);
+        kept_joules.push(s.joules);
+        kept_dt.push(s.dt_s);
         joules += s.joules;
         secs += s.dt_s;
         if s.watts < min_w {
@@ -203,34 +245,132 @@ pub(crate) fn evaluate_arm(
     if watts.len() < PROBE_MIN_KEPT {
         return Err(ArmReject::TooFew);
     }
+    /* Noise plus outlier bounds from median with floor. */
+    /* Idle CV 21.7 percent plus soak light 11.2 percent sit */
+    /* over light 4.2 percent plus load 2.0 percent, so */
+    /* relative plus floor splits steady arms from churn. */
+    /* Idle spike 127 percent must reject, light hump 18.7 */
+    /* percent plus load hump 5.2 percent must pass, so */
+    /* relative plus floor splits spikes from humps. */
+    let median = probe_median(&watts);
     let mean = probe_mean(&watts);
     let std = probe_std(&watts, mean);
-    if std > PROBE_STD_BOUND_W {
-        return Err(ArmReject::TooNoisy);
+    let noise_bound = PROBE_STD_FLOOR_W.max(PROBE_STD_REL * median);
+    let outlier_bound = PROBE_OUTLIER_FLOOR_W.max(PROBE_OUTLIER_REL * median);
+    let noisy = std > noise_bound;
+    let wild = max_w - median > outlier_bound;
+    if !noisy && !wild {
+        let wall_ns = (arm_wall_s * 1e9) as u64;
+        for end in active_end {
+            if let Some(start) = active_start.iter().find(|c| c.id == end.id)
+                && end.active_delta(start) > wall_ns.saturating_add(PROBE_ACTIVE_SLACK_NS)
+            {
+                return Err(ArmReject::Implausible);
+            }
+        }
+        return Ok(ArmStats {
+            joules,
+            secs,
+            kept: watts.len() as u64,
+            mean_w: mean,
+            median_w: median,
+            p99_w: probe_p99(&watts),
+            std_w: std,
+            min_w,
+            max_w,
+            trimmed: 0,
+        });
     }
-    let median = probe_median(&watts);
-    if max_w - median > PROBE_OUTLIER_BOUND_W {
+    /* Single retry on noise plus outlier fails only. Drops */
+    /* at most two farthest from median samples, never below */
+    /* kept minimum, then all stats recompute from the */
+    /* trimmed set with no cherry pick beyond the retry. */
+    let max_drop = PROBE_TRIM_MAX.min(watts.len().saturating_sub(PROBE_MIN_KEPT));
+    if max_drop == 0 {
+        if noisy {
+            return Err(ArmReject::TooNoisy);
+        }
         return Err(ArmReject::Outlier);
     }
-    let wall_ns = (arm_wall_s * 1e9) as u64;
-    for end in active_end {
-        if let Some(start) = active_start.iter().find(|c| c.id == end.id)
-            && end.active_delta(start) > wall_ns.saturating_add(PROBE_ACTIVE_SLACK_NS)
-        {
+    let mut order: Vec<usize> = (0..watts.len()).collect();
+    order.sort_by(|a, b| {
+        (watts[*b] - median)
+            .abs()
+            .partial_cmp(&(watts[*a] - median).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    /* Try one dropped, then two dropped, keep least dropped pass. */
+    let mut last_err = if noisy {
+        ArmReject::TooNoisy
+    } else {
+        ArmReject::Outlier
+    };
+    for drop in 1..=max_drop {
+        let mut dropped = vec![false; watts.len()];
+        for k in 0..drop {
+            dropped[order[k]] = true;
+        }
+        let mut tw: Vec<f64> = Vec::with_capacity(watts.len() - drop);
+        let mut tj = 0.0;
+        let mut ts = 0.0;
+        let mut tmin = f64::INFINITY;
+        let mut tmax = f64::NEG_INFINITY;
+        for (i, w) in watts.iter().enumerate() {
+            if dropped[i] {
+                continue;
+            }
+            tw.push(*w);
+            tj += kept_joules[i];
+            ts += kept_dt[i];
+            if *w < tmin {
+                tmin = *w;
+            }
+            if *w > tmax {
+                tmax = *w;
+            }
+        }
+        let tmedian = probe_median(&tw);
+        let tmean = probe_mean(&tw);
+        let tstd = probe_std(&tw, tmean);
+        if tstd > PROBE_STD_FLOOR_W.max(PROBE_STD_REL * tmedian) {
+            last_err = ArmReject::TooNoisy;
+            continue;
+        }
+        if tmax - tmedian > PROBE_OUTLIER_FLOOR_W.max(PROBE_OUTLIER_REL * tmedian) {
+            last_err = ArmReject::Outlier;
+            continue;
+        }
+        let wall_ns = (arm_wall_s * 1e9) as u64;
+        let mut bad = false;
+        for end in active_end {
+            if let Some(start) = active_start.iter().find(|c| c.id == end.id)
+                && end.active_delta(start) > wall_ns.saturating_add(PROBE_ACTIVE_SLACK_NS)
+            {
+                bad = true;
+                break;
+            }
+        }
+        if bad {
             return Err(ArmReject::Implausible);
         }
+        return Ok(ArmStats {
+            joules: tj,
+            secs: ts,
+            kept: tw.len() as u64,
+            mean_w: tmean,
+            median_w: tmedian,
+            p99_w: probe_p99(&tw),
+            std_w: tstd,
+            min_w: tmin,
+            max_w: tmax,
+            trimmed: drop as u64,
+        });
     }
-    Ok(ArmStats {
-        joules,
-        secs,
-        kept: watts.len() as u64,
-        mean_w: mean,
-        median_w: median,
-        p99_w: probe_p99(&watts),
-        std_w: std,
-        min_w,
-        max_w,
-    })
+    /* Storm keeps failing past two dropped with no pass. */
+    if last_err == ArmReject::TooNoisy {
+        return Err(ArmReject::TooNoisy);
+    }
+    return Err(ArmReject::Outlier);
 }
 
 /*
@@ -284,6 +424,8 @@ pub(crate) struct ProbeSample<'a> {
  * A/B probe over package joules. Alternates strict plus
  * perf arms with settle gaps, judges each pair as a unit,
  * and keeps the ratio of sums once three pairs land.
+ * Idle parks in waiting on low W with no pair cost, load
+ * returns on high W, timeout tries one pair with re wait.
  * Suspend plus resume plus hotplug plus gaps discard the
  * in flight pair with no partial credit. Restart clears
  * all history, since nothing is stored off process.
@@ -316,6 +458,12 @@ pub(crate) struct EnergyProbe {
     last_reject: Option<ArmReject>,
     consec_invalid: u32,
     backoff_left: u64,
+    /* Low W ticks toward waiting entry while collecting. */
+    wait_enter: u32,
+    /* High W ticks toward collecting exit while waiting. */
+    wait_exit: u32,
+    /* Seconds parked in waiting toward timeout. */
+    wait_wall_s: f64,
     want_force: bool,
     trace: String,
 }
@@ -351,6 +499,9 @@ impl EnergyProbe {
             last_reject: None,
             consec_invalid: 0,
             backoff_left: 0,
+            wait_enter: 0,
+            wait_exit: 0,
+            wait_wall_s: 0.0,
             want_force: false,
             trace: String::new(),
         };
@@ -412,6 +563,33 @@ impl EnergyProbe {
         self.phase = ProbePhase::Settle;
         self.phase_left = PROBE_SETTLE_SECS;
         self.want_force = false;
+    }
+
+    /* Watts of one tick from joules plus time. Missed yields nothing. */
+    fn tick_watts(delta_uj: Option<u64>, dt_s: f64) -> Option<f64> {
+        let uj = delta_uj?;
+        if dt_s <= 0.0 {
+            return None;
+        }
+        Some(uj as f64 / dt_s / 1_000_000.0)
+    }
+
+    /* Enter waiting at pair boundary with no reject plus strict force. */
+    fn enter_waiting(&mut self) {
+        self.state = ProbeState::Waiting;
+        self.wait_enter = 0;
+        self.wait_exit = 0;
+        self.wait_wall_s = 0.0;
+        self.want_force = false;
+    }
+
+    /* Leave waiting into collecting with a fresh pair plus strict force. */
+    fn exit_waiting(&mut self) {
+        self.state = ProbeState::Collecting;
+        self.wait_enter = 0;
+        self.wait_exit = 0;
+        self.wait_wall_s = 0.0;
+        self.begin_pair();
     }
 
     /* Text of one reject reason for the trace. */
@@ -505,6 +683,7 @@ impl EnergyProbe {
             ProbeState::Unavailable => "unavailable",
             ProbeState::Baseline => "baseline",
             ProbeState::Collecting => "collecting",
+            ProbeState::Waiting => "waiting",
             ProbeState::Backoff => "backoff",
         }
     }
@@ -550,6 +729,13 @@ impl EnergyProbe {
             }
             ProbeState::Baseline => {
                 t.push_str("state baseline, paused while governor reads performance\n");
+            }
+            ProbeState::Waiting => {
+                t.push_str(&format!(
+                    "state waiting {:.0}s to timeout, idle under {:.1}W\n",
+                    (PROBE_WAIT_TIMEOUT_SECS as f64 - self.wait_wall_s).max(0.0),
+                    PROBE_WAIT_ENTER_W
+                ));
             }
             ProbeState::Backoff => {
                 t.push_str(&format!(
@@ -604,6 +790,11 @@ impl EnergyProbe {
                 "spread perf kept {} std {:.2} median {:.2} p50 {:.2} p99 {:.2} min {:.2} max {:.2}\n",
                 p.kept, p.std_w, p.median_w, p.median_w, p.p99_w, p.min_w, p.max_w
             ));
+            /* Trimmed count from the one retry on noise plus outlier fails. */
+            t.push_str(&format!(
+                "trimmed strict {} perf {}\n",
+                s.trimmed, p.trimmed
+            ));
         }
         if let Some((id, share)) = &self.last_active {
             t.push_str(&format!("active max CPU{id} {share:.1} percent of wall\n"));
@@ -640,6 +831,10 @@ impl EnergyProbe {
      * the force cleared. Hotplug plus gaps plus resume drop
      * the in flight pair and open a fresh one. Five straight
      * bad intervals park the probe in backoff for a minute.
+     * Idle parks in waiting on low W at pair boundary with
+     * no reject plus strict force, load returns on high W,
+     * timeout tries one pair with re wait. Missed ticks
+     * freeze waiting counts with no reset plus no advance.
      * One missed read keeps its wall in pending plus wall,
      * so the next good delta over the gap keeps true mean.
      * Countdown follows wall clock, not tick count.
@@ -649,6 +844,9 @@ impl EnergyProbe {
             if self.state != ProbeState::Unavailable {
                 self.discard_pair();
                 self.state = ProbeState::Unavailable;
+                self.wait_enter = 0;
+                self.wait_exit = 0;
+                self.wait_wall_s = 0.0;
                 self.want_force = false;
             }
             self.render_trace();
@@ -658,6 +856,9 @@ impl EnergyProbe {
             if self.state != ProbeState::Baseline {
                 self.discard_pair();
                 self.state = ProbeState::Baseline;
+                self.wait_enter = 0;
+                self.wait_exit = 0;
+                self.wait_wall_s = 0.0;
                 self.want_force = false;
             }
             self.render_trace();
@@ -667,6 +868,50 @@ impl EnergyProbe {
             ProbeState::Unavailable | ProbeState::Baseline => {
                 self.state = ProbeState::Collecting;
                 self.begin_pair();
+                self.wait_enter = 0;
+                self.wait_exit = 0;
+                self.wait_wall_s = 0.0;
+            }
+            ProbeState::Waiting => {
+                /* Hotplug plus gaps plus bad time stay waiting. */
+                /* Missed ticks freeze exit counts with wall kept. */
+                if s.online_changed || s.dt_s > PROBE_MAX_GAP_S || s.dt_s <= 0.0 {
+                    self.wait_exit = 0;
+                    self.want_force = false;
+                    self.refresh_countdown();
+                    self.render_trace();
+                    return;
+                }
+                if s.dt_s > 0.0 {
+                    self.wait_wall_s += s.dt_s;
+                }
+                self.refresh_countdown();
+                if self.wait_wall_s >= PROBE_WAIT_TIMEOUT_SECS as f64 {
+                    self.exit_waiting();
+                    self.refresh_countdown();
+                    self.render_trace();
+                    return;
+                }
+                match Self::tick_watts(s.delta_uj, s.dt_s) {
+                    Some(w) => {
+                        if w > PROBE_WAIT_EXIT_W {
+                            self.wait_exit += 1;
+                        } else {
+                            self.wait_exit = 0;
+                        }
+                        if self.wait_exit >= PROBE_WAIT_EXIT_TICKS {
+                            self.exit_waiting();
+                            self.refresh_countdown();
+                            self.render_trace();
+                            return;
+                        }
+                    }
+                    None => {}
+                }
+                self.want_force = false;
+                self.refresh_countdown();
+                self.render_trace();
+                return;
             }
             ProbeState::Backoff => {
                 if s.dt_s > 0.0 {
@@ -687,6 +932,24 @@ impl EnergyProbe {
         if s.online_changed || s.dt_s > PROBE_MAX_GAP_S || s.dt_s <= 0.0 {
             self.discard_pair();
             self.begin_pair();
+            self.refresh_countdown();
+            self.render_trace();
+            return;
+        }
+        /* Waiting entry on low W at pair boundary only. */
+        /* Missed ticks freeze entry counts with no reset. */
+        match Self::tick_watts(s.delta_uj, s.dt_s) {
+            Some(w) => {
+                if w < PROBE_WAIT_ENTER_W {
+                    self.wait_enter = self.wait_enter.saturating_add(1);
+                } else {
+                    self.wait_enter = 0;
+                }
+            }
+            None => {}
+        }
+        if self.wait_enter >= PROBE_WAIT_ENTER_TICKS && !self.pair_started() {
+            self.enter_waiting();
             self.refresh_countdown();
             self.render_trace();
             return;
@@ -1091,8 +1354,16 @@ mod tests {
             PROBE_ARM_SECS + PROBE_SETTLE_SECS + PROBE_ARM_SECS + PROBE_SETTLE_SECS,
             66
         );
-        assert_eq!(PROBE_STD_BOUND_W, 2.0);
-        assert_eq!(PROBE_OUTLIER_BOUND_W, 7.0);
+        assert_eq!(PROBE_STD_REL, 0.15);
+        assert_eq!(PROBE_STD_FLOOR_W, 1.5);
+        assert_eq!(PROBE_OUTLIER_REL, 0.35);
+        assert_eq!(PROBE_OUTLIER_FLOOR_W, 3.0);
+        assert_eq!(PROBE_TRIM_MAX, 2);
+        assert_eq!(PROBE_WAIT_ENTER_W, 15.0);
+        assert_eq!(PROBE_WAIT_EXIT_W, 20.0);
+        assert_eq!(PROBE_WAIT_ENTER_TICKS, 5);
+        assert_eq!(PROBE_WAIT_EXIT_TICKS, 5);
+        assert_eq!(PROBE_WAIT_TIMEOUT_SECS, 180);
         assert_eq!(PROBE_MIN_PAIRS, 3);
         assert_eq!(PROBE_BACKOFF_SECS, 60);
         assert_eq!(PROBE_MAX_CONSEC_INVALID, 5);
@@ -1175,20 +1446,20 @@ mod tests {
         );
     }
 
-    /* Noise past two W rejects, exactly two passes. */
+    /* Relative noise bound splits steady arms from churn. */
     #[test]
     fn noise_bound_rejects_past_two_watts() {
         let mut loud = Vec::new();
         let mut edge = Vec::new();
         for i in 1..=30 {
-            let w = if i % 2 == 0 { 32.1 } else { 27.9 };
+            let w = if i % 2 == 0 { 35.0 } else { 25.0 };
             loud.push(ArmSample {
                 offset_s: i as f64,
                 dt_s: 1.0,
                 watts: w,
                 joules: w,
             });
-            let e = if i % 2 == 0 { 31.9 } else { 28.1 };
+            let e = if i % 2 == 0 { 32.0 } else { 28.0 };
             edge.push(ArmSample {
                 offset_s: i as f64,
                 dt_s: 1.0,
@@ -1196,14 +1467,17 @@ mod tests {
                 joules: e,
             });
         }
+        /* Loud std 5.0 W tops max 1.5 W plus 0.15 times 30 W. */
         assert_eq!(
             evaluate_arm(&loud, 30.0, &[], &[]).unwrap_err(),
             ArmReject::TooNoisy
         );
-        assert!(evaluate_arm(&edge, 30.0, &[], &[]).is_ok());
+        /* Edge std 2.0 W stays under max 1.5 W plus 0.15 times 30 W. */
+        let got = evaluate_arm(&edge, 30.0, &[], &[]).unwrap();
+        assert_eq!(got.trimmed, 0);
     }
 
-    /* Replayed idle spike rejects, light hump passes. */
+    /* Single spike trims to pass, light hump passes clean. */
     #[test]
     fn outlier_replay_matches_probe_data() {
         let mut spike = Vec::new();
@@ -1224,11 +1498,231 @@ mod tests {
                 joules: light,
             });
         }
+        /* Idle spike 127 percent over median trims one plus passes. */
+        let got = evaluate_arm(&spike, 30.0, &[], &[]).unwrap();
+        assert_eq!(got.trimmed, 1);
+        assert!((got.median_w - 7.0).abs() < 1e-9);
+        /* Light hump 18.7 percent stays under 0.35 plus 3.0 W. */
+        let h = evaluate_arm(&hump, 30.0, &[], &[]).unwrap();
+        assert_eq!(h.trimmed, 0);
+    }
+
+    /* Idle steady near 7 W holds under floor plus relative. */
+    #[test]
+    fn idle_replay_passes_near_floor() {
+        let mut v = Vec::new();
+        for i in 1..=30 {
+            let w = if i % 2 == 0 { 8.5 } else { 5.5 };
+            v.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: w,
+                joules: w,
+            });
+        }
+        /* Idle CV 21.7 percent maps near 1.5 W at 7 W median. */
+        let got = evaluate_arm(&v, 30.0, &[], &[]).unwrap();
+        assert_eq!(got.trimmed, 0);
+        assert!((got.mean_w - 7.0).abs() < 0.5);
+    }
+
+    /* Light steady near 30 W holds well under relative. */
+    #[test]
+    fn light_replay_passes_with_margin() {
+        let mut v = Vec::new();
+        for i in 1..=30 {
+            let w = if i % 2 == 0 { 31.3 } else { 28.7 };
+            v.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: w,
+                joules: w,
+            });
+        }
+        /* Light CV 4.2 percent maps near 1.3 W at 30 W median. */
+        let got = evaluate_arm(&v, 30.0, &[], &[]).unwrap();
+        assert_eq!(got.trimmed, 0);
+        assert!((got.mean_w - 30.0).abs() < 0.5);
+    }
+
+    /* Load steady near 100 W holds well under relative. */
+    #[test]
+    fn load_replay_passes_with_margin() {
+        let mut v = Vec::new();
+        for i in 1..=30 {
+            let w = if i % 2 == 0 { 102.0 } else { 98.0 };
+            v.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: w,
+                joules: w,
+            });
+        }
+        /* Load CV 2.0 percent maps near 2.0 W at 100 W median. */
+        let got = evaluate_arm(&v, 30.0, &[], &[]).unwrap();
+        assert_eq!(got.trimmed, 0);
+        assert!((got.mean_w - 100.0).abs() < 0.5);
+    }
+
+    /* Close idle arms accept with no headline bias by construction. */
+    #[test]
+    fn close_idle_arms_accept_with_small_bias() {
+        /* Bias under 0.5 W carries no headline bias by */
+        /* construction, since ratio of sums weights by kept */
+        /* seconds plus per arm means with equal windows. */
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for i in 1..=30 {
+            a.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: 7.05,
+                joules: 7.05,
+            });
+            b.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: 7.37,
+                joules: 7.37,
+            });
+        }
+        let ga = evaluate_arm(&a, 30.0, &[], &[]).unwrap();
+        let gb = evaluate_arm(&b, 30.0, &[], &[]).unwrap();
+        assert_eq!(ga.trimmed, 0);
+        assert_eq!(gb.trimmed, 0);
+        assert!((gb.mean_w - ga.mean_w - 0.32).abs() < 1e-9);
+    }
+
+    /* Storm with five spikes still rejects past two dropped. */
+    #[test]
+    fn storm_with_five_spikes_rejects() {
+        let mut v = Vec::new();
+        for i in 1..=30 {
+            let w = if [10, 13, 15, 18, 20].contains(&i) {
+                15.9
+            } else {
+                7.0
+            };
+            v.push(ArmSample {
+                offset_s: i as f64,
+                dt_s: 1.0,
+                watts: w,
+                joules: w,
+            });
+        }
+        /* Five spikes need five dropped, two leave three plus fail. */
+        assert!(evaluate_arm(&v, 30.0, &[], &[]).is_err());
+    }
+
+    /* Idle parks in waiting at pair boundary with no reject. */
+    #[test]
+    fn waiting_enters_at_boundary_with_no_reject() {
+        let mut p = EnergyProbe::new();
+        for _ in 0..70 {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(100.0).state, "waiting");
+        assert_eq!(p.rejected_pairs, 0);
+        assert!(!p.want_force());
+        assert!(p.trace.contains("waiting"));
+    }
+
+    /* Load returns from waiting with a fresh pair plus strict start. */
+    #[test]
+    fn waiting_exits_on_load_with_fresh_pair() {
+        let mut p = EnergyProbe::new();
+        for _ in 0..70 {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(100.0).state, "waiting");
+        for _ in 0..PROBE_WAIT_EXIT_TICKS {
+            let q = quiet(30.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(200.0).state, "collecting");
+        assert!(!p.want_force());
+    }
+
+    /* Flap holds with hysteresis plus debounce on both sides. */
+    #[test]
+    fn waiting_flap_holds_with_hysteresis() {
+        let mut p = EnergyProbe::new();
+        for i in 0..20 {
+            let w = if i % 2 == 0 { 7.0 } else { 30.0 };
+            let q = quiet(w);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(100.0).state, "collecting");
+        for _ in 0..70 {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(200.0).state, "waiting");
+        for i in 0..8 {
+            let w = if i % 3 == 2 { 7.0 } else { 30.0 };
+            let q = quiet(w);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(300.0).state, "waiting");
+    }
+
+    /* Timeout tries one pair then re waits on still idle W. */
+    #[test]
+    fn waiting_timeout_tries_one_pair_then_rewaits() {
+        let mut p = EnergyProbe::new();
+        for _ in 0..70 {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(100.0).state, "waiting");
+        for _ in 0..PROBE_WAIT_TIMEOUT_SECS {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(300.0).state, "collecting");
+        let have = p.accepted_pairs;
+        for _ in 0..(PROBE_ARM_SECS + PROBE_SETTLE_SECS + PROBE_ARM_SECS + PROBE_SETTLE_SECS + 10) {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(500.0).state, "waiting");
+        assert!(p.accepted_pairs >= have);
+    }
+
+    /* Waiting holds strict force with no perf widen. */
+    #[test]
+    fn waiting_holds_strict_force() {
+        let mut p = EnergyProbe::new();
+        for _ in 0..70 {
+            let q = quiet(7.0);
+            p.tick(&q);
+        }
+        assert_eq!(p.output(100.0).state, "waiting");
+        for _ in 0..10 {
+            let q = quiet(7.0);
+            p.tick(&q);
+            assert!(!p.want_force());
+        }
+        assert_eq!(p.output(200.0).state, "waiting");
+    }
+
+    /* Three light pairs span three times sixty six seconds. */
+    #[test]
+    fn throughput_three_light_pairs_take_198s() {
+        /* Pair cycle 30 plus 3 plus 30 plus 3 is 66, */
+        /* three cycles is 198 with no waiting on 30 W. */
+        let mut p = EnergyProbe::new();
+        run_pair(&mut p, 30.0, 30.0);
+        run_pair(&mut p, 30.0, 30.0);
+        run_pair(&mut p, 30.0, 30.0);
+        assert_eq!(p.accepted_pairs, 3);
         assert_eq!(
-            evaluate_arm(&spike, 30.0, &[], &[]).unwrap_err(),
-            ArmReject::Outlier
+            3 * (PROBE_ARM_SECS + PROBE_SETTLE_SECS + PROBE_ARM_SECS + PROBE_SETTLE_SECS),
+            198
         );
-        assert!(evaluate_arm(&hump, 30.0, &[], &[]).is_ok());
+        assert_eq!(p.output(500.0).state, "collecting");
     }
 
     /* Active past wall plus slack rejects, zeros pass. */

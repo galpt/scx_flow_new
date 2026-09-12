@@ -166,14 +166,18 @@
       line-height: 1.55;
     }
     .section-label {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-bottom: 8px;
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 6px;
+      margin-bottom: 10px;
     }
     .subsection-label {
-      font-size: 0.6875rem;
-      color: var(--text-muted);
-      margin-bottom: 2px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
     }
     /* System stats grid */
     .sys-grid {
@@ -181,6 +185,8 @@
       grid-template-columns: repeat(2, 1fr);
       gap: 8px;
       font-size: 0.8125rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
     }
     @media (min-width: 640px) {
       .sys-grid { grid-template-columns: repeat(4, 1fr); }
@@ -745,6 +751,17 @@
         el('energy-pairs').textContent = 'baseline';
         note = 'Paused while the governor reads ' +
           'performance. Showing baseline.';
+      } else if (state === 'waiting') {
+        el('energy-daily').textContent = 'waiting';
+        el('energy-daily-kwh').textContent = 'waiting';
+        el('energy-yearly').textContent = 'waiting';
+        el('energy-yearly-kwh').textContent = 'waiting';
+        el('energy-since').textContent = 'waiting';
+        el('energy-pairs').textContent =
+          (energy.accepted_pairs || 0) + ' accepted, ' +
+          (energy.rejected_pairs || 0) + ' rejected';
+        note = 'Waiting for load above 20 W. ' +
+          'Headlines need 3 accepted pairs.';
       } else if (!energy.has_headline) {
         var have = energy.accepted_pairs || 0;
         var waiting = 'collecting ' + have + '/3 pairs';
@@ -797,6 +814,8 @@
         live = 'waiting for package counter';
       } else if (state === 'baseline') {
         live = 'paused for baseline';
+      } else if (state === 'waiting') {
+        live = 'waiting for load above 20 W';
       } else if (!energy.has_headline) {
         live = 'waiting for 3 accepted pairs';
       } else {

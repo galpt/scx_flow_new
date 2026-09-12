@@ -298,13 +298,14 @@ mod tests {
         }
     }
 
-    /* Merged carries all four energy modes to the page. */
+    /* Merged carries all five energy modes to the page. */
     #[test]
     fn merged_carries_all_four_energy_modes() {
         for (state, accepted, headline) in [
             ("unavailable", 0, 0.0),
             ("baseline", 0, 0.0),
             ("collecting", 5, -1.5),
+            ("waiting", 1, 0.0),
             ("backoff", 2, 0.0),
         ] {
             let snap = energy_fixture(state, accepted, headline);
@@ -384,6 +385,34 @@ mod tests {
                 .and_then(|s| s.as_str()),
             Some("unavailable")
         );
+    }
+
+    /* Waiting keeps pairs plus eleven keys for the page. */
+    #[test]
+    fn merged_carries_waiting_with_pairs() {
+        for (state, accepted, headline) in [
+            ("unavailable", 0, 0.0),
+            ("baseline", 0, 0.0),
+            ("collecting", 5, -1.5),
+            ("waiting", 1, 0.0),
+            ("backoff", 2, 0.0),
+        ] {
+            let snap = energy_fixture(state, accepted, headline);
+            let v = merged(&snap);
+            assert_eq!(v.as_object().map(|o| o.len()), Some(11));
+            let e = v.get("energy").expect("energy key");
+            assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
+            assert_eq!(
+                e.get("accepted_pairs").and_then(|n| n.as_u64()),
+                Some(accepted)
+            );
+            let back: WebMetrics = serde_json::from_value(v).unwrap();
+            assert_eq!(back.energy.state, state);
+        }
+        let wait = energy_fixture("waiting", 1, 0.0);
+        assert_eq!(wait.energy.state, "waiting");
+        assert!(!wait.energy.has_headline);
+        assert_eq!(merged(&wait)["energy"]["state"], "waiting");
     }
 
     /* Old snapshots without new fields still decode. */
@@ -478,7 +507,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.27".to_string(),
+            version: "4.2.28".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -542,7 +571,7 @@ mod tests {
             back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
             9_000
         );
-        assert_eq!(back.version, "4.2.27");
+        assert_eq!(back.version, "4.2.28");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);

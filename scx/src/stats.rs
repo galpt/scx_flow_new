@@ -200,7 +200,7 @@ fn default_energy_state() -> String {
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnergyMetrics {
-    /* Probe state. unavailable, baseline, collecting, backoff. */
+    /* Probe state. unavailable, baseline, collecting, waiting, backoff. */
     #[serde(default = "default_energy_state")]
     pub state: String,
     /* True once three accepted pairs back the headline. */
