@@ -177,6 +177,7 @@
       font-size: 0.75rem;
       font-weight: 600;
       color: var(--text-secondary);
+      letter-spacing: 0.02em;
       margin-bottom: 4px;
     }
     /* System stats grid */
@@ -227,6 +228,12 @@
       color: var(--text-primary);
       border-color: var(--border-hover);
     }
+    .energy-ref:focus {
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+      outline: 1px solid var(--border-hover);
+      outline-offset: 1px;
+    }
     .energy-tip {
       display: none;
       position: absolute;
@@ -234,7 +241,7 @@
       left: 50%;
       transform: translateX(-50%);
       width: max-content;
-      max-width: 240px;
+      max-width: min(240px, 100vw - 32px);
       padding: 6px 8px;
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -247,7 +254,9 @@
       white-space: normal;
       z-index: 1;
     }
-    .energy-ref:hover .energy-tip {
+    .energy-ref:hover .energy-tip,
+    .energy-ref:focus .energy-tip,
+    .energy-ref:focus-within .energy-tip {
       display: block;
     }
     .energy-notes-list {
@@ -272,6 +281,172 @@
     }
     .energy-backlink:hover {
       color: var(--text-primary);
+    }
+    /* Energy hero pair. Answer first with large mono numerals, primary ink, tabular figures. */
+    .energy-hero .stat-value,
+    #energy-daily,
+    #energy-daily-kwh {
+      font-family: var(--font-mono);
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      font-feature-settings: "tnum";
+      line-height: 1.3;
+    }
+    /* Hero labels stay muted, small, sans, so numerals carry the answer. */
+    .energy-hero span:first-child {
+      font-size: 0.8125rem;
+    }
+    /* Legend definition rows. Symbol chips sit on elevated ground, definitions stay secondary. */
+    #energy-legend {
+      display: grid;
+      gap: 4px;
+    }
+    #energy-legend .legend-row {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 0;
+      line-height: 1.55;
+    }
+    #energy-legend .legend-sym {
+      flex: none;
+      padding: 0 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--elevated);
+      color: var(--text-primary);
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-style: italic;
+      font-size: 0.75rem;
+      line-height: 1.5;
+    }
+    #energy-legend .legend-def {
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+    }
+    /* Trace well plus parsed rows. Keys stay muted, values stay secondary, outcomes add weight plus markers. */
+    #energy-trace {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--elevated);
+      padding: 8px 10px;
+    }
+    /* Trace rows for parsed lines. Unknown lines fall through to plain rows, kept secondary. */
+    .trace-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0;
+      line-height: 1.5;
+    }
+    .trace-key {
+      color: var(--text-muted);
+      flex: none;
+    }
+    .trace-val {
+      color: var(--text-secondary);
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+    .trace-row--plain {
+      color: var(--text-secondary);
+      font-weight: 400;
+    }
+    .trace-accepted,
+    .trace-rejected,
+    .trace-low,
+    .trace-headline {
+      font-weight: 700;
+    }
+    .trace-accepted {
+      color: var(--success);
+    }
+    .trace-accepted::before {
+      content: "✓ ";
+    }
+    .trace-rejected {
+      color: var(--warning);
+    }
+    .trace-rejected::before {
+      content: "✕ ";
+    }
+    .trace-low {
+      color: var(--warning);
+      font-weight: 600;
+    }
+    .trace-low::before {
+      content: "! ";
+    }
+    .trace-headline {
+      color: var(--text-primary);
+    }
+    .trace-headline::before {
+      content: "» ";
+    }
+    /* Footnotes. Muted sans lines carry state notes, estimates, projections. */
+    #energy-note,
+    #energy-footnote {
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    /* State note marker. Left rule plus weight marks the note, never color alone. */
+    #energy-note:not(:empty) {
+      border-left: 2px solid var(--border-hover);
+      padding-left: 8px;
+      font-weight: 500;
+    }
+    /* Live derivation line. Serif secondary line follows the formula, quiet till headlines. */
+    #energy-live {
+      font-weight: 400;
+    }
+    /* Header badges. Weight plus tracking mark mode, running, disconnected, never color alone. */
+    #mode-badge,
+    #status-badge {
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    /* Run badges. Live adds weight plus solid border, idle stays dashed, muted. */
+    .run-idle {
+      border-style: dashed;
+      font-weight: 400;
+    }
+    .run-live {
+      border-style: solid;
+      font-weight: 700;
+    }
+    /* Summary headline. Left rule plus weight marks the headline, body stays secondary. */
+    .summary-tldr {
+      border-left: 2px solid var(--border-hover);
+      padding-left: 8px;
+    }
+    /* Connection status. Mono plus weight marks live, disconnected, retrying. */
+    #conn-status {
+      font-family: var(--font-mono);
+      font-weight: 500;
+    }
+    /* Empty grid notice. Dashed border plus centered weight marks the idle grid, quiet till work arrives. */
+    #core-cards > .card:not(.core-card) {
+      border-style: dashed;
+      font-weight: 600;
+    }
+    /* Narrow widths. Hero stacks full width at 1rem, tips stay off where anchors carry the notes. */
+    @media (max-width: 640px) {
+      .energy-hero {
+        grid-column: 1 / -1;
+      }
+      #energy-daily,
+      #energy-daily-kwh {
+        font-size: 1rem !important;
+      }
+      .energy-tip,
+      .energy-ref:hover .energy-tip,
+      .energy-ref:focus .energy-tip,
+      .energy-ref:focus-within .energy-tip {
+        display: none !important;
+      }
     }
   </style>
 </head>
@@ -341,7 +516,7 @@
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Energy</p>
       <div class="sys-grid">
-        <div><span style="color:var(--text-muted)">
+        <div class="energy-hero"><span style="color:var(--text-muted)">
           Daily saved:</span>
           <span class="stat-value" id="energy-daily">unavailable</span>
           <a class="energy-ref" href="#energy-note-1"
@@ -351,7 +526,7 @@
             style="display:none">[2]<span
             class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
         </div>
-        <div><span style="color:var(--text-muted)">
+        <div class="energy-hero"><span style="color:var(--text-muted)">
           Daily energy:</span>
           <span class="stat-value" id="energy-daily-kwh">unavailable</span>
         </div>
@@ -383,16 +558,16 @@
         font-size:0.875rem;color:var(--text-primary)">
         <i>E_saved</i> = (<i>P_perf</i> − <i>P_strict</i>) × <i>t</i> ÷ 1000
       </p>
-      <div id="energy-legend" style="margin-top:4px;
-        font-size:0.75rem;color:var(--text-secondary)">
-        <p>E_saved is saved energy in kWh over the span.</p>
-        <p>P_perf is mean perf power in W over kept seconds in all accepted pairs.</p>
-        <p>P_strict is mean strict power in W over kept seconds in all accepted pairs.</p>
-        <p>t is hours in the span.</p>
-      </div>
       <p id="energy-live" style="margin-top:4px;
         font-family: Georgia, 'Times New Roman', Times, serif;
         font-size:0.75rem;color:var(--text-secondary)">waiting for 3 accepted pairs</p>
+      <div id="energy-legend" style="margin-top:4px;
+        font-size:0.75rem;color:var(--text-secondary)">
+        <p class="legend-row"><span class="legend-sym"><i>E_saved</i></span> <span class="legend-def">is saved energy in kWh over the span.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_perf</i></span> <span class="legend-def">is mean perf power in W over kept seconds in all accepted pairs.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_strict</i></span> <span class="legend-def">is mean strict power in W over kept seconds in all accepted pairs.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>t</i></span> <span class="legend-def">is hours in the span.</span></p>
+      </div>
       <pre id="energy-trace" style="margin-top:8px;
         font-family:var(--font-mono);font-size:0.6875rem;
         line-height:1.5;color:var(--text-secondary);
@@ -813,14 +988,71 @@
       return s;
     }
 
+    /* Trace outcome class by word match, class only with no text change. */
+    function traceClass(line) {
+      if (line.indexOf('low confidence') >= 0) {
+        return 'trace-low';
+      }
+      if (line.indexOf('rejected') >= 0) {
+        return 'trace-rejected';
+      }
+      if (line.indexOf('accepted') >= 0) {
+        return 'trace-accepted';
+      }
+      if (line.indexOf('headline') >= 0) {
+        return 'trace-headline';
+      }
+      return '';
+    }
+
+    /* Parsed trace rows keep every byte, unknown lines stay plain with no marker. */
+    function renderTrace(text) {
+      var host = el('energy-trace');
+      host.textContent = '';
+      var src = String(text);
+      var lines = src.split('\n');
+      var trailing = src.length > 0 &&
+        src.charAt(src.length - 1) === '\n';
+      if (trailing) {
+        lines.pop();
+      }
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var row = document.createElement('span');
+        row.className = 'trace-row';
+        var mark = traceClass(line);
+        var at = line.indexOf(': ');
+        if (at >= 0) {
+          var keyEl = document.createElement('span');
+          keyEl.className = 'trace-key';
+          keyEl.textContent = line.slice(0, at);
+          var valEl = document.createElement('span');
+          valEl.className = 'trace-val';
+          valEl.textContent = line.slice(at + 2);
+          row.appendChild(keyEl);
+          row.appendChild(document.createTextNode(': '));
+          row.appendChild(valEl);
+        } else {
+          row.className += ' trace-row--plain';
+          row.textContent = line;
+        }
+        if (mark) {
+          row.className += ' ' + mark;
+        }
+        host.appendChild(row);
+        if (i < lines.length - 1 || trailing) {
+          host.appendChild(document.createTextNode('\n'));
+        }
+      }
+    }
+
     /* Energy cells plus trace plus note from one snapshot. */
     /* Runs on the single one second poll with no extra timer */
     /* plus no stored history, so a restart resets the view. */
     function updateEnergy(data) {
       var energy = data.energy || {};
       var state = energy.state || 'unavailable';
-      el('energy-trace').textContent =
-        energy.trace || state;
+      renderTrace(energy.trace || state);
       var note = '';
       if (state === 'unavailable') {
         el('energy-daily').textContent = 'unavailable';
