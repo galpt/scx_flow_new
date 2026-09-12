@@ -75,6 +75,7 @@ pub fn discover_package_zone(base: &Path) -> Option<PathBuf> {
  * order. Sums per zone deltas with per zone wrap, so
  * two package hosts count both with no bias. Single
  * package hosts return one entry with no behavior shift.
+ * Links count as dirs, since sysfs entries are links.
  */
 pub fn discover_package_zones(base: &Path) -> Vec<PathBuf> {
     let rd = match std::fs::read_dir(base) {
@@ -84,10 +85,11 @@ pub fn discover_package_zones(base: &Path) -> Vec<PathBuf> {
     let mut names: Vec<String> = Vec::new();
     for entry in rd.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if zone_path(base, &name).is_none() {
-            continue;
-        }
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        let dir = match zone_path(base, &name) {
+            Some(v) => v,
+            None => continue,
+        };
+        if std::fs::metadata(&dir).map(|m| m.is_dir()).unwrap_or(false) {
             names.push(name);
         }
     }
@@ -311,6 +313,42 @@ mod tests {
         fake_zone(&d, "intel-rapl:7", "core\n", "500\n", Some("65532610987\n"));
         let got = discover_package_zone(&d).unwrap();
         assert_eq!(got, d.join("intel-rapl:3"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /* Discovery follows sysfs links to the package zone. */
+    #[test]
+    fn discovers_package_through_symlinks() {
+        use std::os::unix::fs::symlink;
+        let d = scratch("symlink");
+        let real = d.join("real");
+        let top = real.join("intel-rapl");
+        fs::create_dir_all(&top).unwrap();
+        let pkg = real.join("intel-rapl:0");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(pkg.join("name"), "package-0\n").unwrap();
+        fs::write(pkg.join("energy_uj"), "1000\n").unwrap();
+        fs::write(pkg.join("max_energy_range_uj"), "65532610987\n").unwrap();
+        let sub = pkg.join("intel-rapl:0:0");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("name"), "core\n").unwrap();
+        fs::write(sub.join("energy_uj"), "500\n").unwrap();
+        fs::write(sub.join("max_energy_range_uj"), "65532610987\n").unwrap();
+        symlink(&top, d.join("intel-rapl")).unwrap();
+        symlink(&pkg, d.join("intel-rapl:0")).unwrap();
+        symlink(&sub, d.join("intel-rapl:0:0")).unwrap();
+        for zone in ["intel-rapl", "intel-rapl:0", "intel-rapl:0:0"] {
+            assert!(
+                fs::symlink_metadata(d.join(zone))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{zone} must be a link"
+            );
+        }
+        let got = discover_package_zones(&d);
+        assert_eq!(got, vec![d.join("intel-rapl:0")]);
+        assert_eq!(discover_package_zone(&d), Some(d.join("intel-rapl:0")));
         let _ = fs::remove_dir_all(&d);
     }
 
