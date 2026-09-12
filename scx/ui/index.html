@@ -205,6 +205,74 @@
         gap: 4px;
       }
     }
+    /* Energy notes plus ref pills. Serif notes stay quiet
+     * beside the formula, pills stay muted till hover. */
+    .energy-ref {
+      display: inline-block;
+      margin-left: 4px;
+      padding: 0 5px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--elevated);
+      color: var(--text-secondary);
+      font-family: var(--font-sans);
+      font-size: 0.75rem;
+      font-weight: 500;
+      line-height: 1.5;
+      text-decoration: none;
+      vertical-align: super;
+      position: relative;
+    }
+    .energy-ref:hover {
+      color: var(--text-primary);
+      border-color: var(--border-hover);
+    }
+    .energy-tip {
+      display: none;
+      position: absolute;
+      bottom: 1.6em;
+      left: 50%;
+      transform: translateX(-50%);
+      width: max-content;
+      max-width: 240px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--elevated);
+      color: var(--text-secondary);
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-size: 0.75rem;
+      font-weight: 400;
+      line-height: 1.45;
+      white-space: normal;
+      z-index: 1;
+    }
+    .energy-ref:hover .energy-tip {
+      display: block;
+    }
+    .energy-notes-list {
+      margin: 0;
+      padding-left: 1.25em;
+      border: none;
+      font-family: Georgia, 'Times New Roman', Times, serif;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+    .energy-notes-list li {
+      margin-top: 4px;
+    }
+    .energy-notes-list li::marker {
+      font-weight: 500;
+    }
+    .energy-backlink {
+      margin-left: 6px;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .energy-backlink:hover {
+      color: var(--text-primary);
+    }
   </style>
 </head>
 <body>
@@ -276,6 +344,12 @@
         <div><span style="color:var(--text-muted)">
           Daily saved:</span>
           <span class="stat-value" id="energy-daily">unavailable</span>
+          <a class="energy-ref" href="#energy-note-1"
+            style="display:none">[1]<span
+            class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
+          <a class="energy-ref" href="#energy-note-2"
+            style="display:none">[2]<span
+            class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
         </div>
         <div><span style="color:var(--text-muted)">
           Daily energy:</span>
@@ -284,6 +358,12 @@
         <div><span style="color:var(--text-muted)">
           Yearly saved:</span>
           <span class="stat-value" id="energy-yearly">unavailable</span>
+          <a class="energy-ref" href="#energy-note-1"
+            style="display:none">[1]<span
+            class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
+          <a class="energy-ref" href="#energy-note-2"
+            style="display:none">[2]<span
+            class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
         </div>
         <div><span style="color:var(--text-muted)">
           Yearly energy:</span>
@@ -321,6 +401,15 @@
         font-size:0.75rem;color:var(--text-muted)"></p>
       <p id="energy-footnote" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-muted)">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</p>
+      <div id="energy-notes" style="display:none">
+        <hr style="border:none;border-top:1px solid var(--border);
+          margin:1.5em 0">
+        <p class="subsection-label">Notes</p>
+        <ol class="energy-notes-list">
+          <li id="energy-note-1">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+          <li id="energy-note-2">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+        </ol>
+      </div>
     </div>
 
     <!-- Groups with depths plus pressure plus rates -->
@@ -799,16 +888,6 @@
       if (state === 'backoff') {
         note = 'Cooling down after bad reads. ' + note;
       }
-      /* Perf disclosure with natural hints plus duty plus scope. */
-      /* Perf arms widen placement with natural hints at about */
-      /* 45 percent duty, headline extrapolates strict versus */
-      /* forced perf with no hint pin. */
-      if (state !== 'unavailable') {
-        var duty = 'Perf arms widen placement with natural ' +
-          'hints at about 45 percent duty. Headline ' +
-          'extrapolates strict versus forced perf.';
-        note = note ? note + ' ' + duty : duty;
-      }
       var live = '';
       if (state === 'unavailable') {
         live = 'waiting for package counter';
@@ -826,6 +905,24 @@
       }
       el('energy-live').textContent = live;
       el('energy-note').textContent = note;
+      /* Notes hold for every state except unavailable. */
+      /* Method plus estimates stay true in baseline plus */
+      /* waiting plus collecting too, so the block shows */
+      /* there. Pills show only with headlines, so no */
+      /* dangling refs in early states. */
+      var notes = el('energy-notes');
+      if (notes) {
+        notes.style.display =
+          (state === 'unavailable') ? 'none' : '';
+      }
+      var showRefs = !!energy.has_headline &&
+        state !== 'unavailable' &&
+        state !== 'baseline' &&
+        state !== 'waiting';
+      var refs = document.querySelectorAll('.energy-ref');
+      for (var i = 0; i < refs.length; i++) {
+        refs[i].style.display = showRefs ? '' : 'none';
+      }
     }
 
     function updateUI(data) {
