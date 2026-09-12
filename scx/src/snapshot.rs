@@ -370,7 +370,7 @@ pub(crate) fn evaluate_arm(
     if last_err == ArmReject::TooNoisy {
         return Err(ArmReject::TooNoisy);
     }
-    return Err(ArmReject::Outlier);
+    Err(ArmReject::Outlier)
 }
 
 /*
@@ -892,21 +892,18 @@ impl EnergyProbe {
                     self.render_trace();
                     return;
                 }
-                match Self::tick_watts(s.delta_uj, s.dt_s) {
-                    Some(w) => {
-                        if w > PROBE_WAIT_EXIT_W {
-                            self.wait_exit += 1;
-                        } else {
-                            self.wait_exit = 0;
-                        }
-                        if self.wait_exit >= PROBE_WAIT_EXIT_TICKS {
-                            self.exit_waiting();
-                            self.refresh_countdown();
-                            self.render_trace();
-                            return;
-                        }
+                if let Some(w) = Self::tick_watts(s.delta_uj, s.dt_s) {
+                    if w > PROBE_WAIT_EXIT_W {
+                        self.wait_exit += 1;
+                    } else {
+                        self.wait_exit = 0;
                     }
-                    None => {}
+                    if self.wait_exit >= PROBE_WAIT_EXIT_TICKS {
+                        self.exit_waiting();
+                        self.refresh_countdown();
+                        self.render_trace();
+                        return;
+                    }
                 }
                 self.want_force = false;
                 self.refresh_countdown();
@@ -938,15 +935,12 @@ impl EnergyProbe {
         }
         /* Waiting entry on low W at pair boundary only. */
         /* Missed ticks freeze entry counts with no reset. */
-        match Self::tick_watts(s.delta_uj, s.dt_s) {
-            Some(w) => {
-                if w < PROBE_WAIT_ENTER_W {
-                    self.wait_enter = self.wait_enter.saturating_add(1);
-                } else {
-                    self.wait_enter = 0;
-                }
+        if let Some(w) = Self::tick_watts(s.delta_uj, s.dt_s) {
+            if w < PROBE_WAIT_ENTER_W {
+                self.wait_enter = self.wait_enter.saturating_add(1);
+            } else {
+                self.wait_enter = 0;
             }
-            None => {}
         }
         if self.wait_enter >= PROBE_WAIT_ENTER_TICKS && !self.pair_started() {
             self.enter_waiting();
