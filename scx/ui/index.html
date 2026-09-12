@@ -362,26 +362,26 @@
     .trace-accepted {
       color: var(--success);
     }
-    .trace-accepted::before {
+    .trace-accepted .trace-val::before {
       content: "✓ ";
     }
     .trace-rejected {
       color: var(--warning);
     }
-    .trace-rejected::before {
+    .trace-rejected .trace-val::before {
       content: "✕ ";
     }
     .trace-low {
       color: var(--warning);
       font-weight: 600;
     }
-    .trace-low::before {
+    .trace-low .trace-val::before {
       content: "! ";
     }
     .trace-headline {
       color: var(--text-primary);
     }
-    .trace-headline::before {
+    .trace-headline .trace-val::before {
       content: "» ";
     }
     /* Footnotes. Muted sans lines carry state notes, estimates, projections. */
@@ -1146,6 +1146,14 @@
       if (notes) {
         notes.style.display =
           (state === 'unavailable') ? 'none' : '';
+      }
+      /* Footnote backs unavailable alone. */
+      /* Other states hide the fallback line so */
+      /* note two carries estimates with no double. */
+      var footnote = el('energy-footnote');
+      if (footnote) {
+        footnote.style.display =
+          (state === 'unavailable') ? '' : 'none';
       }
       var showRefs = !!energy.has_headline &&
         state !== 'unavailable' &&
