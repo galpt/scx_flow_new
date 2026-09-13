@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Trimmed topology
  *
- * Trimmed topology for the flow scheduler. Static cards
- * plus sibling plus LLC plus capacity plus max frequency
- * seed the group table. Live frequency plus CPU cards
- * stay display only and never shape placement.
+ * Seeds the group table from static cards plus sibling plus LLC plus capacity plus max
+ * frequency. Live frequency plus CPU cards stay display only and never shape placement.
  * Zero means unknown and keeps a plain fallback.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use log::warn;
 use scx_utils::Topology;

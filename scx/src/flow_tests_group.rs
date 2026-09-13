@@ -1,17 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Group unit tests
  *
- * Group unit tests for the flow scheduler.
- * The tests mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * Two groups split CPUs by id halves with extra
- * to hog and odd extra to hog in both views. The
- * classifier uses burn only with a 32ms window plus
- * 16ms demote plus 4ms burst plus 4ms low for 64 wins
- * near 2s plus 8 short blocks below 1ms with burn
- * below 4ms. Tier 0 models keep both drains. BPF ships
- * Tier 3 park only by construction with peer mask only.
+ * Covers the group split plus classifier plus live table helpers with halves and burn checks.
+ * Run with cargo test -p scx_flow flow_tests_group.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow::*;
 use std::collections::VecDeque;

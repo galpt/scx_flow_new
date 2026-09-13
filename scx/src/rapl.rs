@@ -1,13 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Package energy reads
  *
- * Package energy reads for the flow scheduler. Discovers
- * the package zone by name, samples the energy counter on
- * the snapshot tick, and turns counter wraps into plain
- * joule deltas. Missing files yield fallback values with
- * no trap, so the scheduler keeps running with the probe
- * parked in the unavailable state.
+ * Discovers the RAPL package zone by name, samples the energy counter on the snapshot tick,
+ * and turns counter wraps into plain joule deltas. Missing files yield fallback values with
+ * no trap, so the scheduler keeps running with the probe parked in the unavailable state.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use std::path::Path;
 use std::path::PathBuf;

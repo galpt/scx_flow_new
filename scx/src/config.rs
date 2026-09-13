@@ -1,11 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Validated scheduling constants
  *
- * Validated scheduling constants for the flow scheduler.
- * The defaults match the shared BPF header. Validation
- * keeps bad values from reaching the BPF object.
- * The slice is fixed at 1ms with no knob.
+ * Holds the validated scheduling constants with defaults that match the shared BPF header.
+ * Validation keeps bad values from reaching the BPF object. The slice is fixed at 1ms with
+ * no knob.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow::DISPATCH_BATCH;
 use crate::flow::EST_MAX_NS;

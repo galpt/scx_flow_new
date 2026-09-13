@@ -1,5 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Enqueue op
+ *
+ * Picks the target queue in group with park fallback and stamps deadline plus delay. Keeps
+ * mask wins with group aware placement and coalesced idle kicks.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 /* Group of one task with light as default. */
 static __always_inline u8 flow_task_group(
 	struct flow_task_ctx *tctx)

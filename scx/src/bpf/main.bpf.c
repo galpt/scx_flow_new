@@ -1,5 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Flow scheduler BPF core
+ *
+ * Holds the task and CPU maps plus the shared helpers plus the ops table. Defines init and
+ * exit with per task and per CPU state for the flow scheduler.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 #include <scx/common.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include "intf.h"

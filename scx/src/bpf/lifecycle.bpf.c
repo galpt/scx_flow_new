@@ -1,5 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Task lifecycle ops
+ *
+ * Handles running plus dequeue plus stopping plus enable plus disable plus exit plus CPU
+ * release. Tracks running state plus estimates plus pressure with no extra cost.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;

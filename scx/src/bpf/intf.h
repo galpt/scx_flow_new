@@ -1,5 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Shared flow header
+ *
+ * Defines the shared constants plus structs plus helpers with a fixed 1ms slice plus two
+ * groups plus ordered queues. Mirrored by userspace so behavior stays the same on both sides
+ * of the boundary.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 #ifndef __FLOW_INTF_H
 #define __FLOW_INTF_H
 #ifndef __VMLINUX_H__

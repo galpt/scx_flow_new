@@ -1,11 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Deadline and queue helpers
  *
- * Deadline and queue helpers for the flow scheduler.
- * The functions mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no knob.
+ * Holds the deadline and queue helpers that mirror the BPF header so behavior stays the same
+ * on both sides of the boundary. The slice is fixed at 1ms with no knob.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Bound of moved tasks in one pass. */

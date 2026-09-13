@@ -1,10 +1,11 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Flow scheduler front end
  *
- * Flow scheduler front end. Loads the BPF object, wires
- * stats and the dashboard, and drives the run loop until
+ * Loads the BPF object, wires stats and the dashboard, and drives the run loop until
  * shutdown or exit. Snapshot reads live in snapshot.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 mod bpf_skel;
 pub use bpf_skel::*;

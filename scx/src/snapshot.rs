@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Snapshot reads
  *
- * Snapshot reads for the flow scheduler. Builds the
- * metrics view and the dashboard view from the BPF
- * maps and the static cards. Gauges only, no deltas.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Builds the metrics view and the dashboard view from the BPF maps and the static cards.
+ * Gauges only with no deltas. Frequency plus LLC plus CPU cards stay display only and never
+ * shape placement.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;

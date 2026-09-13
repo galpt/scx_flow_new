@@ -1,13 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Slice and estimate helpers
  *
- * Slice and estimate helpers for the flow scheduler.
- * The functions mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no knob.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Holds the slice and estimate helpers that mirror the BPF header so behavior stays the same
+ * on both sides of the boundary. The slice is fixed at 1ms with no knob. Frequency plus LLC
+ * plus CPU cards stay display only and never shape placement.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Lower bound of a per task estimate in nanos. */

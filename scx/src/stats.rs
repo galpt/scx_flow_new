@@ -1,24 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Stats server and web snapshot
  *
- * Stats server and web snapshot for the flow scheduler.
- * Metrics mirrors the BPF counters plus uptime. Inserts
- * count fresh joins. Requeues count runnable slice ends.
- * Completions count blocks and exits. Park and steal
- * moves count dispatch moves. Kicks count idle wakeups.
- * Preempt counts cover busy kicks plus total skips plus
- * five reasons in branch order armed plus deserved plus
- * group plus mask plus rate. Total keeps the sum for
- * compat. Coalesced counts q2 idle skips in 50us at
- * 200B. EDF counts cover ordered inserts with clamp
- * detail. Group counts cover demote plus promote plus
- * wake promote plus pinned inflate plus steal skips. Wake
- * promote is the fast subset of promote by 8 short
- * blocks. Web metrics adds per-CPU cards with fixed
- * slice plus group plus delay plus depths plus pressure
- * plus version plus topology plus timestamp for the page
- * and the JSON log.
+ * Exports the metrics view and the dashboard view from the BPF counters. Metrics mirrors
+ * inserts plus requeues plus completions plus dispatch moves plus kicks plus preempt detail
+ * plus EDF and group detail. Web metrics adds per CPU cards with slice plus group plus delay
+ * plus depths plus pressure plus version plus topology plus timestamp.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use std::io::Write;
 use std::sync::Arc;

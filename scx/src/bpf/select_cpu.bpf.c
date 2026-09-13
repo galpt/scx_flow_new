@@ -1,5 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Select CPU op
+ *
+ * Picks an idle CPU in group with mask and locality first, then any idle plus previous plus
+ * first allowed. Keeps placement only with no dispatch use and mask always wins.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 prev_cpu, u64 wake_flags)
 {

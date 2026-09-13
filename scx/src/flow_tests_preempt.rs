@@ -1,11 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Preempt unit tests
  *
- * Preempt unit tests for the flow scheduler. The tests
- * mirror the BPF header so behavior stays the same on
- * both sides of the boundary. Delay stays in 32us units
- * with integer math only and no float use.
+ * Covers the delay plus granule plus slack plus rate helpers with header match and math
+ * checks.
+ * Run with cargo test -p scx_flow flow_tests_preempt.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow_preempt::*;
 use crate::flow_select::*;

@@ -1,13 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * EDF unit tests
  *
- * EDF unit tests for the flow scheduler.
- * The tests mirror the BPF header so behavior
- * stays the same on both sides of the boundary.
- * The slice is fixed at 1ms with no knob.
- * Frequency plus LLC plus CPU cards stay display only
- * and never shape placement.
+ * Covers the EDF plus slice helpers with estimate clamp plus weight scaling plus queue order
+ * checks.
+ * Run with cargo test -p scx_flow flow_tests_edf.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow_edf::*;
 use crate::flow_select::*;

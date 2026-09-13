@@ -1,24 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Group helpers
  *
- * Group helpers for the flow scheduler.
- * Two groups split cores by half with extra
- * to hog. Odd counts give the extra core to hog in
- * both views. One LLC splits globally. Two plus N
- * LLCs split in each LLC. All singleton cores use
- * halves plus interleave exactly. Light holds short
- * waits. Hog holds burn.
- * The classifier uses burn with a 32ms window plus
- * wake hits. Demote needs 16ms burn or one burst at
- * 4ms quiet down to 1ms floor during flood. Promote
- * needs 4ms low for 64 wins near 2s or 8 short blocks
- * below 1ms with burn below 4ms. Cold tasks join
- * light. The 4x gap keeps flips rare. A per CPU table
- * holds live groups when ready, else halves applies.
- * Short slices clamp with no pad. Strict iff ready is
- * zero, best effort iff ready is one with dispatch on
- * halves and placement on live.
+ * Holds the group helpers with two groups that split cores by half with extra to hog. The
+ * classifier uses burn plus wake hits to demote and promote between light and hog. A per CPU
+ * table holds live groups when ready, else halves applies.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 
 /* Count of groups. Fixed at two with no knob. */

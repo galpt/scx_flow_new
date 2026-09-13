@@ -1,28 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (c) 2026 Galih Tama <galpt@v.recipes> */
-/* Dispatch keeps park isolation by construction. */
-/* Userspace seeds by online rank with write by id, offline */
-/* light inert, skewed forces ready one, dense full keeps */
-/* prior halves. Snapshot covers online only. */
-/* Own drains to the same CPU with no group check, so a */
-/* pinned single entry with the opposite group still runs */
-/* where its mask allows with steal held by the mask. Park */
-/* drains the thief group park only with enqueue parking by */
-/* task group and no task recheck. Peer keeps mask plus */
-/* depth with idle rescue and no task recheck, so a depth */
-/* 1 donor moves only when the thief is idle with no moved */
-/* plus no own left past unmovable park leftovers. Busy */
-/* thieves keep depth 2. Tier 0 models also donor asleep */
-/* ships thief idle only by construction due to verifier */
-/* jump at 1000001 on asleep check in the steal loop with */
-/* donor asleep handled by idle kick. Tier 3 holds park */
-/* only by construction due to verifier jump at 1000001 */
-/* on donor check in the steal loop. Strict park iff */
-/* ready is zero, best effort peer iff ready is one. */
-/* Dispatch uses halves. Placement uses live table seeded */
-/* by online rank with offline inert. S0 plus S1 leave */
-/* dispatch on halves with no perf widen. Perf widens */
-/* placement plus kick only, see select plus enqueue. */
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Dispatch op
+ *
+ * Drains own plus park plus peer queues with park isolation. Keeps dispatch on halves with
+ * peer steals that respect mask plus depth plus idle rescue.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
 static __always_inline u32 flow_drain_own(s32 cpu,
 	u32 budget)
 {

@@ -1,12 +1,12 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+// SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ * Loopback dashboard
  *
- * Loopback dashboard for the flow scheduler. Serves the
- * embedded page and the live snapshot as JSON. Prefers
- * the loopback TCP port and falls back to a unix socket
- * when the sandbox blocks TCP. No auth is used. The
- * loopback address is the trust boundary.
+ * Serves the embedded page and the live snapshot as JSON. Prefers the loopback TCP port and
+ * falls back to a unix socket when the sandbox blocks TCP. No auth is used and the loopback
+ * address is the trust boundary.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use std::io::BufRead;
 use std::io::BufReader;
@@ -507,7 +507,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.34".to_string(),
+            version: "4.2.35".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -571,7 +571,7 @@ mod tests {
             back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
             9_000
         );
-        assert_eq!(back.version, "4.2.34");
+        assert_eq!(back.version, "4.2.35");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
