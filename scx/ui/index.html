@@ -1,7 +1,7 @@
 <!--
   SPDX-License-Identifier: GPL-2.0
   scx_flow dashboard page
-  Live view of per CPU queues plus per CPU running tasks plus system counters. Offline single
+  Live view of per CPU queues, per CPU running tasks, and system counters. Offline single
   file with no external assets. Data source is the loopback snapshot route with /api/snapshot
   and /api/stats.
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -205,7 +205,7 @@
         gap: 4px;
       }
     }
-    /* Energy notes plus ref pills. Serif notes stay quiet
+    /* Energy notes and ref pills. Serif notes stay quiet
      * beside the formula, pills stay muted till hover. */
     .energy-ref {
       display: inline-block;
@@ -233,7 +233,7 @@
       outline: 1px solid var(--border-hover);
       outline-offset: 1px;
     }
-    /* Tooltips open below plus grow with content. Height stays auto with no cap plus visible overflow, width stays capped. */
+    /* Tooltips open below and grow with content. Height stays auto with no cap and visible overflow, width stays capped. */
     .energy-tip {
       display: none;
       position: absolute;
@@ -329,7 +329,7 @@
       color: var(--text-secondary);
       font-size: 0.75rem;
     }
-    /* Trace well plus parsed rows. Keys stay muted, values stay secondary, outcomes add weight plus markers. */
+    /* Trace well and parsed rows. Keys stay muted, values stay secondary, outcomes add weight and markers. */
     #energy-trace {
       border: 1px solid var(--border-hover);
       border-radius: 8px;
@@ -404,13 +404,13 @@
     #energy-live {
       font-weight: 400;
     }
-    /* Header badges. Weight plus tracking mark mode, running, disconnected, never color alone. */
+    /* Header badges. Weight and tracking mark mode, running, disconnected, never color alone. */
     #mode-badge,
     #status-badge {
       font-weight: 600;
       letter-spacing: 0.02em;
     }
-    /* Run badges. Live adds weight plus solid border, idle stays dashed, muted. */
+    /* Run badges. Live adds weight and solid border, idle stays dashed, muted. */
     .run-idle {
       border-style: dashed;
       font-weight: 400;
@@ -419,12 +419,12 @@
       border-style: solid;
       font-weight: 700;
     }
-    /* Connection status. Mono plus weight marks live, disconnected, retrying. */
+    /* Connection status. Mono with weight marks live, disconnected, retrying. */
     #conn-status {
       font-family: var(--font-mono);
       font-weight: 500;
     }
-    /* Empty grid notice. Dashed border plus centered weight marks the idle grid, quiet till work arrives. */
+    /* Empty grid notice. Dashed border with centered weight marks the idle grid, quiet till work arrives. */
     #core-cards > .card:not(.core-card) {
       border-style: dashed;
       font-weight: 600;
@@ -505,7 +505,7 @@
         id="summary-explanation"></p>
     </div>
 
-    <!-- Energy with daily plus yearly savings plus trace -->
+    <!-- Energy with daily, yearly savings, and trace -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Energy</p>
       <div class="sys-grid">
@@ -571,7 +571,7 @@
       </div>
     </div>
 
-    <!-- Groups with depths plus pressure plus rates -->
+    <!-- Groups with depths, pressure, and rates -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Groups</p>
       <div class="sys-grid">
@@ -801,12 +801,11 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with fixed slice plus group
-     * plus the running estimate plus the pid plus
-     * nice plus weight plus delay. Freq unknown stays
+    /* Per-CPU cards with fixed slice, group, and the running estimate. They
+     * also show the pid, nice, weight, and delay. Freq unknown stays
      * plain with no zero print. No sibling stays plain
      * with no badge. Group shows live table when
-     * ready, else halves. Nice plus weight stay
+     * ready, else halves. Nice and weight stay
      * display only with dash when idle. Delay shows
      * latched dot with hollow when clear. Delay
      * shows stale word when idle, explicit. */
@@ -885,7 +884,7 @@
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
-     * walks the insert plus move plus group split with
+     * walks the insert, move, and group split with
      * wake detail. */
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
@@ -929,7 +928,7 @@
       return { tldr: tldr, explanation: explanation };
     }
 
-    /* Prior counters plus wall time for rate math. */
+    /* Prior counters with wall time for rate math. */
     var prevStats = null;
     var prevAt = 0;
 
@@ -1030,9 +1029,9 @@
       }
     }
 
-    /* Energy cells plus trace plus note from one snapshot. */
+    /* Energy cells, trace, and note from one snapshot. */
     /* Runs on the single one second poll with no extra timer */
-    /* plus no stored history, so a restart resets the view. */
+    /* and no stored history, so a restart resets the view. */
     function updateEnergy(data) {
       var energy = data.energy || {};
       var state = energy.state || 'unavailable';
@@ -1122,8 +1121,8 @@
       el('energy-live').textContent = live;
       el('energy-note').textContent = note;
       /* Notes hold for every state except unavailable. */
-      /* Method plus estimates stay true in baseline plus */
-      /* waiting plus collecting too, so the block shows */
+      /* Method and estimates stay true in baseline, waiting, */
+      /* and collecting too, so the block shows */
       /* there. Pills show only with headlines, so no */
       /* dangling refs in early states. */
       var notes = el('energy-notes');
@@ -1155,7 +1154,7 @@
         'var(--success)';
       el('status-badge').style.color = 'var(--success)';
 
-      /* Mode cell with strict plus perf plus governor tip. */
+      /* Mode cell with strict, perf, and governor tip. */
       /* Perf widens placement to any allowed on miss. */
       /* Strict keeps group isolation with mask win. */
       var perf = data.perf_mode === 1 ? 'perf' : 'strict';
@@ -1163,10 +1162,10 @@
       el('mode-badge').textContent = perf;
       el('mode-badge').title = gov;
 
-      /* Energy savings with daily plus yearly plus trace. */
+      /* Energy savings with daily, yearly, and trace. */
       /* Unavailable stays literal, baseline stays paused, */
       /* collecting waits for three pairs, headlines show */
-      /* one ratio in percent plus kWh. Yearly */
+      /* one ratio in percent and kWh. Yearly */
       /* is a projection, since running is an estimate. */
       updateEnergy(data);
 
@@ -1176,7 +1175,7 @@
       el('summary-explanation').textContent =
         summary.explanation;
 
-      /* Meta line with version plus topology. */
+      /* Meta line with version and topology. */
       var ver = data.version || '';
       var topo = data.topology || '';
       var meta = '';
@@ -1186,7 +1185,7 @@
       el('meta-line').textContent = meta ||
         'per-CPU queues, fixed slices and placement';
 
-      /* Group depths plus pressure from snapshot. */
+      /* Group depths and pressure from snapshot. */
       el('light-depth').textContent =
         fmt(data.light_depth || 0);
       el('hog-depth').textContent =
@@ -1323,7 +1322,7 @@
     }
 
     /* Full snapshot download as a timestamped file. */
-    /* Pure blob save with no new network surface plus */
+    /* Pure blob save with no new network surface and */
     /* the same loopback snapshot route. */
     function downloadSnapshot() {
       fetch('/api/snapshot', { cache: 'no-store' })

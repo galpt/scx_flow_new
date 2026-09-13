@@ -2,8 +2,8 @@
 /*
  * Flow scheduler BPF core
  *
- * Holds the task and CPU maps plus the shared helpers plus the ops table. Defines init and
- * exit with per task and per CPU state for the flow scheduler.
+ * Holds the task and CPU maps, the shared helpers, and the ops table. Defines
+ * init and exit with per task and per CPU state for the flow scheduler.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -19,7 +19,7 @@ struct {
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU state with frontier plus running plus cursor. */
+/* Per CPU state with frontier, running, and cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
@@ -28,11 +28,10 @@ struct {
 } cpu_state_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
-/* Live pressure gauges for the dashboard with no task cost. */
-/* Light plus hog depths sum per CPU queued counts capped at */
-/* 4. Allowance holds the burst line for the light depth. */
-/* Stopping refreshes all three with one pass, so snapshot */
-/* reads a consistent view with no dispatch cost. */
+/* Live pressure gauges for the dashboard with no task cost. Light and hog */
+/* depths sum per CPU queued counts capped at 4. Allowance holds the burst */
+/* line for the light depth. Stopping refreshes all three with one pass, so */
+/* snapshot reads a consistent view with no dispatch cost. */
 volatile u64 flow_light_depth;
 volatile u64 flow_hog_depth;
 volatile u64 flow_burst_allowance_ns;
@@ -44,33 +43,27 @@ volatile u64 flow_burst_allowance_ns;
 /* Halves is the fallback while ready is zero. */
 volatile u8 flow_group_by_cpu[1024];
 volatile u8 flow_group_ready;
-/* Sibling partner seeded by userspace at attach. */
-/* Seeded by online rank with write by id, offline plus */
-/* singleton holds 0xffff inert. Dense full matches prior. */
-/* Each CPU holds the next CPU in the same core. */
-/* 0xffff means singleton with no sibling. */
-/* Placement only with no dispatch use. */
+/* Sibling partner seeded by userspace at attach. Seeded by online rank with */
+/* write by id, offline and singleton holds 0xffff inert. Dense full matches */
+/* prior. Each CPU holds the next CPU in the same core. 0xffff means */
+/* singleton with no sibling. Placement only with no dispatch use. */
 volatile u16 flow_sibling_by_cpu[1024];
 /* Last idle kick time per CPU in nanos at 50us. */
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_kick_at[1024];
-/* Governor flag for S0 plus S1 with zero init strict. */
-/* Zero keeps 4.2.21 paths bit identical with group plus */
-/* mask isolation. One widens placement to any allowed */
-/* on in group miss with same tier order plus bypasses */
-/* the kick group gate with no recount. Mask always wins */
-/* in both modes with no CLI knob. Userspace writes on */
-/* governor transition only. Single flag with no per CPU */
+/* Governor flag for S0 and S1 with zero init strict. Zero keeps 4.2.21 paths */
+/* bit identical with group and mask isolation. One widens placement to any */
+/* allowed on in group miss with same tier order and bypasses the kick group */
+/* gate with no recount. Mask always wins in both modes with no CLI knob. */
+/* Userspace writes on governor transition only. Single flag with no per CPU */
 /* array. */
 volatile u8 flow_perf_mode;
-/* Probe force for A/B arms with zero init strict. */
-/* Zero keeps strict paths bit identical with group plus */
-/* mask isolation. One widens placement with natural */
-/* hints on the perf arm with no governor write, so the */
-/* probe measures the grouping split with no hint split. */
-/* Userspace writes on arm transition only. Single flag */
-/* with no per CPU array. */
+/* Probe force for A/B arms with zero init strict. Zero keeps strict paths */
+/* bit identical with group and mask isolation. One widens placement with */
+/* natural hints on the perf arm with no governor write, so the probe */
+/* measures the grouping split with no hint split. Userspace writes on arm */
+/* transition only. Single flag with no per CPU array. */
 volatile u8 flow_probe_perf;
 static __always_inline u64 flow_now(void)
 {
@@ -145,7 +138,7 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear running estimate, pid and nice to 0, weight to 1024, plus rate bit. */
+/* Clear running estimate, pid and nice to 0, weight to 1024, and rate bit. */
 /* Atomic clear, so a concurrent claim never loses. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
@@ -164,8 +157,8 @@ static __always_inline void flow_clear_running(s32 cpu)
 	__sync_fetch_and_and(&st->cursor,
 	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
-/* Clear running only when the pid owns it, so a disable */
-/* plus an exit never clears a new owner after a switch. */
+/* Clear running only when the pid owns it, so a disable and an exit never */
+/* clears a new owner after a switch. */
 static __always_inline void flow_clear_running_if_owner(
 	s32 cpu, u32 pid)
 {
@@ -186,15 +179,13 @@ static __always_inline void flow_clear_running_if_owner(
 	__sync_fetch_and_and(&st->cursor,
 	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
-/* Charge one leftover run segment at most once. */
-/* stopping owns the normal charge plus clears run at, so */
-/* a later disable plus exit sees zero with no second charge. */
-/* Disable plus exit funnel here only when stopping never ran */
-/* for the segment. Release never charges, the task segment */
-/* still ends through stopping plus disable plus exit. Check */
-/* CPU plus live plus clock before clearing run at, so a */
-/* rejected funnel keeps the segment for the second funnel. */
-/* Atomic add matches flow stats with no lost update. */
+/* Charge one leftover run segment at most once. stopping owns the normal */
+/* charge and clears run at, so a later disable and exit sees zero with no */
+/* second charge. Disable and exit funnel here only when stopping never ran */
+/* for the segment. Release never charges, the task segment still ends */
+/* through stopping, disable, and exit. Check CPU, live, and clock before */
+/* clearing run at, so a rejected funnel keeps the segment for the second */
+/* funnel. Atomic add matches flow stats with no lost update. */
 static __always_inline void flow_charge_leftover(s32 cpu,
 	struct flow_task_ctx *tctx)
 {
@@ -219,10 +210,9 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 	tctx->run_at = 0;
 	__sync_fetch_and_add(&st->active_ns, now - start);
 }
-/* Live group of one CPU from table plus halves fallback. */
-/* Reads the table when ready holds groups, else halves. */
-/* Table holds online rank with write by id, offline inert. */
-/* Bad values fall back to halves with no trap. */
+/* Live group of one CPU from table and halves fallback. Reads the table when */
+/* ready holds groups, else halves. Table holds online rank with write by id, */
+/* offline inert. Bad values fall back to halves with no trap. */
 static __always_inline u8 flow_group_live(u32 cpu,
 	u64 nr)
 {
@@ -240,16 +230,12 @@ static __always_inline u8 flow_group_live(u32 cpu,
 		return (u8)FLOW_GROUP_LIGHT;
 	return flow_group_of_cpu(cpu, nr);
 }
-/* Least queued allowed CPU in one group. */
-/* Scans 0 to 1024 with early break on nr plus */
-/* max, so the bound matches the prior first. */
-/* Needs live group plus mask plus queued depth. */
-/* Picks the smallest queued depth with lowest id */
-/* on ties by strict less only, so equal depths */
-/* keep the first id with no extra pass. Missing */
-/* queues read via the dsq count with no storage */
-/* lookup and no new loop. Placement keeps live, */
-/* dispatch keeps halves, constants frozen. */
+/* Least queued allowed CPU in one group. Scans 0 to 1024 with early break on */
+/* nr and max, so the bound matches the prior first. Needs live group, mask, */
+/* and queued depth. Picks the smallest queued depth with lowest id on ties */
+/* by strict less only, so equal depths keep the first id with no extra pass. */
+/* Missing queues read via the dsq count with no storage lookup and no new */
+/* loop. Placement keeps live, dispatch keeps halves, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
@@ -281,10 +267,9 @@ static __always_inline s32 flow_first_in_group(
 	}
 	return best;
 }
-/* True when one core holds no running task. */
-/* Needs self plus all siblings idle by pid. */
-/* Singletons read as free with no trap. */
-/* Missing state fails closed with no pick. */
+/* True when one core holds no running task. Needs self and all siblings idle */
+/* by pid. Singletons read as free with no trap. Missing state fails closed */
+/* with no pick. */
 static __always_inline bool flow_core_free(u32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -339,10 +324,9 @@ static __always_inline bool flow_core_free(u32 cpu)
 	}
 	return true;
 }
-/* First free core in one group in id order. */
-/* Scans up to 1024 with early exit on match. */
-/* Needs group plus mask plus free core by pid. */
-/* No claim here, so a miss wastes no idle claim. */
+/* First free core in one group in id order. Scans up to 1024 with early exit */
+/* on match. Needs group, mask, and free core by pid. No claim here, so a */
+/* miss wastes no idle claim. */
 static __always_inline s32 flow_free_in_group(
 	const struct task_struct *p, u8 group)
 {
@@ -368,14 +352,12 @@ static __always_inline s32 flow_free_in_group(
 	}
 	return -1;
 }
-/* Least queued allowed CPU in any group for S0 perf. */
-/* Scans 0 to 1024 with early break on nr plus max. */
-/* Needs mask plus queued depth with no group check. */
-/* Picks the smallest queued depth with lowest id on */
-/* ties by strict less only, so equal depths keep the */
-/* first id with no extra pass. Perf only on in group */
-/* miss with same rule over the widened set. Mask */
-/* always wins with no dispatch use. */
+/* Least queued allowed CPU in any group for S0 perf. Scans 0 to 1024 with */
+/* early break on nr and max. Needs mask and queued depth with no group */
+/* check. Picks the smallest queued depth with lowest id on ties by strict */
+/* less only, so equal depths keep the first id with no extra pass. Perf only */
+/* on in group miss with same rule over the widened set. Mask always wins */
+/* with no dispatch use. */
 static __always_inline s32 flow_first_allowed(
 	const struct task_struct *p)
 {
@@ -402,11 +384,10 @@ static __always_inline s32 flow_first_allowed(
 	}
 	return best;
 }
-/* First free core in any group for S0 perf in id order. */
-/* Scans up to 1024 with early exit on match. */
-/* Needs mask plus free core by pid with no group check. */
-/* Perf only on in group miss with same order. Mask */
-/* always wins with no claim plus no dispatch use. */
+/* First free core in any group for S0 perf in id order. Scans up to 1024 */
+/* with early exit on match. Needs mask and free core by pid with no group */
+/* check. Perf only on in group miss with same order. Mask always wins with */
+/* no claim and no dispatch use. */
 static __always_inline s32 flow_free_any(
 	const struct task_struct *p)
 {
@@ -483,14 +464,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st->delay_win = 0;
 		st->delay_cur = 0;
 		st->delay_cnt = 0;
-		/* BSS zero already covers the EMA tail, */
-		/* so verify plus keep explicit zero for */
-		/* the 32B to 48B growth with no trap. */
+		/* BSS zero already covers the EMA tail, so verify and keep explicit zero */
+		/* for the 32B to 48B growth with no trap. */
 		st->cpuperf_ema = 0;
 		st->cpuperf_ema_at = 0;
-		/* Active starts at zero with lifetime growth, */
-		/* so verify plus keep explicit zero for the */
-		/* 48B to 56B growth with no trap. */
+		/* Active starts at zero with lifetime growth, so verify and keep explicit */
+		/* zero for the 48B to 56B growth with no trap. */
 		st->active_ns = 0;
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,

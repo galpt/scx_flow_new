@@ -6,12 +6,12 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.35`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.36`
 - `scx/src/bpf/intf.h` shared constants and helpers
-- `scx/src/bpf/` maps plus placement plus dispatch
+- `scx/src/bpf/` maps, placement, and dispatch
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/snapshot.rs` metrics and dashboard snapshots
-- `scx/src/stats.rs` counters plus web payload
+- `scx/src/stats.rs` counters and web payload
 - `scx/src/rapl.rs` package energy reads
 - `scx/src/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
@@ -30,7 +30,7 @@ sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 /usr/local/bin/scx_flow --version
 ```
 
-Expect version `4.2.35`, state `enabled`, ops with `flow`.
+Expect version `4.2.36`, state `enabled`, ops with `flow`.
 
 ## Checks
 

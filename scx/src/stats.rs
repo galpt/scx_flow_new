@@ -2,10 +2,11 @@
 /*
  * Stats server and web snapshot
  *
- * Exports the metrics view and the dashboard view from the BPF counters. Metrics mirrors
- * inserts plus requeues plus completions plus dispatch moves plus kicks plus preempt detail
- * plus EDF and group detail. Web metrics adds per CPU cards with slice plus group plus delay
- * plus depths plus pressure plus version plus topology plus timestamp.
+ * Exports the metrics view and the dashboard view from the BPF counters.
+ * Metrics mirrors inserts, requeues, completions, dispatch moves, and kicks.
+ * It also covers preempt detail with EDF and group detail. Web metrics adds
+ * per CPU cards with slice, group, delay, depths, and pressure. It also
+ * carries version, topology, and timestamp.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -178,14 +179,12 @@ fn default_energy_state() -> String {
 }
 
 /*
- * Energy savings view for the web dashboard. One nested
- * object with defaults on every field, so old JSON
- * without energy still decodes into the unavailable
- * state. Headline plus daily plus yearly share one
- * savings ratio from measured package joules. Daily
- * plus yearly plus since running energies come from the
- * same saved W over different spans. Trace holds
- * the live derivation in monospace for the page.
+ * Energy savings view for the web dashboard. One nested object with defaults on
+ * every field, so old JSON without energy still decodes into the unavailable
+ * state. Headline, daily, and yearly share one savings ratio from measured
+ * package joules. Daily, yearly, and since running energies come from the same
+ * saved W over different spans. Trace holds the live derivation in monospace
+ * for the page.
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnergyMetrics {
@@ -255,10 +254,9 @@ impl Default for EnergyMetrics {
  * Snapshot for the web dashboard. All fields are gauges.
  * The run loop pushes one per iteration. The web thread
  * keeps the newest behind a lock for the handlers.
- * Version plus timestamp plus topology plus depths plus
- * allowance plus perf mode plus governor join stats plus
- * per-CPU for one screenshot plus one JSON log with back
- * compat defaults.
+ * Version, timestamp, topology, depths, allowance, perf mode, and governor
+ * join stats and per-CPU. The set covers one screenshot and one JSON log
+ * with back compat defaults.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
@@ -267,7 +265,7 @@ pub struct WebMetrics {
     /* One entry per online CPU. */
     #[serde(default)]
     pub per_cpu: Vec<PerCpuMetrics>,
-    /* Scheduler version for the page plus the log. */
+    /* Scheduler version for the page and the log. */
     #[serde(default)]
     pub version: String,
     /* Wall time in nanos since epoch for the log. */
@@ -288,7 +286,7 @@ pub struct WebMetrics {
     /* Placement widen flag. Zero is strict, one is perf. */
     #[serde(default)]
     pub perf_mode: u8,
-    /* Governor display with EPP plus platform suffix. */
+    /* Governor display with EPP and platform suffix. */
     #[serde(default)]
     pub governor: String,
     /* Energy savings view. Defaults to unavailable. */

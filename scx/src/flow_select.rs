@@ -2,9 +2,9 @@
 /*
  * Placement and steal helpers
  *
- * Holds the placement and steal helpers that mirror the BPF side so behavior stays the same
- * on both sides of the boundary. Frequency plus LLC plus CPU cards stay display only and
- * never shape placement.
+ * Holds the placement and steal helpers that mirror the BPF side so behavior
+ * stays the same on both sides of the boundary. Frequency, LLC, and CPU cards
+ * stay display only and never shape placement.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -80,13 +80,11 @@ pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
 }
 
 /*
- * Check that a CPU may run a task with the given
- * mask. Mirrors the BPF live plus range plus mask
- * check. A negative CPU fails closed. A CPU at or
- * past 1024 fails closed as test only bound. Live
- * CPUs are modelled by the mask length in tests, so
- * callers keep the mask sized to live CPUs. A missing
- * entry fails closed.
+ * Check that a CPU may run a task with the given mask. Mirrors the BPF live,
+ * range, and mask check. A negative CPU fails closed. A CPU at or past 1024
+ * fails closed as test only bound. Live CPUs are modelled by the mask length in
+ * tests, so callers keep the mask sized to live CPUs. A missing entry fails
+ * closed.
  */
 #[cfg(test)]
 pub fn may_run_on(cpu: i32, allowed: &[bool]) -> bool {
@@ -133,15 +131,12 @@ pub fn may_run_on_live(cpu: i32, allowed: &[bool], nr_cpus: usize) -> bool {
 }
 
 /*
- * True when a donor queue may lose one task. Tier 0
- * model only. Needs at least two queued tasks, or one
- * queued task with a rescue when the thief is idle
- * with no moved plus no own left past unmovable park
- * leftovers or when the donor is asleep with no running
- * task. Busy thieves with a running donor keep the last
- * task. BPF ships thief idle only by construction due
- * to verifier jump at 1000001 on asleep check, with
- * donor asleep handled by idle kick.
+ * True when a donor queue may lose one task. Tier 0 model only. Needs at least
+ * two queued tasks, or one queued task with a rescue when the thief is idle
+ * with no moved and no own left past unmovable park leftovers or when the donor
+ * is asleep with no running task. Busy thieves with a running donor keep the
+ * last task. BPF ships thief idle only by construction due to verifier jump at
+ * 1000001 on asleep check, with donor asleep handled by idle kick.
  */
 #[cfg(test)]
 pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
@@ -155,11 +150,10 @@ pub fn donor_ok(depth: u64, allow_single: bool, donor_idle: bool) -> bool {
 }
 
 /*
- * True when a thief may rescue a lone queued task.
- * Needs no moved work plus no own left past unmovable
- * park leftovers, so idle thieves rescue singletons
- * even when the park holds only unmovable entries.
- * Mirrors the BPF min depth gate with no park use.
+ * True when a thief may rescue a lone queued task. Needs no moved work and no
+ * own left past unmovable park leftovers, so idle thieves rescue singletons
+ * even when the park holds only unmovable entries. Mirrors the BPF min depth
+ * gate with no park use.
  */
 #[cfg(test)]
 pub fn rescue_single_ok(moved: u32, own_left: u64) -> bool {
@@ -167,10 +161,9 @@ pub fn rescue_single_ok(moved: u32, own_left: u64) -> bool {
 }
 
 /*
- * First idle CPU in the mask. Models the any idle
- * step. Returns none when no allowed CPU is idle.
- * Frequency plus LLC plus CPU cards stay display only
- * and never feed this choice.
+ * First idle CPU in the mask. Models the any idle step. Returns none when no
+ * allowed CPU is idle. Frequency, LLC, and CPU cards stay display only and
+ * never feed this choice.
  */
 #[cfg(test)]
 pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -186,11 +179,9 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 }
 
 /*
- * Full select model. Mirrors the BPF order of any idle
- * plus previous plus current plus first. Returns none
- * for park use when no CPU allows. Frequency plus LLC
- * plus CPU cards stay display only and never feed this
- * choice.
+ * Full select model. Mirrors the BPF order of any idle, previous, current, and
+ * first. Returns none for park use when no CPU allows. Frequency, LLC, and CPU
+ * cards stay display only and never feed this choice.
  */
 #[cfg(test)]
 pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -212,13 +203,11 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
 }
 
 /*
- * True when one CPU sits on a free core. Needs the CPU
- * plus no sibling with a running task. Singletons with
- * 0xffff read as free, so SMT off is a no-op with no
- * trap. Out of range CPUs fail closed with no
- * placement. Follows the partner table for up to 8
- * steps with no division. Mirrors the BPF walk with
- * the same table and the same bounds.
+ * True when one CPU sits on a free core. Needs the CPU and no sibling with a
+ * running task. Singletons with 0xffff read as free, so SMT off is a no-op with
+ * no trap. Out of range CPUs fail closed with no placement. Follows the partner
+ * table for up to 8 steps with no division. Mirrors the BPF walk with the same
+ * table and the same bounds.
  */
 #[cfg(test)]
 pub fn core_free(cpu: i32, partner: &[u16], running: &[bool], nr: usize) -> bool {
@@ -286,13 +275,11 @@ pub fn core_free(cpu: i32, partner: &[u16], running: &[bool], nr: usize) -> bool
 }
 
 /*
- * First free CPU in one group. Tier A model only.
- * Scans in id order with the table when ready, else
- * halves. Needs allowed plus group plus free core by
- * running pid. No scx idle use and no claim, so a miss
- * wastes no idle claim. Returns none when no such CPU
- * lives. Strict iff ready is zero, best effort iff
- * ready is one with live table in placement.
+ * First free CPU in one group. Tier A model only. Scans in id order with the
+ * table when ready, else halves. Needs allowed, group, and free core by running
+ * pid. No scx idle use and no claim, so a miss wastes no idle claim. Returns
+ * none when no such CPU lives. Strict iff ready is zero, best effort iff ready
+ * is one with live table in placement.
  */
 #[cfg(test)]
 pub fn pick_free_idle(
@@ -320,12 +307,10 @@ pub fn pick_free_idle(
 }
 
 /*
- * First idle CPU in one group. Tier B model only.
- * Scans in id order with the table when ready, else
- * halves. Needs idle plus allowed in the group.
- * Returns none when no such CPU lives. Strict iff
- * ready is zero, best effort iff ready is one with
- * live table in placement.
+ * First idle CPU in one group. Tier B model only. Scans in id order with the
+ * table when ready, else halves. Needs idle and allowed in the group. Returns
+ * none when no such CPU lives. Strict iff ready is zero, best effort iff ready
+ * is one with live table in placement.
  */
 #[cfg(test)]
 pub fn pick_idle_in_group(
@@ -352,10 +337,9 @@ pub fn pick_idle_in_group(
 }
 
 /*
- * True when the waker CPU may keep the task. Needs idle
- * with no running task plus allowed plus in group.
- * An idle core cannot stack, so locality is free.
- * Every other case keeps current behavior.
+ * True when the waker CPU may keep the task. Needs idle with no running task,
+ * allowed, and in group. An idle core cannot stack, so locality is free. Every
+ * other case keeps current behavior.
  */
 #[cfg(test)]
 pub fn waker_first_ok(
@@ -389,22 +373,17 @@ pub fn waker_first_ok(
 }
 
 /*
- * Full tiered select model with first fallback.
- * Mirrors the BPF order of waker CPU first plus free
- * scan plus any idle in the group plus previous plus
- * current plus first in the group plus first. Waker
- * wins when idle with no running task plus allowed
- * plus in group. An idle core cannot stack, so
- * locality is free. Every other case keeps current
- * behavior. Tier A scans for a free core with no
- * claim, so a miss wastes no idle claim. Tier B
- * prefers any idle in the group with claim only there.
- * Placement only with no dispatch use. Singletons treat
- * all running free as free, so Tier A equals Tier B
- * order with no trap. Strict iff ready is zero,
- * best effort iff ready is one with live table
- * in placement. First model only, see tiered least
- * for the live least used by select plus enqueue.
+ * Full tiered select model with first fallback. Mirrors the BPF order of waker
+ * CPU first, free scan, and any idle in the group. It then checks previous,
+ * current, first in the group, and first. Waker wins when idle with no
+ * running task, allowed, and in group. An idle core cannot stack, so locality
+ * is free. Every other case keeps current behavior. Tier A scans for a free
+ * core with no claim, so a miss wastes no idle claim. Tier B prefers any idle
+ * in the group with claim only there. Placement only with no dispatch use.
+ * Singletons treat all running free as free, so Tier A equals Tier B order with
+ * no trap. Strict iff ready is zero, best effort iff ready is one with live
+ * table in placement. First model only, see tiered least for the live least
+ * used by select and enqueue.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered(
@@ -449,17 +428,14 @@ pub fn select_cpu_tiered(
 }
 
 /*
- * Full tiered select model with least queued fallback.
- * Mirrors the BPF order of waker plus free plus any
- * idle plus previous plus current plus least in the
- * group plus first. The least step scans 0 to nr in
- * id order with live plus mask plus queued depth and
- * picks the smallest depth with lowest id on ties by
- * strict less only, so equal depths keep the first
- * id. Missing queued entries read as zero with no
- * trap. Placement keeps live, dispatch keeps halves,
- * constants frozen. Strict iff ready is zero, best
- * effort iff ready is one with live table use.
+ * Full tiered select model with least queued fallback. Mirrors the BPF order
+ * of waker, free, and any idle. It then checks previous, current, least in
+ * the group, and first. The least step scans 0 to nr in id order with live,
+ * and queued depth and picks the smallest depth with lowest id on ties by
+ * strict less only, so equal depths keep the first id. Missing queued entries
+ * read as zero with no trap. Placement keeps live, dispatch keeps halves,
+ * constants frozen. Strict iff ready is zero, best effort iff ready is one with
+ * live table use.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered_least(
@@ -507,12 +483,10 @@ pub fn select_cpu_tiered_least(
 }
 
 /*
- * Target CPU in one group from selected plus least.
- * Mirrors the BPF pick in group used by enqueue. A
- * valid allowed selected CPU in the group wins.
- * Otherwise the least queued allowed CPU in the group
- * wins with lowest id on ties. No allowed CPU in the
- * group yields none for park use. Placement keeps
+ * Target CPU in one group from selected and least. Mirrors the BPF pick in
+ * group used by enqueue. A valid allowed selected CPU in the group wins.
+ * Otherwise the least queued allowed CPU in the group wins with lowest id on
+ * ties. No allowed CPU in the group yields none for park use. Placement keeps
  * live, dispatch keeps halves, constants frozen.
  */
 #[cfg(test)]
@@ -572,11 +546,10 @@ pub fn least_any(allowed: &[bool], nr: usize, queued: &[u64]) -> Option<u32> {
 }
 
 /*
- * First free CPU in any group for S0 perf. Scans in
- * id order with mask plus free core by running pid.
- * No group check, so cross group idle cores win on
- * in group miss. Returns none when no such CPU lives.
- * Mirrors the BPF widened free scan with mask win.
+ * First free CPU in any group for S0 perf. Scans in id order with mask and free
+ * core by running pid. No group check, so cross group idle cores win on in
+ * group miss. Returns none when no such CPU lives. Mirrors the BPF widened free
+ * scan with mask win.
  */
 #[cfg(test)]
 pub fn pick_free_any(
@@ -598,11 +571,10 @@ pub fn pick_free_any(
 }
 
 /*
- * True when the waker CPU may keep the task in S0
- * perf. Needs idle with no running task plus allowed.
- * Perf skips the group check, so any allowed idle
- * waker wins. Strict callers use waker_first_ok with
- * group, see tiered perf below. Mask always wins.
+ * True when the waker CPU may keep the task in S0 perf. Needs idle with no
+ * running task and allowed. Perf skips the group check, so any allowed idle
+ * waker wins. Strict callers use waker_first_ok with group, see tiered perf
+ * below. Mask always wins.
  */
 #[cfg(test)]
 pub fn waker_first_ok_perf(waker: i32, allowed: &[bool], nr: usize, running: &[bool]) -> bool {
@@ -625,13 +597,11 @@ pub fn waker_first_ok_perf(waker: i32, allowed: &[bool], nr: usize, running: &[b
 }
 
 /*
- * Target CPU in one group with S0 perf widening.
- * Mirrors the BPF pick in group with the flag. A
- * valid allowed selected CPU in the group wins. Perf
- * takes any allowed selected CPU on group miss. Then
- * the least in group wins, then perf takes the least
- * any on miss with lowest depth plus lowest id. No
- * allowed CPU yields none for park use. Mask wins.
+ * Target CPU in one group with S0 perf widening. Mirrors the BPF pick in group
+ * with the flag. A valid allowed selected CPU in the group wins. Perf takes any
+ * allowed selected CPU on group miss. Then the least in group wins, then perf
+ * takes the least any on miss with lowest depth and lowest id. No allowed CPU
+ * yields none for park use. Mask wins.
  */
 #[cfg(test)]
 pub fn pick_in_group_widened(
@@ -666,15 +636,12 @@ pub fn pick_in_group_widened(
 }
 
 /*
- * Full tiered select with S0 perf widening. Mirrors
- * the BPF order of waker plus free plus any idle plus
- * previous plus current plus least plus first. Strict
- * keeps group checks, perf widens each miss to any
- * allowed with same order. Waker perf skips group.
- * Free perf scans any free core on miss. Idle perf
- * takes any idle on miss. Previous plus current perf
- * take any allowed on group miss. Least perf takes
- * least any on miss with lowest depth plus lowest id.
+ * Full tiered select with S0 perf widening. Mirrors the BPF order of waker,
+ * free, and any idle. It then checks previous, current, least, and first.
+ * Strict keeps group checks, perf widens each miss to any allowed with same
+ * Waker perf skips group. Free perf scans any free core on miss. Idle perf
+ * takes any idle on miss. Previous and current perf take any allowed on group
+ * miss. Least perf takes least any on miss with lowest depth and lowest id.
  * First stays any allowed. Mask always wins.
  */
 #[cfg(test)]
@@ -759,14 +726,12 @@ pub fn exiting_local_ok(exiting: bool, tgt_allowed: bool) -> bool {
 }
 
 /*
- * True when an exiting fast path may kick the task CPU.
- * Needs the target state with no running task, so an idle
- * task CPU wakes at once for the exit. No queued depth plus
- * no coalesce plus no rate check, so q0 plus q1 plus q2 all
- * kick when idle with no slide. Busy targets stay quiet. A
- * missing state fails closed with no kick. Callers gate on
- * exiting_local_ok first, so non-exiting plus fallback paths
- * never kick here.
+ * True when an exiting fast path may kick the task CPU. Needs the target state
+ * with no running task, so an idle task CPU wakes at once for the exit. No
+ * queued depth, no coalesce, and no rate check, so q0, q1, and q2 all kick when
+ * idle with no slide. Busy targets stay quiet. A missing state fails closed
+ * with no kick. Callers gate on exiting_local_ok first, so non-exiting and
+ * fallback paths never kick here.
  */
 #[cfg(test)]
 pub fn exiting_kick_ok(running_pid: u32, has_state: bool) -> bool {
@@ -809,12 +774,11 @@ pub fn kick_recent(now: u64, last: u64) -> bool {
 }
 
 /*
- * True when one idle kick coalesces with no kick. Needs
- * q2 plus idle plus recent plus not pinned, so q1 always
- * kicks and deep stays quiet with no count. Pinned never
- * skips. No slide on skip, the caller keeps the old last.
- * Park stays out with no kick use. Exiting uses its own
- * idle kick with no coalesce, see exiting_kick_ok.
+ * True when one idle kick coalesces with no kick. Needs q2, idle, recent, and
+ * not pinned, so q1 always kicks and deep stays quiet with no count. Pinned
+ * never skips. No slide on skip, the caller keeps the old last. Park stays out
+ * with no kick use. Exiting uses its own idle kick with no coalesce, see
+ * exiting_kick_ok.
  */
 #[cfg(test)]
 pub fn kick_coalesced(
@@ -946,22 +910,17 @@ pub fn peer_head_ok(thief: i32, head: Option<&PendingTask>) -> bool {
 }
 
 /*
- * Steal up to budget tasks from peers for an idle CPU.
- * Tier 0 model only. The scan visits at most bound
- * peers starting after the cursor with wrap. Only idle
- * callers steal. Each peer needs at least two queued
- * tasks, or one with a rescue when the thief is idle
- * with no moved plus no own left past unmovable park
- * leftovers or when the donor is asleep with no running
- * task, so thin running donors keep the last task while
- * idle thieves plus asleep donors rescue singletons.
- * BPF ships thief idle only by construction due to
- * verifier jump at 1000001 on asleep check, with donor
- * asleep handled by idle kick. Each peer is scanned in
- * order past dead, foreign, and failed heads, so movable
- * work behind a bad head is rescued. The cursor advances
- * by the peers visited. Returns the count moved and the
- * new cursor.
+ * Steal up to budget tasks from peers for an idle CPU. Tier 0 model only. The
+ * scan visits at most bound peers starting after the cursor with wrap. Only
+ * idle callers steal. Each peer needs at least two queued tasks, or one with a
+ * rescue when the thief is idle with no moved and no own left past unmovable
+ * park leftovers or when the donor is asleep with no running task, so thin
+ * running donors keep the last task while idle thieves and asleep donors rescue
+ * singletons. BPF ships thief idle only by construction due to verifier jump at
+ * 1000001 on asleep check, with donor asleep handled by idle kick. Each peer is
+ * scanned in order past dead, foreign, and failed heads, so movable work behind
+ * a bad head is rescued. The cursor advances by the peers visited. Returns the
+ * count moved and the new cursor.
  */
 #[cfg(test)]
 pub fn steal_model(

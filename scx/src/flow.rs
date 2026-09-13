@@ -2,8 +2,8 @@
 /*
  * Flow scheduler helpers facade
  *
- * Reexports the slice plus EDF plus group plus preempt helpers and the select helpers in
- * test, so crate and flow paths stay stable.
+ * Reexports the slice, EDF, group, and preempt helpers and the select helpers
+ * in test, so crate and flow paths stay stable.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

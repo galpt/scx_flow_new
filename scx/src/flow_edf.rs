@@ -102,13 +102,10 @@ pub fn frontier_max(old: u64, next: u64) -> u64 {
 }
 
 /*
- * Corrected frontier for the normal enqueue path.
- * Takes the max of the selected ref frontier and
- * the target frontier with wrap safety. The
- * corrected value feeds both the clamp plus
- * deadline and the deserved compare, so both see
- * the same floor. Park plus no tctx paths keep
- * ref only with no use here.
+ * Corrected frontier for the normal enqueue path. Takes the max of the selected
+ * ref frontier and the target frontier with wrap safety. The corrected value
+ * feeds both the clamp and deadline and the deserved compare, so both see the
+ * same floor. Park and no tctx paths keep ref only with no use here.
  */
 #[cfg(test)]
 pub fn corrected_frontier(ref_frontier: u64, target_frontier: u64) -> u64 {
@@ -177,11 +174,10 @@ pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
 }
 
 /*
- * Sentinel for a consumed completion. The deadline
- * holds max when no grant is outstanding, so a block
- * plus a disable plus an exit count one task once.
- * Enable starts consumed. Each insert regrants with a
- * real deadline. Each completion consumes once.
+ * Sentinel for a consumed completion. The deadline holds max when no grant is
+ * outstanding, so a block, a disable, and an exit count one task once. Enable
+ * starts consumed. Each insert regrants with a real deadline. Each completion
+ * consumes once.
  */
 #[cfg(test)]
 pub const COMPLETED_SENTINEL: u64 = u64::MAX;
@@ -216,11 +212,10 @@ pub fn completion_grant(deadline: &mut u64, dl: u64) {
 }
 
 /*
- * Combined insert plus frontier step for tests. Runs
- * the insert model then advances virtual time by the
- * scaled estimate and steps the frontier, so callers
- * see the clamped time plus the deadline plus the next
- * frontier at once with no extra path.
+ * Combined insert and frontier step for tests. Runs the insert model then
+ * advances virtual time by the scaled estimate and steps the frontier, so
+ * callers see the clamped time, the deadline, and the next frontier at once
+ * with no extra path.
  */
 #[cfg(test)]
 pub fn edf_insert_and_step(
@@ -248,7 +243,7 @@ pub fn edf_insert_and_step(
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OrderedEntry {
-    /* Clamped virtual time plus scaled estimate. */
+    /* Clamped virtual time and scaled estimate. */
     pub deadline: u64,
     /* Arrival sequence used for ties. Lower is older. */
     pub seq: u64,
@@ -348,10 +343,9 @@ pub fn dispatch_own_park_model(
 }
 
 /*
- * Running view of one CPU for tests. Mirrors the BPF
- * CPU state fields used by the dashboard. Zero pid
- * means idle. Nice plus weight stay display only with
- * no placement use.
+ * Running view of one CPU for tests. Mirrors the BPF CPU state fields used by
+ * the dashboard. Zero pid means idle. Nice and weight stay display only with no
+ * placement use.
  */
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,9 +395,8 @@ impl RunningView {
     }
 
     /*
-     * Clear the view only when the pid owns it. Mirrors
-     * the disable plus exit path that clears the BPF
-     * running fields only on owner match, so a stale
+     * Clear the view only when the pid owns it. Mirrors the disable and exit
+     * path that clears the BPF running fields only on owner match, so a stale
      * exit never clears a new owner after a switch.
      */
     pub fn clear_if_owner(&mut self, pid: u32) {

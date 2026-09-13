@@ -2,9 +2,8 @@
 /*
  * EDF unit tests
  *
- * Covers the EDF plus slice helpers with estimate clamp plus weight scaling plus queue order
- * checks.
- * Run with cargo test -p scx_flow flow_tests_edf.
+ * Covers the EDF, slice helpers with estimate clamp, weight scaling, and queue
+ * order checks. Run with cargo test -p scx_flow flow_tests_edf.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -299,9 +298,9 @@ fn kick_coalesce_const_matches_header() {
 }
 
 /*
- * Recent needs 50us with zero open plus wrap. Zero
- * last never counts, 49999 counts, 50000 plus stays
- * open. Wrap diff holds across the wrap with no check.
+ * Recent needs 50us with zero open and wrap. Zero last never counts, 49999
+ * counts, 50000 and above stays open. Wrap diff holds across the wrap with no
+ * check.
  */
 #[test]
 fn kick_recent_needs_50us_with_zero_open() {
@@ -319,11 +318,9 @@ fn kick_recent_needs_50us_with_zero_open() {
 }
 
 /*
- * Coalesce needs q2 plus idle plus recent plus not
- * pinned. Q1 plus busy plus missing plus pinned stay
- * open with a kick. Park stays out with no kick use,
- * see park helper. Exiting uses its own idle kick with
- * no coalesce, see exiting helpers.
+ * Coalesce needs q2, idle, recent, and not pinned. Q1, busy, missing, and
+ * pinned stay open with a kick. Park stays out with no kick use, see park
+ * helper. Exiting uses its own idle kick with no coalesce, see exiting helpers.
  */
 #[test]
 fn kick_coalesce_needs_q2_idle_recent_unpinned() {
@@ -436,9 +433,9 @@ fn exiting_uses_task_cpu_not_enqueuer() {
 }
 
 /*
- * Kick on idle with no depth plus no coalesce plus no rate.
- * Any queue state kicks when the task CPU is idle with a
- * live state, so q0 plus q1 plus q2 all wake at once.
+ * Kick on idle with no depth, no coalesce, and no rate. Any queue state kicks
+ * when the task CPU is idle with a live state, so q0, q1, and q2 all wake at
+ * once.
  */
 #[test]
 fn exiting_kick_on_idle() {
@@ -447,10 +444,9 @@ fn exiting_kick_on_idle() {
 }
 
 /*
- * No kick when busy or when the target state is missing.
- * Busy task CPUs stay quiet with no preempt, and a missing
- * state fails closed with no kick. Mirrors the BPF tst plus
- * running pid check with no kick at plus no coalesce.
+ * No kick when busy or when the target state is missing. Busy task CPUs stay
+ * quiet with no preempt, and a missing state fails closed with no kick. Mirrors
+ * the BPF tst, running pid check with no kick at, and no coalesce.
  */
 #[test]
 fn exiting_no_kick_when_busy_or_missing() {
@@ -464,10 +460,9 @@ fn exiting_no_kick_when_busy_or_missing() {
 }
 
 /*
- * Fallback runs the normal path exactly once with no double
- * enqueue. An exiting task with a foreign task CPU skips the
- * fast insert plus the fast kick, then the normal path
- * inserts once. Counts model single insert plus no double.
+ * Fallback runs the normal path exactly once with no double enqueue. An exiting
+ * task with a foreign task CPU skips the fast insert and the fast kick, then
+ * the normal path inserts once. Counts model single insert and no double.
  */
 #[test]
 fn exiting_fallback_single_insert_no_double() {
@@ -494,10 +489,9 @@ fn exiting_fallback_single_insert_no_double() {
 }
 
 /*
- * Non-exiting tasks never take the fast path and keep the
- * normal kick rules. The fast gate stays closed for any tgt
- * mask, park stays kickless, and the normal idle plus
- * coalesce helpers stay unchanged.
+ * Non-exiting tasks never take the fast path and keep the normal kick rules.
+ * The fast gate stays closed for any tgt mask, park stays kickless, and the
+ * normal idle and coalesce helpers stay unchanged.
  */
 #[test]
 fn exiting_non_exiting_unchanged() {
@@ -618,10 +612,9 @@ fn steal_cursor_rotates_across_peers() {
 }
 
 /*
- * Tier 0 model only for donor plus rescue. BPF ships
- * thief idle only by construction due to verifier jump
- * at 1000001 on asleep check, with donor asleep handled
- * by idle kick.
+ * Tier 0 model only for donor and rescue. BPF ships thief idle only by
+ * construction due to verifier jump at 1000001 on asleep check, with donor
+ * asleep handled by idle kick.
  */
 #[test]
 fn donor_keeps_last_task() {
@@ -1221,11 +1214,10 @@ fn free_core_needs_no_sibling_running() {
 }
 
 /*
- * Tier A scans for a free core in the group with no
- * claim. Tier B prefers any idle in the group. The
- * scan stays in id order with group plus mask plus
- * running pid. Strict iff ready is zero, best effort
- * iff ready is one with live table in placement.
+ * Tier A scans for a free core in the group with no claim. Tier B prefers any
+ * idle in the group. The scan stays in id order with group, mask, and running
+ * pid. Strict iff ready is zero, best effort iff ready is one with live table
+ * in placement.
  */
 #[test]
 fn tier_prefers_free_core_in_group() {
@@ -1356,9 +1348,8 @@ fn singleton_tier_is_noop_with_prior_order() {
 }
 
 /*
- * Tiered keeps mask plus group. Cross group running
- * stays out. Empty masks park with none. Pinned single
- * keeps the single CPU with no scan. Strict iff ready
+ * Tiered keeps mask and group. Cross group running stays out. Empty masks park
+ * with none. Pinned single keeps the single CPU with no scan. Strict iff ready
  * is zero, best effort iff ready is one.
  */
 #[test]
@@ -1417,10 +1408,9 @@ fn tiered_keeps_mask_plus_group() {
 }
 
 /*
- * Waker CPU idle in group keeps the waker. Needs idle
- * with no running task plus allowed plus in group.
- * An idle core cannot stack, so locality is free.
- * Beats Tier A even when CPU 0 is free with no idle.
+ * Waker CPU idle in group keeps the waker. Needs idle with no running task,
+ * allowed, and in group. An idle core cannot stack, so locality is free. Beats
+ * Tier A even when CPU 0 is free with no idle.
  */
 #[test]
 fn waker_idle_keeps_waker() {
@@ -1672,9 +1662,8 @@ fn smt_off_placement_matches_prior() {
 }
 
 /*
- * Empty plus zero plus missing stay safe. Zero CPUs
- * give none with no table use. Missing partner reads
- * as free with no trap. No division runs here.
+ * Empty, zero, and missing stay safe. Zero CPUs give none with no table use.
+ * Missing partner reads as free with no trap. No division runs here.
  */
 #[test]
 fn empty_plus_zero_stay_safe_with_no_trap() {
@@ -1713,10 +1702,9 @@ fn empty_plus_zero_stay_safe_with_no_trap() {
 }
 
 /*
- * Weight table holds 40 levels with strict fall plus
- * center 1024 at nice 0. Ends are 2048 at minus 20
- * and 256 at 19, so total spread K is 8 with boost
- * 2x and penalty 4x. All values fit in u16 with no zero.
+ * Weight table holds 40 levels with strict fall and center 1024 at nice 0. Ends
+ * are 2048 at minus 20 and 256 at 19, so total spread K is 8 with boost 2x and
+ * penalty 4x. All values fit in u16 with no zero.
  */
 #[test]
 fn weight_table_is_monotonic_with_center_1024() {
@@ -1762,9 +1750,8 @@ fn nice_maps_prio_minus_120_with_fallback() {
 }
 
 /*
- * Cap holds base in slice over 8 to slice times 8.
- * Center stays at one slice. Heavy keeps a short cap,
- * light keeps a long cap. Zero weight plus zero slice
+ * Cap holds base in slice over 8 to slice times 8. Center stays at one slice.
+ * Heavy keeps a short cap, light keeps a long cap. Zero weight and zero slice
  * stay safe with no divide fault.
  */
 #[test]
@@ -1809,9 +1796,8 @@ fn clamp_w_matches_fixed_at_center() {
 }
 
 /*
- * Heavy tasks keep earlier deadlines with the same
- * start. Scale plus clamp plus deadline all move with
- * weight, so low nice gains service with no starve as
+ * Heavy tasks keep earlier deadlines with the same start. Scale, clamp, and
+ * deadline all move with weight, so low nice gains service with no starve as
  * the cap holds extremes in 8x.
  */
 #[test]
@@ -1830,10 +1816,9 @@ fn heavy_keeps_earlier_deadline() {
 }
 
 /*
- * Insert matches weighted clamp plus scale plus
- * deadline. BPF clamps with the weight cap in both
- * enqueue paths, so the model composes the weighted
- * clamp with the scaled estimate at every weight.
+ * Insert matches weighted clamp, scale, and deadline. BPF clamps with the
+ * weight cap in both enqueue paths, so the model composes the weighted clamp
+ * with the scaled estimate at every weight.
  */
 #[test]
 fn edf_insert_matches_weighted_clamp_and_scale() {
@@ -1868,10 +1853,9 @@ fn edf_insert_matches_weighted_clamp_and_scale() {
 }
 
 /*
- * Weight stays out of routing with no group plus steal
- * plus kick change. Placement plus drain plus kick read
- * the same with any weight, so only deadline plus
- * vruntime move with nice.
+ * Weight stays out of routing with no group, steal, and kick change. Placement,
+ * drain, and kick read the same with any weight, so only deadline and vruntime
+ * move with nice.
  */
 #[test]
 fn weight_keeps_routing_unchanged() {
@@ -1898,9 +1882,8 @@ fn weight_keeps_routing_unchanged() {
 }
 
 /*
- * Per CPU nice plus weight decode with defaults plus
- * alias. Old JSON with no new fields stays valid. Old
- * tq_ns still maps to slice with no loss.
+ * Per CPU nice, weight decode with defaults, and alias. Old JSON with no new
+ * fields stays valid. Old tq_ns still maps to slice with no loss.
  */
 #[test]
 fn per_cpu_nice_plus_weight_decode_with_alias() {
@@ -1931,9 +1914,8 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
 }
 
 /*
- * Facade reexports the weight helpers with no drift.
- * Table plus nice plus weight plus cap plus clamp all
- * match the helper modules at once.
+ * Facade reexports the weight helpers with no drift. Table, nice, weight, cap,
+ * and clamp all match the helper modules at once.
  */
 #[test]
 fn facade_matches_weight_helpers() {
@@ -2034,11 +2016,10 @@ fn tiered_least_fallback_picks_least() {
 }
 
 /*
- * Pick in group least prefers the selected CPU when
- * allowed plus in group, else the least queued in the
- * group with lowest id on ties. No allowed CPU in the
- * group yields none for park use. Mirrors BPF enqueue
- * pick at 4.2.19 with live view plus frozen bounds.
+ * Pick in group least prefers the selected CPU when allowed and in group, else
+ * the least queued in the group with lowest id on ties. No allowed CPU in the
+ * group yields none for park use. Mirrors BPF enqueue pick at 4.2.19 with live
+ * view and frozen bounds.
  */
 #[test]
 fn pick_in_group_least_prefers_selected_else_least() {
@@ -2077,11 +2058,9 @@ fn pick_in_group_least_prefers_selected_else_least() {
 }
 
 /*
- * Corrected frontier takes the max with wrap. Ref
- * past target wins, target past ref wins, equal
- * stays, zero follows max, wrap follows before.
- * Mirrors the BPF normal path max of ref plus
- * target with no park plus no tctx use.
+ * Corrected frontier takes the max with wrap. Ref past target wins, target past
+ * ref wins, equal stays, zero follows max, wrap follows before. Mirrors the BPF
+ * normal path max of ref, target with no park, and no tctx use.
  */
 #[test]
 fn corrected_frontier_takes_max_with_wrap() {
@@ -2107,11 +2086,9 @@ fn corrected_frontier_takes_max_with_wrap() {
 }
 
 /*
- * Corrected frontier feeds clamp plus deserved with
- * one floor. A ref past target lifts the clamp and
- * widens deserved at once, so both see the same
- * max with no split view. Park plus no tctx keep
- * ref only with no use here.
+ * Corrected frontier feeds clamp and deserved with one floor. A ref past target
+ * lifts the clamp and widens deserved at once, so both see the same max with no
+ * split view. Park and no tctx keep ref only with no use here.
  */
 #[test]
 fn corrected_frontier_feeds_clamp_and_deserved() {
@@ -2142,10 +2119,9 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
 }
 
 /*
- * S0 strict keeps group isolation with mask win.
- * Perf widens to any allowed on in group miss with
- * same tier order. Least keeps lowest depth plus
- * lowest id over the widened set. Mask always wins.
+ * S0 strict keeps group isolation with mask win. Perf widens to any allowed on
+ * in group miss with same tier order. Least keeps lowest depth and lowest id
+ * over the widened set. Mask always wins.
  */
 #[test]
 fn s0_strict_keeps_isolation_perf_widens_on_miss() {
@@ -2153,7 +2129,7 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
     use crate::flow_group::GROUP_TABLE_LEN;
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
-    // Halves at 4. 0,1 light plus 2,3 hog.
+    // Halves at 4. 0,1 light and 2,3 hog.
     let allowed = vec![true; 4];
     let queued = vec![5, 1, 3, 0];
     // Strict least in light is 1, perf same when hit.
@@ -2194,7 +2170,7 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
         pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &queued, true),
         None
     );
-    // Least any keeps lowest depth plus lowest id.
+    // Least any keeps lowest depth and lowest id.
     let tie = vec![2, 2, 1, 1];
     assert_eq!(least_any(&allowed, nr, &tie), Some(2));
     assert_eq!(least_any(&narrow, nr, &tie), Some(2));
@@ -2202,9 +2178,8 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
 }
 
 /*
- * S0 tiered perf keeps order with wider any allowed.
- * Strict free plus idle plus prev plus least stay in
- * group, perf falls to any on each miss. Mask wins.
+ * S0 tiered perf keeps order with wider any allowed. Strict free, idle, prev,
+ * and least stay in group, perf falls to any on each miss. Mask wins.
  */
 #[test]
 fn s0_tiered_perf_keeps_order_with_wider_set() {
@@ -2214,7 +2189,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let partner = vec![SIBLING_EMPTY; 4];
-    // All idle plus free. Strict and perf both take 0.
+    // All idle and free. Strict and perf both take 0.
     let allowed = vec![true; 4];
     let idle = vec![true; 4];
     let running = vec![false; 4];

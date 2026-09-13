@@ -4,17 +4,17 @@ scx_flow is our own EDF scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps one ordered queue per-CPU with a fixed slice at
-1ms plus two groups for light waits and hog burn, strict
+1ms and two groups for light waits and hog burn, strict
 exactly when ready is zero and best effort when ready
 is one.
 It is deliberately knob-free. It uses per-CPU ordered
-EDF plus vruntime fairness plus the fixed slice.
+EDF, vruntime fairness, and the fixed slice.
 
 ## Overview
 
 ### Order and deadlines
 
-Tasks wait in per-CPU ordered queues, plus one park queue
+Tasks wait in per-CPU ordered queues, and one park queue
 per group for tasks with no allowed CPU. Earliest deadline
 runs first with arrival order for ties. The deadline adds
 clamped virtual time and a scaled estimate at live weight
@@ -22,7 +22,7 @@ from nice. Exiting tasks run at once on the task CPU
 via LOCAL_ON with no order wait. The task CPU wins
 over the enqueuer, so an exit enqueued elsewhere still
 runs where the task lives. Single insert with an idle
-kick only plus no coalesce. Falls back when the task
+kick only and no coalesce. Falls back when the task
 CPU is not allowed.
 
 ### Fixed slice
@@ -64,17 +64,17 @@ current behavior. Pinned tasks stay local. Empty masks
 park in order in the task group. Frequency cards stay
 display only and never shape placement. Pinned subsets
 stay in mask. Groups seed by online rank with write by
-id. See `src/bpf/select_cpu.bpf.c` plus
+id. See `src/bpf/select_cpu.bpf.c` and
 `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
 
 Strict order is local queue, group park, then steals
 from idle peers with mask checks. An idle thief with
-no moved plus no own left may rescue a lone queued
+no moved and no own left may rescue a lone queued
 task past unmovable park leftovers while busy thieves
 keep depth 2. Perf leaves dispatch on halves, see
-governor mode. Isolation follows placement plus park
+governor mode. Isolation follows placement and park
 choice with peer best effort across groups. Dispatch
 uses halves while placement uses the live table seeded
 by online rank.
@@ -83,45 +83,44 @@ by online rank.
 
 Idle targets with at most 2 queued are kicked with a mask
 check. Busy targets need latched delay arm 16 stand 8
-in 32us units plus deserved woken deadline before
-frontier plus quarter granule weight aware with 64us
-floor plus 32us slack plus same group strict plus mask
-plus atomic rate claim with one kick per slice
-alone, bounded extra on overlap. Perf bypasses group,
+in 32us units with deserved woken deadline before frontier,
+quarter granule weight aware with 64us floor, and 32us slack.
+The gate also needs same group strict, mask, and atomic rate
+claim with one kick per slice alone, bounded extra on overlap.
+Perf bypasses group,
 see governor mode. Details live in `src/bpf/intf.h`.
 Uses woken weight only.
-Total plus five reasons cover all fail-closed busy
-no-kicks in branch order armed plus deserved plus group
-plus mask plus rate. One coalesced count covers q2 idle
+Total and five reasons cover all fail-closed busy no-kicks
+in branch order armed, deserved, group, mask, and rate. One
+coalesced count covers q2 idle
 skips in 50us at 200B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep stays quiet, pinned never skips.
 Delay persists across idle, delay shows stale
 when idle. A missed wakeup is rescued on the next
 insert while deep queues stay quiet. Exiting uses
-a separate idle kick on the task CPU with no depth
-plus no coalesce plus no preempt. Park sends
+a separate idle kick on the task CPU with no depth,
+no coalesce, and no preempt. Park sends
 no kick and the next dispatch pass collects it.
-Disarmed stays idle only. See `src/bpf/intf.h`
-plus `src/bpf/main.bpf.c` plus
-`src/bpf/enqueue.bpf.c` plus `src/flow_select.rs`.
+Disarmed stays idle only. See `src/bpf/intf.h`,
+`src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
+`src/flow_select.rs`.
 
 ### Governor mode
 
 Strict keeps group isolation with mask win.
 Perf widens placement to any allowed on miss
-with same tier order plus least over any.
+with same tier order and least over any.
 Perf bypasses the kick group gate with no recount,
 so group skips stay flat in perf. Unanimous
 performance over online CPUs sets perf one,
 else strict zero. Polls online only on the 1s tick
 with BSS write on transition only. Dashboard shows
-strict plus perf in the mode cell with governor tip.
+strict and perf in the mode cell with governor tip.
 Dispatch stays on halves with no perf widen.
-No CLI knob changes this. See `src/bpf/intf.h` plus
-`src/bpf/select_cpu.bpf.c` plus `src/bpf/enqueue.bpf.c`
-plus `src/topology.rs` plus `src/snapshot.rs` plus
-`ui/index.html`.
+No CLI knob changes this. See `src/bpf/intf.h`,
+`src/bpf/select_cpu.bpf.c`, and `src/bpf/enqueue.bpf.c`.
+See `src/topology.rs`, `src/snapshot.rs`, and `ui/index.html`.
 
 ### CPU perf
 
@@ -130,13 +129,12 @@ uniform both groups with no tier. Stopping
 decays by elapsed with 24ms half-life then
 climbs on the burst toward the 1ms budget
 with 12x in FP8, so boost follows load with
-fast attack plus slow decay. Blocked with
+fast attack and slow decay. Blocked with
 empty queues maps the decayed EMA, long sleep
 with no burst still maps to zero via 64
-period decay. Init plus no state holds max
-1024. See `src/bpf/intf.h` plus
-`src/bpf/lifecycle.bpf.c` plus
-`src/bpf/main.bpf.c`.
+period decay. Init and no state hold max
+1024. See `src/bpf/intf.h`,
+`src/bpf/lifecycle.bpf.c`, and `src/bpf/main.bpf.c`.
 
 Weight follows nice from minus 20 to 19 with center 1024
 and no knob. The slice stays fixed at 1ms. The version is
@@ -144,7 +142,13 @@ in `Cargo.toml`.
 
 ### Energy probe
 
-Package energy comes from RAPL counters with per-CPU active time from BPF state. The probe alternates strict plus baseline arms and reports collecting plus waiting plus unavailable states until enough accepted pairs exist for a headline. Daily plus yearly plus since attach savings appear in kWh on the dashboard with a live trace. Details live in `src/rapl.rs` plus `src/snapshot.rs` plus `src/stats.rs` plus `src/webui.rs` plus `ui/index.html` plus `src/bpf/intf.h`.
+Package energy comes from RAPL counters with per-CPU active time from BPF
+state. The probe alternates strict and baseline arms and reports collecting,
+waiting, and unavailable states until enough accepted pairs exist for a
+headline. Daily, yearly, and since attach savings appear in kWh on the
+dashboard with a live trace. Details live in `src/rapl.rs`,
+`src/snapshot.rs`, and `src/stats.rs`. See `src/webui.rs`,
+`ui/index.html`, and `src/bpf/intf.h` for the full path.
 
 ## Typical Use Cases
 
@@ -173,7 +177,7 @@ The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock` and no
 authentication, since loopback is the trust boundary.
 It shows group depths, move rates, preempt rates,
-per-CPU nice plus weight plus delay dots, and a button
+per-CPU nice, weight, and delay dots, and a button
 to download the full snapshot as JSON.
 `--no-webui` disables it.
 
@@ -184,7 +188,7 @@ to download the full snapshot as JSON.
 - Placement: `src/bpf/select_cpu.bpf.c`
 - Inserts: `src/bpf/enqueue.bpf.c`
 - Drains: `src/bpf/dispatch.bpf.c`
-- Lifecycle plus classifier: `src/bpf/lifecycle.bpf.c`
+- Lifecycle and classifier: `src/bpf/lifecycle.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
   `src/flow_select.rs`, `src/flow_group.rs`,
   `src/flow_preempt.rs`
@@ -192,11 +196,11 @@ to download the full snapshot as JSON.
 - Tests: `src/flow_tests_edf.rs`,
   `src/flow_tests_group.rs`, `src/flow_tests_preempt.rs`
 - Constant validation: `src/config.rs`
-- Generated bindings plus skeleton: `src/bpf_intf.rs`,
+- Generated bindings and skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`
-- Snapshot plus topology: `src/snapshot.rs`,
+- Snapshot and topology: `src/snapshot.rs`,
   `src/topology.rs`
-- Stats plus dashboard payload: `src/stats.rs`,
+- Stats and dashboard payload: `src/stats.rs`,
   `src/webui.rs`, `ui/index.html`
 
 ## Measuring Wakeup Latency
@@ -213,7 +217,7 @@ baseline with no realtime use.
   when ready is one. Dispatch uses halves while placement
   uses the live table seeded by online rank with offline
   light inert. Peer steal is mask only.
-- Topology plus online set is snapshotted at attach, so
+- Topology with online set is snapshotted at attach, so
   a CPU hotplug needs a restart. Snapshot covers online
   only with per CPU count matching online count.
 - Unknown frequency stays unknown with no effect on

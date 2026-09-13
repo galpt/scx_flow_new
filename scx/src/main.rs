@@ -121,13 +121,13 @@ pub(crate) struct Scheduler<'a> {
     cur_freq_khz: Vec<u64>,
     freq_read_at: Option<std::time::Instant>,
     started_at: std::time::Instant,
-    /* Per CPU group table plus ready flag. */
+    /* Per CPU group table and ready flag. */
     group_table: [u8; crate::flow_group::GROUP_TABLE_LEN],
     /* Zero keeps halves fallback in snapshot. */
     group_ready: u8,
     /* Placement widen flag. Zero is strict, one is perf. */
     perf_mode: u8,
-    /* Governor display with EPP plus platform suffix. */
+    /* Governor display with EPP and platform suffix. */
     governor: String,
     /* Last governor poll for the 1s tick writer. */
     governor_read_at: Option<std::time::Instant>,
@@ -165,16 +165,14 @@ impl<'a> Scheduler<'a> {
             | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         skel.struct_ops.flow_ops_mut().flags = flags;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
-        /* Static cards seed the start log and the cards. */
-        /* Live frequency plus CPU cards stay display */
-        /* only and never shape placement. Max frequency */
-        /* plus capacity plus LLC plus siblings seed groups. */
+        /* Static cards seed the start log and the cards. Live frequency and */
+        /* CPU cards stay display only and never shape placement. Max */
+        /* frequency, capacity, LLC, and siblings seed groups. */
         let cards = topology::web_cpu_static();
-        /* Online ids once at init in rank order. Snapshot */
-        /* reads online CPUs again each tick for hotplug. */
-        /* Rank based seed writes by id, offline stays */
-        /* light inert, skewed forces ready one, dense full */
-        /* keeps prior table plus ready exactly. */
+        /* Online ids once at init in rank order. Snapshot reads online CPUs */
+        /* again each tick for hotplug. Rank based seed writes by id, offline */
+        /* stays light inert, skewed forces ready one, dense full keeps prior */
+        /* table and ready exactly. */
         let mut online = topology::online_cpus();
         if online.is_empty() {
             online = cards.iter().map(|c| c.id).collect();

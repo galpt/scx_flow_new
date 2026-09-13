@@ -2,9 +2,8 @@
 /*
  * Preempt unit tests
  *
- * Covers the delay plus granule plus slack plus rate helpers with header match and math
- * checks.
- * Run with cargo test -p scx_flow flow_tests_preempt.
+ * Covers the delay, granule, slack, and rate helpers with header match and math
+ * checks. Run with cargo test -p scx_flow flow_tests_preempt.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -225,10 +224,9 @@ fn frontier_deserved_beats_floor_by_granule() {
 }
 
 /*
- * Slack eases the deserved bound by 32us with a
- * strict miss by one pass plus exact boundary fail.
- * Zero slack collapses to the old granule only
- * compare with no behavior change.
+ * Slack eases the deserved bound by 32us with a strict miss by one pass and
+ * exact boundary fail. Zero slack collapses to the old granule only compare
+ * with no behavior change.
  */
 #[test]
 fn deserved_slack_eases_by_32us() {
@@ -420,9 +418,8 @@ fn facade_matches_preempt_helpers() {
 }
 
 /*
- * Dual max is idempotent with bounded loss. Commutes
- * plus assoc plus idem, racy keeps old to true max.
- * Count stays running only, decay stays intact.
+ * Dual max is idempotent with bounded loss. Commutes, assoc, and idem, racy
+ * keeps old to true max. Count stays running only, decay stays intact.
  */
 #[test]
 fn delay_max_concurrent_keeps_bound() {
@@ -476,9 +473,8 @@ fn cursor_cas_keeps_fresh_flags() {
 }
 
 /*
- * Split reasons follow branch order armed plus deserved
- * plus group plus mask plus rate. First fail wins, rate
- * last as the atomic claim. Total plus reason both count
+ * Split reasons follow branch order armed, deserved, group, mask, and rate.
+ * First fail wins, rate last as the atomic claim. Total and reason both count
  * at 200B, so the sum of reasons equals the total.
  */
 #[test]
@@ -528,9 +524,9 @@ fn skip_reason_matches_preempt_ok() {
 }
 
 /*
- * Delay 62 is the storm line at two queued. Armed needs
- * 16, so storm needs both armed plus queued depth. Rate
- * holds one kick per slice, storm would add a second.
+ * Delay 62 is the storm line at two queued. Armed needs 16, so storm needs both
+ * armed and queued depth. Rate holds one kick per slice, storm would add a
+ * second.
  */
 #[test]
 fn storm_line_needs_two_queued() {
@@ -544,15 +540,12 @@ fn storm_line_needs_two_queued() {
 }
 
 /*
- * S1 perf bypasses the group gate with no recount.
- * Strict keeps the live check, so cross group fails
- * with reason 3. Perf forces same true before the
- * branch checks, so the same cross group wake kicks
- * with no group count. Other gates stay frozen, so
- * armed plus deserved plus mask plus rate still fail
- * in perf with the same branch order. Mirrors the BPF
- * if flow_perf_enabled same true in enqueue with no
- * preempt_ok signature change.
+ * S1 perf bypasses the group gate with no recount. Strict keeps the live check,
+ * so cross group fails with reason 3. Perf forces same true before the branch
+ * checks, so the same cross group wake kicks with no group count. Other gates
+ * stay frozen, so armed, deserved, mask, and rate still fail in perf with the
+ * same branch order. Mirrors the BPF if flow_perf_enabled same true in enqueue
+ * with no preempt_ok signature change.
  */
 #[test]
 fn same_override_bypasses_group_without_recount() {

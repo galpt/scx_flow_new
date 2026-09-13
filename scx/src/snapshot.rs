@@ -2,9 +2,9 @@
 /*
  * Snapshot reads
  *
- * Builds the metrics view and the dashboard view from the BPF maps and the static cards.
- * Gauges only with no deltas. Frequency plus LLC plus CPU cards stay display only and never
- * shape placement.
+ * Builds the metrics view and the dashboard view from the BPF maps and the
+ * static cards. Gauges only with no deltas. Frequency, LLC, and CPU cards stay
+ * display only and never shape placement.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -21,8 +21,8 @@ use stats::EnergyMetrics;
 /* ninety five percent half width near half a W in the */
 /* light regime, see the SE table in the RAPL probe data. */
 pub(crate) const PROBE_ARM_SECS: u64 = 30;
-/* Lead seconds dropped per arm. Power plus frequency settle */
-/* inside three seconds after a step in the RAPL probe data. */
+/* Lead seconds dropped per arm. Power and frequency settle inside three */
+/* seconds after a step in the RAPL probe data. */
 pub(crate) const PROBE_DISCARD_LEAD_S: f64 = 3.0;
 /* Tail seconds dropped per arm. Teardown tails run two to */
 /* four seconds in the RAPL probe data, two keeps twenty five. */
@@ -35,28 +35,28 @@ pub(crate) const PROBE_MIN_ARM_SECS: u64 = 20;
 /* the discard from a full arm, so twenty tolerates a few */
 /* missed ticks with no weak arm entering the sums. */
 pub(crate) const PROBE_MIN_KEPT: usize = 20;
-/* Settle seconds between arms. Thirty plus three plus thirty */
-/* plus three makes the sixty six second pair cycle. */
+/* Settle seconds between arms. Thirty + three + thirty + three makes the */
+/* sixty six second pair cycle. */
 pub(crate) const PROBE_SETTLE_SECS: u64 = 3;
-/* Relative noise bound. Idle CV 21.7 percent plus soak light 11.2 */
-/* percent need headroom, light 4.2 percent plus load 2.0 percent */
-/* stay well under, so 0.15 splits steady arms from churn. */
+/* Relative noise bound. Idle CV 21.7 percent and soak light 11.2 percent */
+/* need headroom, light 4.2 percent and load 2.0 percent stay well under, so */
+/* 0.15 splits steady arms from churn. */
 pub(crate) const PROBE_STD_REL: f64 = 0.15;
 /* Noise floor in W. Idle median near 7 W times 0.15 is near 1.0, */
 /* so 1.5 W rejects idle churn while light near 30 W uses 4.5 W, */
 /* load near 100 W uses 15.0 W with no false trip. */
 pub(crate) const PROBE_STD_FLOOR_W: f64 = 1.5;
-/* Relative outlier bound. Idle spike 127 percent must reject, */
-/* light hump 18.7 percent plus load hump 5.2 percent must pass, */
-/* so 0.35 splits the probe spikes with margin. */
+/* Relative outlier bound. Idle spike 127 percent must reject, light hump */
+/* 18.7 percent and load hump 5.2 percent must pass, so 0.35 splits the probe */
+/* spikes with margin. */
 pub(crate) const PROBE_OUTLIER_REL: f64 = 0.35;
 /* Outlier floor in W. Idle median near 7 W times 0.35 is near 2.4, */
 /* so 3.0 W rejects idle spikes while light near 30 W uses 10.5 W, */
 /* load near 100 W uses 35.0 W with no false trip. */
 pub(crate) const PROBE_OUTLIER_FLOOR_W: f64 = 3.0;
-/* Trim retry bound. One retry drops at most two farthest from */
-/* median samples on noise plus outlier fails only, then all */
-/* stats recompute from the trimmed set with no cherry pick. */
+/* Trim retry bound. One retry drops at most two farthest from median samples */
+/* on noise and outlier fails only, then all stats recompute from the trimmed */
+/* set with no cherry pick. */
 pub(crate) const PROBE_TRIM_MAX: usize = 2;
 /* Waiting entry bound in W. Idle near 7 W sits well under, light */
 /* near 30 W sits well over, so 15.0 W marks the idle floor. */
@@ -64,11 +64,11 @@ pub(crate) const PROBE_WAIT_ENTER_W: f64 = 15.0;
 /* Waiting exit bound in W. Hysteresis over entry keeps flap out, */
 /* light near 30 W clears 20.0 W while idle near 7 W stays under. */
 pub(crate) const PROBE_WAIT_EXIT_W: f64 = 20.0;
-/* Waiting entry debounce ticks. Five low W ticks prove idle, */
-/* missed ticks freeze the count with no reset plus no advance. */
+/* Waiting entry debounce ticks. Five low W ticks prove idle, missed ticks */
+/* freeze the count with no reset and no advance. */
 pub(crate) const PROBE_WAIT_ENTER_TICKS: u32 = 5;
-/* Waiting exit debounce ticks. Five high W ticks prove load, */
-/* missed ticks freeze the count with no reset plus no advance. */
+/* Waiting exit debounce ticks. Five high W ticks prove load, missed ticks */
+/* freeze the count with no reset and no advance. */
 pub(crate) const PROBE_WAIT_EXIT_TICKS: u32 = 5;
 /* Waiting timeout seconds. One hundred eighty seconds parks idle, */
 /* then one pair attempts with re wait on still idle W. */
@@ -88,8 +88,8 @@ pub(crate) const PROBE_BACKOFF_SECS: u64 = 60;
 /* Gap seconds proving a missed window. Five seconds stands far */
 /* past tick jitter, so a resume starts a fresh pair. */
 pub(crate) const PROBE_MAX_GAP_S: f64 = 5.0;
-/* Active plausibility slack in nanos. Ten milliseconds covers */
-/* boundary segments plus clock read skew over one arm. */
+/* Active plausibility slack in nanos. Ten milliseconds covers boundary */
+/* segments and clock read skew over one arm. */
 pub(crate) const PROBE_ACTIVE_SLACK_NS: u64 = 10_000_000;
 
 /* Top state of the energy probe. */
@@ -197,18 +197,15 @@ pub(crate) fn probe_p99(v: &[f64]) -> f64 {
 }
 
 /*
- * Judge one arm as a unit. Drops the lead plus tail window,
- * then checks kept count plus noise plus outlier plus per
- * CPU plausibility in order. Noise rejects past max floor
- * plus relative share of median, outlier rejects past max
- * floor plus relative share of median. One retry drops at
- * most two farthest from median samples on noise plus
- * outlier fails only, then all stats recompute from the
- * trimmed set. Too few plus implausible never trim, nor
- * below kept minimum. Any failure rejects the whole arm,
- * so the pair falls with it and nothing is cherry picked.
- * Empty active snapshots pass vacuously, so an old BPF
- * object without the active tail still measures.
+ * Judge one arm as a unit. Drops the lead and tail window, then checks kept
+ * count, noise, outlier, and per CPU plausibility in order. Noise rejects past
+ * max floor and relative share of median, outlier rejects past max floor and
+ * relative share of median. One retry drops at most two farthest from median
+ * samples on noise and outlier fails only, then all stats recompute from the
+ * trimmed set. Too few and implausible never trim, nor below kept minimum. Any
+ * failure rejects the whole arm, so the pair falls with it and nothing is
+ * cherry picked. Empty active snapshots pass vacuously, so an old BPF object
+ * without the active tail still measures.
  */
 pub(crate) fn evaluate_arm(
     samples: &[ArmSample],
@@ -245,13 +242,11 @@ pub(crate) fn evaluate_arm(
     if watts.len() < PROBE_MIN_KEPT {
         return Err(ArmReject::TooFew);
     }
-    /* Noise plus outlier bounds from median with floor. */
-    /* Idle CV 21.7 percent plus soak light 11.2 percent sit */
-    /* over light 4.2 percent plus load 2.0 percent, so */
-    /* relative plus floor splits steady arms from churn. */
-    /* Idle spike 127 percent must reject, light hump 18.7 */
-    /* percent plus load hump 5.2 percent must pass, so */
-    /* relative plus floor splits spikes from humps. */
+    /* Noise and outlier bounds from median with floor. Idle CV 21.7 percent, */
+    /* soak light 11.2 percent sit over light 4.2 percent, and load 2.0 */
+    /* percent, so relative and floor splits steady arms from churn. Idle */
+    /* spike 127 percent must reject, light hump 18.7 percent and load hump */
+    /* 5.2 percent must pass, so relative and floor splits spikes from humps. */
     let median = probe_median(&watts);
     let mean = probe_mean(&watts);
     let std = probe_std(&watts, mean);
@@ -281,10 +276,9 @@ pub(crate) fn evaluate_arm(
             trimmed: 0,
         });
     }
-    /* Single retry on noise plus outlier fails only. Drops */
-    /* at most two farthest from median samples, never below */
-    /* kept minimum, then all stats recompute from the */
-    /* trimmed set with no cherry pick beyond the retry. */
+    /* Single retry on noise and outlier fails only. Drops at most two */
+    /* farthest from median samples, never below kept minimum, then all stats */
+    /* recompute from the trimmed set with no cherry pick beyond the retry. */
     let max_drop = PROBE_TRIM_MAX.min(watts.len().saturating_sub(PROBE_MIN_KEPT));
     if max_drop == 0 {
         if noisy {
@@ -374,9 +368,9 @@ pub(crate) fn evaluate_arm(
 }
 
 /*
- * Saved percent from the ratio of sums. Needs three
- * accepted pairs plus perf joules past one millijoule,
- * else nothing. Ratio of sums, never the mean of ratios.
+ * Saved percent from the ratio of sums. Needs three accepted pairs and perf
+ * joules past one millijoule, else nothing. Ratio of sums, never the mean of
+ * ratios.
  */
 pub(crate) fn headline_pct(sum_d_j: f64, sum_perf_j: f64, accepted: u64) -> Option<f64> {
     if accepted < PROBE_MIN_PAIRS {
@@ -421,14 +415,12 @@ pub(crate) struct ProbeSample<'a> {
 }
 
 /*
- * A/B probe over package joules. Alternates strict plus
- * perf arms with settle gaps, judges each pair as a unit,
- * and keeps the ratio of sums once three pairs land.
- * Idle parks in waiting on low W with no pair cost, load
- * returns on high W, timeout tries one pair with re wait.
- * Suspend plus resume plus hotplug plus gaps discard the
- * in flight pair with no partial credit. Restart clears
- * all history, since nothing is stored off process.
+ * A/B probe over package joules. Alternates strict and perf arms with settle
+ * gaps, judges each pair as a unit, and keeps the ratio of sums once three
+ * pairs land. Idle parks in waiting on low W with no pair cost, load returns on
+ * high W, timeout tries one pair with re wait. Suspend, resume, hotplug, and
+ * gaps discard the in flight pair with no partial credit. Restart clears all
+ * history, since nothing is stored off process.
  */
 pub(crate) struct EnergyProbe {
     state: ProbeState,
@@ -565,7 +557,7 @@ impl EnergyProbe {
         self.want_force = false;
     }
 
-    /* Watts of one tick from joules plus time. Missed yields nothing. */
+    /* Watts of one tick from joules and time. Missed yields nothing. */
     fn tick_watts(delta_uj: Option<u64>, dt_s: f64) -> Option<f64> {
         let uj = delta_uj?;
         if dt_s <= 0.0 {
@@ -574,7 +566,7 @@ impl EnergyProbe {
         Some(uj as f64 / dt_s / 1_000_000.0)
     }
 
-    /* Enter waiting at pair boundary with no reject plus strict force. */
+    /* Enter waiting at pair boundary with no reject and strict force. */
     fn enter_waiting(&mut self) {
         self.state = ProbeState::Waiting;
         self.wait_enter = 0;
@@ -583,7 +575,7 @@ impl EnergyProbe {
         self.want_force = false;
     }
 
-    /* Leave waiting into collecting with a fresh pair plus strict force. */
+    /* Leave waiting into collecting with a fresh pair and strict force. */
     fn exit_waiting(&mut self) {
         self.state = ProbeState::Collecting;
         self.wait_enter = 0;
@@ -790,7 +782,7 @@ impl EnergyProbe {
                 "spread perf kept {} std {:.2} median {:.2} p50 {:.2} p99 {:.2} min {:.2} max {:.2}\n",
                 p.kept, p.std_w, p.median_w, p.median_w, p.p99_w, p.min_w, p.max_w
             ));
-            /* Trimmed count from the one retry on noise plus outlier fails. */
+            /* Trimmed count from the one retry on noise and outlier fails. */
             t.push_str(&format!(
                 "trimmed strict {} perf {}\n",
                 s.trimmed, p.trimmed
@@ -826,18 +818,15 @@ impl EnergyProbe {
     }
 
     /*
-     * Drive one snapshot tick. Missing RAPL parks the probe
-     * unavailable. Perf governor suspends into baseline with
-     * the force cleared. Hotplug plus gaps plus resume drop
-     * the in flight pair and open a fresh one. Five straight
-     * bad intervals park the probe in backoff for a minute.
-     * Idle parks in waiting on low W at pair boundary with
-     * no reject plus strict force, load returns on high W,
-     * timeout tries one pair with re wait. Missed ticks
-     * freeze waiting counts with no reset plus no advance.
-     * One missed read keeps its wall in pending plus wall,
-     * so the next good delta over the gap keeps true mean.
-     * Countdown follows wall clock, not tick count.
+     * Drive one snapshot tick. Missing RAPL parks the probe unavailable. Perf
+     * governor suspends into baseline with the force cleared. Hotplug, gaps,
+     * and resume drop the in flight pair and open a fresh one. Five straight
+     * bad intervals park the probe in backoff for a minute. Idle parks in
+     * waiting on low W at pair boundary with no reject and strict force, load
+     * returns on high W, timeout tries one pair with re wait. Missed ticks
+     * freeze waiting counts with no reset and no advance. One missed read keeps
+     * its wall in pending and wall, so the next good delta over the gap keeps
+     * true mean. Countdown follows wall clock, not tick count.
      */
     pub(crate) fn tick(&mut self, s: &ProbeSample) {
         if !s.rapl_present {
@@ -873,8 +862,8 @@ impl EnergyProbe {
                 self.wait_wall_s = 0.0;
             }
             ProbeState::Waiting => {
-                /* Hotplug plus gaps plus bad time stay waiting. */
-                /* Missed ticks freeze exit counts with wall kept. */
+                /* Hotplug, gaps, and bad time stay waiting. Missed ticks */
+                /* freeze exit counts with wall kept. */
                 if s.online_changed || s.dt_s > PROBE_MAX_GAP_S || s.dt_s <= 0.0 {
                     self.wait_exit = 0;
                     self.want_force = false;
@@ -1081,10 +1070,9 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Read one CPU state without heap use. Failed
-     * lookups yield an idle view with fixed slice
-     * plus zero EMA. Slice stays fixed at 1ms.
-     * Zero EMA matches BSS plus init with no trap.
+     * Read one CPU state without heap use. Failed lookups yield an idle view
+     * with fixed slice and zero EMA. Slice stays fixed at 1ms. Zero EMA matches
+     * BSS and init with no trap.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {
@@ -1122,18 +1110,15 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Dashboard snapshot. Merges the static cards with
-     * live state by online rank. Gauges only, no deltas.
-     * Frequency plus LLC plus CPU cards stay display only
-     * and never feed placement or division. Slice stays
-     * fixed at 1ms. Group follows the live table when
-     * ready, else halves fallback with no trap. Offline
-     * stays out, so per CPU count matches online count.
-     * Version plus timestamp plus topology plus depths
-     * plus allowance plus mode plus governor join the
-     * counters for one screenshot plus one JSON log.
-     * Governor polls online only on the 1s tick with a
-     * transition only BSS write, so strict stays quiet.
+     * Dashboard snapshot. Merges the static cards with live state by online
+     * rank. Gauges only, no deltas. Frequency, LLC, and CPU cards stay display
+     * only and never feed placement or division. Slice stays fixed at 1ms.
+     * Group follows the live table when ready, else halves fallback with no
+     * trap. Offline stays out, so per CPU count matches online count. Version,
+     * timestamp, topology, depths, allowance, mode, and governor join the
+     * counters. The set covers one screenshot and one JSON log. Governor
+     * polls online only on the 1s tick with a transition only BSS write, so
+     * strict stays quiet.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let (nr_raw, light_depth, hog_depth, burst_allowance_ns) = {
@@ -1218,10 +1203,9 @@ impl<'a> Scheduler<'a> {
             crate::topology::describe_topology(&self.cpu_static)
         };
         /*
-         * Energy probe tick at 1s cadence. Samples package
-         * joules plus per CPU active time, then drives the
-         * strict plus perf arms. The BSS force follows arm
-         * transitions only, so strict stays quiet.
+         * Energy probe tick at 1s cadence. Samples package joules and per CPU
+         * active time, then drives the strict and perf arms. The BSS force
+         * follows arm transitions only, so strict stays quiet.
          */
         let now_tick = std::time::Instant::now();
         let rapl_due = self
@@ -1363,7 +1347,7 @@ mod tests {
         assert_eq!(PROBE_MAX_CONSEC_INVALID, 5);
     }
 
-    /* Mean plus median plus p99 plus std match hand math. */
+    /* Mean, median, p99, and std match hand math. */
     #[test]
     fn probe_stats_match_hand_math() {
         assert_eq!(probe_mean(&[]), 0.0);
@@ -1398,7 +1382,7 @@ mod tests {
         assert_eq!(got.mean_w, 50.0);
     }
 
-    /* Window edges hold at three plus twenty eight. */
+    /* Window edges hold at three + twenty eight. */
     #[test]
     fn discard_window_edges_hold() {
         let mut samples = Vec::new();
@@ -1461,12 +1445,12 @@ mod tests {
                 joules: e,
             });
         }
-        /* Loud std 5.0 W tops max 1.5 W plus 0.15 times 30 W. */
+        /* Loud std 5.0 W tops max 1.5 W + 0.15 times 30 W. */
         assert_eq!(
             evaluate_arm(&loud, 30.0, &[], &[]).unwrap_err(),
             ArmReject::TooNoisy
         );
-        /* Edge std 2.0 W stays under max 1.5 W plus 0.15 times 30 W. */
+        /* Edge std 2.0 W stays under max 1.5 W + 0.15 times 30 W. */
         let got = evaluate_arm(&edge, 30.0, &[], &[]).unwrap();
         assert_eq!(got.trimmed, 0);
     }
@@ -1492,16 +1476,16 @@ mod tests {
                 joules: light,
             });
         }
-        /* Idle spike 127 percent over median trims one plus passes. */
+        /* Idle spike 127 percent over median trims one and passes. */
         let got = evaluate_arm(&spike, 30.0, &[], &[]).unwrap();
         assert_eq!(got.trimmed, 1);
         assert!((got.median_w - 7.0).abs() < 1e-9);
-        /* Light hump 18.7 percent stays under 0.35 plus 3.0 W. */
+        /* Light hump 18.7 percent stays under 0.35 + 3.0 W. */
         let h = evaluate_arm(&hump, 30.0, &[], &[]).unwrap();
         assert_eq!(h.trimmed, 0);
     }
 
-    /* Idle steady near 7 W holds under floor plus relative. */
+    /* Idle steady near 7 W holds under floor and relative. */
     #[test]
     fn idle_replay_passes_near_floor() {
         let mut v = Vec::new();
@@ -1561,9 +1545,9 @@ mod tests {
     /* Close idle arms accept with no headline bias by construction. */
     #[test]
     fn close_idle_arms_accept_with_small_bias() {
-        /* Bias under 0.5 W carries no headline bias by */
-        /* construction, since ratio of sums weights by kept */
-        /* seconds plus per arm means with equal windows. */
+        /* Bias under 0.5 W carries no headline bias by construction, since */
+        /* ratio of sums weights by kept seconds and per arm means with equal */
+        /* windows. */
         let mut a = Vec::new();
         let mut b = Vec::new();
         for i in 1..=30 {
@@ -1604,7 +1588,7 @@ mod tests {
                 joules: w,
             });
         }
-        /* Five spikes need five dropped, two leave three plus fail. */
+        /* Five spikes need five dropped, two leave three and fail. */
         assert!(evaluate_arm(&v, 30.0, &[], &[]).is_err());
     }
 
@@ -1622,7 +1606,7 @@ mod tests {
         assert!(p.trace.contains("waiting"));
     }
 
-    /* Load returns from waiting with a fresh pair plus strict start. */
+    /* Load returns from waiting with a fresh pair and strict start. */
     #[test]
     fn waiting_exits_on_load_with_fresh_pair() {
         let mut p = EnergyProbe::new();
@@ -1639,7 +1623,7 @@ mod tests {
         assert!(!p.want_force());
     }
 
-    /* Flap holds with hysteresis plus debounce on both sides. */
+    /* Flap holds with hysteresis and debounce on both sides. */
     #[test]
     fn waiting_flap_holds_with_hysteresis() {
         let mut p = EnergyProbe::new();
@@ -1705,8 +1689,8 @@ mod tests {
     /* Three light pairs span three times sixty six seconds. */
     #[test]
     fn throughput_three_light_pairs_take_198s() {
-        /* Pair cycle 30 plus 3 plus 30 plus 3 is 66, */
-        /* three cycles is 198 with no waiting on 30 W. */
+        /* Pair cycle 30 + 3 + 30 + 3 is 66, three cycles is 198 with no */
+        /* waiting on 30 W. */
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 30.0, 30.0);
         run_pair(&mut p, 30.0, 30.0);
@@ -1719,7 +1703,7 @@ mod tests {
         assert_eq!(p.output(500.0).state, "collecting");
     }
 
-    /* Active past wall plus slack rejects, zeros pass. */
+    /* Active past wall and slack rejects, zeros pass. */
     #[test]
     fn plausibility_flags_impossible_active() {
         let mut samples = Vec::new();
@@ -1789,7 +1773,7 @@ mod tests {
         assert!((e.yearly_pct - want).abs() < 1e-9);
     }
 
-    /* Daily plus yearly plus since running share one saved W. */
+    /* Daily, yearly, and since running share one saved W. */
     #[test]
     fn energies_share_one_saved_watts() {
         assert_eq!(saved_watts(100.0, 50.0, 200.0, 50.0), -2.0);
@@ -1838,7 +1822,7 @@ mod tests {
         assert_eq!(two.since_running_kwh, 0.0);
     }
 
-    /* One missed read keeps true mean with no spike plus no waste. */
+    /* One missed read keeps true mean with no spike and no waste. */
     #[test]
     fn missed_tick_keeps_true_mean() {
         let mut p = EnergyProbe::new();
@@ -1976,7 +1960,7 @@ mod tests {
         assert!(p.trace.contains("collecting"));
     }
 
-    /* Hotplug plus gaps discard the in flight pair. */
+    /* Hotplug and gaps discard the in flight pair. */
     #[test]
     fn hotplug_and_gap_discard_pair() {
         let mut p = EnergyProbe::new();
@@ -2054,7 +2038,7 @@ mod tests {
         assert!(e.trace.contains("unavailable"));
     }
 
-    /* Trace carries state plus counts plus derivation. */
+    /* Trace carries state, counts, and derivation. */
     #[test]
     fn trace_carries_derivation() {
         let mut p = EnergyProbe::new();

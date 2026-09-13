@@ -2,8 +2,8 @@
 /*
  * Group unit tests
  *
- * Covers the group split plus classifier plus live table helpers with halves and burn checks.
- * Run with cargo test -p scx_flow flow_tests_group.
+ * Covers the group split, classifier, and live table helpers with halves and
+ * burn checks. Run with cargo test -p scx_flow flow_tests_group.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -221,9 +221,8 @@ fn hog_depth_sums_hog_only_capped_at_4() {
 }
 
 /*
- * Both depths share one pass with cap at 4 each. The
- * single scan matches the BPF refresh with bounded
- * cost. Light plus hog stay separate with no cross
+ * Both depths share one pass with cap at 4 each. The single scan matches the
+ * BPF refresh with bounded cost. Light and hog stay separate with no cross
  * lift.
  */
 #[test]
@@ -454,11 +453,9 @@ fn inflate_adds_8ms_with_wrap() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 3 park only by
- * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort
- * peer.
+ * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
+ * recheck and peer mask only, so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn drain_keeps_strict_isolation_tier0_model_only() {
@@ -481,11 +478,9 @@ fn drain_keeps_strict_isolation_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 3 park only by
- * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort
- * peer.
+ * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
+ * recheck and peer mask only, so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn drain_skips_dead_plus_failed_with_no_cross_tier0_model_only() {
@@ -683,11 +678,10 @@ fn task_state_stays_48_with_wake_at_46() {
 }
 
 /*
- * Tier 0 model only for park plus peer. BPF ships Tier 3
- * park only with no task recheck by construction due to
- * verifier jump at 1000001 on donor check, so hetero
- * entries may move cross iff ready is one with strict
- * park iff ready is zero and best effort peer.
+ * Tier 0 model only for park and peer. BPF ships Tier 3 park only with no task
+ * recheck by construction due to verifier jump at 1000001 on donor check, so
+ * hetero entries may move cross iff ready is one with strict park iff ready is
+ * zero and best effort peer.
  */
 #[test]
 fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
@@ -709,10 +703,9 @@ fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 3 park only by
- * construction with no task recheck plus peer mask only,
- * so a stale cross entry may move iff ready is one with
- * strict park iff ready is zero and best effort peer.
+ * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
+ * recheck and peer mask only, so a stale cross entry may move iff ready is one
+ * with strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
@@ -733,11 +726,9 @@ fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 3 park only by
- * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort
- * peer.
+ * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
+ * recheck and peer mask only, so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn null_storage_defaults_to_light_tier0_model_only() {
@@ -760,11 +751,9 @@ fn null_storage_defaults_to_light_tier0_model_only() {
 }
 
 /*
- * Tier 0 model only. BPF ships Tier 3 park only by
- * construction with no task recheck plus peer mask only,
- * so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort
- * peer.
+ * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
+ * recheck and peer mask only, so hetero entries may move cross iff ready is one
+ * with strict park iff ready is zero and best effort peer.
  */
 #[test]
 fn mask_fail_never_counts_as_group_skip_tier0_model_only() {
@@ -835,10 +824,9 @@ fn sorted_interleave_spreads_fast_across_groups() {
 }
 
 /*
- * Odd counts give the extra CPU to hog in both views.
- * Halves gives 1 light plus 2 hog at 3. Interleave
- * matches with 1 light plus 2 hog, so hetero keeps
- * the same bias with no split.
+ * Odd counts give the extra CPU to hog in both views. Halves gives 1 light and
+ * 2 hog at 3. Interleave matches with 1 light and 2 hog, so hetero keeps the
+ * same bias with no split.
  */
 #[test]
 fn odd_counts_give_extra_to_hog_in_both_views() {
@@ -937,10 +925,9 @@ fn seed_groups_sets_ready_only_when_hetero() {
 }
 
 /*
- * Hetero keeps dispatch on halves while placement uses
- * live. Strict iff ready is zero, best effort iff ready
- * is one with verifier jump plus BSS bounds. Locks the
- * documented split with no live use in dispatch.
+ * Hetero keeps dispatch on halves while placement uses live. Strict iff ready
+ * is zero, best effort iff ready is one with verifier jump and BSS bounds.
+ * Locks the documented split with no live use in dispatch.
  */
 #[test]
 fn hetero_dispatch_uses_halves_placement_uses_live() {
@@ -972,10 +959,9 @@ fn hetero_dispatch_uses_halves_placement_uses_live() {
 }
 
 /*
- * Pinned keeps the CPU with live regroup. A task pinned
- * to one CPU takes the live group of that CPU, so later
- * park plus steal see the same group. Locks the enqueue
- * pinned path with no stale group.
+ * Pinned keeps the CPU with live regroup. A task pinned to one CPU takes the
+ * live group of that CPU, so later park and steal see the same group. Locks the
+ * enqueue pinned path with no stale group.
  */
 #[test]
 fn pinned_regroups_to_live_group() {
@@ -1100,11 +1086,10 @@ fn cores_split_keeps_siblings_with_extra_to_hog() {
 }
 
 /*
- * Core interleave spreads fast cores. Sorts by max
- * capacity plus max frequency plus least id. Even slots
- * go light, odd slots go hog. Odd core counts give the
- * extra core to hog. Single core falls back to CPU
- * interleave with no empty group.
+ * Core interleave spreads fast cores. Sorts by max capacity, max frequency, and
+ * least id. Even slots go light, odd slots go hog. Odd core counts give the
+ * extra core to hog. Single core falls back to CPU interleave with no empty
+ * group.
  */
 #[test]
 fn cores_interleave_spreads_fast_cores() {
@@ -1129,8 +1114,8 @@ fn cores_interleave_spreads_fast_cores() {
 }
 
 /*
- * One LLC splits cores globally. Two cores go one
- * light plus one hog. Four cores go two plus two.
+ * One LLC splits cores globally. Two cores go one light and one hog. Four cores
+ * go two and two.
  */
 #[test]
 fn llc_one_splits_globally() {
@@ -1146,9 +1131,8 @@ fn llc_one_splits_globally() {
 }
 
 /*
- * Two LLCs split in each LLC. Each domain keeps both
- * groups, so cache domains stay balanced. Four cores
- * across two LLCs go one plus one in each LLC.
+ * Two LLCs split in each LLC. Each domain keeps both groups, so cache domains
+ * stay balanced. Four cores across two LLCs go one and one in each LLC.
  */
 #[test]
 fn llc_two_splits_per_llc() {
@@ -1250,9 +1234,8 @@ fn singleton_bypass_keeps_prior_exact() {
 }
 
 /*
- * Topology seed with singletons matches prior seed.
- * Table plus ready stay identical, so SMT off keeps
- * state equivalence with no crash plus no stall.
+ * Topology seed with singletons matches prior seed. Table and ready stay
+ * identical, so SMT off keeps state equivalence with no crash and no stall.
  */
 #[test]
 fn seed_topology_singleton_matches_prior() {
@@ -1363,9 +1346,8 @@ fn sibling_table_maps_next_with_empty_for_singleton() {
 }
 
 /*
- * SMT off with 8 CPUs keeps halves. All singleton
- * cores give the same table plus ready as prior, plus
- * the same live view with no division plus no trap.
+ * SMT off with 8 CPUs keeps halves. All singleton cores give the same table and
+ * ready as prior, and the same live view with no division and no trap.
  */
 #[test]
 fn smt_off_8c_keeps_halves_with_no_trap() {
@@ -1394,9 +1376,8 @@ fn smt_off_8c_keeps_halves_with_no_trap() {
 }
 
 /*
- * SMT off with odd counts keeps extra to hog. Three
- * plus five CPUs give one plus two light with the rest
- * hog in both views with no empty group.
+ * SMT off with odd counts keeps extra to hog. Three, five CPUs give one, and
+ * two light with the rest hog in both views with no empty group.
  */
 #[test]
 fn smt_off_odd_keeps_extra_to_hog() {
@@ -1424,8 +1405,8 @@ fn smt_off_odd_keeps_extra_to_hog() {
 }
 
 /*
- * Single CPU keeps all light. Both seeds keep ready
- * cleared with no peer scan plus no division.
+ * Single CPU keeps all light. Both seeds keep ready cleared with no peer scan
+ * and no division.
  */
 #[test]
 fn single_cpu_keeps_all_light_with_no_scan() {
@@ -1442,10 +1423,9 @@ fn single_cpu_keeps_all_light_with_no_scan() {
 }
 
 /*
- * Zero plus empty plus short stay safe. Zero CPUs give
- * ready cleared with no use. Short slices clamp with no
- * pad. No division runs, so no zero risk. No group stays
- * empty with more than one CPU.
+ * Zero, empty, and short stay safe. Zero CPUs give ready cleared with no use.
+ * Short slices clamp with no pad. No division runs, so no zero risk. No group
+ * stays empty with more than one CPU.
  */
 #[test]
 fn zero_plus_empty_plus_short_stay_safe() {
@@ -1467,10 +1447,9 @@ fn zero_plus_empty_plus_short_stay_safe() {
 }
 
 /*
- * Weight leaves groups unchanged with no routing use.
- * Split plus park plus steal plus classifier read the
- * same with any nice, so only deadline plus vruntime
- * move with weight.
+ * Weight leaves groups unchanged with no routing use. Split, park, steal, and
+ * classifier read the same with any nice, so only deadline and vruntime move
+ * with weight.
  */
 #[test]
 fn weight_leaves_groups_unchanged() {
@@ -1492,9 +1471,8 @@ fn weight_leaves_groups_unchanged() {
 }
 
 /*
- * Online dense checks rank order with no gaps.
- * Empty counts as dense with no trap. Sparse plus
- * short plus gaps count as not dense.
+ * Online dense checks rank order with no gaps. Empty counts as dense with no
+ * trap. Sparse, short, and gaps count as not dense.
  */
 #[test]
 fn online_dense_checks_rank_order() {
@@ -1525,9 +1503,8 @@ fn online_skew_forces_live_when_short() {
 }
 
 /*
- * Seed online sparse evens holds 4 plus 4 by id.
- * First half ranks stay light, rest stay hog, offline
- * stays light inert. Skewed forces ready one even when
+ * Seed online sparse evens holds 4 and 4 by id. First half ranks stay light,
+ * rest stay hog, offline stays light inert. Skewed forces ready one even when
  * uniform, so SMT off keeps groups over online only.
  */
 #[test]
@@ -1549,18 +1526,16 @@ fn seed_online_sparse_evens_holds_4_plus_4() {
     for &id in &online {
         let live = group_live(id, 16, &t, r);
         let want = if id < 8 { GROUP_LIGHT } else { GROUP_HOG };
-        // Rank halves match id halves here, so live holds
-        // the same 4 plus 4 with no drift.
+        // Rank halves match id halves here, so live holds the same 4 and 4 with
+        // no drift.
         assert_eq!(live, want);
     }
 }
 
 /*
- * Seed online sparse odd holds 3 plus 4 by rank.
- * First three ranks stay light, rest stay hog with
- * extra to hog, offline stays light inert. Skewed
- * forces ready one even when uniform, so SMT off
- * keeps groups over online only.
+ * Seed online sparse odd holds 3 and 4 by rank. First three ranks stay light,
+ * rest stay hog with extra to hog, offline stays light inert. Skewed forces
+ * ready one even when uniform, so SMT off keeps groups over online only.
  */
 #[test]
 fn seed_online_sparse_odd_holds_3_plus_4() {
@@ -1578,7 +1553,7 @@ fn seed_online_sparse_odd_holds_3_plus_4() {
     for &id in &[1, 3, 5, 7, 9, 11, 13, 14, 15] {
         assert_eq!(t[id as usize], GROUP_LIGHT);
     }
-    /* Rank halves give 3 light plus 4 hog with no drift. */
+    /* Rank halves give 3 light and 4 hog with no drift. */
     let light = online
         .iter()
         .filter(|&&id| t[id as usize] == GROUP_LIGHT)
@@ -1592,10 +1567,9 @@ fn seed_online_sparse_odd_holds_3_plus_4() {
 }
 
 /*
- * Seed online sparse hetero holds 4 plus 4 by rank.
- * Table holds interleave over rank with offline inert,
- * so fast ranks spread with no id use. Hetero plus
- * skew keep ready one, so placement uses live.
+ * Seed online sparse hetero holds 4 and 4 by rank. Table holds interleave over
+ * rank with offline inert, so fast ranks spread with no id use. Hetero and skew
+ * keep ready one, so placement uses live.
  */
 #[test]
 fn seed_online_sparse_hetero_holds_4_plus_4() {
@@ -1609,7 +1583,7 @@ fn seed_online_sparse_hetero_holds_4_plus_4() {
     for (rank, &id) in online.iter().enumerate() {
         assert_eq!(t[id as usize], want[rank]);
     }
-    /* Counts stay 4 plus 4 with offline light inert. */
+    /* Counts stay 4 and 4 with offline light inert. */
     let light = online
         .iter()
         .filter(|&&id| t[id as usize] == GROUP_LIGHT)
@@ -1626,10 +1600,9 @@ fn seed_online_sparse_hetero_holds_4_plus_4() {
 }
 
 /*
- * Seed online dense short holds 4 plus 4 over online.
- * Offline stays light inert with no trap. Ready stays
- * one, so placement uses the live table with no halves
- * drift over possible.
+ * Seed online dense short holds 4 and 4 over online. Offline stays light inert
+ * with no trap. Ready stays one, so placement uses the live table with no
+ * halves drift over possible.
  */
 #[test]
 fn seed_online_dense_short_holds_4_plus_4() {
@@ -1650,9 +1623,8 @@ fn seed_online_dense_short_holds_4_plus_4() {
 }
 
 /*
- * Seed online dense full matches prior with no change.
- * Table plus ready stay identical, so SMT on keeps
- * prior state with no stall.
+ * Seed online dense full matches prior with no change. Table and ready stay
+ * identical, so SMT on keeps prior state with no stall.
  */
 #[test]
 fn seed_online_dense_full_matches_prior() {
@@ -1678,10 +1650,9 @@ fn seed_online_dense_full_matches_prior() {
 }
 
 /*
- * Topology seed online sparse evens holds 4 plus 4.
- * All singleton online cores use rank halves exactly
- * with offline inert. Ready stays one from skew with
- * no trap.
+ * Topology seed online sparse evens holds 4 and 4. All singleton online cores
+ * use rank halves exactly with offline inert. Ready stays one from skew with no
+ * trap.
  */
 #[test]
 fn seed_topology_online_sparse_evens_holds_4_plus_4() {
@@ -1704,9 +1675,8 @@ fn seed_topology_online_sparse_evens_holds_4_plus_4() {
 }
 
 /*
- * Topology seed online dense full matches prior.
- * Table plus ready stay identical, so SMT on keeps
- * prior state with no change.
+ * Topology seed online dense full matches prior. Table and ready stay
+ * identical, so SMT on keeps prior state with no change.
  */
 #[test]
 fn seed_topology_online_dense_full_matches_prior() {
@@ -1742,9 +1712,9 @@ fn build_cores_online_ignores_offline() {
 }
 
 /*
- * Sibling online pairs ring by id with offline inert.
- * Pairs point at each other, singletons plus offline
- * hold empty with no trap. Dense full matches prior.
+ * Sibling online pairs ring by id with offline inert. Pairs point at each
+ * other, singletons and offline hold empty with no trap. Dense full matches
+ * prior.
  */
 #[test]
 fn sibling_online_pairs_ring_by_id() {
@@ -1795,12 +1765,10 @@ fn least_in_group_picks_least_with_lowest_id_tie() {
 }
 
 /*
- * Least in live group uses the table when ready else
- * halves with the same least plus tie rule. Strict
- * iff ready is zero, best effort iff ready is one
- * with live table in placement. Missing queued reads
- * as zero with no trap. Mirrors BPF select plus
- * enqueue fallback at 4.2.19.
+ * Least in live group uses the table when ready else halves with the same least
+ * and tie rule. Strict iff ready is zero, best effort iff ready is one with
+ * live table in placement. Missing queued reads as zero with no trap. Mirrors
+ * BPF select and enqueue fallback at 4.2.19.
  */
 #[test]
 fn least_in_group_live_uses_table_with_least() {
@@ -1848,11 +1816,10 @@ fn least_in_group_live_uses_table_with_least() {
 }
 
 /*
- * Least keeps the bound plus halves view with frozen
- * constants. Scans 0 to nr only with no wrap, so out
- * of range allowed entries never win. Halves splits
- * low half light plus high half hog with extra to
- * hog on odd counts. Single CPU keeps all light.
+ * Least keeps the bound and halves view with frozen constants. Scans 0 to nr
+ * only with no wrap, so out of range allowed entries never win. Halves splits
+ * low half light and high half hog with extra to hog on odd counts. Single CPU
+ * keeps all light.
  */
 #[test]
 fn least_keeps_bound_plus_halves_view() {
@@ -1875,12 +1842,10 @@ fn least_keeps_bound_plus_halves_view() {
 }
 
 /*
- * Running maps the stored EMA uniform both groups.
- * Both groups share the same map from the stored
- * EMA with no per group hint, so cold zero maps to
- * zero until the first climb. Init plus no state
- * holds max 1024. Locks the BPF header plus the
- * Rust mirror with no stats change.
+ * Running maps the stored EMA uniform both groups. Both groups share the same
+ * map from the stored EMA with no per group hint, so cold zero maps to zero
+ * until the first climb. Init and no state holds max 1024. Locks the BPF header
+ * and the Rust mirror with no stats change.
  */
 #[test]
 fn running_sets_cpuperf_level() {
@@ -1901,12 +1866,10 @@ fn running_sets_cpuperf_level() {
 }
 
 /*
- * Idle restore needs blocked plus empty queues.
- * Only blocked with per CPU empty plus local empty
- * restores, so runnable never restores with any
- * queued work held high. Predicate holds with no
- * EMA, M2 maps the decayed EMA with from_ema, so
- * long idle still maps to zero.
+ * Idle restore needs blocked and empty queues. Only blocked with per CPU empty
+ * and local empty restores, so runnable never restores with any queued work
+ * held high. Predicate holds with no EMA, M2 maps the decayed EMA with
+ * from_ema, so long idle still maps to zero.
  */
 #[test]
 fn idle_restore_needs_blocked_and_empty() {
@@ -1925,10 +1888,9 @@ fn idle_restore_needs_blocked_and_empty() {
 }
 
 /*
- * CPU perf EMA consts match the header at M2.
- * Budget is 1ms, half-life is 24ms, alpha is 3072
- * at 12x in FP8 with shift 8 plus one 256. Names use
- * the FLOW_CPUPERF prefix to guard FP clashes.
+ * CPU perf EMA consts match the header at M2. Budget is 1ms, half-life is 24ms,
+ * alpha is 3072 at 12x in FP8 with shift 8 and one 256. Names use the
+ * FLOW_CPUPERF prefix to guard FP clashes.
  */
 #[test]
 fn cpuperf_consts_match_header() {
@@ -1961,12 +1923,10 @@ fn cpuperf_consts_match_header() {
 }
 
 /*
- * EMA climb climbs toward the budget with gap math.
- * Delta clamps to the budget first with u64 order, so
- * a long burst never overshoots in one step. Alpha at
- * 12x gives a fast attack, so a full slice from zero
- * saturates at once, a quarter slice also saturates,
- * half plus 10us lands mid between half and max, max
+ * EMA climb climbs toward the budget with gap math. Delta clamps to the budget
+ * first with u64 order, so a long burst never overshoots in one step. Alpha at
+ * 12x gives a fast attack, so a full slice from zero saturates at once, a
+ * quarter slice also saturates, half + 10us lands mid between half and max, max
  * stays capped with no wrap.
  */
 #[test]
@@ -1988,12 +1948,10 @@ fn ema_climb_vectors_match_spec() {
 }
 
 /*
- * EMA decay halves whole periods plus Taylor residual.
- * Zero sleep keeps identity, zero half keeps identity
- * with no divide, at or past 64 periods maps to zero,
- * one half-life maps to half exactly via shift, half
- * of a half-life lands near 0.71x via the 2nd-order
- * Taylor with no float plus no loop.
+ * EMA decay halves whole periods and Taylor residual. Zero sleep keeps
+ * identity, zero half keeps identity with no divide, at or past 64 periods maps
+ * to zero, one half-life maps to half exactly via shift, half of a half-life
+ * lands near 0.71x via the 2nd-order Taylor with no float and no loop.
  */
 #[test]
 fn ema_decay_vectors_match_spec() {

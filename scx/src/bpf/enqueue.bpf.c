@@ -2,8 +2,8 @@
 /*
  * Enqueue op
  *
- * Picks the target queue in group with park fallback and stamps deadline plus delay. Keeps
- * mask wins with group aware placement and coalesced idle kicks.
+ * Picks the target queue in group with park fallback and stamps deadline and
+ * delay. Keeps mask wins with group aware placement and coalesced idle kicks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -27,11 +27,10 @@ static __always_inline bool flow_task_pinned(
 		return true;
 	return false;
 }
-/* Target in one group from selected plus least. */
-/* Least picks lowest queued depth with lowest id on ties. */
-/* Strict keeps group only, perf widens to any allowed on */
-/* miss with same least rule over the widened set. Mask */
-/* always wins with no dispatch use. */
+/* Target in one group from selected and least. Least picks lowest queued */
+/* depth with lowest id on ties. Strict keeps group only, perf widens to any */
+/* allowed on miss with same least rule over the widened set. Mask always */
+/* wins with no dispatch use. */
 static __always_inline s32 flow_pick_in_group(
 	const struct task_struct *p, s32 sel,
 	u8 group)
@@ -89,15 +88,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u8 group;
 	u64 est = 0;
 	u64 slice = (u64)FLOW_SLICE_NS;
-	/* Exiting tasks run at once on the task CPU */
-	/* via LOCAL_ON with no order wait, so short */
-	/* exits never stall in a queue behind other */
-	/* work. Task CPU wins over the enqueuer, so */
-	/* an exit enqueued elsewhere still runs where */
-	/* the task lives. Single insert plus return */
-	/* with no double enqueue. Falls back when the */
-	/* task CPU is not allowed. Idle kick only with */
-	/* no coalesce plus no preempt. */
+	/* Exiting tasks run at once on the task CPU via LOCAL_ON with no order */
+	/* wait, so short exits never stall in a queue behind other work. Task CPU */
+	/* wins over the enqueuer, so an exit enqueued elsewhere still runs where */
+	/* the task lives. Single insert and return with no double enqueue. Falls */
+	/* back when the task CPU is not allowed. Idle kick only with no coalesce */
+	/* and no preempt. */
 	if (p->flags & PF_EXITING) {
 		s32 tgt = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, tgt)) {
@@ -282,9 +278,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (st)
 			target = st->frontier;
 		ref_f = flow_ref_frontier(p, sel);
-		/* Normal path only, park plus no tctx keep */
-		/* ref only. Corrected feeds clamp plus */
-		/* deserved with max wrap safety. */
+		/* Normal path only, park and no tctx keep ref only. Corrected feeds clamp */
+		/* and deserved with max wrap safety. */
 		frontier = flow_frontier_max(ref_f, target);
 		nice = flow_nice_of(p);
 		w = flow_weight_of(nice);
@@ -312,22 +307,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
-		/* Kick idle plus busy preempt with delay. */
+		/* Kick idle and busy preempt with delay. */
 		/* Idle fast path first with one queued read. */
 		/* Q2 idle in 50us coalesces when not pinned. */
 		/* Q1 always kicks, deep stays quiet, no slide. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
-		/* Needs latched arm 16 stand 8 plus deserved */
-		/* woken dl before frontier plus quarter gran */
-		/* plus 32us slack plus same group plus mask */
-		/* plus atomic rate claim with one kick per */
-		/* slice. Frontier is the floor, so beating */
-		/* it by granule plus slack proves earliness */
-		/* with no lookup. Fail closed with */
-		/* no kick plus total plus reason in branch */
-		/* order armed plus deserved plus group plus */
-		/* mask plus rate. No loop. Delay persists */
+		/* Needs latched arm 16 stand 8, deserved woken */
+		/* dl before frontier, and quarter gran. It also */
+		/* needs 32us slack, same group, mask, and atomic */
+		/* rate claim with one kick per slice. Frontier is */
+		/* the floor, so beating it by granule and slack */
+		/* proves earliness with no lookup. Fail closed */
+		/* with no kick, total, and reason. The branch */
+		/* order is armed, deserved, group, mask, and rate. */
+		/* No loop. Delay persists */
 		/* across idle, next running decays, delay */
 		/* shows stale idle. */
 		if (flow_cpu_ok(p, cpu)) {

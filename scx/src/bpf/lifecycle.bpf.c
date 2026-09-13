@@ -2,8 +2,9 @@
 /*
  * Task lifecycle ops
  *
- * Handles running plus dequeue plus stopping plus enable plus disable plus exit plus CPU
- * release. Tracks running state plus estimates plus pressure with no extra cost.
+ * Handles running, dequeue, stopping, and enable. It also handles disable,
+ * exit, and CPU release. Tracks running state, estimates, and pressure with
+ * no extra cost.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -32,13 +33,10 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		u8 nwin;
 		u8 ncur;
 		u16 ncnt;
-		/* Pure-EMA hint at M2 uniform both groups. */
-		/* No group branch, so light plus hog share */
-		/* the same map from the stored EMA. Cold */
-		/* zero maps to zero until the first climb. */
-		/* Perf arm keeps natural hints with no pin, */
-		/* so the probe measures the grouping split */
-		/* with no hint split. */
+		/* Pure-EMA hint at M2 uniform both groups. No group branch, so light and */
+		/* hog share the same map from the stored EMA. Cold zero maps to zero until */
+		/* the first climb. Perf arm keeps natural hints with no pin, so the probe */
+		/* measures the grouping split with no hint split. */
 		perf = flow_cpuperf_from_ema(
 		    st->cpuperf_ema);
 		if (scx_bpf_cpuperf_set)
@@ -53,10 +51,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->running_weight = (u16)w;
 		__sync_fetch_and_and(&st->cursor,
 		    ~(u32)FLOW_CURSOR_RATE_BIT);
-		/* Own count plus close with no loop. */
-		/* Enqueue stamps max only, so 8 means */
-		/* 8 runnings with no double count. */
-		/* Dual max drops one sample max, decay */
+		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */
+		/* runnings with no double count. Dual max drops one sample max, decay */
 		/* intact, persists idle, decays at 1/8. */
 		dsq = flow_dsq_for_cpu((u32)cpu);
 		q = scx_bpf_dsq_nr_queued(dsq);
@@ -98,18 +94,14 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Pressure refresh from per CPU queued counts capped */
-/* at 4. Sums light plus hog queued tasks over per CPU */
-/* queues in halves order with early stop when both hit */
-/* 4. Halves matches dispatch isolation with no table */
-/* cost. Placement uses live table seeded by online rank */
-/* with offline inert, so strict iff ready is zero, best */
-/* effort iff ready is one. Park stays */
-/* out, so the measure tracks CPU pressure only with */
-/* one pass and bounded cost. Stores depths plus */
-/* allowance for snapshot with no task field. Returns */
-/* the allowance for the burst check. Stopping only, */
-/* never dispatch. */
+/* Pressure refresh from per CPU queued counts capped at 4. Sums light and */
+/* hog queued tasks over per CPU queues in halves order with early stop when */
+/* both hit 4. Halves matches dispatch isolation with no table cost. */
+/* Placement uses live table seeded by online rank with offline inert, so */
+/* strict iff ready is zero, best effort iff ready is one. Park stays out, so */
+/* the measure tracks CPU pressure only with one pass and bounded cost. */
+/* Stores depths and allowance for snapshot with no task field. Returns the */
+/* allowance for the burst check. Stopping only, never dispatch. */
 static __always_inline u64 flow_refresh_pressure(void)
 {
 	u64 light = 0;
@@ -148,17 +140,14 @@ static __always_inline u64 flow_refresh_pressure(void)
 	flow_burst_allowance_ns = allow;
 	return allow;
 }
-/* Burn step for one stop with window plus burst plus wake. */
-/* Burst allowance adapts to light depth with 4ms quiet to */
-/* 2ms mild to 1ms floor during flood. Short blocks below */
-/* 1ms with burn below 4ms count toward 8 for fast promote. */
-/* A burst at the allowance clears wake hits. A short with */
-/* burn at or past 4ms clears wake hits. A hot window at or */
-/* past 16ms clears wake hits. A middle window at the end */
-/* clears wake hits with low runs. A low window below 4ms */
-/* keeps wake hits. A window in progress keeps wake hits. */
-/* Slow path with 64 low wins stays intact. Stopping only, */
-/* never dispatch. */
+/* Burn step for one stop with window, burst, and wake. Burst allowance */
+/* adapts to light depth with 4ms quiet to 2ms mild to 1ms floor during */
+/* flood. Short blocks below 1ms with burn below 4ms count toward 8 for fast */
+/* promote. A burst at the allowance clears wake hits. A short with burn at */
+/* or past 4ms clears wake hits. A hot window at or past 16ms clears wake */
+/* hits. A middle window at the end clears wake hits with low runs. A low */
+/* window below 4ms keeps wake hits. A window in progress keeps wake hits. */
+/* Slow path with 64 low wins stays intact. Stopping only, never dispatch. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,
 	u64 delta)
@@ -289,7 +278,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
-	/* No minus one check, since zero init plus never minus one. */
+	/* No minus one check, since zero init and never minus one. */
 	if (!tctx || !tctx->run_at) {
 		flow_clear_running_if_owner(cpu,
 		    (u32)p->pid);
@@ -388,9 +377,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    delta);
 			st->cpuperf_ema = ema;
 			st->cpuperf_ema_at = now;
-			/* Charge this segment once with fetch add. */
-			/* Run at clears earlier, so disable plus exit */
-			/* later see zero with no second charge. */
+			/* Charge this segment once with fetch add. Run at clears earlier, so */
+			/* disable and exit later see zero with no second charge. */
 			__sync_fetch_and_add(&st->active_ns, delta);
 		}
 		if (st) {
@@ -493,9 +481,8 @@ void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,
 	struct scx_cpu_release_args *args)
 {
 	(void)args;
-	/* Clear the stale running view with no charge. */
-	/* The task segment still ends through stopping plus */
-	/* disable plus exit, which own the single charge */
-	/* through run at, so release never double counts. */
+	/* Clear the stale running view with no charge. The task segment still ends */
+	/* through stopping, disable, and exit, which own the single charge through */
+	/* run at, so release never double counts. */
 	flow_clear_running(cpu);
 }

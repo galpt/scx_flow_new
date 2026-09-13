@@ -2,8 +2,8 @@
 /*
  * Dispatch op
  *
- * Drains own plus park plus peer queues with park isolation. Keeps dispatch on halves with
- * peer steals that respect mask plus depth plus idle rescue.
+ * Drains own, park, and peer queues with park isolation. Keeps dispatch on
+ * halves with peer steals that respect mask, depth, and idle rescue.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -175,10 +175,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			moved += flow_drain_peer(cpu, peer,
 			    min_depth);
 		}
-		/* Keep rate plus stand with new peer. */
-		/* CAS keeps fresh flags with 4 tries. */
-		/* One kick per slice alone, bounded */
-		/* extra IPIs on exact overlap only. */
+		/* Keep rate and stand with new peer. CAS keeps fresh flags with 4 tries. */
+		/* One kick per slice alone, bounded extra IPIs on exact overlap only. */
 		if (st) {
 			bpf_for(j, 0, 4) {
 				u32 seen = st->cursor;

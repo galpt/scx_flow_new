@@ -2,9 +2,9 @@
 /*
  * Shared flow header
  *
- * Defines the shared constants plus structs plus helpers with a fixed 1ms slice plus two
- * groups plus ordered queues. Mirrored by userspace so behavior stays the same on both sides
- * of the boundary.
+ * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
+ * groups, and ordered queues. Mirrored by userspace so behavior stays the same
+ * on both sides of the boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -80,7 +80,7 @@ _Static_assert((FLOW_WEIGHT) <= 65535,
     "weight fits u16");
 _Static_assert(20 <= 32767,
     "nice fits s16");
-/* Per task state at 48B with group plus window plus wake. */
+/* Per task state at 48B with group, window, and wake. */
 struct flow_task_ctx {
 	u64 est_ns;
 	u64 run_at;
@@ -92,13 +92,13 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 56B with delay plus rate plus EMA plus active. */
-/* Frontier plus running plus cursor plus delay plus */
-/* cpuperf EMA at 32B base with 16B EMA tail plus 8B active tail. EMA holds */
+/* Per CPU state at 56B with delay, rate, EMA, and active. */
+/* Frontier, running, cursor, delay, and cpuperf EMA at 32B base. */
+/* The base carries 16B EMA tail with 8B active tail. EMA holds */
 /* the proportional budget in nanos capped at 1ms, at */
 /* holds the last EMA update time in nanos. Active holds */
 /* lifetime active nanos charged once per run segment. BSS zero */
-/* covers the cold start plus explicit zero kept as */
+/* covers the cold start and explicit zero kept as */
 /* verify for the 48B to 56B growth with no trap. */
 struct flow_cpu_state {
 	u64 frontier;
@@ -114,11 +114,10 @@ struct flow_cpu_state {
 	u64 cpuperf_ema_at;
 	u64 active_ns;
 };
-/* Counters at 200B with group plus coalesce plus */
-/* split skip reasons. Total keeps the sum for compat, */
-/* reasons split fail-closed busy no-kicks in branch */
-/* order armed plus deserved plus group plus mask plus */
-/* rate. Coalesced counts q2 idle skips in 50us. */
+/* Counters at 200B with group, coalesce, and split skip reasons. Total keeps */
+/* the sum for compat, reasons split fail-closed busy no-kicks in branch */
+/* order armed, deserved, group, mask, and rate. Coalesced counts q2 idle */
+/* skips in 50us. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -189,12 +188,11 @@ static __always_inline u32 flow_perf_for_group(u8 group)
 		return (u32)FLOW_PERF_HOG;
 	return (u32)FLOW_PERF_LIGHT;
 }
-/* True when a stopping task should restore the idle hint. */
-/* Bang-bang edge at M1 with no EMA plus no state growth. */
-/* M2 keeps the predicate but maps the value through the */
-/* EMA with from_ema, so long idle still decays to zero. */
-/* Needs blocked plus per CPU queue empty plus local empty, */
-/* so runnable never restores with any queued work held high. */
+/* True when a stopping task should restore the idle hint. Bang-bang edge at */
+/* M1 with no EMA and no state growth. M2 keeps the predicate but maps the */
+/* value through the EMA with from_ema, so long idle still decays to zero. */
+/* Needs blocked, per CPU queue empty, and local empty, so runnable never */
+/* restores with any queued work held high. */
 static __always_inline bool flow_should_restore_hint(
 	bool runnable, u64 dsq_nr, u64 local_nr)
 {
@@ -232,15 +230,13 @@ static __always_inline u64 flow_ema_climb(u64 ema,
 		step = gap;
 	return ema + step;
 }
-/* Decay the EMA by sleep with half-life halves plus Taylor. */
-/* Shifts whole half-lives then scales the residual below one */
-/* half with a 2nd-order Taylor of 0.5 to the r power at r is */
-/* rem over half. Fixed point at FP_ONE 256 holds ln2 times */
-/* 256 at 177 plus quad times 256 at 61, so t is rem times */
-/* 256 over half in 0 to 255 with dec1 plus inc2 in u64 order */
-/* with no float plus no loop. Zero sleep keeps identity. */
-/* Zero half keeps identity with no divide. At or past 64 */
-/* periods returns zero, so long idle still maps to zero. */
+/* Decay the EMA by sleep with half-life halves and Taylor. Shifts whole */
+/* half-lives then scales the residual below one half with a 2nd-order Taylor */
+/* of 0.5 to the r power at r is rem over half. Fixed point at FP_ONE 256 */
+/* holds ln2 times 256 at 177 + quad times 256 at 61, so t is rem times 256 */
+/* over half in 0 to 255 with dec1 + inc2 in u64 order with no float and no */
+/* loop. Zero sleep keeps identity. Zero half keeps identity with no divide. */
+/* At or past 64 periods returns zero, so long idle still maps to zero. */
 static __always_inline u64 flow_ema_decay(u64 ema,
 	u64 sleep, u64 half)
 {
@@ -318,15 +314,13 @@ static __always_inline bool flow_burst_hot(u64 delta)
 {
 	return delta >= (u64)FLOW_DEMOTE_BURST_NS;
 }
-/* Burst allowance from light depth with flood backpressure. */
-/* Depth sums queued tasks in light per CPU queues capped at */
-/* 4. Table is depth 0 to 1 to 4ms, depth 2 to 3 to 2ms, */
-/* depth 4 plus to 1ms. Quiet keeps 4ms so lone bursts move */
-/* fast with no pressure. Mild halves to 2ms so flood bursts */
-/* move earlier but still above one slice with no flap on */
-/* single slices. Deep floors at 1ms, so per task worst case */
-/* is the floor during flood. Halves keeps the view matched */
-/* to dispatch isolation with no BSS cost in stopping. */
+/* Burst allowance from light depth with flood backpressure. Depth sums */
+/* queued tasks in light per CPU queues capped at 4. Table is depth 0 to 1 to */
+/* 4ms, depth 2 to 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so */
+/* lone bursts move fast with no pressure. Mild halves to 2ms so flood bursts */
+/* move earlier but still above one slice with no flap on single slices. Deep */
+/* floors at 1ms, so per task worst case is the floor during flood. Halves */
+/* keeps the view matched to dispatch isolation with no BSS cost in stopping. */
 /* Strict iff ready is zero, best effort iff ready is one. */
 static __always_inline u64 flow_burst_allowance(u64 depth)
 {
@@ -387,13 +381,11 @@ static __always_inline u64 flow_clamp_vruntime(u64 v,
 		return floor;
 	return v;
 }
-/* Weight table for 40 nice levels from minus 20 to 19. */
-/* Index is nice plus 20 with center 1024 at nice 0. */
-/* Ends are 2048 at minus 20 and 256 at 19, */
-/* so total spread K is 8 with boost 2x and penalty 4x. */
-/* Made as 1024 times 2 to minus nice over 20 below 1, */
-/* else 1024 times 4 to minus nice over 19, rounded. */
-/* The maker is docs only, the table is rodata. */
+/* Weight table for 40 nice levels from minus 20 to 19. Index is nice + 20 */
+/* with center 1024 at nice 0. Ends are 2048 at minus 20 and 256 at 19, so */
+/* total spread K is 8 with boost 2x and penalty 4x. Made as 1024 times 2 to */
+/* minus nice over 20 below 1, else 1024 times 4 to minus nice over 19, */
+/* rounded. The maker is docs only, the table is rodata. */
 static const u16 flow_weight_table[40] = {
 	2048, 1978, 1911, 1846, 1783, 1722, 1663, 1607,
 	1552, 1499, 1448, 1399, 1351, 1305, 1261, 1218,
@@ -452,7 +444,7 @@ static __always_inline u64 flow_clamp_vruntime_w(u64 v,
 		return floor;
 	return v;
 }
-/* Deadline from clamped time plus scaled estimate. */
+/* Deadline from clamped time and scaled estimate. */
 static __always_inline u64 flow_deadline(u64 clamped_v,
 	u64 scaled)
 {
@@ -479,9 +471,8 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;
 }
-/* Next peer for steal scan with rotating cursor. */
-/* Masks rate plus stand, so one kick per slice keeps */
-/* the scan order with no extra state. */
+/* Next peer for steal scan with rotating cursor. Masks rate and stand, so */
+/* one kick per slice keeps the scan order with no extra state. */
 static __always_inline u32 flow_steal_next(u32 cursor,
 	u32 nr_cpus)
 {
@@ -491,7 +482,7 @@ static __always_inline u32 flow_steal_next(u32 cursor,
 	cur = cursor & (u32)FLOW_CURSOR_MASK;
 	return (cur + 1) % nr_cpus;
 }
-/* Cursor peer without rate plus stand. */
+/* Cursor peer without rate and stand. */
 static __always_inline u32 flow_cursor_val(u32 cursor)
 {
 	return cursor & (u32)FLOW_CURSOR_MASK;
@@ -504,9 +495,8 @@ static __always_inline bool flow_stand_held(u32 cursor)
 	return (cursor &
 	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
 }
-/* Store peer plus keep rate plus stand. */
-/* Dispatch CAS keeps fresh flags, model */
-/* is sequential form, timing only. */
+/* Store peer, keep rate, and stand. Dispatch CAS keeps fresh flags, model is */
+/* sequential form, timing only. */
 static __always_inline u32 flow_cursor_store(u32 peer,
 	u32 old)
 {
@@ -514,12 +504,12 @@ static __always_inline u32 flow_cursor_store(u32 peer,
 	    (old & ((u32)FLOW_CURSOR_RATE_BIT |
 	    (u32)FLOW_CURSOR_STAND_BIT));
 }
-/* Set the stand latch plus keep peer plus rate. */
+/* Set the stand latch, keep peer, and rate. */
 static __always_inline u32 flow_stand_set(u32 cursor)
 {
 	return cursor | (u32)FLOW_CURSOR_STAND_BIT;
 }
-/* Clear the stand latch plus keep peer plus rate. */
+/* Clear the stand latch, keep peer, and rate. */
 static __always_inline u32 flow_stand_clear(u32 cursor)
 {
 	return cursor & ~(u32)FLOW_CURSOR_STAND_BIT;
@@ -583,10 +573,9 @@ static __always_inline bool flow_delay_armed_latched(
 		return true;
 	return false;
 }
-/* Max of two delay samples with cap at 250. */
-/* Win plus cur are dual writer max, count is */
-/* running only. Lost race drops at most one */
-/* sample with no count skew, decay intact. */
+/* Max of two delay samples with cap at 250. Win and cur are dual writer max, */
+/* count is running only. Lost race drops at most one sample with no count */
+/* skew, decay intact. */
 static __always_inline u8 flow_delay_max(u8 a,
 	u8 b)
 {
@@ -595,9 +584,8 @@ static __always_inline u8 flow_delay_max(u8 a,
 		return (u8)FLOW_DELAY_MAX;
 	return m;
 }
-/* Close one window of 8 with decay plus max. */
-/* Decays the old max by 1/8 then keeps the max */
-/* with the current window max with cap at 250. */
+/* Close one window of 8 with decay and max. Decays the old max by 1/8 then */
+/* keeps the max with the current window max with cap at 250. */
 static __always_inline u8 flow_delay_close(u8 win,
 	u8 cur)
 {
@@ -605,14 +593,11 @@ static __always_inline u8 flow_delay_close(u8 win,
 	u8 m = flow_delay_max(d, cur);
 	return m;
 }
-/* Granule in nanos quarter slice with 64us floor. */
-/* Base is slice times 1024 over weight quartered */
-/* with floor at 64us, so heavy keeps short and */
-/* light keeps long with no trap on zero input. */
-/* Short heavy is stricter, tempering deadline */
-/* lead. Net easiness is deadline math, not gran. */
-/* Quarter bounds theft near 25% of a slice. */
-/* Floor covers IPI plus switch cost, no thrash. */
+/* Granule in nanos quarter slice with 64us floor. Base is slice times 1024 */
+/* over weight quartered with floor at 64us, so heavy keeps short and light */
+/* keeps long with no trap on zero input. Short heavy is stricter, tempering */
+/* deadline lead. Net easiness is deadline math, not gran. Quarter bounds */
+/* theft near 25% of a slice. Floor covers IPI and switch cost, no thrash. */
 /* Uses woken weight only, see deserved. */
 static __always_inline u64 flow_granule_for_weight(
 	u32 weight, u64 slice)
@@ -633,27 +618,23 @@ static __always_inline u64 flow_granule_for_weight(
 		return (u64)FLOW_GRANULE_FLOOR_NS;
 	return gran;
 }
-/* True when woken deadline beats frontier plus gran plus slack. */
-/* Frontier is the service floor, so beating it by */
-/* granule proves earliness with no occupant state. */
-/* Slack is 32us bounded at half the 64us floor, so */
-/* near misses ease with no storm. Wrap safe via */
-/* time before on the summed bound with no branch. */
-/* Granule uses woken weight only, occupant weight */
-/* stays out after the frontier compare fix. */
+/* True when woken deadline beats frontier, gran, and slack. Frontier is the */
+/* service floor, so beating it by granule proves earliness with no occupant */
+/* state. Slack is 32us bounded at half the 64us floor, so near misses ease */
+/* with no storm. Wrap safe via time before on the summed bound with no */
+/* branch. Granule uses woken weight only, occupant weight stays out after */
+/* the frontier compare fix. */
 static __always_inline bool flow_deserved(u64 woken_dl,
 	u64 frontier, u64 granule)
 {
 	return flow_time_before(woken_dl,
 	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
 }
-/* True when all five preempt gates pass. */
-/* Armed plus deserved plus same group plus mask plus */
-/* rate clear with fail closed on any clear. Branch */
-/* order is armed plus deserved plus group plus mask */
-/* plus rate, rate last as the atomic claim. Each fail */
-/* counts total plus its reason at 200B. Disarmed plus */
-/* rate plus isolation no longer share one count. */
+/* True when all five preempt gates pass. Armed, deserved, same group, mask, */
+/* and rate clear with fail closed on any clear. Branch order is armed, */
+/* deserved, group, mask, and rate, rate last as the atomic claim. Each fail */
+/* counts total and its reason at 200B. Disarmed, rate, and isolation no */
+/* longer share one count. */
 static __always_inline bool flow_preempt_ok(bool armed,
 	bool deserved, bool rate_clear, bool same_group,
 	bool mask_ok)
@@ -672,18 +653,15 @@ static __always_inline bool flow_kick_recent(u64 now,
 	return now - last <
 	    (u64)FLOW_KICK_COALESCE_NS;
 }
-/* True when perf mode is on for S0 plus S1. */
-/* BSS flag holds zero for strict plus one for perf. */
-/* Zero init keeps 4.2.21 paths bit identical. Probe */
-/* force joins here, so one predicate covers grouping in */
-/* select plus enqueue with strict default bit for bit. */
-/* Perf arms widen placement with natural hints only, so */
-/* the probe measures the grouping split with no hint */
-/* split. S0 keeps tier order with wider any allowed set, */
-/* S1 bypasses the kick group gate with no recount. */
-/* Mask always wins in both modes with no new knob. */
-/* Extern lives in the function body, so bindgen keeps */
-/* no host copy with BSS only in main. */
+/* True when perf mode is on for S0 and S1. BSS flag holds zero for strict */
+/* and one for perf. Zero init keeps 4.2.21 paths bit identical. Probe force */
+/* joins here, so one predicate covers grouping in select and enqueue with */
+/* strict default bit for bit. Perf arms widen placement with natural hints */
+/* only, so the probe measures the grouping split with no hint split. S0 */
+/* keeps tier order with wider any allowed set, S1 bypasses the kick group */
+/* gate with no recount. Mask always wins in both modes with no new knob. */
+/* Extern lives in the function body, so bindgen keeps no host copy with BSS */
+/* only in main. */
 static __always_inline bool flow_perf_enabled(void)
 {
 	extern volatile u8 flow_perf_mode;

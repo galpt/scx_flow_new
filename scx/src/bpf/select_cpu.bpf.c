@@ -2,8 +2,9 @@
 /*
  * Select CPU op
  *
- * Picks an idle CPU in group with mask and locality first, then any idle plus previous plus
- * first allowed. Keeps placement only with no dispatch use and mask always wins.
+ * Picks an idle CPU in group with mask and locality first, then any idle,
+ * previous, and first allowed. Keeps placement only with no dispatch use and
+ * mask always wins.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -47,10 +48,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		group = (u8)FLOW_GROUP_HOG;
 	else
 		group = (u8)FLOW_GROUP_LIGHT;
-	/* Waker CPU first when idle with mask plus group. */
-	/* Strict needs in group, perf takes any allowed idle. */
-	/* An idle core cannot stack, so locality is free. */
-	/* Every other case keeps current behavior. Mask wins. */
+	/* Waker CPU first when idle with mask and group. Strict needs in group, */
+	/* perf takes any allowed idle. An idle core cannot stack, so locality is */
+	/* free. Every other case keeps current behavior. Mask wins. */
 	wst = flow_cpu((u32)this_cpu);
 	if (wst && wst->running_pid == 0 &&
 	    flow_cpu_ok(p, this_cpu) &&

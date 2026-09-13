@@ -33,11 +33,10 @@ fn read_trimmed(path: &Path) -> Option<String> {
 }
 
 /*
- * Join one zone name under the base dir. Accepts letters
- * plus digits plus dash plus underscore plus colon plus
- * dot, so intel-rapl plus index forms pass. Anything else
- * yields nothing, so parent climbs plus separators plus
- * absolute paths stay out with no trap.
+ * Join one zone name under the base dir. Accepts letters, digits, dash,
+ * underscore, colon, and dot. Intel-rapl with index forms then pass.
+ * Anything else yields nothing, so parent climbs, separators, and absolute
+ * paths stay out with no trap.
  */
 pub fn zone_path(base: &Path, zone: &str) -> Option<PathBuf> {
     if zone.is_empty() {
@@ -56,13 +55,11 @@ pub fn zone_path(base: &Path, zone: &str) -> Option<PathBuf> {
 }
 
 /*
- * Find the package zone under the base dir. Scans every
- * entry and reads its name file, so no index is assumed.
- * The first entry whose name opens with package wins in
- * sorted order, so repeated scans agree. Core plus
- * uncore plus nameless entries stay out. Nothing here
- * reads the enabled file, since the counter advances
- * while enabled reads zero on the measured host.
+ * Find the package zone under the base dir. Scans every entry and reads its
+ * name file, so no index is assumed. The first entry whose name opens with
+ * package wins in sorted order, so repeated scans agree. Core, uncore, and
+ * nameless entries stay out. Nothing here reads the enabled file, since the
+ * counter advances while enabled reads zero on the measured host.
  */
 #[allow(dead_code)]
 pub fn discover_package_zone(base: &Path) -> Option<PathBuf> {
@@ -105,9 +102,8 @@ pub fn discover_package_zones(base: &Path) -> Vec<PathBuf> {
 }
 
 /*
- * Range of one zone in microjoules. Missing plus broken
- * files yield the fallback with a warn log, so the probe
- * keeps honest deltas on hosts with odd firmware.
+ * Range of one zone in microjoules. Missing and broken files yield the fallback
+ * with a warn log, so the probe keeps honest deltas on hosts with odd firmware.
  */
 pub fn read_max_range(zone: &Path) -> u64 {
     read_trimmed(&zone.join("max_energy_range_uj"))
@@ -125,13 +121,11 @@ pub fn read_energy_uj(energy: &Path) -> Option<u64> {
 }
 
 /*
- * Delta between two counter reads in microjoules. Equal
- * reads yield zero. A backward step is one wrap, so the
- * delta is a modular single wrap correction against the
- * true max with the tail plus the head. A delta past half
- * the max cannot come from one second of burn and marks
- * the interval invalid with nothing. Zero max yields
- * nothing with no divide.
+ * Delta between two counter reads in microjoules. Equal reads yield zero. A
+ * backward step is one wrap, so the delta is a modular single wrap correction
+ * against the true max with the tail and the head. A delta past half the max
+ * cannot come from one second of burn and marks the interval invalid with
+ * nothing. Zero max yields nothing with no divide.
  */
 pub fn energy_delta_uj(new: u64, old: u64, max_range: u64) -> Option<u64> {
     if max_range == 0 {
@@ -149,9 +143,9 @@ pub fn energy_delta_uj(new: u64, old: u64, max_range: u64) -> Option<u64> {
 }
 
 /*
- * True when the counter proves it moves. Needs two good
- * reads with a positive delta inside half the max, so a
- * stuck file plus a wild jump both fail the check.
+ * True when the counter proves it moves. Needs two good reads with a positive
+ * delta inside half the max, so a stuck file and a wild jump both fail the
+ * check.
  */
 pub fn increment_ok(first: Option<u64>, second: Option<u64>, max_range: u64) -> bool {
     match (first, second) {
@@ -161,9 +155,8 @@ pub fn increment_ok(first: Option<u64>, second: Option<u64>, max_range: u64) -> 
 }
 
 /*
- * One package zone state with its own range plus base.
- * Per zone wrap keeps each counter honest, the sample
- * sums all zones after every zone proves valid.
+ * One package zone state with its own range and base. Per zone wrap keeps each
+ * counter honest, the sample sums all zones after every zone proves valid.
  */
 struct ZoneState {
     energy: PathBuf,
@@ -172,11 +165,10 @@ struct ZoneState {
 }
 
 /*
- * Open package reader. Holds one entry per package zone
- * with the energy file plus the range plus the last read
- * for deltas. Open fails with nothing when discovery plus
- * range plus the increment check do not all pass, and the
- * caller parks the probe in the unavailable state.
+ * Open package reader. Holds one entry per package zone with the energy file,
+ * the range, and the last read for deltas. Open fails with nothing when
+ * discovery, range, and the increment check do not all pass, and the caller
+ * parks the probe in the unavailable state.
  */
 pub struct RaplReader {
     zones: Vec<ZoneState>,
@@ -224,11 +216,10 @@ impl RaplReader {
     }
 
     /*
-     * One summed delta since the last call in microjoules.
-     * Every zone must read well with a valid wrap delta,
-     * else nothing moves and no base moves, so the next
-     * good read still covers the gap with no poison. A
-     * bad read plus an invalid delta yield nothing.
+     * One summed delta since the last call in microjoules. Every zone must read
+     * well with a valid wrap delta, else nothing moves and no base moves, so
+     * the next good read still covers the gap with no poison. A bad read and an
+     * invalid delta yield nothing.
      */
     pub fn sample(&mut self) -> Option<u64> {
         let mut nows = Vec::with_capacity(self.zones.len());

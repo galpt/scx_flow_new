@@ -57,11 +57,10 @@ fn jt(v: &Value) -> String {
 }
 
 /* Merged dashboard object for one snapshot. */
-/* Full log with version plus timestamp plus topology */
-/* plus depths plus allowance plus mode plus governor */
-/* plus energy plus stats plus per-CPU. Same object serves stats */
-/* polling plus snapshot download on loopback with no */
-/* new exposure. */
+/* Full log with version, timestamp, topology, depths, and allowance. */
+/* It also carries mode, governor, energy, stats, and per-CPU. Same */
+/* object serves stats polling and snapshot download on loopback with */
+/* no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -79,10 +78,9 @@ fn merged(snap: &WebMetrics) -> Value {
 }
 
 /*
- * Serve one unix client. Routes mirror the TCP server.
- * The root serves the page. The stats plus snapshot
- * paths serve the same full JSON with loopback only.
- * Unknown paths get a short not found reply.
+ * Serve one unix client. Routes mirror the TCP server. The root serves the
+ * page. The stats and snapshot paths serve the same full JSON with loopback
+ * only. Unknown paths get a short not found reply.
  */
 fn unix_client(
     mut stream: std::os::unix::net::UnixStream,
@@ -387,7 +385,7 @@ mod tests {
         );
     }
 
-    /* Waiting keeps pairs plus eleven keys for the page. */
+    /* Waiting keeps pairs and eleven keys for the page. */
     #[test]
     fn merged_carries_waiting_with_pairs() {
         for (state, accepted, headline) in [
@@ -507,7 +505,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.35".to_string(),
+            version: "4.2.36".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -571,7 +569,7 @@ mod tests {
             back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
             9_000
         );
-        assert_eq!(back.version, "4.2.35");
+        assert_eq!(back.version, "4.2.36");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
@@ -620,7 +618,7 @@ mod tests {
         assert!(html.contains("id=\"pskip-r\""));
     }
 
-    /* Dashboard shows the strict plus perf mode cell. */
+    /* Dashboard shows the strict and perf mode cell. */
     #[test]
     fn dashboard_shows_mode_cell() {
         let html = include_str!("../ui/index.html");
