@@ -170,7 +170,7 @@ impl<'a> Scheduler<'a> {
         /* plus capacity plus LLC plus siblings seed groups. */
         let cards = topology::web_cpu_static();
         /* Online ids once at init in rank order. Snapshot */
-        /* plus seeding share one order with no re-read. */
+        /* reads online CPUs again each tick for hotplug. */
         /* Rank based seed writes by id, offline stays */
         /* light inert, skewed forces ready one, dense full */
         /* keeps prior table plus ready exactly. */

@@ -138,7 +138,7 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear rate only plus keep peer plus stand. */
+/* Clear running estimate, pid and nice to 0, weight to 1024, plus rate bit. */
 /* Atomic clear, so a concurrent claim never loses. */
 static __always_inline void flow_clear_running(s32 cpu)
 {

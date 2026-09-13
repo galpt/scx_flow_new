@@ -2154,7 +2154,7 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
     use crate::flow_group::GROUP_TABLE_LEN;
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
-    // Halves at 4: 0,1 light plus 2,3 hog.
+    // Halves at 4. 0,1 light plus 2,3 hog.
     let allowed = vec![true; 4];
     let queued = vec![5, 1, 3, 0];
     // Strict least in light is 1, perf same when hit.
@@ -2166,7 +2166,7 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
         pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, true),
         Some(1)
     );
-    // Narrow to hog only: strict light misses, perf widens.
+    // Narrow to hog only. Strict light misses, perf widens.
     let narrow = vec![false, false, true, true];
     assert_eq!(
         pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, false),
@@ -2176,7 +2176,7 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
         pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &queued, true),
         Some(3)
     );
-    // Selected cross group: strict skips to least, perf keeps it.
+    // Selected cross group. Strict skips to least, perf keeps it.
     assert_eq!(
         pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &queued, false),
         Some(1)
@@ -2215,7 +2215,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     let nr = 4;
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let partner = vec![SIBLING_EMPTY; 4];
-    // All idle plus free: strict and perf both take 0.
+    // All idle plus free. Strict and perf both take 0.
     let allowed = vec![true; 4];
     let idle = vec![true; 4];
     let running = vec![false; 4];
@@ -2254,7 +2254,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         ),
         Some(0)
     );
-    // Light masked out: strict falls to first hog, perf widens least.
+    // Light masked out. Strict falls to first hog, perf widens least.
     let hog_only = vec![false, false, true, true];
     let idle_hog = vec![false, false, true, true];
     let strict = select_cpu_tiered_perf(
@@ -2287,7 +2287,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     );
     assert_eq!(strict, Some(2));
     assert_eq!(perf, Some(2));
-    // Waker cross group: strict skips, perf keeps waker.
+    // Waker cross group. Strict skips, perf keeps waker.
     let running_busy = vec![true, true, true, false];
     let idle_none = vec![false; 4];
     let queued_busy = vec![5, 5, 5, 0];
@@ -2322,7 +2322,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     );
     assert_ne!(s, p);
     assert_eq!(p, Some(3));
-    // Mask wins: no allowed yields none in both modes.
+    // Mask wins. No allowed yields none in both modes.
     let empty = vec![false; 4];
     assert_eq!(
         select_cpu_tiered_perf(

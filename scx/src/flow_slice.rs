@@ -61,9 +61,9 @@ pub fn clamp_est(v: u64) -> u64 {
 }
 
 /*
- * Scale an estimate by weight for virtual time. The
- * fixed weight keeps the value unchanged while the
- * signature allows future weights with no call change.
+ * Scale an estimate by live weight for virtual time.
+ * Weight 1024 keeps the value unchanged and other
+ * weights scale it inversely.
  */
 #[cfg(test)]
 pub fn scale_by_weight(est: u64, weight: u32) -> u64 {

@@ -15,7 +15,7 @@ pub const MAX_CPUS: u32 = 1024;
 /* Bound of peers visited by one steal scan. */
 #[cfg(test)]
 pub const STEAL_BOUND: usize = 8;
-/* Least donor depth that allows a steal. */
+/* Least donor depth that always allows a steal, depth 1 needs rescue. */
 #[cfg(test)]
 pub const STEAL_MIN_DEPTH: u64 = 2;
 /* Coalesce window in nanos at 50us. */
