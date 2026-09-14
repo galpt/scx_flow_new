@@ -72,16 +72,18 @@ volatile u8 flow_probe_perf;
 /* nothing. Wide word keeps atomic or on 32 bits, since 8 bit atomics stay */
 /* unsupported. */
 volatile u32 flow_wheel_head;
-/* Wheel fine summary with 256 bits for 256 near slots. Set after insert with */
-/* the head and coarse. Never cleared, so seek stays fail-positive with drains */
-/* owning moves and no hide. Drains never consult marks, so clearing buys */
-/* nothing. */
+/* Wheel fine summary with 256 bits for 256 near slots. Set */
+/* after insert with the head and coarse. Never cleared, so */
+/* seek stays fail-positive with drains owning moves and no */
+/* hide. Drains never consult marks, kicks use window truth, */
+/* so clearing buys nothing. */
 volatile u64 flow_wheel_fine[4];
-/* Wheel coarse summary with 256 bits for 256 far blocks. Set after insert */
-/* with head and fine. Never cleared per bucket, since one bit covers 256 */
-/* slots and no single drain can prove the block empty, so stale falls back */
-/* to positive with drains owning moves and no hide. Drains never consult */
-/* marks, so clearing buys nothing. */
+/* Wheel coarse summary with 256 bits for 256 far blocks. Set */
+/* after insert with head and fine. Never cleared per bucket, */
+/* since one bit covers 256 slots and no single drain can prove */
+/* the block empty, so stale falls back to positive with drains */
+/* owning moves and no hide. Drains never consult marks, kicks */
+/* use window truth, so clearing buys nothing. */
 volatile u64 flow_wheel_coarse[4];
 /* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
 /* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
@@ -89,24 +91,32 @@ volatile u64 flow_wheel_coarse[4];
 /* Stopping refills to full with no vruntime change. Enqueue spends one on a */
 /* boost with no order change. */
 volatile u32 flow_token_stor[1024];
-/* Per CPU slot bucket cursor with one u8 per CPU for 1024 CPUs. Each entry */
-/* holds 0 to 255 for own bucket rotation with BSS zero start. Plain load and */
-/* store on the owning CPU only with no atomic, since dispatch for one CPU */
-/* owns its entry. Wraps by truncation with no branch, so every bucket gets a */
-/* visit within 256 dispatches with no collapse and no freeze on hot ones. */
-/* every bucket with no collapse with the steal cursor and no freeze on hot */
-/* buckets. Capped retain keeps a D capped bucket for retry while */
-/* unmovable-only leftover advances with no pin, so every occupied bucket */
-/* drains within 512 dispatches worst case with always rescue and the kick */
-/* chain below. */
+/* Per CPU slot bucket cursor with one u8 per CPU for 1024 CPUs. */
+/* Each entry holds 0 to 255 for own bucket rotation with BSS */
+/* zero start. Plain load and store on the owning CPU only with */
+/* no atomic, since dispatch for one CPU owns its entry. Wraps */
+/* by truncation with no branch. At most 3 consecutive retains */
+/* per bucket with force advance, so every bucket gets a visit */
+/* within 1024 dispatches with no collapse and no hot pin. */
+/* Capped retain keeps a 31 capped bucket for retry while */
+/* unmovable-only leftover advances with no pin, so every */
+/* occupied bucket drains within 1024 worst case with always */
+/* rescue and the kick chain below. */
 volatile u8 flow_slot_cur[1024];
-/* Per CPU sweep miss counter with one u8 per CPU for 1024 CPUs. Each entry */
-/* holds 0 to 255 zero-move sweeps since last progress with BSS zero start. */
-/* Plain load and store on the owning CPU only with no atomic, since dispatch */
-/* for one CPU owns its entry. Caps zero-move kick chains at 255 hops, so */
-/* unmovable-only far work stops polling with no infinite loop while movable */
-/* far work sweeps within 256. Resets on any move with no extra pass. */
-volatile u8 flow_slot_sweep_cnt[1024];
+/* Per CPU retain counter with one u8 per CPU for 1024 CPUs. */
+/* Each entry holds 0 to 3 consecutive retains with BSS zero */
+/* start. Plain load and store on the owning CPU only with no */
+/* atomic, since dispatch for one CPU owns its entry. Force */
+/* advance past 3 keeps hot buckets bounded with no pin. */
+volatile u8 flow_slot_retain_cnt[1024];
+/* Per CPU sweep miss counter with one u16 per CPU for 1024 */
+/* CPUs. Each entry holds 0 to 256 zero-move sweeps since last */
+/* progress with BSS zero start. Plain load and store on the */
+/* owning CPU only with no atomic, since dispatch for one CPU */
+/* owns its entry. Caps zero-move kick chains at 256 hops, so */
+/* unmovable-only window work stops polling with no infinite */
+/* loop while movable work sweeps within 256. Resets on move. */
+volatile u16 flow_slot_sweep_cnt[1024];
 /* Mark one wheel slot after insert with head, fine, and coarse. Slot holds 0 */
 /* to 65535 from the probe cap. Head mirrors the first 8 near slots, fine */
 /* mirrors the first 256 near slots, coarse mirrors 256 far blocks, all with */

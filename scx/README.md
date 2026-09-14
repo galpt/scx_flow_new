@@ -72,26 +72,32 @@ by online rank with write by id. See
 
 ### Dispatch
 
-Strict order is own cursor bucket to budget, group
-overflow at 4, two fill ahead buckets at 4 each, then
-always the other group cursor bucket at 1. One suffices
-because rotation plus the kick sweep still cover every
-bucket, so cross-group rescue stays an exception path
-rather than a bulk path. Rotation advances the cursor
-each dispatch with capped retain for hot buckets, so
-every occupied bucket drains within 512 dispatches
-worst case. A capped drain with
-work left counts one defer. A kick safety net chains
-idle owners past the watchdog with progress, far, and
-sweep kicks. All trips share one drain body with mask
-wins and move to local, so per queue order stays FIFO.
-Placement, dispatch, and pressure read the live table
-seeded by online rank.
+Strict order is own cursor bucket at 31, group
+overflow at 4, two fill ahead buckets at 4 each, other
+group overflow at 4, then always the other group cursor
+bucket at 1. One rescue suffices because rotation plus
+the kick sweep still cover every bucket, so cross-group
+rescue stays an exception path rather than a bulk path.
+The other overflow trip keeps a hog far tail drainable
+on an all-light host with mask wins. Rotation advances
+the cursor each dispatch with capped retain at most 3
+in a row, so every occupied bucket drains within 1024
+dispatches worst case with refill to zero on advance.
+Own at 31 leaves one slot for the rest, so saturated
+own still lets overflow, fill, other overflow, and
+rescue progress. A capped drain with window work left
+counts one defer. A kick safety net chains idle owners
+past the watchdog with progress and sweep kicks at 256
+on window truth only with no far storm. All trips share
+one drain body with mask wins and move to local, so per
+queue order stays FIFO. Placement, dispatch, and
+pressure read the live table seeded by online rank.
 
 ### Kicks
 
-Idle targets with at most 2 queued in the slot target
-are kicked with a mask check. Busy targets stay
+Idle targets are always kicked with a mask check
+regardless of shared queue depth, so no idle CPU with
+queued work sleeps unkicked. Busy targets stay
 fail-closed with no preempt and one armed skip count,
 since the sharded store keeps no per CPU depth for a
 deserved compare. The gate keeps total and five reason
@@ -100,10 +106,10 @@ mask, and rate, so busy no-kicks count under armed
 only in the slot store. One coalesced count covers q2 idle
 skips in 50us at 288B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
-always kicks, deep stays quiet, pinned never skips.
+always kicks, deep always kicks, pinned never skips.
 Delay persists across idle, delay shows stale
 when idle. A missed wakeup is rescued on the next
-insert while deep queues stay quiet. Exiting uses
+insert with no strand. Exiting uses
 a separate idle kick on the task CPU with no depth,
 no coalesce, and no preempt. Overflow sends
 no kick and the next rotation or rescue pass collects

@@ -365,9 +365,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(
 			    &flow_stats.token_boosts, 1);
 		/* Kick idle and busy preempt with delay. */
-		/* Idle fast path first with one queued read on the slot target. */
-		/* Q2 idle in 50us coalesces when not pinned. */
-		/* Q1 always kicks, deep stays quiet, no slide. */
+		/* Idle fast path first with one queued read on */
+		/* the slot target. Q2 idle in 50us coalesces when */
+		/* not pinned. Q1 always kicks, deep always kicks */
+		/* with no quiet, so no idle CPU with queued work */
+		/* sleeps unkicked. No slide. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
 		/* Busy stays fail closed as disarmed with total and armed */
@@ -390,9 +392,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				return;
 			q = scx_bpf_dsq_nr_queued(sdsq);
 			if (st->running_pid == 0) {
-				if (q >
-				    (u64)FLOW_STEAL_MIN_DEPTH)
-					return;
 				if (q ==
 				    (u64)FLOW_STEAL_MIN_DEPTH &&
 				    !pinned &&

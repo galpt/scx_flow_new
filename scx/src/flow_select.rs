@@ -680,17 +680,15 @@ pub fn exiting_kick_ok(running_pid: u32, has_state: bool) -> bool {
 
 /*
  * True when an idle kick may run. Needs an idle target
- * with no running task and at most 2 queued, so a
- * missed empty to 1 kick is rescued on the next insert
- * while deep queues stay quiet with no storm. Busy
- * targets stay quiet. A missing state fails closed
- * with no kick.
+ * with no running task. Always kicks the idle target
+ * regardless of the shared queue depth, so no idle CPU
+ * with queued work sleeps unkicked. Q2 still coalesces
+ * in 50us, see below. Busy targets stay quiet. A
+ * missing state fails closed with no kick. The queue
+ * length stays for call compat and is ignored.
  */
 #[cfg(test)]
-pub fn kick_idle_ok(queue_len: u64, running_pid: u32, has_state: bool) -> bool {
-    if queue_len > STEAL_MIN_DEPTH {
-        return false;
-    }
+pub fn kick_idle_ok(_queue_len: u64, running_pid: u32, has_state: bool) -> bool {
     if !has_state {
         return false;
     }
@@ -712,10 +710,10 @@ pub fn kick_recent(now: u64, last: u64) -> bool {
 
 /*
  * True when one idle kick coalesces with no kick. Needs q2, idle, recent, and
- * not pinned, so q1 always kicks and deep stays quiet with no count. Pinned
- * never skips. No slide on skip, the caller keeps the old last. Overflow sends
- * no kick on its own. Exiting uses its own idle kick with no coalesce, see
- * exiting_kick_ok.
+ * not pinned, so q1 always kicks and deep always kicks with no coalesce.
+ * Pinned never skips. No slide on skip, the caller keeps the old last.
+ * Overflow sends no kick on its own. Exiting uses its own idle kick with
+ * no coalesce, see exiting_kick_ok.
  */
 #[cfg(test)]
 pub fn kick_coalesced(

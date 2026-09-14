@@ -16,6 +16,15 @@
 pub const SLOT_D: u32 = 4;
 /* Tasks moved by one dispatch pass at most. Fixed at 32 with no knob. */
 pub const SLOT_BUDGET: u32 = 32;
+/* Own bucket cap at budget minus one. Fixed at 31 with no knob. */
+#[cfg(test)]
+pub const SLOT_OWN_CAP: u32 = 31;
+/* Consecutive retains before force advance. Fixed at 3. */
+#[cfg(test)]
+pub const RETAIN_MAX: u8 = 3;
+/* Zero-move sweep bound. Fixed at 256 with no knob. */
+#[cfg(test)]
+pub const SWEEP_MAX: u16 = 256;
 /* Base id of the sharded slot queues. */
 #[cfg(test)]
 pub const SLOT_BASE: u64 = 0x6000;
@@ -177,6 +186,18 @@ pub fn slot_cap(budget: u32) -> u32 {
 }
 
 /*
+ * Own bucket cap at budget minus one. Holds 31 with
+ * budget 32, so one slot stays for overflow, fill,
+ * other overflow, and rescue with no strand on a hot
+ * own bucket. Zero stays zero. Mirrors the BPF own
+ * cap reserve.
+ */
+#[cfg(test)]
+pub fn slot_own_cap(budget: u32) -> u32 {
+    budget.saturating_sub(1)
+}
+
+/*
  * Next bucket of one slot cursor with wrap. Holds
  * cur plus one truncated to u8, so 255 wraps to zero
  * with no branch. Mirrors the BPF rotation step.
@@ -199,19 +220,27 @@ pub fn slot_add(base: u8, off: u32) -> u8 {
 }
 
 /*
- * Four trip queue ids for one dispatch. Trip 0 owns
- * the cursor bucket to budget, trip 1 owns the group
- * overflow at D, trips 2 to 3 own the two fill ahead
- * buckets at D each. Mirrors the BPF k-trip ids with
- * no drain use.
+ * Five trip queue ids for one dispatch. Trip 0 owns
+ * the cursor bucket at budget minus one, trip 1 owns
+ * the group overflow at D, trips 2 to 3 own the two
+ * fill ahead buckets at D each, trip 4 owns the other
+ * group overflow at D. Mirrors the BPF k-trip ids with
+ * no drain use. Trip 4 keeps a hog far tail drainable
+ * on an all-light host with mask wins.
  */
 #[cfg(test)]
-pub fn trip_dsqs(cur: u8, group: u8) -> [u64; 4] {
+pub fn trip_dsqs(cur: u8, group: u8) -> [u64; 5] {
+    let other = if group == crate::flow_group::GROUP_HOG {
+        crate::flow_group::GROUP_LIGHT
+    } else {
+        crate::flow_group::GROUP_HOG
+    };
     [
         slot_dsq(group, cur as u64),
         slot_overflow_dsq(group),
         slot_dsq(group, slot_add(cur, 0) as u64),
         slot_dsq(group, slot_add(cur, 1) as u64),
+        slot_overflow_dsq(other),
     ]
 }
 
@@ -235,16 +264,32 @@ pub fn rescue_dsq(cur: u8, group: u8) -> u64 {
  * Next cursor after one dispatch. A capped own
  * leftover with work still queued retries the same
  * bucket next dispatch, so hot work drains with no
- * 256 wrap delay. Any other case advances with no
+ * 1024 wrap delay. Any other case advances with no
  * pin, so unmovable-only leftover never strands the
- * rotation. Mirrors the BPF capped retain.
+ * rotation. Single step form with retains at zero.
+ * See the bounded step for the BPF mirror with the
+ * force advance after three retains.
  */
 #[cfg(test)]
 pub fn rotation_step(cur: u8, own_left: bool, own_capped: bool) -> u8 {
-    if own_left && own_capped {
-        cur
+    rotation_step_bounded(cur, own_left, own_capped, 0).0
+}
+
+/*
+ * Bounded retain step with the retain count. Holds
+ * the bucket while capped leftover stays queued and
+ * retains stay below three, else advances with no pin
+ * and resets the count. Force advance past three keeps
+ * hot buckets bounded, so every bucket gets a visit
+ * within 1024 dispatches. Mirrors the BPF retain with
+ * the same bound and refill to zero on advance.
+ */
+#[cfg(test)]
+pub fn rotation_step_bounded(cur: u8, own_left: bool, own_capped: bool, retains: u8) -> (u8, u8) {
+    if own_left && own_capped && retains < RETAIN_MAX {
+        (cur, retains + 1)
     } else {
-        slot_next(cur)
+        (slot_next(cur), 0)
     }
 }
 
@@ -285,32 +330,38 @@ pub fn slot_drain_model(
 
 /*
  * True when one dispatch counts a defer. Needs moves
- * at or past D with work left in the window or far
- * marks beyond it, so saturated buckets report back
- * pressure with one count. Mirrors the BPF defer
- * gate with no drain use.
+ * at or past D with work left in the window, so a
+ * saturated bucket reports back pressure with one
+ * count. Far marks feed stats only and never gate a
+ * defer, so the kick net fires on true window work
+ * with no storm. Mirrors the BPF defer gate with no
+ * drain use. The far flag stays for call compat and
+ * is ignored.
  */
 #[cfg(test)]
-pub fn defer_ok(moved: u32, window_left: bool, far_left: bool) -> bool {
-    moved >= SLOT_D && (window_left || far_left)
+pub fn defer_ok(moved: u32, window_left: bool, _far_left: bool) -> bool {
+    moved >= SLOT_D && window_left
 }
 
 /*
  * Kick step for one dispatch with the sweep count.
- * A window or far leftover with any move kicks at
- * once for progress. A zero-move dispatch with a far
- * mark kicks until the sweep bound at 255, so
- * unmovable-only far work stops polling with no
+ * A window leftover with any move kicks at once for
+ * progress. A zero-move dispatch with window work
+ * kicks until the sweep bound at 256, so
+ * unmovable-only window work stops polling with no
  * infinite loop. Any move resets the sweep with no
- * extra pass. Returns whether to kick and the next
- * sweep count. Mirrors the BPF safety net.
+ * extra pass. Far marks feed stats only and never
+ * gate a kick, so steady state stays quiet with kicks
+ * per dispatch well below one. Returns whether to kick
+ * and the next sweep count. Mirrors the BPF safety net.
+ * The far flag stays for call compat and is ignored.
  */
 #[cfg(test)]
-pub fn kick_step(moved: u32, window_left: bool, far_left: bool, sweep: u8) -> (bool, u8) {
-    if moved > 0 && (window_left || far_left) {
+pub fn kick_step(moved: u32, window_left: bool, _far_left: bool, sweep: u16) -> (bool, u16) {
+    if moved > 0 && window_left {
         return (true, 0);
     }
-    if moved == 0 && far_left && sweep < 255 {
+    if moved == 0 && window_left && sweep < SWEEP_MAX {
         return (true, sweep + 1);
     }
     if moved > 0 {

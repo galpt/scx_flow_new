@@ -90,6 +90,8 @@ enum flow_consts {
 	FLOW_SLOT_OVERFLOW_N = 2ULL,
 	FLOW_SLOT_D = 4ULL,
 	FLOW_SLOT_BUDGET = 32ULL,
+	FLOW_SLOT_RETAIN_MAX = 3ULL,
+	FLOW_SLOT_SWEEP_MAX = 256ULL,
 };
 /* Weight fits u16 for the running repack. */
 /* Nice minus 20 to 19 fits s16 for repack. */
@@ -798,6 +800,16 @@ static __always_inline u32 flow_slot_cap(u32 budget)
 	if (budget > (u32)FLOW_SLOT_D)
 		return (u32)FLOW_SLOT_D;
 	return budget;
+}
+/* Own cap of one dispatch at budget minus one. Holds 31 with */
+/* budget 32, so one slot stays for overflow, fill, other */
+/* overflow, and rescue with no strand on saturated own. Zero */
+/* stays zero with no wrap. Mirrors the BPF reserve. */
+static __always_inline u32 flow_slot_own_cap(u32 budget)
+{
+	if (budget == 0)
+		return 0;
+	return budget - 1U;
 }
 /* Next bucket of one slot cursor with wrap. Holds cur plus one truncated to */
 /* u8, so 255 wraps to zero with no branch and no divide. Base is the per CPU */

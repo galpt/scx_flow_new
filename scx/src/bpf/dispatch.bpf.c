@@ -2,23 +2,28 @@
 /*
  * Dispatch op
  *
- * Drains the group slot store in rotation with k-trips, cross-group rescue,
- * defer counts, and a kick safety net. One shared drain body feeds every trip
- * with mask wins and move to local, so only DSQ id selection branches. Seek
- * feeds stats only and never gates a drain, so stale marks add fallback work
- * with no hide.
+ * Drains the group slot store in rotation with k-trips,
+ * cross-group rescue, defer counts, and a kick safety net.
+ * One shared drain body feeds every trip with mask wins and
+ * move to local, so only DSQ id selection branches. Seek
+ * feeds stats only and never gates a drain or a kick, so
+ * stale marks add no storm with no hide. Kicks use window
+ * truth only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Shared drain with DSQ and budget only. Own, overflow, fill, and rescue use */
-/* one for_each with mask wins and move to local, so only DSQ id selection */
-/* branches outside with no duplicated loop body. Inlined into the trip loop, */
-/* so the verifier merges states at the loop back edge with one body analysis */
-/* instead of per-site subprogram repeats. Base carries moved so far with */
-/* budget kept whole, so the break reads one wide sum with no narrow */
-/* remainder beside it and states merge. Callers precompute DSQ and capped */
-/* live already proven at dispatch top. No stats inside, so the caller */
-/* aggregates moves once per dispatch with no per bucket atomics. */
+/* Shared drain with DSQ and budget only. Own, overflow, */
+/* fill, other overflow, and rescue use one for_each with mask */
+/* wins and move to local, so only DSQ id selection branches */
+/* outside with no duplicated loop body. Inlined into the trip */
+/* loop, so the verifier merges states at the loop back edge */
+/* with one body analysis instead of per-site repeats. Base */
+/* carries moved so far with budget kept whole, so the break */
+/* reads one wide sum with no narrow remainder beside it and */
+/* states merge. Callers precompute DSQ and capped live already */
+/* proven at dispatch top. No stats inside, so the caller */
+/* aggregates moves once per dispatch with no per bucket */
+/* atomics. */
 static __always_inline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base)
 {
@@ -44,15 +49,17 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 	bpf_rcu_read_unlock();
 	return moved;
 }
-/* Wheel seek over head and fine with count to first set. Head holds */
-/* near slots 0 to 7, fine holds 0 to 255. Each level uses count trailing */
-/* zeros, so no linear 256 scan runs. No loop nests with for_each either */
-/* way: seek runs before drains with no for_each inside seek and no seek */
-/* inside for_each. Head hit returns with no array read, fine hit returns */
-/* with no further read, empty returns 256 skips with the tail slot, so hot */
-/* stays fast with bounded cost. Coarse far blocks rest in the group */
-/* overflow tail drained by trips, so the window remainder still sees far */
-/* work with no second seek and no hide. Stats only, never a drain gate. */
+/* Wheel seek over head and fine with count to first set. */
+/* Head holds near slots 0 to 7, fine holds 0 to 255. Each */
+/* level uses count trailing zeros, so no linear 256 scan */
+/* runs. No loop nests with for_each either way: seek runs */
+/* before drains with no for_each inside seek and no seek */
+/* inside for_each. Head hit returns with no array read, fine */
+/* hit returns with no further read, empty returns 256 skips */
+/* with the tail slot, so hot stays fast with bounded cost. */
+/* Coarse far blocks rest in the group overflow tails drained */
+/* by trips, so no second seek runs. Stats only, never a drain */
+/* or kick gate. */
 static __always_inline u32 flow_wheel_seek_full(u32 *slot_out)
 {
 	u32 head = flow_wheel_head;
@@ -106,6 +113,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 moved = 0;
 	u32 own_moved = 0;
 	u32 scap;
+	u32 own_cap;
 	u32 k;
 	u8 slot_cur = 0;
 	u8 sgroup = 0;
@@ -113,8 +121,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u64 odsq = 0;
 	u64 odsq_own = 0;
 	u64 rdsq = 0;
+	u64 oodsq = 0;
 	u32 seek_slot = (u32)FLOW_WHEEL_TOTAL;
-	bool far_marked = false;
 	(void)prev;
 	if (cpu < 0)
 		return;
@@ -123,11 +131,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	sgroup = flow_group_live((u32)cpu,
 	    nr_cpu_ids);
 	odsq = flow_slot_overflow_dsq(sgroup);
-	/* Seek counts hierarchical skips with head, fine, and empty */
-	/* hits. Marks only accumulate with no clear, so seek stays fail-positive */
-	/* with drains owning moves. Drains always run below with no early */
-	/* return, since marks feed stats only and never gate a drain. The slot */
-	/* feeds the near hint for defer below with overflow covering far. */
+	/* Seek counts hierarchical skips with head, fine, */
+	/* and empty hits. Marks only accumulate with no clear, */
+	/* so seek stays fail-positive with drains owning moves. */
+	/* Drains always run below with no early return, since */
+	/* marks feed stats only and never gate a drain or kick. */
 	{
 		u32 skips = flow_wheel_seek_full(&seek_slot);
 		__sync_fetch_and_add(&flow_stats.wheel_skips,
@@ -141,15 +149,15 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		else
 			__sync_fetch_and_add(
 			    &flow_stats.wheel_empty, 1);
-		far_marked = seek_slot !=
-		    (u32)FLOW_WHEEL_TOTAL;
 	}
-	/* Rotation loads the per CPU slot cursor at dispatch top with plain */
-	/* owning CPU access. The store below keeps capped-conditional retain, */
-	/* so a capped own leftover retries next dispatch instead of a 256 wrap */
-	/* delay while unmovable-only leftover advances with no pin. Decoupled */
-	/* from the steal cursor, so hot buckets never freeze. One u8 per CPU */
-	/* with BSS zero start. Volatile mask keeps the index proven. */
+	/* Rotation loads the per CPU slot cursor at dispatch */
+	/* top with plain owning CPU access. The store below keeps */
+	/* capped-conditional retain with at most 3 in a row, so a */
+	/* capped own leftover retries next dispatch instead of a */
+	/* 1024 wrap delay while unmovable-only leftover advances */
+	/* with no pin. Decoupled from the steal cursor, so hot */
+	/* buckets stay bounded with no freeze. One u8 per CPU with */
+	/* BSS zero start. Volatile mask keeps the index proven. */
 	{
 		volatile u32 vcpu = (u32)cpu;
 		u32 sidx = vcpu & 1023U;
@@ -160,25 +168,35 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	ogroup = sgroup ^ 1U;
 	rdsq = flow_slot_dsq(ogroup,
 	    (u64)slot_cur);
+	oodsq = flow_slot_overflow_dsq(ogroup);
 	scap = flow_slot_cap(budget);
-	/* One slot loop shares the single generic body with DSQ id branching */
-	/* outside, so own, overflow, and 2 fill keep one subprogram call each. */
-	/* Trip 0 owns the cursor bucket to budget, so hot work drains in one */
-	/* visit with no 256 wrap delay. Trip 1 owns overflow and trips 2 to 3 */
-	/* own fill ahead distinct from own, each capped at D with lim toward */
-	/* budget, so 2 times D is 8 with overflow 4 toward budget 32 and defer */
-	/* covering rest. Own move count tracks trip 0 for capped retain below, */
-	/* so unmovable-only leftover advances with no pin. Bound 4 sits under */
-	/* the steal bound with no new nest beyond the shared drain shape. */
-	bpf_for(k, 0, 4) {
+	own_cap = flow_slot_own_cap(budget);
+	/* One slot loop shares the single generic body with DSQ */
+	/* id branching outside, so own, overflow, 2 fill, and */
+	/* other overflow keep one subprogram call each. Trip 0 */
+	/* owns the cursor bucket at budget minus one, so hot work */
+	/* drains with one slot left for the rest with no strand. */
+	/* Trip 1 owns own overflow and trips 2 to 3 own fill ahead */
+	/* distinct from own, trip 4 owns other overflow, each at D */
+	/* with lim toward budget, so 4 times D is 16 toward 32 and */
+	/* defer covers rest. Trip 4 keeps cross-group overflow */
+	/* drainable with mask wins, so a hog far task on an */
+	/* all-light host still drains bounded. Own count tracks */
+	/* trip 0 for capped retain below, so unmovable-only */
+	/* leftover advances with no pin. Bound 5 sits under the */
+	/* steal bound with no new nest beyond the shared shape. */
+	bpf_for(k, 0, 5) {
 		u64 dsq;
 		u32 cap;
 		u32 lim;
 		if (k == 0) {
 			dsq = odsq_own;
-			cap = budget;
+			cap = own_cap;
 		} else if (k == 1) {
 			dsq = odsq;
+			cap = scap;
+		} else if (k == 4) {
+			dsq = oodsq;
 			cap = scap;
 		} else {
 			u8 b = flow_slot_add(slot_cur,
@@ -194,30 +212,41 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (k == 0)
 			own_moved = moved;
 	}
-	/* Capped retain with always rescue. Capped own leftover retries next */
-	/* dispatch with budget, so hot work with 32 moved keeps cur for retry */
-	/* with no 256 wrap delay. Uncapped leftover means the drain visited */
-	/* every task with moves below the cap, so the rest is mask-blocked or */
-	/* failed and must advance with no pin. Retain stays liveness-safe, */
-	/* since it holds only on progress at the cap. Rescue runs always with */
-	/* budget open and no empty gate, so every dispatch visits the other */
-	/* group cursor bucket with 1 toward budget with no strand when own */
-	/* holds movable work. One keeps the cross-group visit with minimal */
-	/* jump cost while rotation plus the kick chain still sweep every */
-	/* bucket. Both FIFO, so per DSQ one flavor holds with mask */
-	/* wins inside the shared body. Recomputes the index to keep no live */
+	/* Capped retain with bound and always rescue. Capped */
+	/* own leftover at 31 retries next dispatch with no 1024 */
+	/* wrap delay. At most 3 retains in a row with force */
+	/* advance, so sustained hot never pins far buckets. */
+	/* Uncapped leftover means the drain visited every task */
+	/* with moves below the cap, so the rest is mask-blocked */
+	/* or failed and must advance with no pin. Retain stays */
+	/* liveness-safe, since it holds only on progress at the */
+	/* cap with a bounded count. Rescue runs always with */
+	/* budget open and no empty gate, so every dispatch visits */
+	/* the other group cursor bucket with 1 toward budget with */
+	/* no strand when own holds movable work. One keeps the */
+	/* cross-group visit with minimal jump cost while rotation */
+	/* plus the kick chain still sweep every bucket. Both FIFO, */
+	/* so per DSQ one flavor holds with mask wins inside the */
+	/* shared body. Recomputes the index to keep no live */
 	/* across the loop. */
 	{
 		volatile u32 vcpu2 = (u32)cpu;
 		u32 sidx2 = vcpu2 & 1023U;
 		bool left = scx_bpf_dsq_nr_queued(
 		    odsq_own) != 0;
-		bool capped = own_moved >= budget;
-		if (left && capped)
+		bool capped = own_cap != 0 &&
+		    own_moved >= own_cap;
+		u8 rcnt = flow_slot_retain_cnt[sidx2];
+		bool keep = left && capped &&
+		    rcnt < (u8)FLOW_SLOT_RETAIN_MAX;
+		if (keep) {
 			flow_slot_cur[sidx2] = slot_cur;
-		else
+			flow_slot_retain_cnt[sidx2] = rcnt + 1;
+		} else {
 			flow_slot_cur[sidx2] =
 			    flow_slot_next(slot_cur);
+			flow_slot_retain_cnt[sidx2] = 0;
+		}
 		if (moved < budget) {
 			u32 lim2 = moved + 1U;
 			if (lim2 > budget)
@@ -229,45 +258,44 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved != 0)
 		__sync_fetch_and_add(&flow_stats.slot_moves,
 		    (u64)moved);
-	/* Defer with the kick safety net. Own keeps the cursor bucket, park */
-	/* keeps the group overflow, rescue keeps the other group cursor */
-	/* bucket. Fill ahead rides the trip drains with no remainder read, */
-	/* so leftover fill becomes own within 2 rotations with no strand */
-	/* and no extra fan-out. Defer aggregates once per dispatch with */
-	/* one atomic when moves reach D with any work left in the window or a */
-	/* far mark from the top seek. The far hint predates the drains, so only */
-	/* the window reads stay exact with no global scan. Monotonic marks keep */
-	/* far fail-positive with no hide, so defer reads as D-cap exception. */
-	/* Safety net kicks once per dispatch with leftover: progress kick covers */
-	/* window leftover with any move, far kick covers marked tails with any */
-	/* move, sweep kick covers zero-move marks with bound 255 and reset on */
-	/* move with no infinite loop. */
+	/* Defer with the kick safety net. Own keeps the cursor */
+	/* bucket, park keeps own overflow, rescue keeps other */
+	/* cursor, other overflow keeps the far tail. Fill ahead */
+	/* rides the trip drains with no remainder read, so leftover */
+	/* fill becomes own within 2 rotations with no strand and no */
+	/* extra fan-out. Defer aggregates once per dispatch with */
+	/* one atomic when moves reach D with work left in the */
+	/* window. The window reads stay exact with nr_queued truth */
+	/* and no global scan, so defer reads as D-cap exception */
+	/* with no storm. Safety net kicks once per dispatch with */
+	/* leftover: progress kick covers window leftover with any */
+	/* move, sweep kick covers zero-move window with bound 256 */
+	/* and reset on move with no infinite loop. Marks feed stats */
+	/* only and never gate a kick. */
 	{
 		u64 own_left;
 		u64 park_left;
 		bool rescue_left;
+		bool other_left;
 		bool window_left;
-		bool far_left = far_marked;
 		own_left = scx_bpf_dsq_nr_queued(odsq_own);
 		park_left = scx_bpf_dsq_nr_queued(odsq);
 		rescue_left = scx_bpf_dsq_nr_queued(rdsq) != 0;
+		other_left = scx_bpf_dsq_nr_queued(oodsq) != 0;
 		window_left = own_left > 0 || park_left > 0 ||
-		    rescue_left;
-		if (moved >= (u32)FLOW_SLOT_D &&
-		    (window_left || far_left))
+		    rescue_left || other_left;
+		if (moved >= (u32)FLOW_SLOT_D && window_left)
 			__sync_fetch_and_add(&flow_stats.slot_defer,
 			    1);
 		{
 			volatile u32 vcpu3 = (u32)cpu;
 			u32 sidx3 = vcpu3 & 1023U;
-			u8 sweep = flow_slot_sweep_cnt[sidx3];
+			u16 sweep = flow_slot_sweep_cnt[sidx3];
 			bool kick = false;
 			if (moved > 0 && window_left)
 				kick = true;
-			else if (moved > 0 && far_left)
-				kick = true;
-			else if (moved == 0 && far_left &&
-			    sweep < 255) {
+			else if (moved == 0 && window_left &&
+			    sweep < (u16)FLOW_SLOT_SWEEP_MAX) {
 				kick = true;
 				flow_slot_sweep_cnt[sidx3] =
 				    sweep + 1;

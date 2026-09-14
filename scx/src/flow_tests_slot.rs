@@ -22,6 +22,11 @@ fn slot_ids_match_header() {
     assert_eq!(SLOT_OVERFLOW_N, 2);
     assert_eq!(SLOT_D, 4);
     assert_eq!(SLOT_BUDGET, 32);
+    assert_eq!(SLOT_OWN_CAP, 31);
+    assert_eq!(RETAIN_MAX, 3);
+    assert_eq!(SWEEP_MAX, 256);
+    assert_eq!(slot_own_cap(32), 31);
+    assert_eq!(slot_own_cap(0), 0);
     assert_eq!(
         SLOT_BASE,
         crate::bpf_intf::flow_consts_FLOW_SLOT_BASE as u64
@@ -43,6 +48,14 @@ fn slot_ids_match_header() {
     assert_eq!(
         SLOT_BUDGET,
         crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET as u32
+    );
+    assert_eq!(
+        RETAIN_MAX as u32,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_RETAIN_MAX as u32
+    );
+    assert_eq!(
+        SWEEP_MAX as u32,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_SWEEP_MAX as u32
     );
     assert_eq!(crate::flow::SLOT_BASE, SLOT_BASE);
     assert_eq!(crate::flow::SLOT_BUDGET, SLOT_BUDGET);
@@ -181,12 +194,15 @@ fn trips_cover_own_overflow_and_two_fill() {
     assert_eq!(trips[1], slot_overflow_dsq(GROUP_LIGHT));
     assert_eq!(trips[2], slot_dsq(GROUP_LIGHT, 10));
     assert_eq!(trips[3], slot_dsq(GROUP_LIGHT, 11));
+    assert_eq!(trips[4], slot_overflow_dsq(GROUP_HOG));
     assert_ne!(trips[0], trips[2]);
     assert_ne!(trips[2], trips[3]);
+    assert_ne!(trips[1], trips[4]);
     let wrap = trip_dsqs(255, GROUP_HOG);
     assert_eq!(wrap[0], slot_dsq(GROUP_HOG, 255));
     assert_eq!(wrap[2], slot_dsq(GROUP_HOG, 0));
     assert_eq!(wrap[3], slot_dsq(GROUP_HOG, 1));
+    assert_eq!(wrap[4], slot_overflow_dsq(GROUP_LIGHT));
 }
 
 #[test]
@@ -208,20 +224,24 @@ fn rotation_retain_keeps_hot_bucket() {
 #[test]
 fn starvation_hot_bucket_drains_with_retains() {
     let mut cur: u8 = 7;
+    let mut retains: u8 = 0;
     let mut left = 40u32;
     let mut passes = 0;
     let mut moved_total = 0;
     while left > 0 && passes < 4 {
-        let take = left.min(SLOT_BUDGET);
+        let take = left.min(SLOT_OWN_CAP);
         moved_total += take;
         left -= take;
-        let capped = take >= SLOT_BUDGET;
-        cur = rotation_step(cur, left > 0, capped);
+        let capped = take >= SLOT_OWN_CAP;
+        let (next, next_ret) = rotation_step_bounded(cur, left > 0, capped, retains);
+        cur = next;
+        retains = next_ret;
         passes += 1;
     }
     assert_eq!(moved_total, 40);
     assert_eq!(passes, 2);
     assert_eq!(cur, 8);
+    assert_eq!(retains, 0);
 }
 
 #[test]
@@ -283,22 +303,28 @@ fn race_marks_never_hide_queued_work() {
 #[test]
 fn defer_fires_on_cap_with_work_left() {
     assert!(defer_ok(4, true, false));
-    assert!(defer_ok(32, false, true));
+    assert!(!defer_ok(32, false, true));
     assert!(defer_ok(32, true, true));
+    assert!(defer_ok(32, true, false));
     assert!(!defer_ok(3, true, true));
     assert!(!defer_ok(4, false, false));
     assert!(!defer_ok(0, true, true));
+    assert!(!defer_ok(0, false, true));
 }
 
 #[test]
 fn kick_progress_far_and_sweep_discipline() {
     assert_eq!(kick_step(1, true, false, 0), (true, 0));
-    assert_eq!(kick_step(1, false, true, 0), (true, 0));
+    assert_eq!(kick_step(1, false, true, 0), (false, 0));
     assert_eq!(kick_step(5, false, false, 0), (false, 0));
-    assert_eq!(kick_step(0, false, true, 3), (true, 4));
+    assert_eq!(kick_step(5, true, false, 0), (true, 0));
+    assert_eq!(kick_step(0, false, true, 3), (false, 3));
     assert_eq!(kick_step(0, false, true, 255), (false, 255));
     assert_eq!(kick_step(0, false, false, 7), (false, 7));
-    assert_eq!(kick_step(0, true, false, 7), (false, 7));
+    assert_eq!(kick_step(0, true, false, 7), (true, 8));
+    assert_eq!(kick_step(0, true, false, 255), (true, 256));
+    assert_eq!(kick_step(0, true, false, 256), (false, 256));
+    assert_eq!(kick_step(1, true, false, 9), (true, 0));
 }
 
 fn live_task(cpu: usize, nr: usize) -> PendingTask {
@@ -391,21 +417,24 @@ fn rescue_moves_one_per_dispatch_under_hot_own_load() {
         assert_eq!(moved, 11);
     }
     assert!(rescue_q.is_empty());
-    // Saturating own load fills the budget, so the budget gate skips
-    // rescue that dispatch with no strand: the other group's own trips
-    // own the bulk path while rescue stays the exception path.
+    // Saturating own load keeps the 31 reserve, so rescue still
+    // takes the last budget slot with no strand. Own at 32 tasks
+    // drains 31 at the own cap with one left, then rescue moves
+    // one toward 32.
     let mut own_full: VecDeque<PendingTask> = (0..SLOT_BUDGET)
         .map(|_| live_task(cpu as usize, 2))
         .collect();
     let mut rescue_one: VecDeque<PendingTask> = VecDeque::from([live_task(cpu as usize, 2)]);
-    let mut moved = slot_drain_model(&mut own_full, cpu, SLOT_BUDGET, 0);
-    assert_eq!(moved, SLOT_BUDGET);
-    assert!(own_full.is_empty());
+    let mut moved = slot_drain_model(&mut own_full, cpu, SLOT_OWN_CAP, 0);
+    assert_eq!(moved, SLOT_OWN_CAP);
+    assert_eq!(own_full.len(), 1);
     if moved < SLOT_BUDGET {
-        moved += slot_drain_model(&mut rescue_one, cpu, moved + 1, moved);
+        let lim = (moved + 1).min(SLOT_BUDGET);
+        moved += slot_drain_model(&mut rescue_one, cpu, lim, moved);
     }
     assert_eq!(moved, SLOT_BUDGET);
-    assert_eq!(rescue_one.len(), 1);
+    assert!(rescue_one.is_empty());
+    assert_eq!(own_full.len(), 1);
 }
 
 #[test]
@@ -452,11 +481,11 @@ fn rescue_never_strands_behind_mask_blocked_own() {
         .collect();
     let mut rescue_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(cpu as usize, 2)).collect();
     for _ in 0..4 {
-        let own_moved = slot_drain_model(&mut own_q, cpu, SLOT_BUDGET, 0);
+        let own_moved = slot_drain_model(&mut own_q, cpu, SLOT_OWN_CAP, 0);
         assert_eq!(own_moved, 0);
         // Uncapped leftover must advance, never pin.
         let left = !own_q.is_empty();
-        let capped = own_moved >= SLOT_BUDGET;
+        let capped = own_moved >= SLOT_OWN_CAP;
         let next = rotation_step(cur, left, capped);
         assert_eq!(next, slot_next(cur));
         cur = next;
@@ -493,4 +522,190 @@ fn facade_matches_slot_helpers() {
         crate::flow::slot_dsq(GROUP_LIGHT, 1)
     );
     assert_eq!(slot_next(255), crate::flow::slot_next(255));
+}
+
+#[test]
+fn slot_own_cap_holds_31_with_reserve() {
+    assert_eq!(SLOT_OWN_CAP, 31);
+    assert_eq!(SLOT_BUDGET, 32);
+    assert_eq!(slot_own_cap(32), 31);
+    assert_eq!(slot_own_cap(31), 30);
+    assert_eq!(slot_own_cap(1), 0);
+    assert_eq!(slot_own_cap(0), 0);
+    assert_eq!(slot_cap(32), SLOT_D);
+}
+
+#[test]
+fn retain_bound_forces_advance_after_three() {
+    assert_eq!(rotation_step_bounded(9, true, true, 0), (9, 1));
+    assert_eq!(rotation_step_bounded(9, true, true, 1), (9, 2));
+    assert_eq!(rotation_step_bounded(9, true, true, 2), (9, 3));
+    assert_eq!(rotation_step_bounded(9, true, true, 3), (10, 0));
+    assert_eq!(rotation_step_bounded(9, true, true, 4), (10, 0));
+    assert_eq!(rotation_step_bounded(9, true, false, 0), (10, 0));
+    assert_eq!(rotation_step_bounded(9, false, true, 0), (10, 0));
+    assert_eq!(RETAIN_MAX, 3);
+    assert_eq!(
+        RETAIN_MAX as u32,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_RETAIN_MAX as u32
+    );
+}
+
+#[test]
+fn high1_single_group_hog_overflow_drains_bounded() {
+    // Single-group host all-light with a hog far tail must
+    // drain via trip 4 bounded at D with mask wins.
+    let cpu = 0;
+    let trips = trip_dsqs(9, GROUP_LIGHT);
+    assert_eq!(trips[4], slot_overflow_dsq(GROUP_HOG));
+    assert_ne!(trips[1], trips[4]);
+    let mut hog_over: VecDeque<PendingTask> = (0..8).map(|_| live_task(0, 2)).collect();
+    let got = slot_drain_model(&mut hog_over, cpu, SLOT_D, 0);
+    assert_eq!(got, SLOT_D);
+    assert_eq!(hog_over.len(), 4);
+    let got2 = slot_drain_model(&mut hog_over, cpu, SLOT_D, 0);
+    assert_eq!(got2, SLOT_D);
+    assert!(hog_over.is_empty());
+    // Mask wins: foreign tasks stay with progress.
+    let mut mixed = VecDeque::from([
+        PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        },
+        live_task(0, 2),
+    ]);
+    let got3 = slot_drain_model(&mut mixed, cpu, SLOT_D, 0);
+    assert_eq!(got3, 1);
+    assert_eq!(mixed.len(), 1);
+}
+
+#[test]
+fn high2_foreign_crowd_idle_target_wakes() {
+    // Shared queue crowded by foreign work must still kick
+    // an idle target, so no idle CPU sleeps unkicked.
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(100, 0, true));
+    assert!(kick_idle_ok(u64::MAX, 0, true));
+    assert!(!kick_idle_ok(8, 1, true));
+    assert!(!kick_idle_ok(8, 0, false));
+    let now = 5_000_000u64;
+    let recent = now - 1_000;
+    assert!(!kick_coalesced(8, 0, true, false, now, recent));
+    assert!(!kick_coalesced(100, 0, true, false, now, recent));
+    // Q2 still coalesces, deep never does.
+    assert!(kick_coalesced(2, 0, true, false, now, recent));
+    assert!(!kick_coalesced(2, 0, true, true, now, recent));
+}
+
+#[test]
+fn high3_saturated_own_hog_progress() {
+    // Saturated own at 40 with hog rescue at 4 must still
+    // move hog via the 31 reserve with one per dispatch.
+    let cpu = 0;
+    let mut own_q: VecDeque<PendingTask> = (0..40).map(|_| live_task(0, 2)).collect();
+    let mut rescue_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(0, 2)).collect();
+    let mut moved = slot_drain_model(&mut own_q, cpu, SLOT_OWN_CAP, 0);
+    assert_eq!(moved, SLOT_OWN_CAP);
+    assert_eq!(own_q.len(), 9);
+    let lim = (moved + 1).min(SLOT_BUDGET);
+    let got = slot_drain_model(&mut rescue_q, cpu, lim, moved);
+    assert_eq!(got, 1);
+    moved += got;
+    assert_eq!(moved, SLOT_BUDGET);
+    assert_eq!(rescue_q.len(), 3);
+    // Next dispatch still reserves with own hot.
+    let mut own_hot: VecDeque<PendingTask> = (0..32).map(|_| live_task(0, 2)).collect();
+    let m2 = slot_drain_model(&mut own_hot, cpu, SLOT_OWN_CAP, 0);
+    assert_eq!(m2, SLOT_OWN_CAP);
+    let lim2 = (m2 + 1).min(SLOT_BUDGET);
+    let g2 = slot_drain_model(&mut rescue_q, cpu, lim2, m2);
+    assert_eq!(g2, 1);
+    assert_eq!(rescue_q.len(), 2);
+}
+
+#[test]
+fn high4_kick_rate_bounded_at_steady_state() {
+    // Steady state with no window work stays quiet even with
+    // stale far marks, so kicks per dispatch stay well below
+    // one. Far alone never defers or kicks.
+    assert!(!defer_ok(32, false, true));
+    assert!(!kick_step(5, false, true, 0).0);
+    assert!(!kick_step(0, false, true, 0).0);
+    let mut kicks = 0u32;
+    let mut sweep: u16 = 0;
+    let dispatches = 100u32;
+    for _ in 0..dispatches {
+        // Steady: moves with no window, far marked stale.
+        let (kick, next) = kick_step(5, false, true, sweep);
+        sweep = next;
+        if kick {
+            kicks += 1;
+        }
+        assert!(!kick);
+    }
+    assert_eq!(kicks, 0);
+    // Empty with no work stays quiet.
+    let (kick2, _) = kick_step(0, false, false, sweep);
+    assert!(!kick2);
+    // Window work kicks once then resets, sweep bounds zero
+    // move chains at 256 with no infinite loop.
+    let (kick3, next3) = kick_step(1, true, false, 0);
+    assert!(kick3);
+    assert_eq!(next3, 0);
+    let mut s: u16 = 0;
+    for _ in 0..SWEEP_MAX {
+        let (k, n) = kick_step(0, true, false, s);
+        assert!(k);
+        s = n;
+    }
+    assert_eq!(s, SWEEP_MAX);
+    let (k_last, s_last) = kick_step(0, true, false, s);
+    assert!(!k_last);
+    assert_eq!(s_last, SWEEP_MAX);
+    // Rate with one window kick in 100 stays << 1.
+    let rate = 1.0 / dispatches as f64;
+    assert!(rate < 0.1);
+}
+
+#[test]
+fn high5_sustained_hot_far_bucket_bounded() {
+    // Sustained hot retains at most three, then force
+    // advance, so a far bucket 100 ahead is visited well
+    // within 1024 dispatches with refill to zero.
+    let mut cur: u8 = 7;
+    let mut retains: u8 = 0;
+    let mut far_seen_at: Option<u32> = None;
+    for i in 0..1024 {
+        if cur == 100 {
+            far_seen_at = Some(i);
+            break;
+        }
+        // Only the hot bucket 7 stays capped, the rest run
+        // empty with advance and reset.
+        let hot = cur == 7;
+        let (next, next_ret) = rotation_step_bounded(cur, hot, hot, retains);
+        cur = next;
+        retains = next_ret;
+    }
+    let at = far_seen_at.expect("far bucket must be seen");
+    assert!(at < 1024);
+    assert!(at < 200);
+    // All-hot worst case needs exactly 1024 to sweep 256
+    // buckets at four visits each, so 512 would strand.
+    let mut cur2: u8 = 0;
+    let mut ret2: u8 = 0;
+    let mut count = 0u32;
+    let mut seen = [false; 256];
+    for _ in 0..1024 {
+        seen[cur2 as usize] = true;
+        let (next, next_ret) = rotation_step_bounded(cur2, true, true, ret2);
+        cur2 = next;
+        ret2 = next_ret;
+        count += 1;
+    }
+    assert!(seen.iter().all(|&v| v));
+    assert_eq!(count, 1024);
+    assert_eq!(cur2, 0);
 }

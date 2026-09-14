@@ -199,9 +199,9 @@ fn kick_idle_rescues_stale_queue() {
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
     assert!(kick_idle_ok(2, 0, true));
-    assert!(!kick_idle_ok(3, 0, true));
-    assert!(!kick_idle_ok(8, 0, true));
-    assert!(!kick_idle_ok(u64::MAX, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(u64::MAX, 0, true));
     assert!(!kick_idle_ok(0, 7, true));
     assert!(!kick_idle_ok(1, 1, true));
     assert!(!kick_idle_ok(2, 7, true));
@@ -268,17 +268,17 @@ fn kick_coalesce_needs_q2_idle_recent_unpinned() {
 
 /*
  * Q1 always kicks with no coalesce even when recent.
- * Deep stays quiet with no coalesce count. Q0 stays
+ * Deep always kicks with no coalesce count. Q0 stays
  * open with a kick. Busy stays quiet with no coalesce.
  */
 #[test]
-fn kick_q1_always_kicks_deep_stays_quiet() {
+fn kick_q1_always_kicks_deep_always_kicks() {
     let now = 5_000_000u64;
     let recent = now - 1_000;
     assert!(kick_idle_ok(1, 0, true));
     assert!(!kick_coalesced(1, 0, true, false, now, recent));
     assert!(!kick_coalesced(1, 0, true, true, now, recent));
-    assert!(!kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
     assert!(!kick_coalesced(3, 0, true, false, now, recent));
     assert!(!kick_coalesced(8, 0, true, false, now, recent));
     assert!(!kick_coalesced(u64::MAX, 0, true, false, now, recent));
@@ -286,6 +286,22 @@ fn kick_q1_always_kicks_deep_stays_quiet() {
     assert!(!kick_coalesced(0, 0, true, false, now, recent));
     assert!(!kick_idle_ok(2, 9, true));
     assert!(!kick_coalesced(2, 9, true, false, now, recent));
+}
+
+#[test]
+fn high2_foreign_crowd_idle_target_wakes() {
+    // Foreign crowd on the shared queue must not strand an
+    // idle target: the new task targets an idle CPU, so the
+    // idle kick runs regardless of shared depth.
+    assert!(kick_idle_ok(8, 0, true));
+    assert!(kick_idle_ok(32, 0, true));
+    assert!(!kick_idle_ok(8, 3, true));
+    assert!(!kick_idle_ok(8, 0, false));
+    let now = 5_000_000u64;
+    let recent = now - 1_000;
+    assert!(!kick_coalesced(8, 0, true, false, now, recent));
+    assert!(kick_idle_ok(1, 0, true));
+    assert!(kick_idle_ok(0, 0, true));
 }
 
 /*
@@ -380,7 +396,7 @@ fn exiting_no_kick_when_busy_or_missing() {
     assert!(!exiting_kick_ok(1, true));
     assert!(!exiting_kick_ok(0, false));
     assert!(!exiting_kick_ok(99, false));
-    assert!(!kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
     assert!(exiting_local_ok(true, true));
     assert!(!exiting_kick_ok(9, true));
 }
@@ -425,7 +441,7 @@ fn exiting_non_exiting_unchanged() {
     assert!(!exiting_local_ok(false, false));
     assert!(kick_idle_ok(0, 0, true));
     assert!(kick_idle_ok(1, 0, true));
-    assert!(!kick_idle_ok(3, 0, true));
+    assert!(kick_idle_ok(3, 0, true));
     assert!(!overflow_kick_ok());
     let now = 1_000_000u64;
     let recent = now - 10_000;
