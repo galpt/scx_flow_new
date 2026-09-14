@@ -217,6 +217,33 @@ fn slot_depths_sum_per_group_capped_at_4() {
 }
 
 /*
+ * Windowed depths keep quiet plus flood parity with
+ * six reads. Quiet stays 4ms, flood still floors at
+ * 1ms, far-only past the window may keep quiet one
+ * step longer with no stall. Cap holds at 4.
+ */
+#[test]
+fn window_depths_keep_quiet_plus_flood() {
+    assert_eq!(slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT), (0, 0));
+    assert_eq!(slot_window_depths(1, 0, 0, 0, 0, 0, GROUP_LIGHT), (1, 0));
+    assert_eq!(slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_HOG), (0, 0));
+    // Flood fills window plus overflows to the cap.
+    assert_eq!(slot_window_depths(2, 2, 2, 2, 6, 6, GROUP_LIGHT), (4, 4));
+    assert_eq!(slot_window_depths(2, 2, 2, 2, 6, 6, GROUP_HOG), (4, 4));
+    // Allowance parity: quiet 4ms, flood 1ms floor.
+    let (l, _) = slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT);
+    assert_eq!(burst_allowance(l), DEMOTE_BURST_NS);
+    let (lf, _) = slot_window_depths(2, 2, 2, 0, 0, 0, GROUP_LIGHT);
+    assert_eq!(burst_allowance(lf), DEMOTE_BURST_FLOOR_NS);
+    // Far-only past window keeps quiet one step longer.
+    let (far, _) = slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT);
+    assert_eq!(burst_allowance(far), DEMOTE_BURST_NS);
+    // Hog side mirrors with rescue plus overflow.
+    assert_eq!(slot_window_depths(0, 0, 0, 3, 0, 0, GROUP_LIGHT), (0, 3));
+    assert_eq!(slot_window_depths(0, 0, 0, 3, 0, 0, GROUP_HOG), (3, 0));
+}
+
+/*
  * Quiet keeps the 4ms line. A burst just below 4ms
  * stays light, a burst at 4ms demotes at once.
  */

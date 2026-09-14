@@ -406,3 +406,32 @@ pub fn far_next(cur: u8, occupied: &[bool; 256]) -> Option<u8> {
 pub fn kick_far_ok(moved: u32, window_left: bool, far_jump: bool) -> bool {
     moved > 0 && (window_left || far_jump)
 }
+
+/* Hints kept per group for the last near insert. */
+#[cfg(test)]
+pub const SLOT_HINT_N: u64 = 2;
+
+/*
+ * True when one hint bucket holds work. Hit jumps
+ * with no full scan, miss falls back to the window
+ * gate plus the full scan with no hide, so a stale
+ * hint costs one read with no stall. Mirrors the
+ * BPF hint fast path with the same check.
+ */
+#[cfg(test)]
+pub fn hint_hit(hint: u8, occupied: &[bool; 256]) -> bool {
+    occupied[hint as usize]
+}
+
+/*
+ * True when one window holds work for the far gate.
+ * Window holds own overflow plus two fill ahead plus
+ * rescue plus other overflow, so trips drain it with
+ * no far need and far work waits at most two turns.
+ * True skips the 256 scan, false runs the full scan
+ * with no hide. Mirrors the BPF window gate.
+ */
+#[cfg(test)]
+pub fn window_has_work(own_over: bool, f0: bool, f1: bool, rescue: bool, other_over: bool) -> bool {
+    own_over || f0 || f1 || rescue || other_over
+}

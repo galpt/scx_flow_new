@@ -790,3 +790,36 @@ fn attach_far_sweep_bounds_guest_stall() {
     late[61] = true;
     assert_eq!(far_next(16, &late), Some(61));
 }
+
+#[test]
+fn hint_hits_jump_with_no_scan() {
+    let mut occ = [false; 256];
+    occ[61] = true;
+    assert!(hint_hit(61, &occ));
+    assert!(!hint_hit(15, &occ));
+    assert_eq!(SLOT_HINT_N, 2);
+    // Stale hint costs one read then falls back.
+    let mut empty = [false; 256];
+    empty[15] = true;
+    assert!(!hint_hit(61, &empty));
+    assert_eq!(far_next(0, &empty), Some(15));
+}
+
+#[test]
+fn window_gate_skips_scan_with_window_work() {
+    assert!(window_has_work(true, false, false, false, false));
+    assert!(window_has_work(false, true, false, false, false));
+    assert!(window_has_work(false, false, true, false, false));
+    assert!(window_has_work(false, false, false, true, false));
+    assert!(window_has_work(false, false, false, false, true));
+    assert!(!window_has_work(false, false, false, false, false));
+    // Attach window from zero holds no work, so the
+    // full scan still runs and lands on 15 at once.
+    let mut occ = [false; 256];
+    occ[15] = true;
+    occ[61] = true;
+    assert!(!window_has_work(false, false, false, false, false));
+    assert_eq!(far_next(0, &occ), Some(15));
+    // Hint 61 jumps at once with no scan.
+    assert!(hint_hit(61, &occ));
+}

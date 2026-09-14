@@ -79,12 +79,13 @@ static __always_inline u64 flow_ref_frontier(
 }
 /* Insert one task FIFO into the group slot store. Probes the deadline in */
 /* vruntime for quantised deadline, slot, error, and overflow, then inserts */
-/* to the bucket or the group overflow tail with the same slice. Marks the */
-/* slot after insert, counts tail pins past the horizon, and reports the */
-/* quant error for the token spend, so one probe feeds insert and spend with */
-/* no second pass. Returns the slot DSQ id for kick sampling, so idle and */
-/* busy share one target with no reread. FIFO only, never vtime, so per DSQ */
-/* one flavor holds. */
+/* to the bucket or the group overflow tail with the same slice. Marks head */
+/* plus fine after insert, counts tail pins past the horizon, stashes the */
+/* near bucket hint for the dispatch fast path, and reports the quant error */
+/* for the token spend, so one probe feeds insert plus spend with no second */
+/* pass. Returns the slot DSQ id for kick sampling, so idle and busy share */
+/* one target with no reread. FIFO only, never vtime, so per DSQ one flavor */
+/* holds. */
 static __always_inline u64 flow_slot_insert(
 	struct task_struct *p, u8 group, u64 dl,
 	u64 frontier, u64 slice, u64 *err_out)
@@ -104,6 +105,8 @@ static __always_inline u64 flow_slot_insert(
 		sdsq = flow_slot_dsq(group, bucket);
 	scx_bpf_dsq_insert(p, sdsq, slice, 0);
 	flow_wheel_mark_all(slot);
+	if (slot < (u64)FLOW_WHEEL_DIM)
+		flow_slot_hint[group & 1U] = (u8)bucket;
 	if (over)
 		__sync_fetch_and_add(&flow_stats.wheel_overflow,
 		    1);

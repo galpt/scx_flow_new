@@ -78,12 +78,10 @@ volatile u32 flow_wheel_head;
 /* hide. Drains never consult marks, kicks use window truth, */
 /* so clearing buys nothing. */
 volatile u64 flow_wheel_fine[4];
-/* Wheel coarse summary with 256 bits for 256 far blocks. Set */
-/* after insert with head and fine. Never cleared per bucket, */
-/* since one bit covers 256 slots and no single drain can prove */
-/* the block empty, so stale falls back to positive with drains */
-/* owning moves and no hide. Drains never consult marks, kicks */
-/* use window truth, so clearing buys nothing. */
+/* Wheel coarse summary with 256 bits for 256 far blocks. Kept */
+/* for ABI with no mark and no read, since seek covers head */
+/* plus fine only and far blocks rest in the group overflow */
+/* tails drained by trips, so no second seek runs. */
 volatile u64 flow_wheel_coarse[4];
 /* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
 /* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
@@ -123,16 +121,25 @@ volatile u16 flow_slot_sweep_cnt[1024];
 /* before trips, read for the far kick, overwritten next */
 /* pass, so no live holds across trips with no storm. */
 volatile u8 flow_slot_far[1024];
-/* Mark one wheel slot after insert with head, fine, and coarse. Slot holds 0 */
-/* to 65535 from the probe cap. Head mirrors the first 8 near slots, fine */
-/* mirrors the first 256 near slots, coarse mirrors 256 far blocks, all with */
-/* atomic or, so a lost race never drops a bit. Mark follows insert, so a */
-/* transient stale negative sits between insert and mark with drains owning */
-/* moves. Bits never clear, so seek stays fail-positive with drains never */
-/* consulting marks and no work hide. */
+/* Per group last near bucket hint with one u8 per group. */
+/* Each holds 0 to 255 for the last near insert with BSS */
+/* zero start. Plain racy store on insert with byte load on */
+/* dispatch, so a torn index never traps and only skews one */
+/* hint check. Hit jumps with no full scan, miss falls back */
+/* to the window gate plus the full scan with no hide. */
+volatile u8 flow_slot_hint[2];
+/* Mark one wheel slot after insert with head and fine only. */
+/* Slot holds 0 to 65535 from the probe cap. Head mirrors */
+/* the first 8 near slots, fine mirrors the first 256 near */
+/* slots, both with atomic or, so a lost race never drops a */
+/* bit. Coarse stays unmarked with far blocks in overflow, */
+/* so one enqueue pays two atomics with no third. Mark */
+/* follows insert, so a transient stale negative sits */
+/* between insert and mark with drains owning moves. Bits */
+/* never clear, so seek stays fail-positive with drains */
+/* never consulting marks and no work hide. */
 static void flow_wheel_mark_all(u64 slot)
 {
-	u64 block;
 	u64 word;
 	u64 bit;
 	if (slot < 8ULL)
@@ -144,15 +151,6 @@ static void flow_wheel_mark_all(u64 slot)
 		if (word < 4ULL)
 			__sync_fetch_and_or(
 			    &flow_wheel_fine[word],
-			    1ULL << bit);
-	}
-	block = slot >> 8ULL;
-	if (block < 256ULL) {
-		word = block >> 6ULL;
-		bit = block & 63ULL;
-		if (word < 4ULL)
-			__sync_fetch_and_or(
-			    &flow_wheel_coarse[word],
 			    1ULL << bit);
 	}
 }

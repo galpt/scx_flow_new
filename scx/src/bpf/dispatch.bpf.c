@@ -11,7 +11,9 @@
  * truth only, plus far progress when idle jumps far.
  * Far jumps to the next own bucket ahead when idle with
  * no window, so boot 15 and 61 drain within 3 hops with
- * no 15 step walk and late 61 still chains.
+ * no 15 step walk and late 61 still chains. Hint plus
+ * window gate keep the far scan off the hot path with
+ * no hide.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -199,13 +201,19 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Far sweep jumps to the next own bucket ahead when */
 	/* idle with no own work, so boot 15 and 61 drain */
 	/* within 3 hops with no 15 step walk and late 61 */
-	/* still finds a jump on the next idle pass. Scans */
-	/* own group only with nr_queued truth and no mark */
-	/* use, so stale marks add no force. Runs only when */
-	/* own holds no work, so hot pays no scan with no */
-	/* storm. Bound 256 worst hops with one far kick. */
-	/* Mark holds per CPU far jump this pass in BSS with */
-	/* no live across trips, so states stay flat. */
+	/* still finds a jump on the next idle pass. Hint */
+	/* checks the last near insert first with one read, */
+	/* so one far bucket jumps with no 256 scan. Window */
+	/* gate skips the scan when overflow, fill, rescue, */
+	/* or other overflow holds work, since trips drain */
+	/* that window with far work waiting at most 2 */
+	/* rotations. Else scans own group only with */
+	/* nr_queued truth and no mark use, so stale marks */
+	/* add no force. Runs only when own holds no work, */
+	/* so hot pays no scan with no storm. Bound 256 */
+	/* worst hops with one far kick. Mark holds per CPU */
+	/* far jump this pass in BSS with no live across */
+	/* trips, so states stay flat. */
 	{
 		u64 pre_own;
 		bool pre_empty;
@@ -215,22 +223,93 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		pre_empty =
 		    scx_bpf_dsq_nr_queued(pre_own) == 0;
 		if (pre_empty) {
-			bool have = false;
-			u8 next = flow_slot_far_next(slot_cur,
-			    sgroup, &have);
+			u8 hint = flow_slot_hint[sgroup &
+			    1U];
+			u64 hint_dsq = flow_slot_dsq(
+			    sgroup, (u64)hint);
+			bool done = false;
 
-			if (have) {
-				volatile u32 vcpu2 = (u32)cpu;
-				u32 sidx2 = vcpu2 & 1023U;
+			if (scx_bpf_dsq_nr_queued(
+			    hint_dsq) != 0) {
+				volatile u32 vcpu2 =
+				    (u32)cpu;
+				u32 sidx2 = vcpu2 &
+				    1023U;
 
-				slot_cur = next;
-				flow_slot_cur[sidx2] = next;
+				slot_cur = hint;
+				flow_slot_cur[sidx2] =
+				    hint;
 				flow_slot_far[sidx2] = 1;
-			} else {
-				volatile u32 vcpu2 = (u32)cpu;
-				u32 sidx2 = vcpu2 & 1023U;
+				done = true;
+			}
+			if (!done) {
+				u8 og = sgroup ^ 1U;
+				u64 od =
+				    flow_slot_overflow_dsq(
+				    sgroup);
+				u64 f0 = flow_slot_dsq(
+				    sgroup,
+				    (u64)flow_slot_add(
+				    slot_cur, 0));
+				u64 f1 = flow_slot_dsq(
+				    sgroup,
+				    (u64)flow_slot_add(
+				    slot_cur, 1));
+				u64 rd = flow_slot_dsq(
+				    og, (u64)slot_cur);
+				u64 od2 =
+				    flow_slot_overflow_dsq(
+				    og);
+				bool win =
+				    scx_bpf_dsq_nr_queued(
+				    od) != 0 ||
+				    scx_bpf_dsq_nr_queued(
+				    f0) != 0 ||
+				    scx_bpf_dsq_nr_queued(
+				    f1) != 0 ||
+				    scx_bpf_dsq_nr_queued(
+				    rd) != 0 ||
+				    scx_bpf_dsq_nr_queued(
+				    od2) != 0;
 
-				flow_slot_far[sidx2] = 0;
+				if (win) {
+					volatile u32 vcpu2 =
+					    (u32)cpu;
+					u32 sidx2 = vcpu2 &
+					    1023U;
+
+					flow_slot_far[sidx2] =
+					    0;
+				} else {
+					bool have = false;
+					u8 next =
+					    flow_slot_far_next(
+					    slot_cur, sgroup,
+					    &have);
+
+					if (have) {
+						volatile u32 vcpu2 =
+						    (u32)cpu;
+						u32 sidx2 =
+						    vcpu2 &
+						    1023U;
+
+						slot_cur = next;
+						flow_slot_cur[
+						    sidx2] = next;
+						flow_slot_far[
+						    sidx2] = 1;
+					} else {
+						volatile u32 vcpu2 =
+						    (u32)cpu;
+						u32 sidx2 =
+						    vcpu2 &
+						    1023U;
+
+						flow_slot_far[
+						    sidx2] = 0;
+					}
+				}
 			}
 		} else {
 			volatile u32 vcpu2 = (u32)cpu;
@@ -255,12 +334,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Trip 1 owns own overflow and trips 2 to 3 own fill ahead */
 	/* distinct from own, trip 4 owns other overflow, each at D */
 	/* with lim toward budget, so 4 times D is 16 toward 32 and */
-	/* defer covers rest. Trip 4 keeps cross-group overflow */
-	/* drainable with mask wins, so a hog far task on an */
-	/* all-light host still drains bounded. Own count tracks */
-	/* trip 0 for capped retain below, so unmovable-only */
-	/* leftover advances with no pin. Bound 5 sits under the */
-	/* steal bound with no new nest beyond the shared shape. */
+	/* defer covers rest. Overflow trips skip empty with one */
+	/* read and no iterator, so light pays no empty scan with */
+	/* no hide. Trip 4 keeps cross-group overflow drainable */
+	/* with mask wins, so a hog far task on an all-light host */
+	/* still drains bounded. Own count tracks trip 0 for */
+	/* capped retain below, so unmovable-only leftover */
+	/* advances with no pin. Bound 5 sits under the steal */
+	/* bound with no new nest beyond the shared shape. */
 	bpf_for(k, 0, 5) {
 		u64 dsq;
 		u32 cap;
@@ -281,6 +362,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			    (u64)b);
 			cap = scap;
 		}
+		if ((k == 1 || k == 4) &&
+		    scx_bpf_dsq_nr_queued(dsq) == 0)
+			continue;
 		lim = moved + cap;
 		if (lim > budget)
 			lim = budget;
@@ -288,7 +372,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (k == 0)
 			own_moved = moved;
 	}
-	/* Capped retain with bound and always rescue. Capped */
+	/* Capped retain with bound and gated rescue. Capped */
 	/* own leftover at 31 retries next dispatch with no 1024 */
 	/* wrap delay. At most 3 retains in a row with force */
 	/* advance, so sustained hot never pins far buckets. */
@@ -296,15 +380,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* with moves below the cap, so the rest is mask-blocked */
 	/* or failed and must advance with no pin. Retain stays */
 	/* liveness-safe, since it holds only on progress at the */
-	/* cap with a bounded count. Rescue runs always with */
-	/* budget open and no empty gate, so every dispatch visits */
-	/* the other group cursor bucket with 1 toward budget with */
-	/* no strand when own holds movable work. One keeps the */
-	/* cross-group visit with minimal jump cost while rotation */
-	/* plus the kick chain still sweep every bucket. Both FIFO, */
-	/* so per DSQ one flavor holds with mask wins inside the */
-	/* shared body. Recomputes the index to keep no live */
-	/* across the loop. */
+	/* cap with a bounded count. Rescue runs with budget */
+	/* open and rescue work only, so empty rescue pays one */
+	/* read with no iterator and no strand when own holds */
+	/* movable work. One keeps the cross-group visit with */
+	/* minimal jump cost while rotation plus the kick chain */
+	/* still sweep every bucket. Both FIFO, so per DSQ one */
+	/* flavor holds with mask wins inside the shared body. */
+	/* Recomputes the index to keep no live across the loop. */
 	{
 		volatile u32 vcpu2 = (u32)cpu;
 		u32 sidx2 = vcpu2 & 1023U;
@@ -323,7 +406,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			    flow_slot_next(slot_cur);
 			flow_slot_retain_cnt[sidx2] = 0;
 		}
-		if (moved < budget) {
+		if (moved < budget &&
+		    scx_bpf_dsq_nr_queued(rdsq) != 0) {
 			u32 lim2 = moved + 1U;
 			if (lim2 > budget)
 				lim2 = budget;

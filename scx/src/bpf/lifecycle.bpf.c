@@ -105,58 +105,87 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Pressure refresh from slot queued counts capped at 4. Sums light and hog */
-/* queued tasks over the 512 sharded buckets plus 2 overflow tails in id */
-/* order with early stop when both hit 4. Index order holds light buckets, */
-/* hog buckets, light overflow, then hog overflow, so the group split needs */
-/* no table read. The bound is honest at 514 reads worst case with the early */
-/* stop paying a few reads when loaded. Placement uses the live table seeded */
-/* by online rank with offline inert, so strict iff ready is zero, best */
-/* effort iff ready is one. Stores depths and allowance for snapshot with no */
-/* task field. Returns the allowance for the burst check. Stopping only, */
+/* Pressure refresh from windowed queued counts capped at 4. Sums */
+/* light and hog queued tasks over the dispatch window plus both */
+/* overflow tails with 6 reads and no 514 scan, so stopping pays */
+/* window cost with no flood miss. Window holds own cursor plus */
+/* 2 fill ahead plus rescue plus both overflows, so quiet keeps */
+/* 4ms and flood fills the window plus overflows to the 1ms */
+/* floor. Far-only depth beyond the window may keep quiet one */
+/* step longer with no stall, since rotation plus rescue still */
+/* cover every bucket within 1024 dispatches. Placement uses */
+/* the live table seeded by online rank with offline inert, so */
+/* strict iff ready is zero, best effort iff ready is one. */
+/* Stores depths and allowance for snapshot with no task field. */
+/* Returns the allowance for the burst check. Stopping only, */
 /* never dispatch. */
-static __always_inline u64 flow_refresh_pressure(void)
+static __always_inline u64 flow_refresh_pressure(s32 cpu)
 {
 	u64 light = 0;
 	u64 hog = 0;
 	u64 allow;
-	s32 i;
-	bpf_for(i, 0, 514) {
-		u64 dsq;
-		u64 n;
-		u64 idx = (u64)i;
-		u8 g;
-		if (i < 0)
-			continue;
-		if (idx >= 514ULL)
-			break;
-		if (idx < (u64)FLOW_SLOT_N) {
-			dsq = (u64)FLOW_SLOT_BASE + idx;
-			if (idx < (u64)FLOW_SLOT_PER_GROUP)
-				g = (u8)FLOW_GROUP_LIGHT;
-			else
-				g = (u8)FLOW_GROUP_HOG;
-		} else {
-			dsq = (u64)FLOW_SLOT_OVERFLOW_BASE +
-			    idx - (u64)FLOW_SLOT_N;
-			if (idx - (u64)FLOW_SLOT_N == 0)
-				g = (u8)FLOW_GROUP_LIGHT;
-			else
-				g = (u8)FLOW_GROUP_HOG;
-		}
-		n = scx_bpf_dsq_nr_queued(dsq);
-		if (g == (u8)FLOW_GROUP_LIGHT) {
-			light += n;
-			if (light >= 4)
-				light = 4;
-		} else {
-			hog += n;
-			if (hog >= 4)
-				hog = 4;
-		}
-		if (light >= 4 && hog >= 4)
-			break;
+	u64 own_n;
+	u64 f0_n;
+	u64 f1_n;
+	u64 rd_n;
+	u64 lo_n;
+	u64 ho_n;
+	u8 g;
+	u8 cur;
+	u8 og;
+	u64 own;
+	u64 f0;
+	u64 f1;
+	u64 rd;
+	u64 lo;
+	u64 ho;
+	if (cpu < 0 || !flow_cpu_live((u32)cpu)) {
+		light = scx_bpf_dsq_nr_queued(
+		    flow_slot_overflow_dsq(
+		    (u8)FLOW_GROUP_LIGHT));
+		hog = scx_bpf_dsq_nr_queued(
+		    flow_slot_overflow_dsq(
+		    (u8)FLOW_GROUP_HOG));
+		if (light > 4)
+			light = 4;
+		if (hog > 4)
+			hog = 4;
+		allow = flow_burst_allowance(light);
+		flow_light_depth = light;
+		flow_hog_depth = hog;
+		flow_burst_allowance_ns = allow;
+		return allow;
 	}
+	g = flow_group_live((u32)cpu, nr_cpu_ids);
+	cur = flow_slot_cur[(u32)cpu & 1023U];
+	own = flow_slot_dsq(g, (u64)cur);
+	f0 = flow_slot_dsq(g,
+	    (u64)flow_slot_add(cur, 0));
+	f1 = flow_slot_dsq(g,
+	    (u64)flow_slot_add(cur, 1));
+	og = g ^ 1U;
+	rd = flow_slot_dsq(og, (u64)cur);
+	lo = flow_slot_overflow_dsq(
+	    (u8)FLOW_GROUP_LIGHT);
+	ho = flow_slot_overflow_dsq(
+	    (u8)FLOW_GROUP_HOG);
+	own_n = scx_bpf_dsq_nr_queued(own);
+	f0_n = scx_bpf_dsq_nr_queued(f0);
+	f1_n = scx_bpf_dsq_nr_queued(f1);
+	rd_n = scx_bpf_dsq_nr_queued(rd);
+	lo_n = scx_bpf_dsq_nr_queued(lo);
+	ho_n = scx_bpf_dsq_nr_queued(ho);
+	if (g == (u8)FLOW_GROUP_HOG) {
+		light = rd_n + lo_n;
+		hog = own_n + f0_n + f1_n + ho_n;
+	} else {
+		light = own_n + f0_n + f1_n + lo_n;
+		hog = rd_n + ho_n;
+	}
+	if (light > 4)
+		light = 4;
+	if (hog > 4)
+		hog = 4;
 	allow = flow_burst_allowance(light);
 	flow_light_depth = light;
 	flow_hog_depth = hog;
@@ -173,7 +202,7 @@ static __always_inline u64 flow_refresh_pressure(void)
 /* Slow path with 64 low wins stays intact. Stopping only, never dispatch. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,
-	u64 delta)
+	u64 delta, s32 cpu)
 {
 	u8 group;
 	u64 sum;
@@ -190,7 +219,7 @@ static __always_inline void flow_classify(
 	if (sum > 0xffffffffULL)
 		sum = 0xffffffffULL;
 	tctx->burn = (u32)sum;
-	allow = flow_refresh_pressure();
+	allow = flow_refresh_pressure(cpu);
 	if (flow_burst_hot_at(delta, allow)) {
 		tctx->wake_hits = 0;
 		if (group ==
@@ -378,7 +407,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	est = flow_clamp_est(delta);
 	tctx->est_ns = est;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
-	flow_classify(tctx, now, delta);
+	flow_classify(tctx, now, delta, cpu);
 	flow_clear_running(cpu);
 	flow_on_cpu_dec();
 	tctx->run_at = 0;

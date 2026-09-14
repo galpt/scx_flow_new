@@ -1229,6 +1229,34 @@ pub fn slot_group_depths(queued: &[u64]) -> (u64, u64) {
 }
 
 /*
+ * Both depths from the windowed slot counts capped
+ * at 4. Window holds own cursor plus two fill ahead
+ * plus rescue plus both overflows with six reads and
+ * no 514 scan, so stopping pays window cost with no
+ * flood miss. Quiet keeps 4ms and flood fills the
+ * window plus overflows to the floor. Far-only depth
+ * past the window may keep quiet one step longer with
+ * no stall. Mirrors the BPF windowed refresh.
+ */
+#[cfg(test)]
+pub fn slot_window_depths(
+    own: u64,
+    f0: u64,
+    f1: u64,
+    rescue: u64,
+    light_over: u64,
+    hog_over: u64,
+    group: u8,
+) -> (u64, u64) {
+    let (light, hog) = if group == GROUP_HOG {
+        (rescue + light_over, own + f0 + f1 + hog_over)
+    } else {
+        (own + f0 + f1 + light_over, rescue + hog_over)
+    };
+    (light.min(4), hog.min(4))
+}
+
+/*
  * True when window burn stays below 4ms for
  * promote. Only low windows move the streak
  * forward toward 64 wins near 2s.
