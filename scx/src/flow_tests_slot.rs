@@ -367,6 +367,110 @@ fn fifo_drain_keeps_arrival_order() {
 }
 
 #[test]
+fn rescue_moves_one_per_dispatch_under_hot_own_load() {
+    // Mirrors dispatch.bpf.c lim2 = moved + 1U: rescue moves at most one
+    // toward budget per dispatch. Hot own load keeps the own bucket
+    // non-empty every dispatch yet leaves budget open, so rescue still
+    // takes exactly one while own takes the rest.
+    let cpu = 0;
+    let mut rescue_q: VecDeque<PendingTask> = (0..8).map(|_| live_task(cpu as usize, 2)).collect();
+    for _ in 0..8 {
+        // Hot own refill with 10 movable keeps budget open at 10 of 32.
+        let mut own_q: VecDeque<PendingTask> =
+            (0..10).map(|_| live_task(cpu as usize, 2)).collect();
+        let mut moved = slot_drain_model(&mut own_q, cpu, SLOT_BUDGET, 0);
+        assert_eq!(moved, 10);
+        assert!(own_q.is_empty());
+        // Overflow and fill stay empty, so rescue sees moved at 10.
+        if moved < SLOT_BUDGET {
+            let lim2 = (moved + 1).min(SLOT_BUDGET);
+            let got = slot_drain_model(&mut rescue_q, cpu, lim2, moved);
+            assert_eq!(got, 1, "rescue must move exactly one when open");
+            moved += got;
+        }
+        assert_eq!(moved, 11);
+    }
+    assert!(rescue_q.is_empty());
+    // Saturating own load fills the budget, so the budget gate skips
+    // rescue that dispatch with no strand: the other group's own trips
+    // own the bulk path while rescue stays the exception path.
+    let mut own_full: VecDeque<PendingTask> = (0..SLOT_BUDGET)
+        .map(|_| live_task(cpu as usize, 2))
+        .collect();
+    let mut rescue_one: VecDeque<PendingTask> = VecDeque::from([live_task(cpu as usize, 2)]);
+    let mut moved = slot_drain_model(&mut own_full, cpu, SLOT_BUDGET, 0);
+    assert_eq!(moved, SLOT_BUDGET);
+    assert!(own_full.is_empty());
+    if moved < SLOT_BUDGET {
+        moved += slot_drain_model(&mut rescue_one, cpu, moved + 1, moved);
+    }
+    assert_eq!(moved, SLOT_BUDGET);
+    assert_eq!(rescue_one.len(), 1);
+}
+
+#[test]
+fn rescue_worst_case_bound_is_one_per_dispatch() {
+    // R rescue tasks need exactly R dispatches at one per dispatch.
+    // This is the worst case when every dispatch leaves budget open.
+    // Rotation plus the kick sweep still cover every bucket, so the
+    // unit rescue rate suffices as the exception path.
+    let cpu = 0;
+    const RESCUE_N: usize = 16;
+    let mut rescue_q: VecDeque<PendingTask> =
+        (0..RESCUE_N).map(|_| live_task(cpu as usize, 2)).collect();
+    for expect_left in (0..RESCUE_N).rev() {
+        // Own stays hot at 31, so rescue takes the last budget slot.
+        let mut own_q: VecDeque<PendingTask> =
+            (0..31).map(|_| live_task(cpu as usize, 2)).collect();
+        let mut moved = slot_drain_model(&mut own_q, cpu, SLOT_BUDGET, 0);
+        assert_eq!(moved, 31);
+        let lim2 = (moved + 1).min(SLOT_BUDGET);
+        let got = slot_drain_model(&mut rescue_q, cpu, lim2, moved);
+        assert_eq!(got, 1);
+        moved += got;
+        assert_eq!(moved, SLOT_BUDGET);
+        assert_eq!(rescue_q.len(), expect_left);
+    }
+    assert!(rescue_q.is_empty());
+}
+
+#[test]
+fn rescue_never_strands_behind_mask_blocked_own() {
+    // Own holds only mask-blocked tasks for this CPU while rescue holds
+    // movable cross-group work. Own moves zero yet stays unpinned
+    // because the leftover is uncapped, and rescue still moves one per
+    // dispatch with the cursor advancing, so no strand forms.
+    let cpu = 0;
+    let mut cur: u8 = 9;
+    let mut own_q: VecDeque<PendingTask> = (0..4)
+        .map(|_| PendingTask {
+            allowed: vec![false, true],
+            exiting: false,
+            live: true,
+            fail: false,
+        })
+        .collect();
+    let mut rescue_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(cpu as usize, 2)).collect();
+    for _ in 0..4 {
+        let own_moved = slot_drain_model(&mut own_q, cpu, SLOT_BUDGET, 0);
+        assert_eq!(own_moved, 0);
+        // Uncapped leftover must advance, never pin.
+        let left = !own_q.is_empty();
+        let capped = own_moved >= SLOT_BUDGET;
+        let next = rotation_step(cur, left, capped);
+        assert_eq!(next, slot_next(cur));
+        cur = next;
+        // Rescue runs with budget open and moves exactly one.
+        let got = slot_drain_model(&mut rescue_q, cpu, 1, 0);
+        assert_eq!(got, 1);
+    }
+    assert!(rescue_q.is_empty());
+    // Blocked own work stays queued but never pinned the rotation.
+    assert_eq!(own_q.len(), 4);
+    assert_eq!(cur, 13);
+}
+
+#[test]
 fn token_eligible_needs_full_conjunct() {
     assert!(token_eligible(true, 5, 1_000_000, 0, 100));
     assert!(!token_eligible(false, 5, 1_000_000, 0, 100));

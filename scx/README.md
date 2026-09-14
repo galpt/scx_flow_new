@@ -74,10 +74,13 @@ by online rank with write by id. See
 
 Strict order is own cursor bucket to budget, group
 overflow at 4, two fill ahead buckets at 4 each, then
-always the other group cursor bucket at 4. Rotation
-advances the cursor each dispatch with capped retain
-for hot buckets, so every occupied bucket drains
-within 512 dispatches worst case. A capped drain with
+always the other group cursor bucket at 1. One suffices
+because rotation plus the kick sweep still cover every
+bucket, so cross-group rescue stays an exception path
+rather than a bulk path. Rotation advances the cursor
+each dispatch with capped retain for hot buckets, so
+every occupied bucket drains within 512 dispatches
+worst case. A capped drain with
 work left counts one defer. A kick safety net chains
 idle owners past the watchdog with progress, far, and
 sweep kicks. All trips share one drain body with mask

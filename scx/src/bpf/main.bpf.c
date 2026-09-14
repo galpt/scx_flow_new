@@ -67,18 +67,21 @@ volatile u8 flow_perf_mode;
 volatile u8 flow_probe_perf;
 /* Wheel head with 8 bits for the first 8 near slots in a 32 bit word. Each */
 /* bit marks one near slot with queued work. Set after insert when the slot */
-/* sits below 8. Cleared when a drain observes its bucket empty, so stale */
-/* falls back to positive with drains owning moves and no hide. Wide word */
-/* keeps atomic or on 32 bits, since 8 bit atomics stay unsupported. */
+/* sits below 8. Never cleared, so seek stays fail-positive with drains */
+/* owning moves and no hide. Drains never consult marks, so clearing buys */
+/* nothing. Wide word keeps atomic or on 32 bits, since 8 bit atomics stay */
+/* unsupported. */
 volatile u32 flow_wheel_head;
 /* Wheel fine summary with 256 bits for 256 near slots. Set after insert with */
-/* the head and coarse. Cleared per bucket when a drain observes it empty, so */
-/* stale falls back to positive with drains owning moves and no hide. */
+/* the head and coarse. Never cleared, so seek stays fail-positive with drains */
+/* owning moves and no hide. Drains never consult marks, so clearing buys */
+/* nothing. */
 volatile u64 flow_wheel_fine[4];
 /* Wheel coarse summary with 256 bits for 256 far blocks. Set after insert */
 /* with head and fine. Never cleared per bucket, since one bit covers 256 */
 /* slots and no single drain can prove the block empty, so stale falls back */
-/* to positive with drains owning moves and no hide. */
+/* to positive with drains owning moves and no hide. Drains never consult */
+/* marks, so clearing buys nothing. */
 volatile u64 flow_wheel_coarse[4];
 /* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
 /* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
