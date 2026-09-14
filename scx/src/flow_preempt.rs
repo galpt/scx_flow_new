@@ -348,3 +348,27 @@ pub fn skip_reason_name(reason: u8) -> &'static str {
         _ => "unknown",
     }
 }
+
+/*
+ * True when one queue holds at most one task for empty
+ * first. Holds when queued is zero or one, else false,
+ * so deep queues stay quiet with no storm and no time
+ * use. Minimal compare with no wrap. Mirrors the BPF
+ * empty check for the bound gate.
+ */
+#[cfg(test)]
+pub fn empty_ok(q: u64) -> bool {
+    q <= 1
+}
+
+/*
+ * True when one wake earns the CPU by earliness or hog.
+ * Holds when deserved holds or occupant holds hog, so
+ * hog occupants preempt with no time cap past empty
+ * first. Minimal OR with no wrap. Mirrors the BPF hog
+ * OR for the bound gate.
+ */
+#[cfg(test)]
+pub fn deserved_or_hog(deserved: bool, occupant_hog: bool) -> bool {
+    deserved || occupant_hog
+}

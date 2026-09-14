@@ -131,6 +131,8 @@ struct flow_cpu_state {
 /* Counters at 296B with group, coalesce, wheel, token, and slot. Total keeps */
 /* the sum for compat. Busy stays fail closed with no preempt, so busy */
 /* no kicks count under total plus armed only with no other reason write. */
+/* Draft for 4.2.41 keeps 296B with kicks plus deserved plus group */
+/* plus mask plus rate live and armed retired with no size move. */
 /* Coalesced counts q2 idle skips in 50us. Overflow counts tail pins past */
 /* the horizon, boosts counts token spends, and cas fails counts lost token */
 /* races. Preempt kicks plus deserved plus group plus mask plus rate plus */
@@ -677,5 +679,22 @@ static __always_inline u32 flow_slot_own_cap(u32 budget)
 	if (budget == 0)
 		return 0;
 	return budget - 1U;
+}
+/* True when one queue holds at most one task for empty first. */
+/* Holds when queued is zero or one, else false, so deep */
+/* queues stay quiet with no storm and no time use. Minimal */
+/* compare with no wrap and no new constant. */
+static __always_inline bool flow_empty_ok(u64 q)
+{
+	return q <= 1ULL;
+}
+/* True when one wake earns the CPU by earliness or hog. */
+/* Holds when deserved holds or occupant holds hog, so hog */
+/* occupants preempt with no time cap past empty first. */
+/* Minimal OR with no wrap and no new branch. */
+static __always_inline bool flow_deserved_or_hog(bool deserved,
+	bool occupant_hog)
+{
+	return deserved || occupant_hog;
 }
 #endif

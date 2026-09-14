@@ -26,6 +26,10 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
+/*
+ * Draft for 4.2.41 keeps 296B with kicks plus deserved plus group
+ * plus mask plus rate live and armed retired with no size move.
+ */
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]

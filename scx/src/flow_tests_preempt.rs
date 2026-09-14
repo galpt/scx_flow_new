@@ -572,3 +572,119 @@ fn same_override_bypasses_group_without_recount() {
     assert!(!strict);
     assert_eq!(skip_reason(true, true, strict, true, true), Some(3));
 }
+
+/*
+ * Empty first holds at most one queued task. Zero and
+ * one pass, two and more fail, so deep queues stay
+ * quiet with no storm. Mirrors the BPF empty check
+ * with no wrap and no new constant.
+ */
+#[test]
+fn empty_first_bounds_shallow_only() {
+    assert!(empty_ok(0));
+    assert!(empty_ok(1));
+    assert!(!empty_ok(2));
+    assert!(!empty_ok(3));
+    assert!(!empty_ok(8));
+    assert!(!empty_ok(100));
+    assert!(!empty_ok(u64::MAX));
+    assert_eq!(empty_ok(0), true);
+    assert_eq!(empty_ok(1), true);
+    assert_eq!(empty_ok(2), false);
+}
+
+/*
+ * Deserved edge holds minus one only with exact bound
+ * fail. Bound is frontier plus granule plus slack, so
+ * minus one passes and bound plus one fails with wrap
+ * safety intact. Uses the floor granule for cover.
+ */
+#[test]
+fn deserved_edge_holds_minus_one_only() {
+    let frontier = 50_000_000u64;
+    let gran = GRANULE_FLOOR_NS;
+    assert_eq!(gran, 64_000);
+    let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
+    assert_eq!(bound, frontier + 96_000);
+    assert!(deserved(bound.wrapping_sub(1), frontier, gran));
+    assert!(!deserved(bound, frontier, gran));
+    assert!(!deserved(bound.wrapping_add(1), frontier, gran));
+    assert!(deserved(frontier, frontier, gran));
+    assert!(!deserved(frontier + 1_000_000, frontier, gran));
+}
+
+/*
+ * Hog OR needs no time cap past empty first. False
+ * plus false fails, all other pairs pass, so hog
+ * occupants preempt even when far past the deserved
+ * bound with no extra check. Minimal OR only.
+ */
+#[test]
+fn hog_or_truth_needs_no_time_cap() {
+    assert!(!deserved_or_hog(false, false));
+    assert!(deserved_or_hog(false, true));
+    assert!(deserved_or_hog(true, false));
+    assert!(deserved_or_hog(true, true));
+    let frontier = 50_000_000u64;
+    let gran = GRANULE_FLOOR_NS;
+    let far = frontier + gran + DESERVED_SLACK_NS + 1_000_000;
+    assert!(!deserved(far, frontier, gran));
+    assert!(deserved_or_hog(false, true));
+    assert!(!deserved_or_hog(false, false));
+    let near = frontier;
+    assert!(deserved(near, frontier, gran));
+    assert!(deserved_or_hog(true, false));
+}
+
+/*
+ * Rate claim keeps a single winner per slice. First
+ * claim wins, second fails, fresh wins once more with
+ * stand kept. Mirrors the BPF fetch OR claim with no
+ * check then set.
+ */
+#[test]
+fn rate_claim_holds_single_winner_stable() {
+    let mut a = 0u32;
+    assert!(rate_claim(&mut a));
+    assert!(!rate_claim(&mut a));
+    assert!(!rate_clear(a));
+    let mut b = CURSOR_RATE_BIT | 7;
+    assert!(!rate_claim(&mut b));
+    assert_eq!(cursor_val(b), 7);
+    let mut c = 0u32;
+    assert!(rate_claim(&mut c));
+    assert!(!rate_claim(&mut c));
+    let mut d = crate::flow_preempt::CURSOR_STAND_BIT | 3;
+    assert!(rate_claim(&mut d));
+    assert!(stand_held(d));
+    assert_eq!(cursor_val(d), 3);
+    assert!(!rate_claim(&mut d));
+}
+
+/*
+ * Skip reason holds five gate order stable with fail
+ * closed intact. None means all five pass, some means
+ * first fail wins in armed, deserved, group, mask, and
+ * rate order. Empty and hog wrappers stay out of the
+ * five gate path with no signature move.
+ */
+#[test]
+fn skip_reason_holds_five_gate_stable() {
+    assert_eq!(skip_reason(true, true, true, true, true), None);
+    assert!(preempt_ok(true, true, true, true, true));
+    assert_eq!(skip_reason(false, true, true, true, true), Some(1));
+    assert_eq!(skip_reason(true, false, true, true, true), Some(2));
+    assert_eq!(skip_reason(true, true, false, true, true), Some(3));
+    assert_eq!(skip_reason(true, true, true, false, true), Some(4));
+    assert_eq!(skip_reason(true, true, true, true, false), Some(5));
+    assert!(!preempt_ok(false, true, true, true, true));
+    assert!(!preempt_ok(true, false, true, true, true));
+    assert!(!preempt_ok(true, true, true, false, true));
+    assert!(!preempt_ok(true, true, true, true, false));
+    assert!(empty_ok(1));
+    assert!(!empty_ok(2));
+    assert!(deserved_or_hog(true, false));
+    assert!(deserved_or_hog(false, true));
+    assert_eq!(skip_reason_name(0), "kick");
+    assert_eq!(skip_reason_name(5), "rate");
+}
