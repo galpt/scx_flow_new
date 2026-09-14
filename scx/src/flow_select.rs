@@ -93,6 +93,43 @@ pub fn steal_peers(cpu: u32, nr_cpus: usize) -> Vec<u32> {
 }
 
 /*
+ * Peers visited by the perf only cross scan from a start.
+ * Steps bound peers from start plus 8 with wrap, so high
+ * CPUs reach low peers with no dead read. Feeds the other
+ * group scan on same group miss with same need and keep
+ * first. Mirrors the BPF second loop with modulo and the
+ * same order for the verifier. Returns the visit order
+ * with bound entries. See src/bpf/dispatch.bpf.c for the
+ * scan use.
+ */
+#[cfg(test)]
+pub fn steal_cross_peers(start: u32, nr_cpus: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(STEAL_BOUND);
+    if nr_cpus == 0 {
+        return out;
+    }
+    for off in 0..STEAL_BOUND as u32 {
+        out.push(start.wrapping_add(8).wrapping_add(off) % nr_cpus as u32);
+    }
+    out
+}
+
+/*
+ * Cross mark from one retained DSQ id and one owner group.
+ * Compares the DSQ low bit against the owner group low bit
+ * with xor, so same group maps to zero and cross maps to
+ * one with no branch. Holds pure after the shared drain
+ * with no live across the drain, so the verifier keeps one
+ * state. Mirrors the BPF post hoc xor with mask. Returns 0
+ * for same and 1 for cross. See src/bpf/dispatch.bpf.c for
+ * the fold use.
+ */
+#[cfg(test)]
+pub fn steal_cross_x(steal_dsq: u64, sgroup: u8) -> u64 {
+    ((steal_dsq & 1) ^ ((sgroup as u64) & 1)) & 1
+}
+
+/*
  * Check that a CPU may run a task with the given mask. Mirrors the BPF live,
  * range, and mask check. A negative CPU fails closed. A CPU at or past 1024
  * fails closed as test only bound. Live CPUs are modelled by the mask length in

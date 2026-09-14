@@ -330,3 +330,96 @@ pub fn kick_step(moved: u32, window_left: bool, sweep: u16) -> (bool, u16) {
 pub fn window_has_work(own: bool, own_over: bool, other: bool, other_over: bool) -> bool {
     own || own_over || other || other_over
 }
+
+/*
+ * Fold counts from one shared steal drain with post hoc mark.
+ * Adds got to steal moves for all peer moves and got times
+ * mark to steal x moves for the cross subset with two
+ * unconditional adds, so zero keeps count still with no
+ * branch on cross. Mirrors the BPF fold with LSB compare
+ * after the drain and single move with lim at moved plus
+ * one. Returns the pair of adds in steal moves order then
+ * steal x moves order. See src/bpf/dispatch.bpf.c for the
+ * drain use.
+ */
+#[cfg(test)]
+pub fn steal_fold_counts(got: u32, steal_dsq: u64, sgroup: u8) -> (u64, u64) {
+    let x = crate::flow_select::steal_cross_x(steal_dsq, sgroup);
+    (got as u64, (got as u64) * x)
+}
+
+/*
+ * First donor DSQ id from one scan window with keep first.
+ * Visits bound peers from start with wrap and keeps the
+ * first peer with queued at or past need, so shallow donors
+ * skip early with no iterator. Mirrors the BPF keep first
+ * scan with live check and need. Returns the DSQ id on hit
+ * and none on miss with no drain use. See
+ * src/bpf/dispatch.bpf.c for the scan use.
+ */
+#[cfg(test)]
+pub fn steal_first_donor(
+    start: u32,
+    nr: usize,
+    group: u8,
+    need: u64,
+    depths: &[u64],
+) -> Option<u64> {
+    if nr <= 1 {
+        return None;
+    }
+    for off in 0..crate::flow_select::STEAL_BOUND as u32 {
+        let peer = start.wrapping_add(off) % nr as u32;
+        if (peer as usize) >= nr {
+            continue;
+        }
+        if (peer as u64) >= 1024 {
+            continue;
+        }
+        let q = depths.get(peer as usize).copied().unwrap_or(0);
+        if q < need {
+            continue;
+        }
+        return Some(slot_cpu_dsq(peer, group));
+    }
+    None
+}
+
+/*
+ * Pick from two scan windows with strict and perf models.
+ * Scans same group first and returns the same donor on hit
+ * with no cross use, so strict stays same group only with
+ * zero cross. Scans other group second from start plus 8
+ * on same group miss when perf holds, so perf adds cross
+ * cover with no extra drain. Single CPU hosts skip the
+ * whole pass with one check. Mirrors the BPF fold with one
+ * shared drain and single move. Returns the DSQ id with
+ * cross flag on hit and none on miss. See
+ * src/bpf/dispatch.bpf.c for the drain use.
+ */
+#[cfg(test)]
+pub fn steal_pick_fold(
+    start: u32,
+    nr: usize,
+    sgroup: u8,
+    ogroup: u8,
+    need: u64,
+    same_depths: &[u64],
+    cross_depths: &[u64],
+    perf: bool,
+) -> Option<(u64, bool)> {
+    if nr <= 1 {
+        return None;
+    }
+    if let Some(dsq) = steal_first_donor(start, nr, sgroup, need, same_depths) {
+        return Some((dsq, false));
+    }
+    if !perf {
+        return None;
+    }
+    let cross_start = start.wrapping_add(8);
+    if let Some(dsq) = steal_first_donor(cross_start, nr, ogroup, need, cross_depths) {
+        return Some((dsq, true));
+    }
+    None
+}

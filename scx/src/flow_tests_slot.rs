@@ -756,3 +756,225 @@ fn insert_fails_closed_on_dead_cpu() {
         slot_cpu_dsq(3, GROUP_LIGHT)
     );
 }
+
+/*
+ * Cross peers sweep start plus 8 with wrap.
+ * Cross peers from start visit bound peers from start
+ * plus 8 with wrap, so high starts reach low peers with
+ * no dead read. First 8 plus cross 8 match the 16 sweep
+ * in order, so same plus cross share one rotation with
+ * stride 8 step. Mirrors the BPF second loop with modulo.
+ * See src/flow_select.rs and src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_cross_peers_sweep_start_plus_8() {
+    assert_eq!(steal_cross_peers(0, 16), vec![8, 9, 10, 11, 12, 13, 14, 15]);
+    let full = steal_peers_from(0, 16);
+    assert_eq!(&full[0..8], &[0, 1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(&full[8..16], steal_cross_peers(0, 16).as_slice());
+    assert_eq!(steal_cross_peers(12, 16), vec![4, 5, 6, 7, 8, 9, 10, 11]);
+    let same8 = steal_peers_from(1, 8);
+    assert_eq!(steal_cross_peers(1, 8), same8[0..8].to_vec());
+    assert!(steal_cross_peers(0, 0).is_empty());
+    assert_eq!(steal_cross_peers(0, 16).len(), STEAL_BOUND);
+}
+
+/*
+ * LSB derive holds cross truth with no branch.
+ * Same DSQ low bit matches owner, so mark stays zero
+ * with no count. Cross DSQ low bit flips owner, so mark
+ * stays one with full count. Zero got keeps zero in both
+ * adds. Mirrors the BPF post hoc xor. See
+ * src/flow_select.rs and src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_lsb_derive_holds_cross_truth() {
+    for cpu in [0u32, 1, 3, 7] {
+        let same_light = slot_cpu_dsq(cpu, GROUP_LIGHT);
+        let cross_light = slot_cpu_dsq(cpu, GROUP_HOG);
+        assert_eq!(steal_cross_x(same_light, GROUP_LIGHT), 0);
+        assert_eq!(steal_cross_x(cross_light, GROUP_LIGHT), 1);
+        let same_hog = slot_cpu_dsq(cpu, GROUP_HOG);
+        let cross_hog = slot_cpu_dsq(cpu, GROUP_LIGHT);
+        assert_eq!(steal_cross_x(same_hog, GROUP_HOG), 0);
+        assert_eq!(steal_cross_x(cross_hog, GROUP_HOG), 1);
+        assert!(steal_cross_x(same_light, GROUP_LIGHT) <= 1);
+        assert!(steal_cross_x(cross_light, GROUP_LIGHT) <= 1);
+    }
+    assert_eq!(steal_cross_x(0x6000, GROUP_LIGHT), 0);
+    assert_eq!(steal_cross_x(0x6001, GROUP_LIGHT), 1);
+    assert_eq!(steal_cross_x(0x6001, GROUP_HOG), 0);
+    assert_eq!(steal_cross_x(0x6000, GROUP_HOG), 1);
+}
+
+/*
+ * Fold counts all plus cross subset with two adds.
+ * Steal moves adds got for all peer moves with no branch,
+ * so same plus cross share one drain. Steal x moves adds
+ * got times mark for the cross subset, so same keeps zero
+ * and cross keeps got with no branch on cross. Mirrors
+ * the BPF fold. See src/flow_slot.rs and
+ * src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_fold_counts_all_plus_cross_subset() {
+    let same = slot_cpu_dsq(2, GROUP_LIGHT);
+    let cross = slot_cpu_dsq(2, GROUP_HOG);
+    assert_eq!(steal_fold_counts(0, same, GROUP_LIGHT), (0, 0));
+    assert_eq!(steal_fold_counts(0, cross, GROUP_LIGHT), (0, 0));
+    assert_eq!(steal_fold_counts(1, same, GROUP_LIGHT), (1, 0));
+    assert_eq!(steal_fold_counts(1, cross, GROUP_LIGHT), (1, 1));
+    assert_eq!(steal_fold_counts(1, cross, GROUP_HOG), (1, 0));
+    assert_eq!(steal_fold_counts(1, same, GROUP_HOG), (1, 1));
+    let (all, x) = steal_fold_counts(1, cross, GROUP_LIGHT);
+    assert_eq!(all, 1);
+    assert_eq!(x, 1);
+    let (all2, x2) = steal_fold_counts(1, same, GROUP_LIGHT);
+    assert_eq!(all2, 1);
+    assert_eq!(x2, 0);
+}
+
+/*
+ * Strict zero stays same only while perf adds cross.
+ * Same hit returns same with no cross use in both modes,
+ * so strict keeps cache apart. Same miss with cross work
+ * returns none in strict with zero cross, while perf
+ * returns cross with full fold, so perf adds cover on miss
+ * only. Single host stays none in both modes. Mirrors the
+ * BPF narrow gate. See src/flow_slot.rs and
+ * src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_strict_zero_vs_perf_positive() {
+    let need = 2u64;
+    let start = 0u32;
+    let nr = 8usize;
+    let mut same_hit = vec![0u64; 8];
+    same_hit[1] = 4;
+    let cross_idle = vec![0u64; 8];
+    let got_same_strict = steal_pick_fold(
+        start,
+        nr,
+        GROUP_LIGHT,
+        GROUP_HOG,
+        need,
+        &same_hit,
+        &cross_idle,
+        false,
+    );
+    let got_same_perf = steal_pick_fold(
+        start,
+        nr,
+        GROUP_LIGHT,
+        GROUP_HOG,
+        need,
+        &same_hit,
+        &cross_idle,
+        true,
+    );
+    assert_eq!(got_same_strict, Some((slot_cpu_dsq(1, GROUP_LIGHT), false)));
+    assert_eq!(got_same_perf, Some((slot_cpu_dsq(1, GROUP_LIGHT), false)));
+    let same_miss = vec![0u64; 8];
+    let mut cross_work = vec![0u64; 8];
+    cross_work[2] = 4;
+    let miss_strict = steal_pick_fold(
+        start,
+        nr,
+        GROUP_LIGHT,
+        GROUP_HOG,
+        need,
+        &same_miss,
+        &cross_work,
+        false,
+    );
+    assert_eq!(miss_strict, None);
+    let miss_perf = steal_pick_fold(
+        start,
+        nr,
+        GROUP_LIGHT,
+        GROUP_HOG,
+        need,
+        &same_miss,
+        &cross_work,
+        true,
+    );
+    assert!(miss_perf.is_some());
+    let (dsq, is_cross) = miss_perf.unwrap();
+    assert!(is_cross);
+    assert_eq!(steal_cross_x(dsq, GROUP_LIGHT), 1);
+    assert_eq!(steal_fold_counts(1, dsq, GROUP_LIGHT), (1, 1));
+    let (same_dsq, same_cross) = got_same_strict.unwrap();
+    assert!(!same_cross);
+    assert_eq!(steal_fold_counts(1, same_dsq, GROUP_LIGHT), (1, 0));
+    assert_eq!(
+        steal_pick_fold(
+            start,
+            1,
+            GROUP_LIGHT,
+            GROUP_HOG,
+            need,
+            &same_hit,
+            &cross_work,
+            false
+        ),
+        None
+    );
+    assert_eq!(
+        steal_pick_fold(
+            start,
+            1,
+            GROUP_LIGHT,
+            GROUP_HOG,
+            need,
+            &same_hit,
+            &cross_work,
+            true
+        ),
+        None
+    );
+    assert_eq!(
+        steal_first_donor(start, nr, GROUP_LIGHT, need, &same_hit),
+        Some(slot_cpu_dsq(1, GROUP_LIGHT))
+    );
+    assert_eq!(
+        steal_first_donor(start, nr, GROUP_LIGHT, need, &same_miss),
+        None
+    );
+}
+
+/*
+ * Fold single move holds one toward budget with shared drain.
+ * One shared drain moves at most one with lim at moved plus
+ * one, so tail stays smooth with no burst theft. Fold then
+ * adds got to steal moves and got times mark to steal x
+ * moves with no branch, so counts track the single move.
+ * Mirrors the BPF single move. See src/flow_slot.rs and
+ * src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_fold_single_move_toward_budget() {
+    let cpu = 0;
+    let mut moved = 0u32;
+    let mut peer_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(0, 2)).collect();
+    let lim = (moved + 1).min(SLOT_BUDGET);
+    let got = slot_drain_model(&mut peer_q, cpu, lim, moved);
+    assert_eq!(got, 1);
+    moved += got;
+    assert_eq!(moved, 1);
+    let same = slot_cpu_dsq(1, GROUP_LIGHT);
+    let cross = slot_cpu_dsq(1, GROUP_HOG);
+    assert_eq!(steal_fold_counts(got, same, GROUP_LIGHT), (1, 0));
+    assert_eq!(steal_fold_counts(got, cross, GROUP_LIGHT), (1, 1));
+    let mut full_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(0, 2)).collect();
+    let lim2 = (moved + 1).min(SLOT_BUDGET);
+    let got2 = slot_drain_model(&mut full_q, cpu, lim2, moved);
+    assert_eq!(got2, 1);
+    moved += got2;
+    assert_eq!(moved, 2);
+    let mut sat_q: VecDeque<PendingTask> = (0..4).map(|_| live_task(0, 2)).collect();
+    let sat_moved = SLOT_BUDGET;
+    let sat_lim = (sat_moved + 1).min(SLOT_BUDGET);
+    let sat_got = slot_drain_model(&mut sat_q, cpu, sat_lim, sat_moved);
+    assert_eq!(sat_got, 0);
+    assert_eq!(steal_fold_counts(sat_got, cross, GROUP_LIGHT), (0, 0));
+}
