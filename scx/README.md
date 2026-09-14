@@ -79,7 +79,32 @@ mask. Groups seed by online rank with write by id. See
 
 ### Dispatch
 
-Strict order is own per CPU own group at 31, own group overflow at 4, own CPU other group at 4, other group overflow at 4, then one peer steal with a single move toward 32. All trips skip empty with one read, so idle pays no empty scan. Each drain caps the walk at budget plus 8, so mask miss walks stay bounded. The steal scan reads bound same group peer queues with wrap plus live check and keeps the first donor at need, which is 1 when the owner is idle with no local moves and no window work, else 2, so idle owners collect the last task while busy owners leave one. Same group only by design, so groups keep cache apart with no cross scan. Single move keeps tail smooth with local trips owning the window. Single CPU hosts skip the pass. Pinned tasks rest in overflow, so trips visit them every pass. Own at 31 leaves budget open, so saturated own still lets overflow, other CPU, other overflow, and steal progress. A capped drain with window work left counts one defer with no kick. A kick net chains idle owners past the watchdog with sweep kicks at 256 on zero-move window only. Moves with window ride the natural dispatch with no kick, since the loop already visited every task. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
+Strict order is own per CPU own group at 31, own group
+overflow at 4, own CPU other group at 4, other group
+overflow at 4, then one peer steal with a single move
+toward 32. All trips skip empty with one read, so idle
+pays no empty scan. Each drain caps the walk at budget
+plus 8, so miss walks stay bounded. Start reads the
+masked cursor plus one with wrap once per dispatch, so
+passes spread. The scan reads bound same group peers
+from start with wrap plus live check and keeps the first
+donor at need, which is 1 when idle with no moves and no
+window work, else 2. Self visit stays allowed with no
+extra branch, so hosts keep cover. Same group only keeps
+cache apart with no cross scan and cross moves stay at
+zero. Single move keeps tail smooth with local trips
+owning the window. Cursor steps by 8 with a bounded swap
+that keeps rate plus stand and drops on race. Single CPU
+hosts skip the pass. Pinned tasks rest in overflow, so
+trips visit them each pass. Own at 31 leaves budget open
+for overflow plus steal. A capped drain with work left
+counts one defer with no kick. Sweep kicks at 256 run on
+zero-move window only. Moves with window ride the next
+dispatch with no kick. All trips share one drain with
+mask wins and move to local, so order stays FIFO.
+Placement, dispatch, and pressure read the live table.
+See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and
+`src/flow_slot.rs`.
 
 ### Kicks
 
