@@ -85,15 +85,15 @@ fn per_cpu_ids_match_topology() {
     assert_eq!(slot_cpu_dsq(0, GROUP_LIGHT), SLOT_BASE);
     assert_eq!(slot_overflow_dsq(GROUP_LIGHT), SLOT_OVERFLOW_BASE);
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_LIGHT, 9, false),
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, false, 8),
         slot_cpu_dsq(3, GROUP_LIGHT)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 300, false),
+        insert_cpu_dsq(3, GROUP_HOG, 300, false, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_LIGHT, 9, true),
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, true, 8),
         slot_overflow_dsq(GROUP_LIGHT)
     );
 }
@@ -206,27 +206,27 @@ fn local_trips_cover_own_overflow_other() {
 #[test]
 fn insert_cpu_rests_pinned_in_overflow() {
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 9, true),
+        insert_cpu_dsq(3, GROUP_HOG, 9, true, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_LIGHT, 9, true),
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, true, 8),
         slot_overflow_dsq(GROUP_LIGHT)
     );
     assert_eq!(
-        insert_cpu_dsq(5, GROUP_LIGHT, 9, false),
+        insert_cpu_dsq(5, GROUP_LIGHT, 9, false, 8),
         slot_cpu_dsq(5, GROUP_LIGHT)
     );
     assert_eq!(
-        insert_cpu_dsq(5, GROUP_HOG, 300, false),
+        insert_cpu_dsq(5, GROUP_HOG, 300, false, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     assert_eq!(
-        insert_cpu_dsq(5, GROUP_LIGHT, 255, false),
+        insert_cpu_dsq(5, GROUP_LIGHT, 255, false, 8),
         slot_cpu_dsq(5, GROUP_LIGHT)
     );
     assert_eq!(
-        insert_cpu_dsq(5, GROUP_LIGHT, 256, false),
+        insert_cpu_dsq(5, GROUP_LIGHT, 256, false, 8),
         slot_overflow_dsq(GROUP_LIGHT)
     );
 }
@@ -552,24 +552,24 @@ fn pinned_rests_in_overflow_with_bounded_drain() {
     // Pinned tasks rest in overflow, so every owner pass
     // visits them in the window.
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 122, true),
+        insert_cpu_dsq(3, GROUP_HOG, 122, true, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     // CPU first arg order still overflows pinned hog at CPU 3.
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 129, true),
+        insert_cpu_dsq(3, GROUP_HOG, 129, true, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_LIGHT, 78, true),
+        insert_cpu_dsq(3, GROUP_LIGHT, 78, true, 8),
         slot_overflow_dsq(GROUP_LIGHT)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 122, false),
+        insert_cpu_dsq(3, GROUP_HOG, 122, false, 8),
         slot_cpu_dsq(3, GROUP_HOG)
     );
     assert_eq!(
-        insert_cpu_dsq(3, GROUP_HOG, 300, false),
+        insert_cpu_dsq(3, GROUP_HOG, 300, false, 8),
         slot_overflow_dsq(GROUP_HOG)
     );
     let trips = local_trip_dsqs(0, GROUP_HOG);
@@ -584,4 +584,58 @@ fn pinned_rests_in_overflow_with_bounded_drain() {
     assert!(defer_ok(SLOT_D, true));
     assert!(!kick_step(1, true, 0).0);
     assert!(!kick_step(0, false, 0).0);
+}
+
+/*
+ * Steal wrap reaches low peers from high CPUs.
+ * Chain from 7 at 8 visits 0 to 6 first with no
+ * dead read, so high CPUs steal with wrap. Mirrors
+ * the BPF steal helper chain with bound 8.
+ */
+#[test]
+fn steal_wrap_reaches_low_peers() {
+    let peers = steal_peers(7, 8);
+    assert_eq!(peers.len(), STEAL_BOUND);
+    assert_eq!(peers, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    assert!(peers.contains(&0));
+    assert!(peers.contains(&1));
+    assert!(peers.contains(&2));
+    assert!(peers.contains(&3));
+    assert!(peers.contains(&4));
+    assert!(peers.contains(&5));
+    assert!(peers.contains(&6));
+    let mid = steal_peers(3, 8);
+    assert_eq!(mid, vec![4, 5, 6, 7, 0, 1, 2, 3]);
+    let single = steal_peers(0, 1);
+    assert_eq!(single, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/*
+ * Insert fails closed to overflow on dead CPUs.
+ * Negative plus past live plus past 1024 all pin
+ * to the tail with no trap. Mirrors the BPF live
+ * check with the same overflow fallback.
+ */
+#[test]
+fn insert_fails_closed_on_dead_cpu() {
+    assert_eq!(
+        insert_cpu_dsq(-1, GROUP_LIGHT, 9, false, 8),
+        slot_overflow_dsq(GROUP_LIGHT)
+    );
+    assert_eq!(
+        insert_cpu_dsq(9, GROUP_LIGHT, 9, false, 8),
+        slot_overflow_dsq(GROUP_LIGHT)
+    );
+    assert_eq!(
+        insert_cpu_dsq(8, GROUP_HOG, 9, false, 8),
+        slot_overflow_dsq(GROUP_HOG)
+    );
+    assert_eq!(
+        insert_cpu_dsq(1024, GROUP_LIGHT, 9, false, 1024),
+        slot_overflow_dsq(GROUP_LIGHT)
+    );
+    assert_eq!(
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, false, 8),
+        slot_cpu_dsq(3, GROUP_LIGHT)
+    );
 }

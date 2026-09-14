@@ -1468,15 +1468,21 @@ pub fn first_in_group_live(
 }
 
 /*
- * Least queued allowed CPU in one group for tests. Depth reads the group
- * overflow tail once with no per CPU pass. Every candidate in the group
- * shares that depth, so the scan keeps mask and group order with lowest
- * id on ties by strict less only. Missing overflow reads as zero with no
- * trap. Returns none when no allowed CPU lives in the group. Mirrors the
- * BPF first helper with frozen constants.
+ * Least queued allowed CPU in one group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Mirrors the BPF first
+ * helper with frozen constants.
  */
 #[cfg(test)]
-pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, overflow: &[u64]) -> Option<u32> {
+pub fn least_in_group(
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    overflow: &[u64],
+    per_cpu: &[u64],
+) -> Option<u32> {
     let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
@@ -1487,14 +1493,15 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, overflow: &[u64]) 
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);
-                best_q = oq;
+                best_q = q;
             }
-            Some(_) if oq < best_q => {
+            Some(_) if q < best_q => {
                 best = Some(cpu as u32);
-                best_q = oq;
+                best_q = q;
             }
             _ => {}
         }
@@ -1503,12 +1510,12 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, overflow: &[u64]) 
 }
 
 /*
- * Least queued allowed CPU in one live group for tests. Depth reads the
- * group overflow tail once with no per CPU pass. Every candidate in the
- * group shares that depth, so the scan keeps mask order with lowest id on
- * ties by strict less only. Missing overflow reads as zero with no trap.
- * Returns none when no allowed CPU lives in the group. Placement keeps
- * live with frozen constants. Mirrors the BPF first helper.
+ * Least queued allowed CPU in one live group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Placement keeps live
+ * with frozen constants. Mirrors the BPF first helper.
  */
 #[cfg(test)]
 pub fn least_in_group_live(
@@ -1518,6 +1525,7 @@ pub fn least_in_group_live(
     table: &[u8],
     ready: u8,
     overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
@@ -1529,14 +1537,15 @@ pub fn least_in_group_live(
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);
-                best_q = oq;
+                best_q = q;
             }
-            Some(_) if oq < best_q => {
+            Some(_) if q < best_q => {
                 best = Some(cpu as u32);
-                best_q = oq;
+                best_q = q;
             }
             _ => {}
         }

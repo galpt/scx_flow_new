@@ -81,7 +81,7 @@ pub struct Metrics {
     #[stat(desc = "Hog to light moves by wake hits")]
     #[serde(default)]
     pub group_wake_promote: u64,
-    #[stat(desc = "Busy kicks after armed delay")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_kicks: u64,
     #[stat(desc = "Total fail-closed busy no-kicks")]
@@ -93,19 +93,19 @@ pub struct Metrics {
     #[stat(desc = "Busy no-kicks for disarmed delay")]
     #[serde(default)]
     pub preempt_skipped_armed: u64,
-    #[stat(desc = "Busy no-kicks for undeserved deadline")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_deserved: u64,
-    #[stat(desc = "Busy no-kicks for cross group")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_group: u64,
-    #[stat(desc = "Busy no-kicks for mask miss")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_mask: u64,
-    #[stat(desc = "Busy no-kicks for rate held")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_rate: u64,
-    #[stat(desc = "Slots passed empty in seek")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub wheel_skips: u64,
     #[stat(desc = "Tail pins past the horizon")]
@@ -114,16 +114,16 @@ pub struct Metrics {
     #[stat(desc = "Sleeper token spends")]
     #[serde(default)]
     pub token_boosts: u64,
-    #[stat(desc = "Seeks served from head")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub wheel_head_hits: u64,
-    #[stat(desc = "Seeks served from fine")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub wheel_fine_hits: u64,
-    #[stat(desc = "Seeks served from coarse")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub wheel_coarse_hits: u64,
-    #[stat(desc = "Seeks with no mark")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub wheel_empty: u64,
     #[stat(desc = "Safety net kicks sent")]

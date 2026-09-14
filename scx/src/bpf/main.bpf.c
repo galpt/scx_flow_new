@@ -301,21 +301,20 @@ static __always_inline u8 flow_group_live(u32 cpu,
 	return flow_group_of_cpu(cpu, nr);
 }
 /* Least queued allowed CPU in one group. Per CPU store keeps backlog per */
-/* CPU, so depth reads the group overflow tail once with no per CPU pass. */
-/* Every candidate in the group shares that depth, so the scan keeps mask and */
-/* group order with lowest id on ties by strict less only. Missing overflow */
-/* reads zero with no trap. Placement keeps live, constants frozen. */
+/* CPU, so depth reads each candidate per CPU queue with one read per */
+/* candidate. The scan keeps mask and group order with lowest id on ties */
+/* by strict less only. Missing reads zero with no trap. Placement only */
+/* scans up to nr CPUs outside the queue store O1 claim with no dispatch */
+/* use. Placement keeps live, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
 	s32 best = -1;
 	u64 best_q = 0;
 	s32 cpu;
-	u64 oq;
-	oq = scx_bpf_dsq_nr_queued(
-	    flow_slot_overflow_dsq(group));
 	bpf_for(cpu, 0, 1024) {
 		u8 g;
+		u64 q;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= nr_cpu_ids)
@@ -329,9 +328,11 @@ static __always_inline s32 flow_first_in_group(
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
 			continue;
-		if (best < 0 || oq < best_q) {
+		q = scx_bpf_dsq_nr_queued(
+		    flow_slot_cpu_dsq((u32)cpu, group));
+		if (best < 0 || q < best_q) {
 			best = cpu;
-			best_q = oq;
+			best_q = q;
 		}
 	}
 	return best;
@@ -422,12 +423,12 @@ static __always_inline s32 flow_free_in_group(
 	return -1;
 }
 /* Least queued allowed CPU in any group for S0 perf. Per CPU store keeps */
-/* backlog per CPU, so depth reads each candidate group overflow tail. */
-/* Both tails load once up front, so the scan keeps mask order with no extra */
-/* pass. Picks the smallest group depth with lowest id on ties by strict less */
-/* only, so equal depths keep the first id with no extra pass. Perf only on */
-/* in group miss with same rule over the widened set. Mask always wins with */
-/* no dispatch use. */
+/* backlog per CPU, so depth reads each candidate per CPU queue plus its */
+/* group overflow tail. The scan keeps mask order with lowest id on ties */
+/* by strict less only, so equal depths keep the first id with no extra */
+/* pass. Placement only scans up to nr CPUs outside the queue store O1 */
+/* claim with no dispatch use. Perf only on in group miss with same rule */
+/* over the widened set. Mask always wins with no dispatch use. */
 static __always_inline s32 flow_first_allowed(
 	const struct task_struct *p)
 {
@@ -443,6 +444,7 @@ static __always_inline s32 flow_first_allowed(
 	    (u8)FLOW_GROUP_HOG));
 	bpf_for(cpu, 0, 1024) {
 		u64 q;
+		u64 pq;
 		u8 g;
 		if (cpu < 0)
 			continue;
@@ -455,7 +457,9 @@ static __always_inline s32 flow_first_allowed(
 			continue;
 		g = flow_group_live((u32)cpu,
 		    nr_cpu_ids) & 1U;
-		q = oq[g];
+		pq = scx_bpf_dsq_nr_queued(
+		    flow_slot_cpu_dsq((u32)cpu, g));
+		q = pq + oq[g];
 		if (best < 0 || q < best_q) {
 			best = cpu;
 			best_q = q;

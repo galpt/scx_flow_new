@@ -67,17 +67,6 @@ pub fn qdl_round_down(dl: u64) -> u64 {
 }
 
 /*
- * True when one deadline lands inside the horizon.
- * Overdue counts as inside with slot zero, so late
- * work runs at once. Past the horizon counts as
- * outside with a tail pin.
- */
-#[cfg(test)]
-pub fn in_horizon(dl: u64, frontier: u64) -> bool {
-    crate::flow_edf::time_before(dl, frontier) || dl.wrapping_sub(frontier) < WHEEL_HORIZON_NS
-}
-
-/*
  * Probe of one deadline into quantised deadline,
  * slot, error, and overflow. Overdue keeps the
  * rounded deadline with slot zero and no overflow.
@@ -189,18 +178,30 @@ pub fn steal_need(idle_empty: bool) -> u64 {
  * overflow. Pinned tasks rest in the group overflow
  * tail with no per CPU use, so every owner dispatch
  * visits them in the window with mask wins. Migratable
- * tasks keep the per CPU queue or the horizon tail. Mirrors the BPF per
+ * tasks keep the per CPU queue or the horizon tail.
+ * Dead CPUs rest in overflow with fail closed, so
+ * negative plus past live plus past 1024 all pin
+ * to the tail with no trap. Mirrors the BPF per
  * CPU branch with the same group fallback.
  */
 #[cfg(test)]
-pub fn insert_cpu_dsq(cpu: u32, group: u8, slot: u64, pinned: bool) -> u64 {
+pub fn insert_cpu_dsq(cpu: i32, group: u8, slot: u64, pinned: bool, nr: usize) -> u64 {
     if pinned {
         return slot_overflow_dsq(group);
     }
     if slot >= WHEEL_DIM {
         return slot_overflow_dsq(group);
     }
-    slot_cpu_dsq(cpu, group)
+    if cpu < 0 {
+        return slot_overflow_dsq(group);
+    }
+    if (cpu as usize) >= nr {
+        return slot_overflow_dsq(group);
+    }
+    if (cpu as u64) >= 1024 {
+        return slot_overflow_dsq(group);
+    }
+    slot_cpu_dsq(cpu as u32, group)
 }
 
 /*

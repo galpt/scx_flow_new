@@ -1538,36 +1538,49 @@ fn sibling_online_pairs_ring_by_id() {
 
 /*
  * Least in group picks the first allowed with
- * lowest id on ties. The group overflow tail feeds
- * every candidate equally. Halves view only with no
- * live table use. Bound is 0 to nr with no extra pass.
- * Missing overflow reads as zero. Mirrors the BPF
- * first helper.
+ * lowest id on ties. The per CPU FIFO store keeps
+ * backlog per CPU, so per CPU depth spreads the
+ * pick with lowest id on ties. Halves view only
+ * with no live table use. Bound is 0 to nr with no
+ * extra pass. Missing entries read as zero. Mirrors
+ * the BPF first helper.
  */
 #[test]
 fn least_in_group_picks_least_with_lowest_id_tie() {
     let all = vec![true; 8];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[0, 0]), Some(0));
-    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &[0, 0]), Some(4));
+    let empty: Vec<u64> = vec![];
+    assert_eq!(
+        least_in_group(&all, GROUP_LIGHT, 8, &[0, 0], &empty),
+        Some(0)
+    );
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &[0, 0], &empty), Some(4));
     let q = vec![5, 9];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &q), Some(0));
-    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &q), Some(4));
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &q, &empty), Some(0));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &q, &empty), Some(4));
     let tie = vec![2, 7];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &tie), Some(0));
-    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &tie), Some(4));
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &tie, &empty), Some(0));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &tie, &empty), Some(4));
     let mut narrow = vec![false; 8];
     narrow[6] = true;
-    assert_eq!(least_in_group(&narrow, GROUP_LIGHT, 8, &q), None);
-    assert_eq!(least_in_group(&narrow, GROUP_HOG, 8, &q), Some(6));
-    assert_eq!(least_in_group(&[], GROUP_LIGHT, 0, &[]), None);
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[]), Some(0));
+    assert_eq!(least_in_group(&narrow, GROUP_LIGHT, 8, &q, &empty), None);
+    assert_eq!(least_in_group(&narrow, GROUP_HOG, 8, &q, &empty), Some(6));
+    assert_eq!(least_in_group(&[], GROUP_LIGHT, 0, &[], &empty), None);
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[], &empty), Some(0));
+    let per = vec![5, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[0, 0], &per), Some(1));
+    let per_hog = vec![0, 0, 0, 0, 0, 3, 0, 1];
+    assert_eq!(
+        least_in_group(&all, GROUP_HOG, 8, &[0, 0], &per_hog),
+        Some(4)
+    );
 }
 
 /*
  * Least in live group uses the table when ready else halves with the same
- * first and tie rule. Strict iff ready is zero, best effort iff ready is one
- * with live table in placement. Missing overflow reads as zero with no trap.
- * Mirrors BPF select and enqueue fallback.
+ * first and tie rule. Per CPU depth spreads the pick with lowest id
+ * on ties. Strict iff ready is zero, best effort iff ready is one
+ * with live table in placement. Missing entries read as zero with no
+ * trap. Mirrors BPF select and enqueue fallback.
  */
 #[test]
 fn least_in_group_live_uses_table_with_least() {
@@ -1578,39 +1591,45 @@ fn least_in_group_live_uses_table_with_least() {
     table[2] = GROUP_LIGHT;
     table[3] = GROUP_LIGHT;
     let q = vec![10, 1];
+    let empty: Vec<u64> = vec![];
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q, &empty),
         Some(2)
     );
     assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &q),
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &q, &empty),
         Some(0)
     );
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 0, &q),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 0, &q, &empty),
         Some(0)
     );
     assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 0, &q),
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 0, &q, &empty),
         Some(2)
     );
     let tie = vec![4, 4];
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &tie),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &tie, &empty),
         Some(2)
     );
     assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &tie),
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &tie, &empty),
         Some(0)
     );
     assert_eq!(
-        least_in_group_live(&[], GROUP_LIGHT, 0, &table, 1, &[]),
+        least_in_group_live(&[], GROUP_LIGHT, 0, &table, 1, &[], &empty),
         None
     );
     let empty_q: Vec<u64> = vec![];
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &empty_q),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &empty_q, &empty),
         Some(2)
+    );
+    let per = vec![0, 0, 5, 0];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q, &per),
+        Some(3)
     );
 }
 
@@ -1625,9 +1644,19 @@ fn least_keeps_bound_plus_halves_view() {
     let mut allowed = vec![false; 16];
     allowed[15] = true;
     let zero16 = [0u64; 16];
-    assert_eq!(least_in_group(&allowed, GROUP_LIGHT, 8, &zero16), None);
-    assert_eq!(least_in_group(&allowed, GROUP_HOG, 8, &zero16), None);
-    assert_eq!(least_in_group(&allowed, GROUP_HOG, 16, &zero16), Some(15));
+    let empty: Vec<u64> = vec![];
+    assert_eq!(
+        least_in_group(&allowed, GROUP_LIGHT, 8, &zero16, &empty),
+        None
+    );
+    assert_eq!(
+        least_in_group(&allowed, GROUP_HOG, 8, &zero16, &empty),
+        None
+    );
+    assert_eq!(
+        least_in_group(&allowed, GROUP_HOG, 16, &zero16, &empty),
+        Some(15)
+    );
     assert_eq!(group_of_cpu(0, 8), GROUP_LIGHT);
     assert_eq!(group_of_cpu(4, 8), GROUP_HOG);
     assert_eq!(group_of_cpu(0, 1), GROUP_LIGHT);
@@ -1635,7 +1664,7 @@ fn least_keeps_bound_plus_halves_view() {
     let zero8 = [0u64; 8];
     assert_eq!(first_in_group(&all8, GROUP_LIGHT, 8), Some(0));
     assert_eq!(
-        least_in_group(&all8, GROUP_LIGHT, 8, &zero8),
+        least_in_group(&all8, GROUP_LIGHT, 8, &zero8, &empty),
         first_in_group(&all8, GROUP_LIGHT, 8)
     );
 }

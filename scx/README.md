@@ -65,31 +65,30 @@ Strict order is waker CPU when idle in group,
 free core in group, any idle in group, prior,
 current, then first allowed in group, then first
 allowed, and the task mask always wins. First
-allowed keeps lowest id with group overflow depth
-as the group backlog. Perf widens each miss to any
+allowed keeps lowest per CPU queued depth with
+lowest id on ties. Perf widens each miss to any
 allowed, see governor mode. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
 rest in the task group overflow tail in arrival order.
-Frequency cards stay display only and never shape
-placement. Pinned subsets stay in mask. Groups seed
-by online rank with write by id. See
+Placement scans up to nr CPUs outside the queue store
+constant claim. Frequency cards stay display only
+and never shape placement. Pinned subsets stay in
+mask. Groups seed by online rank with write by id. See
 `src/bpf/select_cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
 
-Strict order is own per CPU own group at 31, own group overflow at 4, own CPU other group at 4, other group overflow at 4, then one peer steal with a single move toward 32. Overflow trips skip empty with one read, so light pays no empty scan. The steal scan reads 8 same group peer queues with one read each and keeps the first donor at need, which is 1 when the owner is idle with no local moves and no window work, else 2, so idle owners collect the last task while busy owners leave one. Single CPU hosts skip the pass. Pinned tasks rest in overflow, so trips visit them every pass. Own at 31 leaves budget open, so saturated own still lets overflow, other CPU, other overflow, and steal progress. A capped drain with window work left counts one defer with no kick. A kick net chains idle owners past the watchdog with sweep kicks at 256 on zero-move window only. Moves with window ride the natural dispatch with no kick, since the loop already visited every task. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
+Strict order is own per CPU own group at 31, own group overflow at 4, own CPU other group at 4, other group overflow at 4, then one peer steal with a single move toward 32. All trips skip empty with one read, so idle pays no empty scan. Each drain caps the walk at budget plus 8, so mask miss walks stay bounded. The steal scan reads bound same group peer queues with wrap plus live check and keeps the first donor at need, which is 1 when the owner is idle with no local moves and no window work, else 2, so idle owners collect the last task while busy owners leave one. Same group only by design, so groups keep cache apart with no cross scan. Single move keeps tail smooth with local trips owning the window. Single CPU hosts skip the pass. Pinned tasks rest in overflow, so trips visit them every pass. Own at 31 leaves budget open, so saturated own still lets overflow, other CPU, other overflow, and steal progress. A capped drain with window work left counts one defer with no kick. A kick net chains idle owners past the watchdog with sweep kicks at 256 on zero-move window only. Moves with window ride the natural dispatch with no kick, since the loop already visited every task. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
 
 ### Kicks
 
 Idle targets are always kicked with a mask check
 regardless of queue depth, so no idle CPU with
 queued work sleeps unkicked. Busy targets stay
-fail-closed with no preempt and one armed skip count,
-since busy never arms while delay stays display only. The gate keeps total and five reason
-counters with branch order armed, deserved, group,
-mask, and rate, so busy no-kicks count under armed
-only in the slot store. One coalesced count covers q2 idle
+fail-closed with no preempt and total plus armed
+only, other reason fields stay frozen for compat
+with no writes. One coalesced count covers q2 idle
 skips in 50us at 288B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
@@ -109,7 +108,8 @@ Disarmed stays idle only. See `src/bpf/intf.h`,
 
 Strict keeps group isolation with mask win.
 Perf widens placement to any allowed on miss
-with same tier order and least over group overflow.
+with same tier order and least over per CPU plus
+group overflow.
 Perf bypasses the kick group gate with no recount,
 so group skips stay flat in perf. Unanimous
 performance over online CPUs sets perf one,
@@ -217,10 +217,13 @@ baseline with no realtime use.
 
 - Groups are strict when ready is zero and best effort
   when ready is one. Placement, dispatch, and pressure read the live table
-  seeded by online rank with offline light inert. Cross-group drains are
-  mask only across groups.
+  seeded by online rank with offline light inert. Cross-group steal stays
+  off by design, so groups keep cache apart with same group peer steal
+  only and cross drains stay local on the owner CPU.
 - Topology with online set is snapshotted at attach, so
-  a CPU hotplug needs a restart. Snapshot covers online
+  a CPU hotplug needs a restart. Offline queues drain via overflow plus
+  steal on the next pass, while the stale table window lasts until restart
+  with offline light inert. Snapshot covers online
   only with per CPU count matching online count.
 - Queue ids changed in 4.2.38, so upgrading from 4.2.37
   needs a scheduler restart with no live transition.

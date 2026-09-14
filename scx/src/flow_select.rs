@@ -25,10 +25,10 @@ pub const KICK_COALESCE_NS: u64 = 50_000;
 /*
  * Next steal cursor. The cursor rotates with rate
  * and stand masked out, so repeated reads spread
- * across peers. Dispatch scans 8 peers with the same
- * mask, so this covers the cursor rotation math with
- * no queue use. Mirrors the BPF helper with mask.
- * See src/bpf/dispatch.bpf.c for the scan use.
+ * across peers. Dispatch scans bound peers with the
+ * same mask, so this covers the cursor rotation math
+ * with no queue use. Mirrors the BPF helper with
+ * mask. See src/bpf/dispatch.bpf.c for the scan use.
  */
 #[cfg(test)]
 pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
@@ -37,6 +37,25 @@ pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
         return 0;
     }
     ((cursor & CURSOR_MASK) + 1) % nr_cpus as u32
+}
+
+/*
+ * Peers visited by one steal scan from one CPU.
+ * Chains the next helper bound times, so high CPUs
+ * wrap to low peers with no dead read. BPF uses
+ * increment plus wrap with the same order and no
+ * divide for the verifier. Returns the visit order
+ * with bound entries.
+ */
+#[cfg(test)]
+pub fn steal_peers(cpu: u32, nr_cpus: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(STEAL_BOUND);
+    let mut cur = cpu;
+    for _ in 0..STEAL_BOUND {
+        cur = steal_next(cur, nr_cpus);
+        out.push(cur);
+    }
+    out
 }
 
 /*
@@ -361,11 +380,11 @@ pub fn select_cpu_tiered(
  * Full tiered select model with least queued fallback. Mirrors the BPF order
  * of waker, free, and any idle. It then checks previous, current, least in
  * the group, and first. The least step scans 0 to nr in id order with live,
- * and group overflow depth and picks the smallest depth with lowest id on ties
- * by strict less only, so equal depths keep the first id. Missing overflow
- * entries read as zero with no trap. Placement keeps live, dispatch keeps
- * halves, constants frozen. Strict iff ready is zero, best effort iff ready
- * is one with live table use.
+ * per CPU plus group overflow depth and picks the smallest depth with
+ * lowest id on ties by strict less only, so equal depths keep the first
+ * id. Missing entries read as zero with no trap. Placement keeps live,
+ * dispatch keeps halves, constants frozen. Strict iff ready is zero, best
+ * effort iff ready is one with live table use.
  */
 #[cfg(test)]
 pub fn select_cpu_tiered_least(
@@ -380,6 +399,7 @@ pub fn select_cpu_tiered_least(
     partner: &[u16],
     running: &[bool],
     overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     if waker_first_ok(cur, allowed, group, nr, table, ready, running) {
         return Some(cur as u32);
@@ -400,7 +420,7 @@ pub fn select_cpu_tiered_least(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
@@ -428,6 +448,7 @@ pub fn pick_in_group_least(
     table: &[u8],
     ready: u8,
     overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     if selected >= 0
         && may_run_on(selected, allowed)
@@ -436,18 +457,18 @@ pub fn pick_in_group_least(
     {
         return Some(selected as u32);
     }
-    crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow)
+    crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
 }
 
 /*
  * Least queued allowed CPU in any group for S0 perf.
- * The sharded store keeps no per CPU backlog, so depth
- * reads each candidate group overflow tail. Picks the
- * smallest group depth with lowest id on ties by strict
- * less only, so equal depths keep the first id. Missing
- * overflow entries read as zero with no trap. Returns
- * none when no allowed CPU lives. Mirrors the BPF
- * widened least over any allowed.
+ * The per CPU FIFO store keeps backlog per CPU, so depth
+ * reads each candidate per CPU queue plus its group
+ * overflow tail. Picks the smallest depth with lowest
+ * id on ties by strict less only, so equal depths keep
+ * the first id. Missing entries read as zero with no
+ * trap. Returns none when no allowed CPU lives. Mirrors
+ * the BPF widened least over any allowed.
  */
 #[cfg(test)]
 pub fn least_any(
@@ -456,6 +477,7 @@ pub fn least_any(
     table: &[u8],
     ready: u8,
     overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
@@ -467,7 +489,11 @@ pub fn least_any(
             continue;
         }
         let g = crate::flow_group::group_live(cpu as u32, nr, table, ready);
-        let q = overflow.get(g as usize).copied().unwrap_or(0);
+        let q = per_cpu
+            .get(cpu)
+            .copied()
+            .unwrap_or(0)
+            .wrapping_add(overflow.get(g as usize).copied().unwrap_or(0));
         match best {
             None => {
                 best = Some(cpu as u32);
@@ -550,6 +576,7 @@ pub fn pick_in_group_widened(
     table: &[u8],
     ready: u8,
     overflow: &[u64],
+    per_cpu: &[u64],
     perf: bool,
 ) -> Option<u32> {
     if selected >= 0 && may_run_on(selected, allowed) && (selected as usize) < nr {
@@ -561,12 +588,12 @@ pub fn pick_in_group_widened(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
     if perf {
-        if let Some(c) = least_any(allowed, nr, table, ready, overflow) {
+        if let Some(c) = least_any(allowed, nr, table, ready, overflow, per_cpu) {
             return Some(c);
         }
     }
@@ -595,6 +622,7 @@ pub fn select_cpu_tiered_perf(
     partner: &[u16],
     running: &[bool],
     overflow: &[u64],
+    per_cpu: &[u64],
     perf: bool,
 ) -> Option<u32> {
     if perf {
@@ -631,12 +659,12 @@ pub fn select_cpu_tiered_perf(
         }
     }
     if let Some(c) =
-        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow)
+        crate::flow_group::least_in_group_live(allowed, group, nr, table, ready, overflow, per_cpu)
     {
         return Some(c);
     }
     if perf {
-        if let Some(c) = least_any(allowed, nr, table, ready, overflow) {
+        if let Some(c) = least_any(allowed, nr, table, ready, overflow, per_cpu) {
             return Some(c);
         }
     }

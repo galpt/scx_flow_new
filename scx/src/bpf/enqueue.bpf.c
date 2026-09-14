@@ -29,10 +29,11 @@ static __always_inline bool flow_task_pinned(
 		return true;
 	return false;
 }
-/* Target in one group from selected and least. Least picks lowest queued */
-/* depth with lowest id on ties. Strict keeps group only, perf widens to any */
-/* allowed on miss with same least rule over the widened set. Mask always */
-/* wins with no dispatch use. */
+/* Target in one group from selected and least. Least picks lowest per CPU */
+/* queued depth with lowest id on ties. Strict keeps group only, perf */
+/* widens to any allowed on miss with same least rule over the widened */
+/* set. Mask always wins with no dispatch use. Placement only scans up */
+/* to nr CPUs outside the queue store O1 claim. */
 static __always_inline s32 flow_pick_in_group(
 	const struct task_struct *p, s32 sel,
 	u8 group)
@@ -192,7 +193,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		/* No task state, so the light group owns the insert with no */
 		/* token use and no kick. Overflow holds it with steal plus */
-		/* drain collect. Shares the caller pinned bit with no test. */
+		/* drain collect. A target scan would need a loop with storm */
+		/* risk, so no kick is sent and the next pass collects it. */
+		/* Shares the caller pinned bit with no test. */
 		flow_slot_insert(p, -1,
 		    (u8)FLOW_GROUP_LIGHT, dl, frontier,
 		    slice, &err, pinned);

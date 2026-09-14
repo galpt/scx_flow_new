@@ -1440,13 +1440,12 @@ fn facade_matches_weight_helpers() {
 /*
  * Tiered least fallback picks the first allowed in
  * the group with lowest id on ties. Earlier tiers still
- * the group. The sharded store keeps no per CPU
- * backlog, so the group overflow tail feeds every
- * candidate equally with lowest id on ties. Earlier
- * tiers still win when they hit, so the least step
- * only covers the old first fallback. Placement keeps
- * live with strict iff ready is zero. Mirrors BPF
- * select with halves untouched in dispatch.
+ * win. The per CPU FIFO store keeps backlog per CPU,
+ * so per CPU depth spreads the pick with lowest id
+ * on ties. Earlier tiers still win when they hit, so
+ * the least step only covers the old first fallback.
+ * Placement keeps live with strict iff ready is zero.
+ * Mirrors BPF select with halves untouched in dispatch.
  */
 #[test]
 fn tiered_least_fallback_picks_least() {
@@ -1460,6 +1459,7 @@ fn tiered_least_fallback_picks_least() {
     let allowed = vec![true; 4];
     let idle = vec![false; 4];
     let overflow = vec![5, 9];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     let got = select_cpu_tiered_least(
         9,
         9,
@@ -1472,6 +1472,7 @@ fn tiered_least_fallback_picks_least() {
         &partner,
         &running,
         &overflow,
+        &per,
     );
     assert_eq!(got, Some(0));
     let empty: Vec<u64> = vec![];
@@ -1486,6 +1487,7 @@ fn tiered_least_fallback_picks_least() {
         0,
         &partner,
         &running,
+        &empty,
         &empty,
     );
     assert_eq!(got3, Some(0));
@@ -1502,14 +1504,31 @@ fn tiered_least_fallback_picks_least() {
         &partner,
         &running,
         &overflow,
+        &per,
     );
     assert_eq!(got4, Some(1));
+    let spread = vec![4, 0, 0, 0];
+    let got5 = select_cpu_tiered_least(
+        9,
+        9,
+        &allowed,
+        &idle,
+        GROUP_LIGHT,
+        nr,
+        &table,
+        0,
+        &partner,
+        &running,
+        &overflow,
+        &spread,
+    );
+    assert_eq!(got5, Some(1));
 }
 
 /*
  * Pick in group least prefers the selected CPU when allowed and in group, else
- * the first allowed in the group. The sharded store keeps no per CPU backlog,
- * so the group overflow tail feeds every candidate equally. No allowed CPU in
+ * the least queued in the group. The per CPU FIFO store keeps backlog
+ * per CPU, so per CPU depth spreads the pick. No allowed CPU in
  * the group yields none for overflow use. Mirrors BPF enqueue pick with live
  * view and frozen bounds.
  */
@@ -1521,31 +1540,37 @@ fn pick_in_group_least_prefers_selected_else_least() {
     let table = [GROUP_LIGHT; GROUP_TABLE_LEN];
     let allowed = vec![true; 4];
     let overflow = vec![5, 9];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     assert_eq!(
-        pick_in_group_least(0, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(0, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_least(-1, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(-1, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_least(2, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(2, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         Some(0)
     );
     let narrow = vec![false, false, true, true];
     assert_eq!(
-        pick_in_group_least(0, &narrow, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(0, &narrow, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         None
     );
     let empty = vec![false; 4];
     assert_eq!(
-        pick_in_group_least(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow),
+        pick_in_group_least(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, &per),
         None
+    );
+    let spread = vec![3, 0, 0, 0];
+    assert_eq!(
+        pick_in_group_least(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, &spread),
+        Some(1)
     );
 }
 
@@ -1612,8 +1637,8 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
 
 /*
  * S0 strict keeps group isolation with mask win. Perf widens to any allowed on
- * in group miss with same tier order. Least reads the group overflow tail with
- * lowest id over the widened set. Mask always wins.
+ * in group miss with same tier order. Least reads per CPU plus group
+ * overflow with lowest id over the widened set. Mask always wins.
  */
 #[test]
 fn s0_strict_keeps_isolation_perf_widens_on_miss() {
@@ -1624,49 +1649,120 @@ fn s0_strict_keeps_isolation_perf_widens_on_miss() {
     // Halves at 4. 0,1 light and 2,3 hog. Overflow holds light 5, hog 0.
     let allowed = vec![true; 4];
     let overflow = vec![5, 0];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     // Strict least in light is 0, perf same when hit.
     assert_eq!(
-        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, false),
+        pick_in_group_widened(
+            9,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_widened(9, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, true),
+        pick_in_group_widened(
+            9,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
         Some(0)
     );
     // Narrow to hog only. Strict light misses, perf widens.
     let narrow = vec![false, false, true, true];
     assert_eq!(
-        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &overflow, false),
+        pick_in_group_widened(
+            -1,
+            &narrow,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         None
     );
     assert_eq!(
-        pick_in_group_widened(-1, &narrow, GROUP_LIGHT, nr, &table, 0, &overflow, true),
+        pick_in_group_widened(
+            -1,
+            &narrow,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
         Some(2)
     );
     // Selected cross group. Strict skips to least, perf keeps it.
     assert_eq!(
-        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, false),
+        pick_in_group_widened(
+            2,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         Some(0)
     );
     assert_eq!(
-        pick_in_group_widened(2, &allowed, GROUP_LIGHT, nr, &table, 0, &overflow, true),
+        pick_in_group_widened(
+            2,
+            &allowed,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            true
+        ),
         Some(2)
     );
     // Mask wins in both modes with no allowed.
     let empty = vec![false; 4];
     assert_eq!(
-        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, false),
+        pick_in_group_widened(
+            0,
+            &empty,
+            GROUP_LIGHT,
+            nr,
+            &table,
+            0,
+            &overflow,
+            &per,
+            false
+        ),
         None
     );
     assert_eq!(
-        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, true),
+        pick_in_group_widened(0, &empty, GROUP_LIGHT, nr, &table, 0, &overflow, &per, true),
         None
     );
-    // Least any keeps lowest group depth and lowest id.
+    // Least any keeps lowest depth and lowest id.
     let tie = vec![2, 1];
-    assert_eq!(least_any(&allowed, nr, &table, 0, &tie), Some(2));
-    assert_eq!(least_any(&narrow, nr, &table, 0, &tie), Some(2));
-    assert_eq!(least_any(&empty, nr, &table, 0, &tie), None);
+    assert_eq!(least_any(&allowed, nr, &table, 0, &tie, &per), Some(2));
+    assert_eq!(least_any(&narrow, nr, &table, 0, &tie, &per), Some(2));
+    assert_eq!(least_any(&empty, nr, &table, 0, &tie, &per), None);
 }
 
 /*
@@ -1686,6 +1782,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
     let idle = vec![true; 4];
     let running = vec![false; 4];
     let overflow = vec![0, 0];
+    let per: Vec<u64> = vec![0, 0, 0, 0];
     assert_eq!(
         select_cpu_tiered_perf(
             -1,
@@ -1699,6 +1796,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             &partner,
             &running,
             &overflow,
+            &per,
             false
         ),
         Some(0)
@@ -1716,6 +1814,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             &partner,
             &running,
             &overflow,
+            &per,
             true
         ),
         Some(0)
@@ -1735,6 +1834,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         &partner,
         &running,
         &overflow,
+        &per,
         false,
     );
     let perf = select_cpu_tiered_perf(
@@ -1749,6 +1849,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         &partner,
         &running,
         &overflow,
+        &per,
         true,
     );
     assert_eq!(strict, Some(2));
@@ -1770,6 +1871,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         &partner,
         &running_busy,
         &overflow_busy,
+        &per,
         false,
     );
     let p = select_cpu_tiered_perf(
@@ -1784,6 +1886,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
         &partner,
         &running_busy,
         &overflow_busy,
+        &per,
         true,
     );
     assert_ne!(s, p);
@@ -1803,6 +1906,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             &partner,
             &running,
             &overflow,
+            &per,
             false
         ),
         None
@@ -1820,6 +1924,7 @@ fn s0_tiered_perf_keeps_order_with_wider_set() {
             &partner,
             &running,
             &overflow,
+            &per,
             true
         ),
         None

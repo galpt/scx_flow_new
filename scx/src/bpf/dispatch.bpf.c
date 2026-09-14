@@ -6,7 +6,7 @@
  * One shared drain body feeds every trip with mask wins and move to local,
  * so only DSQ id selection branches. Own per CPU own group runs at 31,
  * own overflow at 4, own CPU other group at 4, other overflow at 4, then
- * peer steal visits 8 peers with single move toward budget 32. Sweep
+ * peer steal visits bound peers with single move toward budget 32. Sweep
  * covers zero move window only at 256 with reset on move. Pinned tasks
  * rest in overflow, so trips visit them every pass. All trips share one
  * drain body with mask wins and move to local, so per queue order stays
@@ -23,15 +23,20 @@
 /* sum with no narrow remainder beside it and states merge. Callers */
 /* precompute DSQ and capped live already proven at dispatch top. No stats */
 /* inside, so the caller aggregates moves once per dispatch with no per */
-/* queue atomics. */
+/* queue atomics. Miss caps the walk at 8 straight mask fails, so all mask */
+/* miss walks stay bounded with no full scan and per queue cost stays */
+/* capped with no extra wide sum beside the budget check. */
 static __always_inline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base)
 {
 	struct task_struct *p;
 	u32 moved = 0;
+	u32 miss = 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		if (moved + base >= budget)
+			break;
+		if (miss >= 8U)
 			break;
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
@@ -42,8 +47,10 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 			bpf_task_release(p);
 			moved++;
+			miss = 0;
 		} else {
 			bpf_task_release(p);
+			miss++;
 		}
 	}
 	bpf_rcu_read_unlock();
@@ -79,9 +86,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	scap = flow_slot_cap(budget);
 	own_cap = flow_slot_own_cap(budget);
 	/* Local trips at 4 with one body. Own runs at 31 with one slot left, */
-	/* overflows and other CPU run at 4 with empty skip and no iterator, */
-	/* so light pays no empty scan. Bound 4 sits under the */
-	/* steal bound with one body analysis at the loop back edge. */
+	/* all trips skip empty with one read and no iterator, so idle pays no */
+	/* empty scan. Bound 4 sits under the steal bound with one body analysis */
+	/* at the loop back edge. */
 	bpf_for(off, 0, 4) {
 		u64 dsq;
 		u32 cap;
@@ -100,8 +107,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			dsq = other_over;
 			cap = scap;
 		}
-		if (off != 0 &&
-		    scx_bpf_dsq_nr_queued(dsq) == 0)
+		if (scx_bpf_dsq_nr_queued(dsq) == 0)
 			continue;
 		lim = moved + cap;
 		if (lim > budget)
@@ -111,15 +117,20 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (off == 1 || off == 3)
 			over_moved += got;
 	}
-	/* Peer steal at bound 8 with single move toward budget 32. Donor scan */
-	/* reads 8 peers with one read each and no iterator, so shallow donors */
+	/* Peer steal at steal bound with single move toward budget 32. Donor scan */
+	/* reads bound peers with one read each and no iterator, so shallow donors */
 	/* skip early. Need is 1 when idle empty, else 2, so idle owners collect */
-	/* the last task with no strand while busy owners leave one. Window */
-	/* reads four local queues once after local trips with no global scan, */
-	/* so need plus defer plus sweep share one window with no extra reads. */
-	/* Scan keeps the first donor with work, then one shared drain moves a */
-	/* single task with mask wins, so one bad head never blocks later work. */
-	/* Single CPU hosts skip the whole pass with one check up front. */
+	/* the last task with no strand while busy owners leave one. Peers wrap */
+	/* with modulo plus live check, so high CPUs reach low peers with no */
+	/* dead read. Same group only by design, so groups keep cache apart */
+	/* with no cross scan and cross drains stay local. Single move keeps */
+	/* tail latency smooth with no burst theft, so one peer task per pass */
+	/* is enough with local trips owning the window. Window reads four */
+	/* local queues once after local trips with no global scan, so need */
+	/* plus defer plus sweep share one window with no extra reads. Scan */
+	/* keeps the first donor with work, then one shared drain moves a */
+	/* single task with mask wins, so one bad head never blocks later */
+	/* work. Single CPU hosts skip the whole pass with one check up front. */
 	{
 		bool win_left;
 		struct flow_cpu_state *st;
@@ -139,13 +150,16 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (moved < budget && nr_cpu_ids > 1) {
 			u64 steal_dsq = 0;
 			bool have = false;
-			bpf_for(off, 0, 8) {
+			bpf_for(off, 0, FLOW_STEAL_BOUND) {
 				u32 peer;
 				u64 pdsq;
 				u64 q;
 				if (have)
 					continue;
-				peer = ((u32)cpu + 1U + off) & 1023U;
+				peer = ((u32)cpu + 1U + off) %
+				    (u32)nr_cpu_ids;
+				if (!flow_cpu_live(peer))
+					continue;
 				pdsq = flow_slot_cpu_dsq(peer, sgroup);
 				q = scx_bpf_dsq_nr_queued(pdsq);
 				if (q < need)
@@ -165,7 +179,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				/* with no extra jump and zero adds no count change. */
 				/* See intf.h for the steal need helper. */
 				__sync_fetch_and_add(&flow_stats.steal_moves,
-				    (u64)got);
+					    (u64)got);
 			}
 		}
 		if (moved != 0)
