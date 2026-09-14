@@ -7,8 +7,9 @@
  * One shared drain body feeds every trip with mask wins and
  * move to local, so only DSQ id selection branches. Seek
  * feeds stats only and never gates a drain or a kick, so
- * stale marks add no storm with no hide. Kicks use window
- * truth only with far progress when idle jumps far.
+ * stale marks add no storm with no hide. Kicks use far on
+ * any move plus zero-move window truth only, so moves with
+ * window but no far ride natural dispatch with no storm.
  * Far jumps to the next own bucket ahead when idle with
  * no window, so boot 15 and 61 drain within 3 hops with
  * no 15 step walk and late 61 still chains. Hint and
@@ -429,12 +430,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* window. The window reads stay exact with nr_queued truth */
 	/* and no global scan, so defer reads as D-cap exception */
 	/* with no storm. Safety net kicks once per dispatch with */
-	/* leftover: progress kick covers window leftover with any */
-	/* move, sweep kick covers zero-move window with bound 256 */
-	/* and reset on move with no infinite loop. Far adds one */
-	/* progress kick when idle jumps far, so late 61 still */
-	/* chains after 15 drains with no window. Marks feed stats */
-	/* only and never gate a kick. */
+	/* leftover: far kick fires on any move when idle jumps */
+	/* far, so late 61 still chains after 15 drains with no */
+	/* window, sweep kick covers zero-move window with bound */
+	/* 256 and reset on move with no infinite loop. Moves */
+	/* with window but no far ride the next natural dispatch */
+	/* with no kick, since the loop already visited every */
+	/* task and the CPU runs the moved work before the next */
+	/* dispatch. Marks feed stats only and never gate a kick. */
 	{
 		u64 own_left;
 		u64 park_left;
@@ -456,7 +459,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			u16 sweep = flow_slot_sweep_cnt[sidx3];
 			bool far = flow_slot_far[sidx3] != 0;
 			bool kick = false;
-			if (moved > 0 && (window_left || far))
+			if (moved > 0 && far)
 				kick = true;
 			else if (moved == 0 && window_left &&
 			    sweep < (u16)FLOW_SLOT_SWEEP_MAX) {

@@ -364,22 +364,24 @@ pub fn defer_ok(moved: u32, window_left: bool, _far_left: bool) -> bool {
 
 /*
  * Kick step for one dispatch with the sweep count.
- * A window leftover with any move kicks at once for
- * progress. A zero-move dispatch with window work
- * kicks until the sweep bound at 256, so
- * unmovable-only window work stops polling with no
- * infinite loop. Any move resets the sweep with no
- * extra pass. Far marks feed stats only and never
- * gate a kick, so steady state stays quiet with kicks
- * per dispatch well below one. Returns whether to kick
- * and the next sweep count. Mirrors the BPF safety net.
- * The far flag stays for call compat and is ignored.
+ * A far jump with any move kicks at once via the far
+ * path, so late work still chains with no window. A
+ * zero-move dispatch with window work kicks until the
+ * sweep bound at 256, so unmovable-only window work
+ * stops polling with no infinite loop. Any move resets
+ * the sweep with no extra pass. Moves with window but
+ * no far ride the next natural dispatch with no kick,
+ * since the loop already visited every task and the CPU
+ * runs the moved work before the next pass. Far marks
+ * feed the far path only, so steady state stays quiet
+ * with kicks per dispatch well below one. Returns
+ * whether to kick and the next sweep count. Mirrors the
+ * BPF safety net with no window progress kick. The far
+ * flag stays for call compat and is ignored here, far
+ * kicks live in kick_far_ok only.
  */
 #[cfg(test)]
 pub fn kick_step(moved: u32, window_left: bool, _far_left: bool, sweep: u16) -> (bool, u16) {
-    if moved > 0 && window_left {
-        return (true, 0);
-    }
     if moved == 0 && window_left && sweep < SWEEP_MAX {
         return (true, sweep + 1);
     }
@@ -416,14 +418,16 @@ pub fn far_next(cur: u8, occupied: &[bool; 256]) -> Option<u8> {
 
 /*
  * True when one far progress kick fires. Needs any
- * move with window work or with an idle far jump,
- * so late 61 still chains after 15 drains with no
- * window. No jump keeps window only with no storm.
- * Mirrors the BPF far kick with the same gate.
+ * move with an idle far jump, so late 61 still chains
+ * after 15 drains with no window. Window alone never
+ * kicks with moves, it rides the next natural dispatch,
+ * so the kick net fires on far jumps only with no
+ * storm. Mirrors the BPF far kick with the same gate.
+ * The window flag stays for call compat and is ignored.
  */
 #[cfg(test)]
-pub fn kick_far_ok(moved: u32, window_left: bool, far_jump: bool) -> bool {
-    moved > 0 && (window_left || far_jump)
+pub fn kick_far_ok(moved: u32, _window_left: bool, far_jump: bool) -> bool {
+    moved > 0 && far_jump
 }
 
 /* Hints kept per group for the last near insert. */

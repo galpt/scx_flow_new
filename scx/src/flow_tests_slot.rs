@@ -314,17 +314,25 @@ fn defer_fires_on_cap_with_work_left() {
 
 #[test]
 fn kick_progress_far_and_sweep_discipline() {
-    assert_eq!(kick_step(1, true, false, 0), (true, 0));
+    // Moves with window but no far ride the next natural
+    // dispatch with no kick, since the loop already visited
+    // every task. Far jumps kick via kick_far_ok only.
+    assert_eq!(kick_step(1, true, false, 0), (false, 0));
     assert_eq!(kick_step(1, false, true, 0), (false, 0));
     assert_eq!(kick_step(5, false, false, 0), (false, 0));
-    assert_eq!(kick_step(5, true, false, 0), (true, 0));
+    assert_eq!(kick_step(5, true, false, 0), (false, 0));
     assert_eq!(kick_step(0, false, true, 3), (false, 3));
     assert_eq!(kick_step(0, false, true, 255), (false, 255));
     assert_eq!(kick_step(0, false, false, 7), (false, 7));
     assert_eq!(kick_step(0, true, false, 7), (true, 8));
     assert_eq!(kick_step(0, true, false, 255), (true, 256));
     assert_eq!(kick_step(0, true, false, 256), (false, 256));
-    assert_eq!(kick_step(1, true, false, 9), (true, 0));
+    assert_eq!(kick_step(1, true, false, 9), (false, 0));
+    // Far jumps kick on any move with no window need.
+    assert!(kick_far_ok(1, false, true));
+    assert!(!kick_far_ok(1, false, false));
+    assert!(!kick_far_ok(1, true, false));
+    assert!(!kick_far_ok(0, true, true));
 }
 
 fn live_task(cpu: usize, nr: usize) -> PendingTask {
@@ -629,15 +637,20 @@ fn high3_saturated_own_hog_progress() {
 fn high4_kick_rate_bounded_at_steady_state() {
     // Steady state with no window work stays quiet even with
     // stale far marks, so kicks per dispatch stay well below
-    // one. Far alone never defers or kicks.
+    // one. Far alone never defers, far kicks live in
+    // kick_far_ok only with moves and a real jump.
     assert!(!defer_ok(32, false, true));
     assert!(!kick_step(5, false, true, 0).0);
     assert!(!kick_step(0, false, true, 0).0);
+    assert!(!kick_far_ok(5, false, false));
+    assert!(kick_far_ok(5, false, true));
     let mut kicks = 0u32;
     let mut sweep: u16 = 0;
     let dispatches = 100u32;
     for _ in 0..dispatches {
         // Steady: moves with no window, far marked stale.
+        // kick_step ignores far, so no kick here, far kicks
+        // fire only on a real jump via kick_far_ok.
         let (kick, next) = kick_step(5, false, true, sweep);
         sweep = next;
         if kick {
@@ -649,10 +662,11 @@ fn high4_kick_rate_bounded_at_steady_state() {
     // Empty with no work stays quiet.
     let (kick2, _) = kick_step(0, false, false, sweep);
     assert!(!kick2);
-    // Window work kicks once then resets, sweep bounds zero
-    // move chains at 256 with no infinite loop.
+    // Moves with window but no far ride natural dispatch
+    // with no kick, sweep bounds zero-move chains at 256
+    // with no infinite loop.
     let (kick3, next3) = kick_step(1, true, false, 0);
-    assert!(kick3);
+    assert!(!kick3);
     assert_eq!(next3, 0);
     let mut s: u16 = 0;
     for _ in 0..SWEEP_MAX {
@@ -664,8 +678,9 @@ fn high4_kick_rate_bounded_at_steady_state() {
     let (k_last, s_last) = kick_step(0, true, false, s);
     assert!(!k_last);
     assert_eq!(s_last, SWEEP_MAX);
-    // Rate with one window kick in 100 stays << 1.
-    let rate = 1.0 / dispatches as f64;
+    // Rate with zero window-move kicks in 100 stays << 1,
+    // sweep only fires on zero-move window work.
+    let rate = 0.0 / dispatches as f64;
     assert!(rate < 0.1);
 }
 
@@ -866,9 +881,12 @@ fn pinned_rests_in_overflow_with_bounded_drain() {
     let moved2 = slot_drain_model(&mut q, 11, SLOT_D, 0);
     assert_eq!(moved2, 1);
     assert!(q.is_empty());
-    // Window truth covers overflow, so the kick chain
-    // still fires with leftover and stays quiet empty.
+    // Window truth covers overflow for defer, far and sweep
+    // drive kicks with no storm. Moves with window but no
+    // far ride natural dispatch, zero-move window sweeps to
+    // 256, empty stays quiet.
     assert!(defer_ok(SLOT_D, true, false));
-    assert!(kick_step(1, true, false, 0).0);
+    assert!(!kick_step(1, true, false, 0).0);
+    assert!(kick_far_ok(1, false, true));
     assert!(!kick_step(0, false, false, 0).0);
 }

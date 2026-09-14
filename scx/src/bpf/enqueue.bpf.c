@@ -70,27 +70,32 @@ static __always_inline u64 flow_ref_frontier(
 		else
 			return 0;
 	}
-	if (ref_cpu < 0)
-		return 0;
+	/* No second sign check, the fallback above */
+	/* already proves a live CPU with no dead branch. */
+	/* Out of range still fails closed via a null */
+	/* CPU state with no trap. */
 	rst = flow_cpu((u32)ref_cpu);
 	if (rst)
 		return rst->frontier;
 	return 0;
 }
-/* Insert one task FIFO into the group slot store. Probes the deadline in */
-/* vruntime for quantised deadline, slot, error, and overflow, then inserts */
-/* to the bucket or the group overflow tail with the same slice. Pinned */
-/* tasks rest in the group overflow tail with no bucket use, so every owner */
-/* dispatch visits them in the window with mask wins and no rotation or far */
-/* need. Marks head plus fine after insert, counts tail pins past the */
-/* horizon, stashes the near bucket hint for the dispatch fast path, and */
-/* reports the quant error for the token spend, so one probe feeds insert */
-/* plus spend with no second pass. Returns the slot DSQ id for kick */
-/* sampling, so idle and busy share one target with no reread. FIFO only, */
-/* never vtime, so per DSQ one flavor holds. */
+/* Insert one task FIFO into the group slot store. Pinned tasks rest in */
+/* the group overflow tail with no bucket use, so every owner dispatch */
+/* visits them in the window with mask wins and no rotation or far */
+/* need. The caller shares the pinned bit, so no second pinned test */
+/* runs. The pinned fast path runs before the probe with a direct */
+/* quant error, so one probe feeds only migratable insert plus spend */
+/* with no second pass. Migratable probes the deadline in vruntime */
+/* for quantised deadline, slot, error, and overflow, then inserts to */
+/* the bucket or the group overflow tail with the same slice. Marks */
+/* head plus fine after insert, counts tail pins past the horizon, */
+/* stashes the near bucket hint for the dispatch fast path, and */
+/* reports the quant error for the token spend. Returns the slot DSQ */
+/* id for kick sampling, so idle and busy share one target with no */
+/* reread. FIFO only, never vtime, so per DSQ one flavor holds. */
 static __always_inline u64 flow_slot_insert(
 	struct task_struct *p, u8 group, u64 dl,
-	u64 frontier, u64 slice, u64 *err_out)
+	u64 frontier, u64 slice, u64 *err_out, bool pinned)
 {
 	u64 qdl;
 	u64 slot = 0;
@@ -98,20 +103,20 @@ static __always_inline u64 flow_slot_insert(
 	bool over = false;
 	u64 bucket;
 	u64 sdsq;
-	qdl = flow_wheel_probe(dl, frontier, &slot,
-	    &err, &over);
 	/* Pinned tasks rest in the group overflow tail */
 	/* with FIFO arrival order and no bucket use, so */
 	/* every owner dispatch visits them in the window */
 	/* with mask wins and no rotation or far need. */
 	/* Strict keeps the group, so the owner group */
 	/* always holds the task with no widen. */
-	if (flow_task_pinned(p)) {
+	if (pinned) {
 		sdsq = flow_slot_overflow_dsq(group);
 		scx_bpf_dsq_insert(p, sdsq, slice, 0);
-		*err_out = err;
+		*err_out = dl & (u64)FLOW_WHEEL_QUANT_LO;
 		return sdsq;
 	}
+	qdl = flow_wheel_probe(dl, frontier, &slot,
+	    &err, &over);
 	bucket = flow_slot_bucket(qdl);
 	if (slot >= (u64)FLOW_WHEEL_DIM)
 		sdsq = flow_slot_overflow_dsq(group);
@@ -192,9 +197,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		/* No task state, so the light group owns the insert with no */
 		/* token use and no kick. Rotation and rescue collect it. */
+		/* Shares the caller pinned bit with no second test. */
 		flow_slot_insert(p,
 		    (u8)FLOW_GROUP_LIGHT, dl, frontier,
-		    slice, &err);
+		    slice, &err, pinned);
 		return;
 	}
 	group = flow_task_group(tctx);
@@ -302,7 +308,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		was_c = clamped != v;
 		flow_slot_insert(p, group, dl, frontier,
-		    slice, &err);
+		    slice, &err, pinned);
 		/* Token spend keeps the sleeper conjunct with the enqueuer */
 		/* owning the spend and no order change. */
 		tok_cpu = (u32)bpf_get_smp_processor_id();
@@ -373,7 +379,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    1);
 		was_c = clamped != v;
 		sdsq = flow_slot_insert(p, group, dl,
-		    frontier, slice, &err);
+		    frontier, slice, &err, pinned);
 		/* Token spend keeps the sleeper conjunct with the enqueuer */
 		/* owning the spend and no order change. */
 		tok_cpu = (u32)bpf_get_smp_processor_id();
