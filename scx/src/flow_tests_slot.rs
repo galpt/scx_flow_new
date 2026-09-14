@@ -823,3 +823,52 @@ fn window_gate_skips_scan_with_window_work() {
     // Hint 61 jumps at once with no scan.
     assert!(hint_hit(61, &occ));
 }
+
+#[test]
+fn pinned_rests_in_overflow_with_bounded_drain() {
+    // Live 4.2.37 stall: pinned highpri kworkers in hog
+    // buckets 122, 129, and 172 with idle owners under
+    // powersave strict stranded 36s+ with no kick chain.
+    // Pinned now rests in overflow, so every owner pass
+    // visits it in the window with no rotation or far.
+    assert_eq!(
+        insert_dsq(GROUP_HOG, 122, 122, true),
+        slot_overflow_dsq(GROUP_HOG)
+    );
+    assert_eq!(
+        insert_dsq(GROUP_HOG, 129, 129, true),
+        slot_overflow_dsq(GROUP_HOG)
+    );
+    assert_eq!(
+        insert_dsq(GROUP_LIGHT, 78, 78, true),
+        slot_overflow_dsq(GROUP_LIGHT)
+    );
+    // Migratable keeps the probed bucket.
+    assert_eq!(
+        insert_dsq(GROUP_HOG, 122, 122, false),
+        slot_dsq(GROUP_HOG, 122)
+    );
+    // Horizon tail still overflows for migratable.
+    assert_eq!(
+        insert_dsq(GROUP_HOG, 255, 300, false),
+        slot_overflow_dsq(GROUP_HOG)
+    );
+    // Owner overflow trip holds the pinned task with
+    // mask wins, so one dispatch moves it at D cap.
+    let trips = trip_dsqs(0, GROUP_HOG);
+    assert_eq!(trips[1], slot_overflow_dsq(GROUP_HOG));
+    let mut q: VecDeque<PendingTask> = VecDeque::from([live_task(15, 16), live_task(11, 16)]);
+    let moved = slot_drain_model(&mut q, 15, SLOT_D, 0);
+    assert_eq!(moved, 1);
+    assert_eq!(q.len(), 1);
+    // Foreign owner skips with progress, so the head
+    // never blocks later work in the same overflow.
+    let moved2 = slot_drain_model(&mut q, 11, SLOT_D, 0);
+    assert_eq!(moved2, 1);
+    assert!(q.is_empty());
+    // Window truth covers overflow, so the kick chain
+    // still fires with leftover and stays quiet empty.
+    assert!(defer_ok(SLOT_D, true, false));
+    assert!(kick_step(1, true, false, 0).0);
+    assert!(!kick_step(0, false, false, 0).0);
+}

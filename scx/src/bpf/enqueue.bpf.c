@@ -4,8 +4,8 @@
  *
  * Picks the target CPU in group with overflow fallback and stamps deadline and
  * delay. Inserts FIFO into the task group slot bucket or overflow with probe
- * and mark. Keeps mask wins with group aware placement and coalesced idle
- * kicks.
+ * and mark, pinned tasks rest in the group overflow tail. Keeps mask wins
+ * with group aware placement and coalesced idle kicks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -79,13 +79,15 @@ static __always_inline u64 flow_ref_frontier(
 }
 /* Insert one task FIFO into the group slot store. Probes the deadline in */
 /* vruntime for quantised deadline, slot, error, and overflow, then inserts */
-/* to the bucket or the group overflow tail with the same slice. Marks head */
-/* plus fine after insert, counts tail pins past the horizon, stashes the */
-/* near bucket hint for the dispatch fast path, and reports the quant error */
-/* for the token spend, so one probe feeds insert plus spend with no second */
-/* pass. Returns the slot DSQ id for kick sampling, so idle and busy share */
-/* one target with no reread. FIFO only, never vtime, so per DSQ one flavor */
-/* holds. */
+/* to the bucket or the group overflow tail with the same slice. Pinned */
+/* tasks rest in the group overflow tail with no bucket use, so every owner */
+/* dispatch visits them in the window with mask wins and no rotation or far */
+/* need. Marks head plus fine after insert, counts tail pins past the */
+/* horizon, stashes the near bucket hint for the dispatch fast path, and */
+/* reports the quant error for the token spend, so one probe feeds insert */
+/* plus spend with no second pass. Returns the slot DSQ id for kick */
+/* sampling, so idle and busy share one target with no reread. FIFO only, */
+/* never vtime, so per DSQ one flavor holds. */
 static __always_inline u64 flow_slot_insert(
 	struct task_struct *p, u8 group, u64 dl,
 	u64 frontier, u64 slice, u64 *err_out)
@@ -98,6 +100,18 @@ static __always_inline u64 flow_slot_insert(
 	u64 sdsq;
 	qdl = flow_wheel_probe(dl, frontier, &slot,
 	    &err, &over);
+	/* Pinned tasks rest in the group overflow tail */
+	/* with FIFO arrival order and no bucket use, so */
+	/* every owner dispatch visits them in the window */
+	/* with mask wins and no rotation or far need. */
+	/* Strict keeps the group, so the owner group */
+	/* always holds the task with no widen. */
+	if (flow_task_pinned(p)) {
+		sdsq = flow_slot_overflow_dsq(group);
+		scx_bpf_dsq_insert(p, sdsq, slice, 0);
+		*err_out = err;
+		return sdsq;
+	}
 	bucket = flow_slot_bucket(qdl);
 	if (slot >= (u64)FLOW_WHEEL_DIM)
 		sdsq = flow_slot_overflow_dsq(group);

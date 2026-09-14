@@ -5,9 +5,9 @@
  * Holds the sharded FIFO slot helpers that mirror the BPF header so behavior
  * stays the same on both sides of the boundary. Two groups shard 512 slot
  * queues plus 2 overflow tails with FIFO only and no knob. The probe maps a
- * deadline to a bucket, rotation spreads drains, rescue covers the other
- * group, defer counts capped drains with work left, and the kick chain keeps
- * idle owners moving.
+ * deadline to a bucket, pinned tasks rest in overflow, rotation spreads
+ * drains, rescue covers the other group, defer counts capped drains with
+ * work left, and the kick chain keeps idle owners moving.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -258,6 +258,25 @@ pub fn rescue_dsq(cur: u8, group: u8) -> u64 {
         crate::flow_group::GROUP_HOG
     };
     slot_dsq(other, cur as u64)
+}
+
+/*
+ * DSQ id for one insert with pinned overflow. Pinned
+ * tasks rest in the group overflow tail with no bucket
+ * use, so every owner dispatch visits them in the window
+ * with mask wins and no rotation or far need. Migratable
+ * tasks keep the probed bucket or horizon tail. Mirrors
+ * the BPF pinned branch with the same group fallback.
+ */
+#[cfg(test)]
+pub fn insert_dsq(group: u8, bucket: u64, slot: u64, pinned: bool) -> u64 {
+    if pinned {
+        return slot_overflow_dsq(group);
+    }
+    if slot >= WHEEL_DIM {
+        return slot_overflow_dsq(group);
+    }
+    slot_dsq(group, bucket)
 }
 
 /*

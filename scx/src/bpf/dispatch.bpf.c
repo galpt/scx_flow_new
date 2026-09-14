@@ -13,7 +13,8 @@
  * no window, so boot 15 and 61 drain within 3 hops with
  * no 15 step walk and late 61 still chains. Hint and
  * window gate keep the far scan off the hot path with
- * no hide.
+ * no hide. Pinned tasks rest in overflow, so trips visit
+ * them every pass with no rotation.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

@@ -17,8 +17,10 @@ FIFO slots, vruntime fairness, and the fixed slice.
 
 Tasks wait in FIFO slot buckets picked by deadline,
 with one overflow tail per group for far deadlines.
-A probe maps the deadline to a near slot near 64us
-or pins past the horizon to the tail, so arrival
+Pinned tasks rest in the group overflow tail with no
+bucket use, so every owner dispatch visits them in the
+window. A probe maps the deadline to a near slot near
+64us or pins past the horizon to the tail, so arrival
 order holds inside each queue. The deadline adds
 clamped virtual time and a scaled estimate at live
 weight from nice. Exiting tasks run at once on the
@@ -77,7 +79,7 @@ by online rank with write by id. See
 
 ### Dispatch
 
-Strict order is own cursor bucket at 31, group overflow at 4, two fill ahead at 4 each, other group overflow at 4, then the other group cursor at 1 when it holds work. Overflow trips skip empty with one read and no iterator, so light pays no empty scan. One rescue suffices because rotation and the kick sweep cover every bucket, so cross-group rescue stays an exception path. The other overflow trip keeps a hog far tail drainable on an all-light host with mask wins. Rotation advances the cursor each dispatch with capped retain at most 3 in a row, so every occupied bucket drains within 1024 dispatches with refill to zero on advance. Idle adds a far sweep to the next own bucket ahead with queued work when own holds no work, so boot 15 and 61 drain within 3 hops. Hint checks the last near insert first with one read, window gate skips the 256 scan when overflow, fill, rescue, or other overflow holds work, else the full scan runs. Far runs only when own holds no work, so hot pays no scan with no storm. Bound is 256 hops worst case with one far progress kick while far jumps. Own at 31 leaves one slot for the rest, so saturated own still lets overflow, fill, other overflow, and rescue progress. A capped drain with window work left counts one defer. A kick safety net chains idle owners past the watchdog with progress and sweep kicks at 256 on window truth only with no far storm, and one far progress kick when idle jumps far. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
+Strict order is own cursor bucket at 31, group overflow at 4, two fill ahead at 4 each, other group overflow at 4, then the other group cursor at 1 when it holds work. Overflow trips skip empty with one read and no iterator, so light pays no empty scan. One rescue suffices because rotation and the kick sweep cover every bucket, so cross-group rescue stays an exception path. The other overflow trip keeps a hog far tail drainable on an all-light host with mask wins. Pinned tasks rest in overflow, so trips visit them every pass with no rotation. Rotation advances the cursor each dispatch with capped retain at most 3 in a row, so every occupied bucket drains within 1024 dispatches with refill to zero on advance. Idle adds a far sweep to the next own bucket ahead with queued work when own holds no work, so boot 15 and 61 drain within 3 hops. Hint checks the last near insert first with one read, window gate skips the 256 scan when overflow, fill, rescue, or other overflow holds work, else the full scan runs. Far runs only when own holds no work, so hot pays no scan with no storm. Bound is 256 hops worst case with one far progress kick while far jumps. Own at 31 leaves one slot for the rest, so saturated own still lets overflow, fill, other overflow, and rescue progress. A capped drain with window work left counts one defer. A kick safety net chains idle owners past the watchdog with progress and sweep kicks at 256 on window truth only with no far storm, and one far progress kick when idle jumps far. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
 
 ### Kicks
 
@@ -97,9 +99,11 @@ Delay persists across idle, delay shows stale
 when idle. A missed wakeup is rescued on the next
 insert with no strand. Exiting uses
 a separate idle kick on the task CPU with no depth,
-no coalesce, and no preempt. Overflow sends
-no kick and the next rotation or rescue pass collects
-it. Disarmed stays idle only. See `src/bpf/intf.h`,
+no coalesce, and no preempt. Fallback overflow with
+no live CPU sends no kick and the next rotation or
+rescue pass collects it. Pinned overflow from a live
+owner keeps the normal idle kick with no coalesce.
+Disarmed stays idle only. See `src/bpf/intf.h`,
 `src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
 `src/flow_select.rs`.
 
