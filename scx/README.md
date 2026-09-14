@@ -122,28 +122,30 @@ deserved or hog, then same with perf bypass,
 then mask, then rate last as a single CAS.
 Pinned and deep count total only with no reason
 write. Deserved needs woken deadline past frontier
-plus granule plus 32us slack or hog occupant with
-no time cap. Same keeps group with perf forced true
+plus granule plus 32us slack or occupant hog
+regardless of waker class with no time cap, still
+bounded by empty plus same plus mask plus rate. Same
+keeps group with perf forced true
 and no recount, so group skips stay flat in perf.
-Mask keeps allowed. Rate keeps one win per slice,
+Mask keeps allowed, defensive, expect ~0. Rate keeps one win per slice,
 win sends PREEMPT with kicks live since 4.2.41,
 miss counts total plus rate. Deserved, group, mask,
 and rate stay live since 4.2.41 with armed retired
 frozen for compat. Occupant group rides a u8 tail
-at 64B with LIGHT fallback, written in running and
+at 64B with LIGHT fallback, written in running,
 cleared with pid. One coalesced count covers q2 idle
 skips in 50us at 296B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
-Delay persists across idle, delay shows stale
+Delay persists across idle, shows stale
 when idle. A missed wakeup is rescued on the next
 insert with no strand. Exiting uses
-a separate idle kick on the task CPU with no depth,
+an idle kick on the task CPU with no depth,
 no coalesce, and no preempt. Fallback overflow with
 no live CPU sends no kick and the next drain
 pass collects it. Pinned overflow from a live
-owner keeps the normal idle kick with no coalesce.
-Storm stays reverted with deep quiet and no extra
+owner keeps the idle kick with no coalesce.
+Storm stays reverted with deep quiet, no extra
 kick. See `src/bpf/intf.h`,
 `src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
 `src/flow_select.rs`.

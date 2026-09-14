@@ -89,7 +89,7 @@ pub struct Metrics {
     #[stat(desc = "Live since 4.2.41, busy preempt kicks")]
     #[serde(default)]
     pub preempt_kicks: u64,
-    #[stat(desc = "Total fail-closed busy no-kicks")]
+    #[stat(desc = "Total busy non-kicks without reason")]
     #[serde(default)]
     pub preempt_skipped: u64,
     #[stat(desc = "Q2 idle kicks skipped in 50us")]
@@ -104,7 +104,7 @@ pub struct Metrics {
     #[stat(desc = "Live since 4.2.41, busy no-kicks for cross group")]
     #[serde(default)]
     pub preempt_skipped_group: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for foreign mask")]
+    #[stat(desc = "Live since 4.2.41, defensive mask, expect ~0")]
     #[serde(default)]
     pub preempt_skipped_mask: u64,
     #[stat(desc = "Live since 4.2.41, busy no-kicks for rate held")]

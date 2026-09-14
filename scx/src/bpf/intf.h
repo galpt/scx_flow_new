@@ -138,7 +138,8 @@ struct flow_cpu_state {
 /* under kicks live since 4.2.41 and busy no kicks count under total */
 /* plus deserved plus group plus mask plus rate live since 4.2.41 with */
 /* armed retired frozen for compat and empty plus pinned total only with */
-/* no other reason write. Coalesced counts q2 idle skips in 50us. */
+/* no other reason write. Mask stays defensive, expect ~0 with outer */
+/* check. Coalesced counts q2 idle skips in 50us. */
 /* Overflow counts tail pins past the horizon, boosts counts token spends, */
 /* and cas fails counts lost token races. Armed plus skips plus head */
 /* plus fine plus coarse plus empty stay frozen for compat, so old offsets */
@@ -748,9 +749,10 @@ static __always_inline bool flow_empty_ok(u64 q)
 	return q <= 1ULL;
 }
 /* True when one wake earns the CPU by earliness or hog. */
-/* Holds when deserved holds or occupant holds hog, so hog */
-/* occupants preempt with no time cap past empty first. */
-/* Minimal OR with no wrap and no new branch. */
+/* Holds when deserved holds or occupant holds hog regardless */
+/* of waker class, so hog occupants preempt with no time cap */
+/* past empty first, still bounded by empty plus same plus mask */
+/* plus rate. Minimal OR with no wrap and no new branch. */
 static __always_inline bool flow_deserved_or_hog(bool deserved,
 	bool occupant_hog)
 {

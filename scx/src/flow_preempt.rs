@@ -63,7 +63,8 @@ pub fn delay_decay(old: u8) -> u8 {
 
 /*
  * True when the delay window is armed at 16. 16 is
- * 512us in 32us units near half slice.
+ * 512us in 32us units near half slice. Display
+ * only since 4.2.41 with no gate use, see dots.
  */
 pub fn delay_armed(win: u8) -> bool {
     (win as u64) >= DELAY_ARM
@@ -75,7 +76,8 @@ pub fn delay_armed(win: u8) -> bool {
  * stand at 8 with the latched flag. Persists
  * across idle with no decay sans traffic. Delay
  * shows stale when idle, see dashboard. Next
- * running decays at 1/8 per window.
+ * running decays at 1/8 per window. Display only
+ * since 4.2.41 with no gate use, see dots.
  */
 pub fn delay_armed_latched(win: u8, held: bool) -> bool {
     if delay_armed(win) {
@@ -282,42 +284,68 @@ pub fn same_override(same_group: bool, perf: bool) -> bool {
 }
 
 /*
- * True when all five preempt gates pass. Armed, deserved, same group, mask, and
- * rate clear with fail closed on any clear. Branch order is armed, deserved,
- * group, mask, and rate, rate last as the atomic claim. Each fail counts total
- * and its reason at 200B. Disarmed, rate, and isolation no longer share one
- * count.
+ * True when the bound preempt gate passes. Pinned
+ * false, empty at most one queued, deserved or hog,
+ * same group, mask allowed, and rate clear with kick
+ * on all pass. Branch order is pinned, empty,
+ * deserved or hog, same, mask, and rate, rate last
+ * as the atomic claim. Pinned plus deep count total
+ * only at 296B with no reason. Armed retired frozen
+ * with display only, see delay dots.
  */
 #[cfg(test)]
 pub fn preempt_ok(
-    armed: bool,
-    is_deserved: bool,
-    is_rate_clear: bool,
+    pinned: bool,
+    empty_ok: bool,
+    deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
+    is_rate_clear: bool,
 ) -> bool {
-    armed && is_deserved && is_rate_clear && same_group && mask_ok
+    if pinned {
+        return false;
+    }
+    if !empty_ok {
+        return false;
+    }
+    if !deserved_or_hog {
+        return false;
+    }
+    if !same_group {
+        return false;
+    }
+    if !mask_ok {
+        return false;
+    }
+    is_rate_clear
 }
 
 /*
- * Skip reason in branch order armed, deserved, group, mask, and rate. Returns
- * none when all gates pass, else the first failing gate. Mirrors the BPF
- * sequential checks in enqueue with rate last as the atomic claim. Total and
- * reason both count at 200B. Zero means kick, one to five name the reason in
- * order.
+ * Skip reason in bound order pinned, empty,
+ * deserved or hog, same, mask, and rate. Returns
+ * none on kick, else the first failing gate. Pinned
+ * plus empty map to total only with no reason write
+ * at 296B, deserved maps to 2, group to 3, mask to
+ * 4, rate to 5 with armed 1 retired frozen. Mirrors
+ * the BPF sequential checks in enqueue with rate
+ * last as the atomic claim.
  */
 #[cfg(test)]
 pub fn skip_reason(
-    armed: bool,
-    is_deserved: bool,
+    pinned: bool,
+    empty_ok: bool,
+    deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
     is_rate_clear: bool,
 ) -> Option<u8> {
-    if !armed {
-        return Some(1);
+    if pinned {
+        return Some(6);
     }
-    if !is_deserved {
+    if !empty_ok {
+        return Some(6);
+    }
+    if !deserved_or_hog {
         return Some(2);
     }
     if !same_group {
@@ -333,8 +361,11 @@ pub fn skip_reason(
 }
 
 /*
- * Name of one skip reason for dominance logs. Zero is
- * kick with no skip, one to five follow branch order.
+ * Name of one skip reason for logs. Zero is kick
+ * with no skip, one is armed retired frozen, two to
+ * five follow bound order deserved, group, mask, and
+ * rate, six is total only for pinned plus deep with
+ * no reason write.
  */
 #[cfg(test)]
 pub fn skip_reason_name(reason: u8) -> &'static str {
@@ -345,6 +376,7 @@ pub fn skip_reason_name(reason: u8) -> &'static str {
         3 => "group",
         4 => "mask",
         5 => "rate",
+        6 => "total-only",
         _ => "unknown",
     }
 }
@@ -363,10 +395,12 @@ pub fn empty_ok(q: u64) -> bool {
 
 /*
  * True when one wake earns the CPU by earliness or hog.
- * Holds when deserved holds or occupant holds hog, so
- * hog occupants preempt with no time cap past empty
- * first. Minimal OR with no wrap. Mirrors the BPF hog
- * OR for the bound gate.
+ * Holds when deserved holds or occupant holds hog
+ * regardless of waker class, so hog occupants preempt
+ * with no time cap past empty first, still bounded by
+ * empty plus same plus mask plus rate. Minimal OR
+ * with no wrap. Mirrors the BPF hog OR for the bound
+ * gate.
  */
 #[cfg(test)]
 pub fn deserved_or_hog(deserved: bool, occupant_hog: bool) -> bool {

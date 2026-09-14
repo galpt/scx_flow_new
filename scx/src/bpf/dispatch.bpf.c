@@ -136,6 +136,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* still, so no branch on cross with one shared drain. Single move keeps */
 	/* tail smooth with no burst theft, so one peer task per pass is enough */
 	/* with local trips owning the window. Cursor steps by 8 */
+
 	/* with a bounded compare and swap in 4 tries that keeps rate plus stand */
 	/* and drops on race, so contended owners skip the step with no stall. */
 	/* When host size divides 8, step 8 is identity with no advance, */
