@@ -27,8 +27,9 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /*
- * Draft for 4.2.41 keeps 296B with kicks plus deserved plus group
- * plus mask plus rate live and armed retired with no size move.
+ * Counters at 296B with bound gate live since 4.2.41.
+ * Kicks plus deserved plus group plus mask plus rate
+ * stay live with armed retired frozen for compat.
  */
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
@@ -85,7 +86,7 @@ pub struct Metrics {
     #[stat(desc = "Hog to light moves by wake hits")]
     #[serde(default)]
     pub group_wake_promote: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
+    #[stat(desc = "Live since 4.2.41, busy preempt kicks")]
     #[serde(default)]
     pub preempt_kicks: u64,
     #[stat(desc = "Total fail-closed busy no-kicks")]
@@ -94,19 +95,19 @@ pub struct Metrics {
     #[stat(desc = "Q2 idle kicks skipped in 50us")]
     #[serde(default)]
     pub kick_coalesced: u64,
-    #[stat(desc = "Busy no-kicks for disarmed delay")]
+    #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_armed: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
+    #[stat(desc = "Live since 4.2.41, busy no-kicks for undeserved")]
     #[serde(default)]
     pub preempt_skipped_deserved: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
+    #[stat(desc = "Live since 4.2.41, busy no-kicks for cross group")]
     #[serde(default)]
     pub preempt_skipped_group: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
+    #[stat(desc = "Live since 4.2.41, busy no-kicks for foreign mask")]
     #[serde(default)]
     pub preempt_skipped_mask: u64,
-    #[stat(desc = "Frozen for compat, always zero")]
+    #[stat(desc = "Live since 4.2.41, busy no-kicks for rate held")]
     #[serde(default)]
     pub preempt_skipped_rate: u64,
     #[stat(desc = "Frozen for compat, always zero")]

@@ -385,7 +385,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    est, tctx->burn, err))
 			__sync_fetch_and_add(
 			    &flow_stats.token_boosts, 1);
-		/* Kick idle and busy preempt with delay. */
+		/* Kick idle and busy bound preempt with delay. */
 		/* Idle fast path first with one queued read on */
 		/* the slot target. Q2 idle in 50us coalesces when */
 		/* not pinned. Q1 always kicks, deep always kicks */
@@ -393,13 +393,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* sleeps unkicked. No slide. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
-		/* Busy stays fail closed as disarmed with total and armed */
-		/* counts and no kick, since per CPU dispatch owns moves with */
-		/* no preempt. Idle above already woke, so no strand holds */
-		/* with drains owning moves. */
-		/* No loop. Delay persists */
-		/* across idle, next running decays, delay */
-		/* shows stale idle. */
+		/* Busy uses empty first plus deserved or hog plus same */
+		/* plus mask plus rate with no armed check, so shallow */
+		/* wakes preempt once per slice with no storm. Empty */
+		/* needs at most one queued, deserved needs woken deadline */
+		/* past frontier plus granule plus slack or hog occupant */
+		/* with no time cap, same keeps group with perf bypass, */
+		/* mask keeps allowed, rate keeps one CAS win per slice. */
+		/* Pinned plus deep count total only, others count total */
+		/* plus reason. Kick uses PREEMPT with kicks count. */
+		/* No loop. Delay persists across idle, next running */
+		/* decays, delay shows stale idle. Kick at stays idle only. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u64 now;
@@ -409,6 +413,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u8 cur;
 			u8 swin;
 			u8 scur;
+			u64 granule;
+			bool is_deserved;
+			bool occupant_hog;
+			bool same;
+			bool mask_ok;
 			if (!st)
 				return;
 			q = scx_bpf_dsq_nr_queued(sdsq);
@@ -454,19 +463,79 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			scur = flow_delay_max(cur, sample);
 			st->delay_win = swin;
 			st->delay_cur = scur;
-			/* Fail closed with no preempt. Per CPU dispatch owns */
-			/* moves with no preempt, so busy never arms with the */
-			/* armed count below and no kick regardless of delay dots. */
-			/* Idle above already woke, so no strand holds with drains */
-			/* owning moves. Stand clears, so the dots stay display. */
+			/* Stand clears, so the dots stay display with no gate use. */
 			__sync_fetch_and_and(&st->cursor,
 			    ~(u32)FLOW_CURSOR_STAND_BIT);
+			/* Pinned counts total only with no kick. */
+			if (pinned) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				return;
+			}
+			/* Empty first counts total only past one queued. */
+			if (!flow_empty_ok(q)) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				return;
+			}
+			/* Deserved or hog counts total plus deserved on miss. */
+			granule = flow_granule_for_weight(w,
+			    slice);
+			is_deserved = flow_deserved(dl,
+			    st->frontier, granule);
+			occupant_hog = st->occupant_group ==
+			    (u8)FLOW_GROUP_HOG;
+			if (!flow_deserved_or_hog(is_deserved,
+			    occupant_hog)) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_deserved,
+				    1);
+				return;
+			}
+			/* Same keeps group with perf bypass and no recount. */
+			same = group == flow_group_live((u32)cpu,
+			    nr_cpu_ids);
+			if (flow_perf_enabled())
+				same = true;
+			if (!same) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_group,
+				    1);
+				return;
+			}
+			/* Mask keeps allowed with total plus mask on miss. */
+			mask_ok = bpf_cpumask_test_cpu((u32)cpu,
+			    p->cpus_ptr);
+			if (!mask_ok) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_mask,
+				    1);
+				return;
+			}
+			/* Rate keeps one CAS win per slice with kicks count. */
+			if (!flow_rate_claim(&st->cursor)) {
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped,
+				    1);
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped_rate,
+				    1);
+				return;
+			}
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped,
-			    1);
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped_armed,
-			    1);
+			    &flow_stats.preempt_kicks, 1);
 			return;
 		}
 	}

@@ -133,15 +133,16 @@ struct flow_cpu_state {
 	u8 occupant_group;
 };
 /* Counters at 296B with group, coalesce, wheel, token, and slot. Total keeps */
-/* the sum for compat. Busy stays fail closed with no preempt, so busy */
-/* no kicks count under total plus armed only with no other reason write. */
-/* Draft for 4.2.41 keeps 296B with kicks plus deserved plus group */
-/* plus mask plus rate live and armed retired with no size move. */
-/* Coalesced counts q2 idle skips in 50us. Overflow counts tail pins past */
-/* the horizon, boosts counts token spends, and cas fails counts lost token */
-/* races. Preempt kicks plus deserved plus group plus mask plus rate plus */
-/* skips plus head plus fine plus coarse plus empty stay frozen for compat, */
-/* so old offsets stay stable with no new writes. Slot moves counts all */
+/* the sum for compat. Busy uses the bound gate with empty first plus */
+/* deserved or hog plus same plus mask plus rate, so busy kicks count */
+/* under kicks live since 4.2.41 and busy no kicks count under total */
+/* plus deserved plus group plus mask plus rate live since 4.2.41 with */
+/* armed retired frozen for compat and empty plus pinned total only with */
+/* no other reason write. Coalesced counts q2 idle skips in 50us. */
+/* Overflow counts tail pins past the horizon, boosts counts token spends, */
+/* and cas fails counts lost token races. Armed plus skips plus head */
+/* plus fine plus coarse plus empty stay frozen for compat, so old offsets */
+/* stay stable with no new writes. Slot moves counts all */
 /* FIFO tasks moved via slot drains, park moves counts the overflow subset, */
 /* steal moves counts all peer moves, steal x moves counts the cross */
 /* subset with post hoc LSB compare and unconditional adds, slot kicks */
@@ -683,6 +684,60 @@ static __always_inline u32 flow_slot_own_cap(u32 budget)
 	if (budget == 0)
 		return 0;
 	return budget - 1U;
+}
+/* Granule in nanos quarter slice with 64us floor. Base is slice times 1024 */
+/* over weight quartered with floor at 64us, so heavy keeps short and light */
+/* keeps long with no trap on zero input. Short heavy is stricter, tempering */
+/* deadline lead. Net easiness is deadline math, not gran. Quarter bounds */
+/* theft near 25% of a slice. Floor covers IPI and switch cost, no thrash. */
+/* Uses woken weight only, see deserved. Minimal with no wrap and no branch. */
+static __always_inline u64 flow_granule_for_weight(
+	u32 weight, u64 slice)
+{
+	u64 base;
+	u64 gran;
+	if (weight == 0) {
+		gran = slice / 4ULL;
+		if (gran < (u64)FLOW_GRANULE_FLOOR_NS)
+			return (u64)FLOW_GRANULE_FLOOR_NS;
+		return gran;
+	}
+	if (slice == 0)
+		return (u64)FLOW_GRANULE_FLOOR_NS;
+	base = (slice * 1024ULL) / (u64)weight;
+	gran = base / 4ULL;
+	if (gran < (u64)FLOW_GRANULE_FLOOR_NS)
+		return (u64)FLOW_GRANULE_FLOOR_NS;
+	return gran;
+}
+/* True when woken deadline beats frontier plus gran plus slack. Frontier is */
+/* the service floor, so beating it by granule proves earliness with no */
+/* occupant state. Slack is 32us bounded at half the 64us floor, so near */
+/* misses ease with no storm. Wrap safe via time before on the summed bound */
+/* with no branch. Granule uses woken weight only, occupant weight stays out */
+/* after the frontier compare fix. Minimal with no new constant. */
+static __always_inline bool flow_deserved(u64 woken_dl,
+	u64 frontier, u64 granule)
+{
+	return flow_time_before(woken_dl,
+	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
+}
+/* True when the rate bit is clear for one kick. Read only, so claim below */
+/* does the atomic set. Minimal with no wrap. */
+static __always_inline bool flow_rate_clear(u32 cursor)
+{
+	return (cursor &
+	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
+}
+/* Atomically set rate and report prior clear. One winner per slice with no */
+/* check then set. Single CAS keeps one kick with no storm. Minimal with no */
+/* loop. */
+static __always_inline bool flow_rate_claim(u32 *cursor)
+{
+	u32 old;
+	old = __sync_fetch_and_or(cursor,
+	    (u32)FLOW_CURSOR_RATE_BIT);
+	return flow_rate_clear(old);
 }
 /* True when one queue holds at most one task for empty first. */
 /* Holds when queued is zero or one, else false, so deep */
