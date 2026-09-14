@@ -65,6 +65,128 @@ volatile u8 flow_perf_mode;
 /* measures the grouping split with no hint split. Userspace writes on arm */
 /* transition only. Single flag with no per CPU array. */
 volatile u8 flow_probe_perf;
+/* Wheel head with 8 bits for the first 8 near slots in a 32 bit word. Each */
+/* bit marks one near slot with queued work. Set after insert when the slot */
+/* sits below 8. Cleared when a drain observes its bucket empty, so stale */
+/* falls back to positive with drains owning moves and no hide. Wide word */
+/* keeps atomic or on 32 bits, since 8 bit atomics stay unsupported. */
+volatile u32 flow_wheel_head;
+/* Wheel fine summary with 256 bits for 256 near slots. Set after insert with */
+/* the head and coarse. Cleared per bucket when a drain observes it empty, so */
+/* stale falls back to positive with drains owning moves and no hide. */
+volatile u64 flow_wheel_fine[4];
+/* Wheel coarse summary with 256 bits for 256 far blocks. Set after insert */
+/* with head and fine. Never cleared per bucket, since one bit covers 256 */
+/* slots and no single drain can prove the block empty, so stale falls back */
+/* to positive with drains owning moves and no hide. */
+volatile u64 flow_wheel_coarse[4];
+/* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
+/* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
+/* atomic compare and swap on 32 bits, since 8 bit atomics stay unsupported. */
+/* Stopping refills to full with no vruntime change. Enqueue spends one on a */
+/* boost with no order change. */
+volatile u32 flow_token_stor[1024];
+/* Per CPU slot bucket cursor with one u8 per CPU for 1024 CPUs. Each entry */
+/* holds 0 to 255 for own bucket rotation with BSS zero start. Plain load and */
+/* store on the owning CPU only with no atomic, since dispatch for one CPU */
+/* owns its entry. Wraps by truncation with no branch, so every bucket gets a */
+/* visit within 256 dispatches with no collapse and no freeze on hot ones. */
+/* every bucket with no collapse with the steal cursor and no freeze on hot */
+/* buckets. Capped retain keeps a D capped bucket for retry while */
+/* unmovable-only leftover advances with no pin, so every occupied bucket */
+/* drains within 512 dispatches worst case with always rescue and the kick */
+/* chain below. */
+volatile u8 flow_slot_cur[1024];
+/* Per CPU sweep miss counter with one u8 per CPU for 1024 CPUs. Each entry */
+/* holds 0 to 255 zero-move sweeps since last progress with BSS zero start. */
+/* Plain load and store on the owning CPU only with no atomic, since dispatch */
+/* for one CPU owns its entry. Caps zero-move kick chains at 255 hops, so */
+/* unmovable-only far work stops polling with no infinite loop while movable */
+/* far work sweeps within 256. Resets on any move with no extra pass. */
+volatile u8 flow_slot_sweep_cnt[1024];
+/* Mark one wheel slot after insert with head, fine, and coarse. Slot holds 0 */
+/* to 65535 from the probe cap. Head mirrors the first 8 near slots, fine */
+/* mirrors the first 256 near slots, coarse mirrors 256 far blocks, all with */
+/* atomic or, so a lost race never drops a bit. Mark follows insert, so a */
+/* transient stale negative sits between insert and mark with drains owning */
+/* moves. Bits never clear, so seek stays fail-positive with drains never */
+/* consulting marks and no work hide. */
+static void flow_wheel_mark_all(u64 slot)
+{
+	u64 block;
+	u64 word;
+	u64 bit;
+	if (slot < 8ULL)
+		__sync_fetch_and_or(&flow_wheel_head,
+		    1U << (u32)slot);
+	if (slot < 256ULL) {
+		word = slot >> 6ULL;
+		bit = slot & 63ULL;
+		if (word < 4ULL)
+			__sync_fetch_and_or(
+			    &flow_wheel_fine[word],
+			    1ULL << bit);
+	}
+	block = slot >> 8ULL;
+	if (block < 256ULL) {
+		word = block >> 6ULL;
+		bit = block & 63ULL;
+		if (word < 4ULL)
+			__sync_fetch_and_or(
+			    &flow_wheel_coarse[word],
+			    1ULL << bit);
+	}
+}
+/* Try one token spend with short circuit in gate order clamped, bound, */
+/* estimate, burn, error, and token. Single 1024 bound keeps the array safe */
+/* with fail closed on out of range. Single attempt compare and swap on the */
+/* wide word, so a lost race fails the boost with no spend and one cas fail */
+/* count. Values past max fail closed with no spend. Spend pairs with refill */
+/* on the stopping CPU, so a migrate spends on the enqueuer and refills on */
+/* the runner with per CPU drift expected. BSS zero starts empty with refill */
+/* to full on stop. */
+static __always_inline bool flow_token_try_spend(u32 cpu,
+	bool clamped, u64 est, u32 burn, u64 err)
+{
+	u32 cur;
+	u32 got;
+	if (!clamped)
+		return false;
+	if ((u32)cpu >= 1024)
+		return false;
+	if (est > (u64)FLOW_SLICE_NS)
+		return false;
+	if ((u64)burn >= (u64)FLOW_PROMOTE_BURN_NS)
+		return false;
+	if (err > (u64)FLOW_WHEEL_SLOT_NS)
+		return false;
+	cur = flow_token_stor[cpu];
+	if (cur == 0 || cur > (u32)FLOW_TOKEN_MAX)
+		return false;
+	got = __sync_val_compare_and_swap(
+	    &flow_token_stor[cpu], cur, cur - 1);
+	if (got != cur) {
+		__sync_fetch_and_add(&flow_stats.token_cas_fails,
+		    1);
+		return false;
+	}
+	return true;
+}
+/* Refill one CPU token to full with no other state change. Out of range */
+/* keeps no op with no trap. Stopping piggybacks here with no vruntime, */
+/* frontier, classify, or cpuperf change. Plain store on the wide word pairs */
+/* with the single attempt spend, so a concurrent spend fails with no spend */
+/* while refill wins to full with no skew. */
+static __always_inline void flow_token_refill(u32 cpu)
+{
+	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+		return;
+	if ((u64)cpu >= nr_cpu_ids)
+		return;
+	if ((u32)cpu >= 1024)
+		return;
+	flow_token_stor[cpu] = (u32)FLOW_TOKEN_MAX;
+}
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -210,41 +332,46 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 	tctx->run_at = 0;
 	__sync_fetch_and_add(&st->active_ns, now - start);
 }
-/* Live group of one CPU from table and halves fallback. Reads the table when */
-/* ready holds groups, else halves. Table holds online rank with write by id, */
-/* offline inert. Bad values fall back to halves with no trap. */
+/* Live group of one CPU from table and halves fallback. Reads the table */
+/* when ready holds groups, else halves. Table holds online rank with write */
+/* by id, offline inert. Bad values fall back to halves with no trap. The */
+/* index masks to 1023 through a volatile copy, so the read stays proven even */
+/* when the caller range checks live in another register. */
 static __always_inline u8 flow_group_live(u32 cpu,
 	u64 nr)
 {
 	u8 g;
+	volatile u32 vcpu = cpu;
+	u32 idx = vcpu & 1023U;
 	if (!flow_group_ready)
 		return flow_group_of_cpu(cpu, nr);
-	if ((u32)cpu >= (u32)FLOW_MAX_CPUS)
+	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return flow_group_of_cpu(cpu, nr);
 	if ((u64)cpu >= nr)
 		return flow_group_of_cpu(cpu, nr);
-	g = flow_group_by_cpu[cpu];
+	g = flow_group_by_cpu[idx];
 	if (g == (u8)FLOW_GROUP_HOG)
 		return (u8)FLOW_GROUP_HOG;
 	if (g == (u8)FLOW_GROUP_LIGHT)
 		return (u8)FLOW_GROUP_LIGHT;
 	return flow_group_of_cpu(cpu, nr);
 }
-/* Least queued allowed CPU in one group. Scans 0 to 1024 with early break on */
-/* nr and max, so the bound matches the prior first. Needs live group, mask, */
-/* and queued depth. Picks the smallest queued depth with lowest id on ties */
-/* by strict less only, so equal depths keep the first id with no extra pass. */
-/* Missing queues read via the dsq count with no storage lookup and no new */
-/* loop. Placement keeps live, dispatch keeps halves, constants frozen. */
+/* Least queued allowed CPU in one group. The sharded store keeps no per CPU */
+/* backlog, so depth reads the group overflow tail once with no per CPU pass. */
+/* Every candidate in the group shares that depth, so the scan keeps mask and */
+/* group order with lowest id on ties by strict less only. Missing overflow */
+/* reads zero with no trap. Placement keeps live, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
 	s32 best = -1;
 	u64 best_q = 0;
 	s32 cpu;
+	u64 oq;
+	oq = scx_bpf_dsq_nr_queued(
+	    flow_slot_overflow_dsq(group));
 	bpf_for(cpu, 0, 1024) {
 		u8 g;
-		u64 q;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= nr_cpu_ids)
@@ -258,11 +385,9 @@ static __always_inline s32 flow_first_in_group(
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
 			continue;
-		q = scx_bpf_dsq_nr_queued(
-		    flow_dsq_for_cpu((u32)cpu));
-		if (best < 0 || q < best_q) {
+		if (best < 0 || oq < best_q) {
 			best = cpu;
-			best_q = q;
+			best_q = oq;
 		}
 	}
 	return best;
@@ -352,20 +477,29 @@ static __always_inline s32 flow_free_in_group(
 	}
 	return -1;
 }
-/* Least queued allowed CPU in any group for S0 perf. Scans 0 to 1024 with */
-/* early break on nr and max. Needs mask and queued depth with no group */
-/* check. Picks the smallest queued depth with lowest id on ties by strict */
-/* less only, so equal depths keep the first id with no extra pass. Perf only */
-/* on in group miss with same rule over the widened set. Mask always wins */
-/* with no dispatch use. */
+/* Least queued allowed CPU in any group for S0 perf. The sharded store keeps */
+/* no per CPU backlog, so depth reads each candidate group overflow tail. */
+/* Both tails load once up front, so the scan keeps mask order with no extra */
+/* pass. Picks the smallest group depth with lowest id on ties by strict less */
+/* only, so equal depths keep the first id with no extra pass. Perf only on */
+/* in group miss with same rule over the widened set. Mask always wins with */
+/* no dispatch use. */
 static __always_inline s32 flow_first_allowed(
 	const struct task_struct *p)
 {
 	s32 best = -1;
 	u64 best_q = 0;
 	s32 cpu;
+	u64 oq[2];
+	oq[0] = scx_bpf_dsq_nr_queued(
+	    flow_slot_overflow_dsq(
+	    (u8)FLOW_GROUP_LIGHT));
+	oq[1] = scx_bpf_dsq_nr_queued(
+	    flow_slot_overflow_dsq(
+	    (u8)FLOW_GROUP_HOG));
 	bpf_for(cpu, 0, 1024) {
 		u64 q;
+		u8 g;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= nr_cpu_ids)
@@ -375,8 +509,9 @@ static __always_inline s32 flow_first_allowed(
 		if (!bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr))
 			continue;
-		q = scx_bpf_dsq_nr_queued(
-		    flow_dsq_for_cpu((u32)cpu));
+		g = flow_group_live((u32)cpu,
+		    nr_cpu_ids) & 1U;
+		q = oq[g];
 		if (best < 0 || q < best_q) {
 			best = cpu;
 			best_q = q;
@@ -434,23 +569,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	bpf_for(cpu, 0, 1024) {
 		struct flow_cpu_state *st;
 		u32 key;
-		u64 dsq;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= n)
 			break;
 		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 			break;
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
-			scx_bpf_error("dsq id over bound");
-			return -EINVAL;
-		}
-		ret = scx_bpf_create_dsq(dsq, -1);
-		if (ret < 0 && ret != -EEXIST) {
-			scx_bpf_error("dsq create failed");
-			return ret;
-		}
 		key = (u32)cpu;
 		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
 		if (!st)
@@ -475,25 +599,33 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);
 	}
-	if ((u64)FLOW_DSQ_PARK >= (u64)SCX_DSQ_LOCAL_ON) {
-		scx_bpf_error("dsq id over bound");
-		return -EINVAL;
-	}
-	ret = scx_bpf_create_dsq((u64)FLOW_DSQ_PARK, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("dsq create failed");
-		return ret;
-	}
-	if ((u64)FLOW_DSQ_PARK_HOG >=
-	    (u64)SCX_DSQ_LOCAL_ON) {
-		scx_bpf_error("dsq id over bound");
-		return -EINVAL;
-	}
-	ret = scx_bpf_create_dsq(
-	    (u64)FLOW_DSQ_PARK_HOG, -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("dsq create failed");
-		return ret;
+	/* Slot queues at 512 sharded plus 2 overflow with FIFO only. One bounded */
+	/* pass creates all 514 ids with a LOCAL_ON check, so init pays once */
+	/* with no dispatch cost. The first 512 hold base plus index, the last 2 */
+	/* hold overflow base plus remainder, so groups stay apart with no share. */
+	/* No per CPU and no park queues exist, so the slot store is the only */
+	/* store with no select flag and no transition drain. */
+	bpf_for(cpu, 0, 514) {
+		u64 dsq;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= 514ULL)
+			break;
+		if ((u64)cpu < (u64)FLOW_SLOT_N)
+			dsq = (u64)FLOW_SLOT_BASE +
+			    (u64)cpu;
+		else
+			dsq = (u64)FLOW_SLOT_OVERFLOW_BASE +
+			    (u64)cpu - (u64)FLOW_SLOT_N;
+		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
+			scx_bpf_error("dsq id over bound");
+			return -EINVAL;
+		}
+		ret = scx_bpf_create_dsq(dsq, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("dsq create failed");
+			return ret;
+		}
 	}
 	return 0;
 }

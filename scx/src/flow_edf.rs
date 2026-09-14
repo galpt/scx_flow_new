@@ -10,12 +10,6 @@
 
 /* Bound of moved tasks in one pass. */
 pub const DISPATCH_BATCH: u32 = 32;
-/* Base id of the per CPU ordered queues. */
-#[cfg(test)]
-pub const DSQ_BASE: u64 = 0x4000;
-/* Park id for tasks with no allowed CPU. */
-#[cfg(test)]
-pub const DSQ_PARK: u64 = 0x5000;
 
 /*
  * True when the first time is before the second with
@@ -105,7 +99,7 @@ pub fn frontier_max(old: u64, next: u64) -> u64 {
  * Corrected frontier for the normal enqueue path. Takes the max of the selected
  * ref frontier and the target frontier with wrap safety. The corrected value
  * feeds both the clamp and deadline and the deserved compare, so both see the
- * same floor. Park and no tctx paths keep ref only with no use here.
+ * same floor. Overflow and no tctx paths keep ref only with no use here.
  */
 #[cfg(test)]
 pub fn corrected_frontier(ref_frontier: u64, target_frontier: u64) -> u64 {
@@ -233,113 +227,6 @@ pub fn edf_insert_and_step(
     let next_v = vruntime_add(clamped, scaled);
     let next = frontier_step(frontier, next_v, runnable, queued);
     (clamped, dl, next, flag)
-}
-
-/*
- * Ordered entry for tests. The deadline orders the
- * queue. The sequence keeps arrival order when
- * deadlines match.
- */
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrderedEntry {
-    /* Clamped virtual time and scaled estimate. */
-    pub deadline: u64,
-    /* Arrival sequence used for ties. Lower is older. */
-    pub seq: u64,
-    /* Task id used only to name the entry. */
-    pub id: u64,
-}
-
-#[cfg(test)]
-impl OrderedEntry {
-    /*
-     * True when this entry sorts before the other. The
-     * smaller deadline wins. Equal deadlines keep
-     * arrival order with the older sequence first.
-     */
-    pub fn before(&self, other: &Self) -> bool {
-        if self.deadline != other.deadline {
-            return time_before(self.deadline, other.deadline);
-        }
-        self.seq < other.seq
-    }
-}
-
-/*
- * Insert one entry into an ordered queue. The queue
- * stays sorted by deadline with arrival order for
- * ties. Returns the position of the new entry.
- */
-#[cfg(test)]
-pub fn ordered_insert(queue: &mut Vec<OrderedEntry>, entry: OrderedEntry) -> usize {
-    let mut pos = queue.len();
-    for (i, cur) in queue.iter().enumerate() {
-        if entry.before(cur) {
-            pos = i;
-            break;
-        }
-    }
-    queue.insert(pos, entry);
-    pos
-}
-
-/*
- * Drain up to budget tasks for one CPU. The scan
- * visits every queued task in order and moves each
- * live task with the CPU in the mask and with no
- * move failure. Dead, foreign, and failed heads are
- * skipped, so one head never blocks later work.
- * Returns the count moved. A zero return means no
- * movable work was present.
- */
-#[cfg(test)]
-pub fn drain_model(
-    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
-    cpu: i32,
-    budget: u32,
-) -> u32 {
-    let mut moved = 0;
-    let mut kept = std::collections::VecDeque::new();
-    for task in queue.drain(..) {
-        let ok = moved < budget
-            && task.live
-            && !task.fail
-            && crate::flow_select::may_run_on(cpu, &task.allowed);
-        if ok {
-            moved += 1;
-        } else {
-            kept.push_back(task);
-        }
-    }
-    *queue = kept;
-    moved
-}
-
-/*
- * Dispatch own then park in fixed order. Drains own
- * with the full budget, returns early when saturated,
- * then drains park with the rest when park holds work.
- * The total never exceeds budget. A saturated own
- * leaves park waiting, which matches the BPF dispatch
- * order with no reserve and no new path.
- */
-#[cfg(test)]
-pub fn dispatch_own_park_model(
-    own: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
-    park: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
-    cpu: i32,
-    budget: u32,
-) -> (u32, u32) {
-    let moved_own = drain_model(own, cpu, budget);
-    if moved_own >= budget {
-        return (moved_own, 0);
-    }
-    if park.is_empty() {
-        return (moved_own, 0);
-    }
-    let moved_park = drain_model(park, cpu, budget - moved_own);
-    (moved_own, moved_park)
 }
 
 /*

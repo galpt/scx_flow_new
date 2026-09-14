@@ -27,7 +27,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		u64 est;
 		s32 nice;
 		u32 w;
-		u64 dsq;
 		u64 q;
 		u8 sample;
 		u8 nwin;
@@ -53,9 +52,21 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		    ~(u32)FLOW_CURSOR_RATE_BIT);
 		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */
 		/* runnings with no double count. Dual max drops one sample max, decay */
-		/* intact, persists idle, decays at 1/8. */
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		q = scx_bpf_dsq_nr_queued(dsq);
+		/* intact, persists idle, decays at 1/8. Sample reads the group cursor */
+		/* bucket plus overflow, since the sharded store keeps no per CPU */
+		/* queue. The cursor read is a racy hint with byte load, so a torn */
+		/* index never traps and only skews one display sample. */
+		q = 0;
+		{
+			u8 gg = flow_group_live((u32)cpu,
+			    nr_cpu_ids);
+			u64 bq = flow_slot_dsq(gg,
+			    (u64)flow_slot_cur[(u32)cpu &
+			    1023U]);
+			q = scx_bpf_dsq_nr_queued(bq);
+			q += scx_bpf_dsq_nr_queued(
+			    flow_slot_overflow_dsq(gg));
+		}
 		sample = flow_delay_from_queued(q);
 		nwin = flow_delay_max(st->delay_win,
 		    sample);
@@ -94,33 +105,45 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Pressure refresh from per CPU queued counts capped at 4. Sums light and */
-/* hog queued tasks over per CPU queues in halves order with early stop when */
-/* both hit 4. Halves matches dispatch isolation with no table cost. */
-/* Placement uses live table seeded by online rank with offline inert, so */
-/* strict iff ready is zero, best effort iff ready is one. Park stays out, so */
-/* the measure tracks CPU pressure only with one pass and bounded cost. */
-/* Stores depths and allowance for snapshot with no task field. Returns the */
-/* allowance for the burst check. Stopping only, never dispatch. */
+/* Pressure refresh from slot queued counts capped at 4. Sums light and hog */
+/* queued tasks over the 512 sharded buckets plus 2 overflow tails in id */
+/* order with early stop when both hit 4. Index order holds light buckets, */
+/* hog buckets, light overflow, then hog overflow, so the group split needs */
+/* no table read. The bound is honest at 514 reads worst case with the early */
+/* stop paying a few reads when loaded. Placement uses the live table seeded */
+/* by online rank with offline inert, so strict iff ready is zero, best */
+/* effort iff ready is one. Stores depths and allowance for snapshot with no */
+/* task field. Returns the allowance for the burst check. Stopping only, */
+/* never dispatch. */
 static __always_inline u64 flow_refresh_pressure(void)
 {
 	u64 light = 0;
 	u64 hog = 0;
 	u64 allow;
-	s32 cpu;
-	bpf_for(cpu, 0, 1024) {
+	s32 i;
+	bpf_for(i, 0, 514) {
 		u64 dsq;
 		u64 n;
+		u64 idx = (u64)i;
 		u8 g;
-		if (cpu < 0)
+		if (i < 0)
 			continue;
-		if ((u64)cpu >= nr_cpu_ids)
+		if (idx >= 514ULL)
 			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		g = flow_group_of_cpu((u32)cpu,
-		    nr_cpu_ids);
-		dsq = flow_dsq_for_cpu((u32)cpu);
+		if (idx < (u64)FLOW_SLOT_N) {
+			dsq = (u64)FLOW_SLOT_BASE + idx;
+			if (idx < (u64)FLOW_SLOT_PER_GROUP)
+				g = (u8)FLOW_GROUP_LIGHT;
+			else
+				g = (u8)FLOW_GROUP_HOG;
+		} else {
+			dsq = (u64)FLOW_SLOT_OVERFLOW_BASE +
+			    idx - (u64)FLOW_SLOT_N;
+			if (idx - (u64)FLOW_SLOT_N == 0)
+				g = (u8)FLOW_GROUP_LIGHT;
+			else
+				g = (u8)FLOW_GROUP_HOG;
+		}
 		n = scx_bpf_dsq_nr_queued(dsq);
 		if (g == (u8)FLOW_GROUP_LIGHT) {
 			light += n;
@@ -307,8 +330,21 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
 				est->cpuperf_ema_at = now_e;
 			}
-			dsq_nr = scx_bpf_dsq_nr_queued(
-			    flow_dsq_for_cpu((u32)cpu));
+			/* Queue empty reads the group cursor bucket plus overflow, */
+			/* since the sharded store keeps no per CPU queue. The */
+			/* cursor read is a racy hint with byte load, so a torn */
+			/* index never traps and only skews one hint restore. */
+			dsq_nr = 0;
+			{
+				u8 gg = flow_group_live((u32)cpu,
+				    nr_cpu_ids);
+				u64 bq = flow_slot_dsq(gg,
+				    (u64)flow_slot_cur[(u32)cpu &
+				    1023U]);
+				dsq_nr = scx_bpf_dsq_nr_queued(bq);
+				dsq_nr += scx_bpf_dsq_nr_queued(
+				    flow_slot_overflow_dsq(gg));
+			}
 			local_nr = scx_bpf_dsq_nr_queued(
 			    (u64)SCX_DSQ_LOCAL_ON |
 			    (u64)cpu);
@@ -330,6 +366,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 					scx_bpf_cpuperf_set(cpu,
 					    perf);
 			}
+			/* Token refill to full with no other change. */
+			flow_token_refill((u32)cpu);
 		}
 		return;
 	}
@@ -352,8 +390,21 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		struct flow_cpu_state *st;
 		u64 dsq_nr;
 		u64 local_nr;
-		dsq_nr = scx_bpf_dsq_nr_queued(
-		    flow_dsq_for_cpu((u32)cpu));
+		/* Queue empty reads the group cursor bucket plus overflow, */
+		/* since the sharded store keeps no per CPU queue. The */
+		/* cursor read is a racy hint with byte load, so a torn */
+		/* index never traps and only skews one hint restore. */
+		dsq_nr = 0;
+		{
+			u8 gg = flow_group_live((u32)cpu,
+			    nr_cpu_ids);
+			u64 bq = flow_slot_dsq(gg,
+			    (u64)flow_slot_cur[(u32)cpu &
+			    1023U]);
+			dsq_nr = scx_bpf_dsq_nr_queued(bq);
+			dsq_nr += scx_bpf_dsq_nr_queued(
+			    flow_slot_overflow_dsq(gg));
+		}
 		local_nr = scx_bpf_dsq_nr_queued(
 		    (u64)SCX_DSQ_LOCAL_ON |
 		    (u64)cpu);
@@ -417,6 +468,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				scx_bpf_cpuperf_set(cpu,
 				    perf);
 		}
+		/* Token refill to full with no other change. */
+		flow_token_refill((u32)cpu);
 	}
 	if (runnable) {
 		__sync_fetch_and_add(&flow_stats.requeues, 1);

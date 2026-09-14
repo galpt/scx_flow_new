@@ -1,29 +1,32 @@
 # scx_flow
 
-scx_flow is our own EDF scheduler for Linux, written
+scx_flow is our own slot scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
-It keeps one ordered queue per-CPU with a fixed slice at
-1ms and two groups for light waits and hog burn, strict
+It keeps 512 FIFO slot queues sharded by two groups
+with one overflow tail per group and a fixed slice at
+1ms. Two groups split light waits and hog burn, strict
 exactly when ready is zero and best effort when ready
 is one.
-It is deliberately knob-free. It uses per-CPU ordered
-EDF, vruntime fairness, and the fixed slice.
+It is deliberately knob-free. It uses deadline mapped
+FIFO slots, vruntime fairness, and the fixed slice.
 
 ## Overview
 
 ### Order and deadlines
 
-Tasks wait in per-CPU ordered queues, and one park queue
-per group for tasks with no allowed CPU. Earliest deadline
-runs first with arrival order for ties. The deadline adds
-clamped virtual time and a scaled estimate at live weight
-from nice. Exiting tasks run at once on the task CPU
-via LOCAL_ON with no order wait. The task CPU wins
-over the enqueuer, so an exit enqueued elsewhere still
-runs where the task lives. Single insert with an idle
-kick only and no coalesce. Falls back when the task
-CPU is not allowed.
+Tasks wait in FIFO slot buckets picked by deadline,
+with one overflow tail per group for far deadlines.
+A probe maps the deadline to a near slot near 64us
+or pins past the horizon to the tail, so arrival
+order holds inside each queue. The deadline adds
+clamped virtual time and a scaled estimate at live
+weight from nice. Exiting tasks run at once on the
+task CPU via LOCAL_ON with no order wait. The task
+CPU wins over the enqueuer, so an exit enqueued
+elsewhere still runs where the task lives. Single
+insert with an idle kick only and no coalesce. Falls
+back when the task CPU is not allowed.
 
 ### Fixed slice
 
@@ -37,8 +40,8 @@ Sleeper lag is capped at a weight scaled cap in 125us to
 8ms, so a waking task gains at most the cap of advantage.
 Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
-tasks complete at once. Runnable tasks requeue ordered
-with a refreshed estimate.
+tasks complete at once. Runnable tasks requeue FIFO
+into the probed bucket with a refreshed estimate.
 
 ### Groups
 
@@ -54,55 +57,54 @@ ready is one.
 
 Strict order is waker CPU when idle in group,
 free core in group, any idle in group, prior,
-current, then least queued in group, then first
-allowed, and the task mask always wins. Least picks
-lowest queued depth with lowest id on ties.
-Perf widens each miss to any allowed, see governor
-mode. An idle core cannot
+current, then first allowed in group, then first
+allowed, and the task mask always wins. First
+allowed keeps lowest id with group overflow depth
+as the group backlog. Perf widens each miss to any
+allowed, see governor mode. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
-park in order in the task group. Frequency cards stay
-display only and never shape placement. Pinned subsets
-stay in mask. Groups seed by online rank with write by
-id. See `src/bpf/select_cpu.bpf.c` and
-`src/bpf/enqueue.bpf.c`.
+rest in the task group overflow tail in arrival order.
+Frequency cards stay display only and never shape
+placement. Pinned subsets stay in mask. Groups seed
+by online rank with write by id. See
+`src/bpf/select_cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
 
-Strict order is local queue, group park, then steals
-from idle peers with mask checks. An idle thief with
-no moved and no own left may rescue a lone queued
-task past unmovable park leftovers while busy thieves
-keep depth 2. Perf leaves dispatch on halves, see
-governor mode. Isolation follows placement and park
-choice with peer best effort across groups. Dispatch
-uses halves while placement uses the live table seeded
-by online rank.
+Strict order is own cursor bucket to budget, group
+overflow at 4, two fill ahead buckets at 4 each, then
+always the other group cursor bucket at 4. Rotation
+advances the cursor each dispatch with capped retain
+for hot buckets, so every occupied bucket drains
+within 512 dispatches worst case. A capped drain with
+work left counts one defer. A kick safety net chains
+idle owners past the watchdog with progress, far, and
+sweep kicks. All trips share one drain body with mask
+wins and move to local, so per queue order stays FIFO.
+Placement, dispatch, and pressure read the live table
+seeded by online rank.
 
 ### Kicks
 
-Idle targets with at most 2 queued are kicked with a mask
-check. Busy targets need latched delay arm 16 stand 8
-in 32us units with deserved woken deadline before frontier,
-quarter granule weight aware with 64us floor, and 32us slack.
-The gate also needs same group strict, mask, and atomic rate
-claim with one kick per slice alone, bounded extra on overlap.
-Perf bypasses group,
-see governor mode. Details live in `src/bpf/intf.h`.
-Uses woken weight only.
-Total and five reasons cover all fail-closed busy no-kicks
-in branch order armed, deserved, group, mask, and rate. One
-coalesced count covers q2 idle
-skips in 50us at 200B. Second queued to idle in 50us
+Idle targets with at most 2 queued in the slot target
+are kicked with a mask check. Busy targets stay
+fail-closed with no preempt and one armed skip count,
+since the sharded store keeps no per CPU depth for a
+deserved compare. The gate keeps total and five reason
+counters with branch order armed, deserved, group,
+mask, and rate, so busy no-kicks count under armed
+only in the slot store. One coalesced count covers q2 idle
+skips in 50us at 288B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep stays quiet, pinned never skips.
 Delay persists across idle, delay shows stale
 when idle. A missed wakeup is rescued on the next
 insert while deep queues stay quiet. Exiting uses
 a separate idle kick on the task CPU with no depth,
-no coalesce, and no preempt. Park sends
-no kick and the next dispatch pass collects it.
-Disarmed stays idle only. See `src/bpf/intf.h`,
+no coalesce, and no preempt. Overflow sends
+no kick and the next rotation or rescue pass collects
+it. Disarmed stays idle only. See `src/bpf/intf.h`,
 `src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
 `src/flow_select.rs`.
 
@@ -110,14 +112,14 @@ Disarmed stays idle only. See `src/bpf/intf.h`,
 
 Strict keeps group isolation with mask win.
 Perf widens placement to any allowed on miss
-with same tier order and least over any.
+with same tier order and least over group overflow.
 Perf bypasses the kick group gate with no recount,
 so group skips stay flat in perf. Unanimous
 performance over online CPUs sets perf one,
 else strict zero. Polls online only on the 1s tick
 with BSS write on transition only. Dashboard shows
 strict and perf in the mode cell with governor tip.
-Dispatch stays on halves with no perf widen.
+Dispatch reads live groups with no perf widen.
 No CLI knob changes this. See `src/bpf/intf.h`,
 `src/bpf/select_cpu.bpf.c`, and `src/bpf/enqueue.bpf.c`.
 See `src/topology.rs`, `src/snapshot.rs`, and `ui/index.html`.
@@ -152,14 +154,15 @@ dashboard with a live trace. Details live in `src/rapl.rs`,
 
 ## Typical Use Cases
 
-- Latency-sensitive applications. Short deadlines run first,
-  so wakeups and frame work rarely wait behind long work.
+- Latency-sensitive applications. Near deadlines land in near slots with
+  capped per bucket drains, so wakeups and frame work rarely wait behind
+  long work at one head.
 - General desktop use. The session stays responsive
   while long bursts serve with a fixed slice without blocking
   short arrivals.
 - Mixed batch workloads. Long jobs keep throughput
-  with ordered queues while short arrivals keep draining
-  first.
+  with FIFO slots while short arrivals keep draining
+  through rotation.
 
 ## Production Ready?
 
@@ -176,7 +179,8 @@ scheduling behavior. Reporting only is `--stats`,
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock` and no
 authentication, since loopback is the trust boundary.
-It shows group depths, move rates, preempt rates,
+It shows group depths, move rates, preempt rates, slot moves with defer and
+safety net kicks,
 per-CPU nice, weight, and delay dots, and a button
 to download the full snapshot as JSON.
 `--no-webui` disables it.
@@ -191,10 +195,11 @@ to download the full snapshot as JSON.
 - Lifecycle and classifier: `src/bpf/lifecycle.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
   `src/flow_select.rs`, `src/flow_group.rs`,
-  `src/flow_preempt.rs`
+  `src/flow_preempt.rs`, `src/flow_slot.rs`
 - Facade: `src/flow.rs`
 - Tests: `src/flow_tests_edf.rs`,
-  `src/flow_tests_group.rs`, `src/flow_tests_preempt.rs`
+  `src/flow_tests_group.rs`, `src/flow_tests_preempt.rs`,
+  `src/flow_tests_slot.rs`
 - Constant validation: `src/config.rs`
 - Generated bindings and skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`
@@ -214,9 +219,9 @@ baseline with no realtime use.
 ## Limitations
 
 - Groups are strict when ready is zero and best effort
-  when ready is one. Dispatch uses halves while placement
-  uses the live table seeded by online rank with offline
-  light inert. Peer steal is mask only.
+  when ready is one. Placement, dispatch, and pressure read the live table
+  seeded by online rank with offline light inert. Rescue is mask only across
+  groups.
 - Topology with online set is snapshotted at attach, so
   a CPU hotplug needs a restart. Snapshot covers online
   only with per CPU count matching online count.

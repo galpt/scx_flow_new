@@ -439,6 +439,17 @@ mod tests {
         assert_eq!(m.stats.preempt_skipped_mask, 0);
         assert_eq!(m.stats.preempt_skipped_rate, 0);
         assert_eq!(m.stats.kick_coalesced, 0);
+        assert_eq!(m.stats.wheel_skips, 0);
+        assert_eq!(m.stats.wheel_overflow, 0);
+        assert_eq!(m.stats.token_boosts, 0);
+        assert_eq!(m.stats.wheel_head_hits, 0);
+        assert_eq!(m.stats.wheel_fine_hits, 0);
+        assert_eq!(m.stats.wheel_coarse_hits, 0);
+        assert_eq!(m.stats.wheel_empty, 0);
+        assert_eq!(m.stats.slot_kicks, 0);
+        assert_eq!(m.stats.token_cas_fails, 0);
+        assert_eq!(m.stats.slot_moves, 0);
+        assert_eq!(m.stats.slot_defer, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -490,6 +501,17 @@ mod tests {
                 preempt_skipped_group: 1,
                 preempt_skipped_mask: 1,
                 preempt_skipped_rate: 2,
+                wheel_skips: 11,
+                wheel_overflow: 1,
+                token_boosts: 2,
+                wheel_head_hits: 5,
+                wheel_fine_hits: 3,
+                wheel_coarse_hits: 1,
+                wheel_empty: 4,
+                slot_kicks: 2,
+                token_cas_fails: 0,
+                slot_moves: 40,
+                slot_defer: 3,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -505,7 +527,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.36".to_string(),
+            version: "4.2.37-o1".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -533,6 +555,17 @@ mod tests {
         assert!(txt.contains("preempt_skipped_mask"));
         assert!(txt.contains("preempt_skipped_rate"));
         assert!(txt.contains("kick_coalesced"));
+        assert!(txt.contains("wheel_skips"));
+        assert!(txt.contains("wheel_overflow"));
+        assert!(txt.contains("token_boosts"));
+        assert!(txt.contains("wheel_head_hits"));
+        assert!(txt.contains("wheel_fine_hits"));
+        assert!(txt.contains("wheel_coarse_hits"));
+        assert!(txt.contains("wheel_empty"));
+        assert!(txt.contains("slot_kicks"));
+        assert!(txt.contains("token_cas_fails"));
+        assert!(txt.contains("slot_moves"));
+        assert!(txt.contains("slot_defer"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
@@ -558,6 +591,17 @@ mod tests {
         assert_eq!(back.stats.preempt_skipped_mask, 1);
         assert_eq!(back.stats.preempt_skipped_rate, 2);
         assert_eq!(back.stats.kick_coalesced, 2);
+        assert_eq!(back.stats.wheel_skips, 11);
+        assert_eq!(back.stats.wheel_overflow, 1);
+        assert_eq!(back.stats.token_boosts, 2);
+        assert_eq!(back.stats.wheel_head_hits, 5);
+        assert_eq!(back.stats.wheel_fine_hits, 3);
+        assert_eq!(back.stats.wheel_coarse_hits, 1);
+        assert_eq!(back.stats.wheel_empty, 4);
+        assert_eq!(back.stats.slot_kicks, 2);
+        assert_eq!(back.stats.token_cas_fails, 0);
+        assert_eq!(back.stats.slot_moves, 40);
+        assert_eq!(back.stats.slot_defer, 3);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
@@ -569,7 +613,7 @@ mod tests {
             back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
             9_000
         );
-        assert_eq!(back.version, "4.2.36");
+        assert_eq!(back.version, "4.2.37-o1");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
@@ -616,6 +660,20 @@ mod tests {
         assert!(html.contains("id=\"pskip-g\""));
         assert!(html.contains("id=\"pskip-m\""));
         assert!(html.contains("id=\"pskip-r\""));
+    }
+
+    /* Dashboard shows the slot cells. */
+    #[test]
+    fn dashboard_shows_slot_cells() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"slot-moves\""));
+        assert!(html.contains("id=\"slot-defer\""));
+        assert!(html.contains("id=\"slot-kicks\""));
+        assert!(html.contains("id=\"slot-rate\""));
+        assert!(html.contains("slot_moves"));
+        assert!(html.contains("slot_defer"));
+        assert!(html.contains("slot_kicks"));
+        assert!(html.contains("wheel_skips"));
     }
 
     /* Dashboard shows the strict and perf mode cell. */

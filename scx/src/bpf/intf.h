@@ -3,8 +3,8 @@
  * Shared flow header
  *
  * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
- * groups, and ordered queues. Mirrored by userspace so behavior stays the same
- * on both sides of the boundary.
+ * groups, and sharded FIFO slot queues. Mirrored by userspace so behavior
+ * stays the same on both sides of the boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,15 +25,15 @@ typedef int pid_t;
 #ifndef __always_inline
 #define __always_inline inline __attribute__((__always_inline__))
 #endif
-/* Fixed slice at 1ms, two groups, ordered queues. */
+#ifndef __noinline
+#define __noinline __attribute__((noinline))
+#endif
+/* Fixed slice at 1ms, two groups, sharded FIFO slots. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
 	FLOW_SLICE_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_MAX_CPUS = 1024ULL,
-	FLOW_DSQ_BASE = 0x4000ULL,
-	FLOW_DSQ_PARK = 0x5000ULL,
-	FLOW_DSQ_PARK_HOG = 0x5001ULL,
 	FLOW_NGROUPS = 2ULL,
 	FLOW_GROUP_LIGHT = 0ULL,
 	FLOW_GROUP_HOG = 1ULL,
@@ -73,6 +73,23 @@ enum flow_consts {
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
 	FLOW_KICK_COALESCE_NS = 50000ULL,
+	FLOW_WHEEL_SLOT_NS = (64ULL * 1000ULL),
+	FLOW_WHEEL_DIM = 256ULL,
+	FLOW_WHEEL_TOTAL = 65536ULL,
+	FLOW_WHEEL_HORIZON_NS = (64ULL * 1000ULL * 65536ULL),
+	FLOW_WHEEL_QUANT_LO = 0xFFFFULL,
+	FLOW_TOKEN_MAX = 255ULL,
+	FLOW_WHEEL_HEAD_BITS = 8ULL,
+	FLOW_WHEEL_FINE_WORDS = 4ULL,
+	FLOW_WHEEL_COARSE_WORDS = 4ULL,
+	FLOW_SLOT_BASE = 0x6000ULL,
+	FLOW_SLOT_PER_GROUP = 256ULL,
+	FLOW_SLOT_NGROUPS = 2ULL,
+	FLOW_SLOT_N = 512ULL,
+	FLOW_SLOT_OVERFLOW_BASE = 0x6200ULL,
+	FLOW_SLOT_OVERFLOW_N = 2ULL,
+	FLOW_SLOT_D = 4ULL,
+	FLOW_SLOT_BUDGET = 32ULL,
 };
 /* Weight fits u16 for the running repack. */
 /* Nice minus 20 to 19 fits s16 for repack. */
@@ -114,10 +131,16 @@ struct flow_cpu_state {
 	u64 cpuperf_ema_at;
 	u64 active_ns;
 };
-/* Counters at 200B with group, coalesce, and split skip reasons. Total keeps */
-/* the sum for compat, reasons split fail-closed busy no-kicks in branch */
-/* order armed, deserved, group, mask, and rate. Coalesced counts q2 idle */
-/* skips in 50us. */
+/* Counters at 288B with group, coalesce, split skip reasons, wheel, token, */
+/* and slot. Total keeps the sum for compat, reasons split fail-closed busy */
+/* no-kicks in branch order armed, deserved, group, mask, and rate. Coalesced */
+/* counts q2 idle skips in 50us. Wheel skips counts empty slots passed in */
+/* seek, overflow counts tail pins past the horizon, boosts counts token */
+/* spends, and cas fails counts lost token races. Head, fine, coarse, and */
+/* empty stay append only, so old offsets stay stable. Slot moves counts FIFO */
+/* tasks moved via slot drains, slot kicks counts safety net kicks, and slot */
+/* defer counts slot drains that hit the D cap with work left deferred, all */
+/* append only at the tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -144,6 +167,17 @@ struct flow_sched_stats {
 	u64 preempt_skipped_group;
 	u64 preempt_skipped_mask;
 	u64 preempt_skipped_rate;
+	u64 wheel_skips;
+	u64 wheel_overflow;
+	u64 token_boosts;
+	u64 wheel_head_hits;
+	u64 wheel_fine_hits;
+	u64 wheel_coarse_hits;
+	u64 wheel_empty;
+	u64 slot_kicks;
+	u64 token_cas_fails;
+	u64 slot_moves;
+	u64 slot_defer;
 };
 
 /* Clamp estimate to the estimate range. */
@@ -154,11 +188,6 @@ static __always_inline u64 flow_clamp_est(u64 v)
 	if (v > (u64)FLOW_EST_MAX_NS)
 		return (u64)FLOW_EST_MAX_NS;
 	return v;
-}
-/* Queue id of one CPU with range check by caller. */
-static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
-{
-	return (u64)FLOW_DSQ_BASE + (u64)cpu;
 }
 /* Group of one CPU by id halves with extra to hog. */
 /* Halves is the fallback when the group table is not ready. */
@@ -173,13 +202,6 @@ static __always_inline u8 flow_group_of_cpu(u32 cpu,
 	if ((u64)cpu < nr / 2)
 		return (u8)FLOW_GROUP_LIGHT;
 	return (u8)FLOW_GROUP_HOG;
-}
-/* Park id of one group with light as default. */
-static __always_inline u64 flow_park_for_group(u8 group)
-{
-	if (group == (u8)FLOW_GROUP_HOG)
-		return (u64)FLOW_DSQ_PARK_HOG;
-	return (u64)FLOW_DSQ_PARK;
 }
 /* Perf hint of one group with single policy at max. */
 static __always_inline u32 flow_perf_for_group(u8 group)
@@ -667,5 +689,129 @@ static __always_inline bool flow_perf_enabled(void)
 	extern volatile u8 flow_perf_mode;
 	extern volatile u8 flow_probe_perf;
 	return flow_perf_mode != 0 || flow_probe_perf != 0;
+}
+/* Deadline with the low 16 bits cleared near 64us down. Clearing moves early */
+/* only, so order never moves late with at most 65535ns of earliness. */
+static __always_inline u64 flow_qdl_round_down(u64 dl)
+{
+	return dl & ~0xFFFFULL;
+}
+/* True when one deadline lands inside the horizon. Base is the enqueue */
+/* frontier in vruntime, never ktime. Overdue counts as inside with slot */
+/* zero, so late work runs at once. Past the horizon counts as outside with */
+/* a tail pin. Short circuit keeps one test in the probe. */
+static __always_inline bool flow_in_horizon(u64 dl,
+	u64 frontier)
+{
+	return flow_time_before(dl, frontier) ||
+	    ((dl - frontier) < (u64)FLOW_WHEEL_HORIZON_NS);
+}
+/* Probe of one deadline into quantised deadline, slot, error, and overflow. */
+/* Base is the enqueue frontier in vruntime, never ktime. Overdue keeps the */
+/* rounded deadline with slot zero and no overflow. Inside keeps the rounded */
+/* deadline with the slot from the rounded distance shifted by 16. Outside */
+/* pins to the tail at frontier plus horizon minus one with the last slot */
+/* to the tail at frontier plus horizon minus one with the last slot and */
+/* overflow set. Error holds deadline minus rounded deadline in 0 to 65535. */
+/* One pass keeps a single horizon test with no double read. */
+static __always_inline u64 flow_wheel_probe(u64 dl,
+	u64 frontier, u64 *slot, u64 *err, bool *over)
+{
+	u64 e;
+	bool overdue;
+	bool inside;
+	bool is_over;
+	u64 qdl;
+	u64 s;
+	e = dl & (u64)FLOW_WHEEL_QUANT_LO;
+	*err = e;
+	overdue = flow_time_before(dl, frontier);
+	inside = overdue ||
+	    ((dl - frontier) < (u64)FLOW_WHEEL_HORIZON_NS);
+	is_over = !inside;
+	*over = is_over;
+	if (is_over) {
+		u64 tail = frontier +
+		    (u64)FLOW_WHEEL_HORIZON_NS - 1ULL;
+		qdl = flow_qdl_round_down(tail);
+		*slot = (u64)FLOW_WHEEL_TOTAL - 1ULL;
+		return qdl;
+	}
+	qdl = flow_qdl_round_down(dl);
+	if (flow_time_before(qdl, frontier)) {
+		*slot = 0;
+		return qdl;
+	}
+	s = (qdl - frontier) >> 16ULL;
+	if (s >= (u64)FLOW_WHEEL_TOTAL)
+		s = (u64)FLOW_WHEEL_TOTAL - 1ULL;
+	*slot = s;
+	return qdl;
+}
+/* True when one sleeper may spend one token for a boost. Needs a clamped lag */
+/* with a live token, an estimate at or below one slice, burn below 4ms, and */
+/* quant error at or below 64us, so the boost stays bounded with no late */
+/* move. Short circuit in gate order clamped, token, estimate, burn, and */
+/* error keeps the hot fail fast with no extra pass. */
+static __always_inline bool flow_token_eligible(bool clamped,
+	u32 tok, u64 est, u32 burn, u64 err)
+{
+	return clamped && (tok != 0) &&
+	    (est <= (u64)FLOW_SLICE_NS) &&
+	    ((u64)burn < (u64)FLOW_PROMOTE_BURN_NS) &&
+	    (err <= (u64)FLOW_WHEEL_SLOT_NS);
+}
+/* Bucket of one quantised deadline near 64us. Holds the low 8 slot bits, so */
+/* 256 buckets each cover one near slot with past 16ms resting in overflow. */
+/* Base is vruntime quantised deadline, never ktime, so order stays vruntime */
+/* only. */
+static __always_inline u64 flow_slot_bucket(u64 qdl)
+{
+	return (qdl >> 16ULL) & 0xFFULL;
+}
+/* FIFO id of one group bucket with light as default. Holds base plus group */
+/* times 256 plus bucket, so two groups shard 512 queues with no share. Bad */
+/* group falls to light with no trap, bucket keeps masked form. FIFO only, */
+/* never vtime, so per DSQ one flavor holds with mask wins on drain. */
+static __always_inline u64 flow_slot_dsq(u8 group,
+	u64 bucket)
+{
+	u64 g = group == (u8)FLOW_GROUP_HOG ? 1ULL : 0ULL;
+	return (u64)FLOW_SLOT_BASE + g * 256ULL +
+	    (bucket & 0xFFULL);
+}
+/* FIFO id of one group overflow with light as default. Holds overflow base */
+/* plus group, so two tails keep arrival order per group with no share. Bad */
+/* group falls to light with no trap. FIFO only, never vtime, so per DSQ one */
+/* flavor holds with mask wins on drain. */
+static __always_inline u64 flow_slot_overflow_dsq(u8 group)
+{
+	if (group == (u8)FLOW_GROUP_HOG)
+		return (u64)FLOW_SLOT_OVERFLOW_BASE + 1ULL;
+	return (u64)FLOW_SLOT_OVERFLOW_BASE;
+}
+/* Cap of one slot trip at D under the dispatch budget. Returns the min of */
+/* budget and 4, so one bucket or overflow moves at most 4 with the shared */
+/* loop and no K loop. Mirrors the drain cap with the same test. */
+static __always_inline u32 flow_slot_cap(u32 budget)
+{
+	if (budget > (u32)FLOW_SLOT_D)
+		return (u32)FLOW_SLOT_D;
+	return budget;
+}
+/* Next bucket of one slot cursor with wrap. Holds cur plus one truncated to */
+/* u8, so 255 wraps to zero with no branch and no divide. Base is the per CPU */
+/* slot cursor, never the steal cursor, so rotation stays independent. */
+static __always_inline u8 flow_slot_next(u8 cur)
+{
+	return (u8)(cur + 1);
+}
+/* Bucket ahead of one slot base with wrap. Holds base plus off plus one */
+/* truncated to u8, so the window stays distinct from own with no branch and */
+/* no divide. Off runs zero to one for two fill buckets at D each. */
+static __always_inline u8 flow_slot_add(u8 base,
+	u32 off)
+{
+	return (u8)(base + (u8)off + 1);
 }
 #endif

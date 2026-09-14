@@ -105,6 +105,39 @@ pub struct Metrics {
     #[stat(desc = "Busy no-kicks for rate held")]
     #[serde(default)]
     pub preempt_skipped_rate: u64,
+    #[stat(desc = "Slots passed empty in seek")]
+    #[serde(default)]
+    pub wheel_skips: u64,
+    #[stat(desc = "Tail pins past the horizon")]
+    #[serde(default)]
+    pub wheel_overflow: u64,
+    #[stat(desc = "Sleeper token spends")]
+    #[serde(default)]
+    pub token_boosts: u64,
+    #[stat(desc = "Seeks served from head")]
+    #[serde(default)]
+    pub wheel_head_hits: u64,
+    #[stat(desc = "Seeks served from fine")]
+    #[serde(default)]
+    pub wheel_fine_hits: u64,
+    #[stat(desc = "Seeks served from coarse")]
+    #[serde(default)]
+    pub wheel_coarse_hits: u64,
+    #[stat(desc = "Seeks with no mark")]
+    #[serde(default)]
+    pub wheel_empty: u64,
+    #[stat(desc = "Safety net kicks sent")]
+    #[serde(default)]
+    pub slot_kicks: u64,
+    #[stat(desc = "Lost token races")]
+    #[serde(default)]
+    pub token_cas_fails: u64,
+    #[stat(desc = "FIFO tasks moved via slots")]
+    #[serde(default)]
+    pub slot_moves: u64,
+    #[stat(desc = "Capped drains with work left")]
+    #[serde(default)]
+    pub slot_defer: u64,
 }
 
 /*
@@ -303,7 +336,10 @@ impl Metrics {
             kick={} noctx={} edfenq={} edfclamp={} edford={} \
             demote={} promote={} wpromote={} pinfl={} gskip={} \
             pkick={} pskip={} kcoal={} \
-            pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={}",
+            pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
+            wskips={} wover={} tboost={} \
+            whead={} wfine={} wcoarse={} wempty={} \
+            skicks={} tcas={} smoves={} sdefer={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -331,6 +367,17 @@ impl Metrics {
             self.preempt_skipped_group,
             self.preempt_skipped_mask,
             self.preempt_skipped_rate,
+            self.wheel_skips,
+            self.wheel_overflow,
+            self.token_boosts,
+            self.wheel_head_hits,
+            self.wheel_fine_hits,
+            self.wheel_coarse_hits,
+            self.wheel_empty,
+            self.slot_kicks,
+            self.token_cas_fails,
+            self.slot_moves,
+            self.slot_defer,
         )?;
         Ok(())
     }
@@ -381,6 +428,17 @@ impl Metrics {
             preempt_skipped_rate: self
                 .preempt_skipped_rate
                 .wrapping_sub(rhs.preempt_skipped_rate),
+            wheel_skips: self.wheel_skips.wrapping_sub(rhs.wheel_skips),
+            wheel_overflow: self.wheel_overflow.wrapping_sub(rhs.wheel_overflow),
+            token_boosts: self.token_boosts.wrapping_sub(rhs.token_boosts),
+            wheel_head_hits: self.wheel_head_hits.wrapping_sub(rhs.wheel_head_hits),
+            wheel_fine_hits: self.wheel_fine_hits.wrapping_sub(rhs.wheel_fine_hits),
+            wheel_coarse_hits: self.wheel_coarse_hits.wrapping_sub(rhs.wheel_coarse_hits),
+            wheel_empty: self.wheel_empty.wrapping_sub(rhs.wheel_empty),
+            slot_kicks: self.slot_kicks.wrapping_sub(rhs.slot_kicks),
+            token_cas_fails: self.token_cas_fails.wrapping_sub(rhs.token_cas_fails),
+            slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
+            slot_defer: self.slot_defer.wrapping_sub(rhs.slot_defer),
         }
     }
 }

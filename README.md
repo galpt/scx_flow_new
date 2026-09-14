@@ -6,7 +6,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.36`
+- `scx/Cargo.toml` package `scx_flow` at `4.2.37-o1`
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/` maps, placement, and dispatch
 - `scx/src/main.rs` frontend and run loop
@@ -30,7 +30,7 @@ sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 /usr/local/bin/scx_flow --version
 ```
 
-Expect version `4.2.36`, state `enabled`, ops with `flow`.
+Expect version `4.2.37-o1`, state `enabled`, ops with `flow`.
 
 ## Checks
 

@@ -2,8 +2,10 @@
 /*
  * Enqueue op
  *
- * Picks the target queue in group with park fallback and stamps deadline and
- * delay. Keeps mask wins with group aware placement and coalesced idle kicks.
+ * Picks the target CPU in group with overflow fallback and stamps deadline and
+ * delay. Inserts FIFO into the task group slot bucket or overflow with probe
+ * and mark. Keeps mask wins with group aware placement and coalesced idle
+ * kicks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -75,6 +77,39 @@ static __always_inline u64 flow_ref_frontier(
 		return rst->frontier;
 	return 0;
 }
+/* Insert one task FIFO into the group slot store. Probes the deadline in */
+/* vruntime for quantised deadline, slot, error, and overflow, then inserts */
+/* to the bucket or the group overflow tail with the same slice. Marks the */
+/* slot after insert, counts tail pins past the horizon, and reports the */
+/* quant error for the token spend, so one probe feeds insert and spend with */
+/* no second pass. Returns the slot DSQ id for kick sampling, so idle and */
+/* busy share one target with no reread. FIFO only, never vtime, so per DSQ */
+/* one flavor holds. */
+static __always_inline u64 flow_slot_insert(
+	struct task_struct *p, u8 group, u64 dl,
+	u64 frontier, u64 slice, u64 *err_out)
+{
+	u64 qdl;
+	u64 slot = 0;
+	u64 err = 0;
+	bool over = false;
+	u64 bucket;
+	u64 sdsq;
+	qdl = flow_wheel_probe(dl, frontier, &slot,
+	    &err, &over);
+	bucket = flow_slot_bucket(qdl);
+	if (slot >= (u64)FLOW_WHEEL_DIM)
+		sdsq = flow_slot_overflow_dsq(group);
+	else
+		sdsq = flow_slot_dsq(group, bucket);
+	scx_bpf_dsq_insert(p, sdsq, slice, 0);
+	flow_wheel_mark_all(slot);
+	if (over)
+		__sync_fetch_and_add(&flow_stats.wheel_overflow,
+		    1);
+	*err_out = err;
+	return sdsq;
+}
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
@@ -121,6 +156,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 clamped;
 		u64 scaled;
 		u64 dl;
+		u64 err = 0;
 		frontier = flow_ref_frontier(p, sel);
 		clamped = flow_clamp_vruntime(0, frontier,
 		    slice);
@@ -137,8 +173,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.edf_clamped, 1);
 		__sync_fetch_and_add(&flow_stats.edf_ordered,
 		    1);
-		scx_bpf_dsq_insert_vtime(p,
-		    (u64)FLOW_DSQ_PARK, slice, dl, 0);
+		/* No task state, so the light group owns the insert with no */
+		/* token use and no kick. Rotation and rescue collect it. */
+		flow_slot_insert(p,
+		    (u8)FLOW_GROUP_LIGHT, dl, frontier,
+		    slice, &err);
 		return;
 	}
 	group = flow_task_group(tctx);
@@ -201,9 +240,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 clamped;
 		u64 scaled;
 		u64 dl;
-		u64 park;
 		s32 nice;
 		u32 w;
+		u32 tok_cpu;
+		u64 err = 0;
+		bool was_c;
 		if (is_fresh)
 			est = slice;
 		else
@@ -242,16 +283,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.edf_clamped, 1);
 		__sync_fetch_and_add(&flow_stats.edf_ordered,
 		    1);
-		park = flow_park_for_group(group);
-		scx_bpf_dsq_insert_vtime(p, park, slice,
-		    dl, 0);
-		/* Park sends no kick. Park holds tasks with */
-		/* no live allowed CPU after fallback, so no */
-		/* single idle target can run them. The next */
-		/* dispatch pass on any thief in the park */
-		/* group collects them when the mask allows. */
-		/* A target scan would need a loop with storm */
-		/* risk, so no kick is sent. */
+		was_c = clamped != v;
+		flow_slot_insert(p, group, dl, frontier,
+		    slice, &err);
+		/* Token spend keeps the sleeper conjunct with the enqueuer */
+		/* owning the spend and no order change. */
+		tok_cpu = (u32)bpf_get_smp_processor_id();
+		if (flow_token_try_spend(tok_cpu, was_c,
+		    est, tctx->burn, err))
+			__sync_fetch_and_add(
+			    &flow_stats.token_boosts, 1);
+		/* No live allowed CPU after fallback, so no kick is sent. The */
+		/* slot bucket or overflow holds the task in arrival order, so */
+		/* the next rotation or rescue pass collects it when the mask */
+		/* allows. A target scan would need a loop with storm risk, so */
+		/* no kick is sent. */
 		return;
 	}
 	if (is_fresh)
@@ -269,17 +315,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 clamped;
 		u64 scaled;
 		u64 dl;
-		u64 dsq;
+		u64 sdsq;
 		s32 nice;
 		u32 w;
 		u64 target = 0;
 		u64 ref_f = 0;
+		u64 err = 0;
+		bool was_c;
+		u32 tok_cpu;
 		st = flow_cpu((u32)cpu);
 		if (st)
 			target = st->frontier;
 		ref_f = flow_ref_frontier(p, sel);
-		/* Normal path only, park and no tctx keep ref only. Corrected feeds clamp */
-		/* and deserved with max wrap safety. */
+		/* Normal path only, no tctx and overflow keep their own probe. */
+		/* Corrected feeds clamp and deserved with max wrap safety. */
 		frontier = flow_frontier_max(ref_f, target);
 		nice = flow_nice_of(p);
 		w = flow_weight_of(nice);
@@ -305,22 +354,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.edf_clamped, 1);
 		__sync_fetch_and_add(&flow_stats.edf_ordered,
 		    1);
-		dsq = flow_dsq_for_cpu((u32)cpu);
-		scx_bpf_dsq_insert_vtime(p, dsq, slice, dl, 0);
+		was_c = clamped != v;
+		sdsq = flow_slot_insert(p, group, dl,
+		    frontier, slice, &err);
+		/* Token spend keeps the sleeper conjunct with the enqueuer */
+		/* owning the spend and no order change. */
+		tok_cpu = (u32)bpf_get_smp_processor_id();
+		if (flow_token_try_spend(tok_cpu, was_c,
+		    est, tctx->burn, err))
+			__sync_fetch_and_add(
+			    &flow_stats.token_boosts, 1);
 		/* Kick idle and busy preempt with delay. */
-		/* Idle fast path first with one queued read. */
+		/* Idle fast path first with one queued read on the slot target. */
 		/* Q2 idle in 50us coalesces when not pinned. */
 		/* Q1 always kicks, deep stays quiet, no slide. */
 		/* Busy stamps max only, running owns count. */
 		/* Dual max drops one sample max, decay intact. */
-		/* Needs latched arm 16 stand 8, deserved woken */
-		/* dl before frontier, and quarter gran. It also */
-		/* needs 32us slack, same group, mask, and atomic */
-		/* rate claim with one kick per slice. Frontier is */
-		/* the floor, so beating it by granule and slack */
-		/* proves earliness with no lookup. Fail closed */
-		/* with no kick, total, and reason. The branch */
-		/* order is armed, deserved, group, mask, and rate. */
+		/* Busy stays fail closed as disarmed with total and armed */
+		/* counts and no kick, since the sharded store keeps no per CPU */
+		/* depth for a deserved preempt. Idle above already woke, so no */
+		/* strand holds with drains owning moves. */
 		/* No loop. Delay persists */
 		/* across idle, next running decays, delay */
 		/* shows stale idle. */
@@ -333,15 +386,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u8 cur;
 			u8 swin;
 			u8 scur;
-			bool held;
-			bool armed;
-			bool is_deserved;
-			u64 granule;
-			bool same;
-			bool mask_ok;
 			if (!st)
 				return;
-			q = scx_bpf_dsq_nr_queued(dsq);
+			q = scx_bpf_dsq_nr_queued(sdsq);
 			if (st->running_pid == 0) {
 				if (q >
 				    (u64)FLOW_STEAL_MIN_DEPTH)
@@ -387,78 +434,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			scur = flow_delay_max(cur, sample);
 			st->delay_win = swin;
 			st->delay_cur = scur;
-			held = flow_stand_held(st->cursor);
-			armed = flow_delay_armed_latched(
-			    swin, held);
-			if (armed)
-				__sync_fetch_and_or(&st->cursor,
-				    (u32)FLOW_CURSOR_STAND_BIT);
-			else
-				__sync_fetch_and_and(&st->cursor,
-				    ~(u32)FLOW_CURSOR_STAND_BIT);
-			granule = flow_granule_for_weight(w,
-			    slice);
-			is_deserved = flow_deserved(dl,
-			    frontier, granule);
-			same = group ==
-			    flow_group_live((u32)cpu,
-			    nr_cpu_ids);
-			/* S1 perf bypasses group with no recount, */
-			/* so pskip_g stays flat in perf. */
-			if (flow_perf_enabled())
-				same = true;
-			mask_ok =
-			    bpf_cpumask_test_cpu(
-			    (u32)cpu, p->cpus_ptr);
-			if (!armed) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_armed,
-				    1);
-				return;
-			}
-			if (!is_deserved) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_deserved,
-				    1);
-				return;
-			}
-			if (!same) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_group,
-				    1);
-				return;
-			}
-			if (!mask_ok) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_mask,
-				    1);
-				return;
-			}
-			if (!flow_rate_claim(&st->cursor)) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_rate,
-				    1);
-				return;
-			}
-			scx_bpf_kick_cpu(cpu,
-			    SCX_KICK_PREEMPT);
+			/* Fail closed with no preempt. The sharded store keeps */
+			/* no per CPU depth, so busy never arms with the armed */
+			/* count below and no kick regardless of delay dots. Idle */
+			/* above already woke, so no strand holds with drains */
+			/* owning moves. Stand clears, so the dots stay display. */
+			__sync_fetch_and_and(&st->cursor,
+			    ~(u32)FLOW_CURSOR_STAND_BIT);
 			__sync_fetch_and_add(
-			    &flow_stats.preempt_kicks, 1);
+			    &flow_stats.preempt_skipped,
+			    1);
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped_armed,
+			    1);
+			return;
 		}
 	}
 }

@@ -18,12 +18,15 @@ mod flow_group;
 mod flow_preempt;
 mod flow_select;
 mod flow_slice;
+mod flow_slot;
 #[cfg(test)]
 mod flow_tests_edf;
 #[cfg(test)]
 mod flow_tests_group;
 #[cfg(test)]
 mod flow_tests_preempt;
+#[cfg(test)]
+mod flow_tests_slot;
 mod rapl;
 mod snapshot;
 mod stats;
@@ -295,6 +298,9 @@ impl<'a> Scheduler<'a> {
             demote={} promote={} wpromote={} pinfl={} gskip={} \
             pkick={} pskip={} kcoal={} \
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
+            wskips={} wover={} tboost={} \
+            whead={} wfine={} wcoarse={} wempty={} \
+            skicks={} tcas={} smoves={} sdefer={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -319,6 +325,17 @@ impl<'a> Scheduler<'a> {
             m.preempt_skipped_group,
             m.preempt_skipped_mask,
             m.preempt_skipped_rate,
+            m.wheel_skips,
+            m.wheel_overflow,
+            m.token_boosts,
+            m.wheel_head_hits,
+            m.wheel_fine_hits,
+            m.wheel_coarse_hits,
+            m.wheel_empty,
+            m.slot_kicks,
+            m.token_cas_fails,
+            m.slot_moves,
+            m.slot_defer,
             runtime,
             oncpu,
         );
@@ -426,14 +443,30 @@ mod tests {
     }
 
     #[test]
-    fn dsq_matches_header() {
+    fn slot_matches_header() {
         assert_eq!(
-            crate::flow_edf::DSQ_BASE,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_BASE as u64
+            crate::flow_slot::SLOT_BASE,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_BASE as u64
         );
         assert_eq!(
-            crate::flow_edf::DSQ_PARK,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+            crate::flow_slot::SLOT_OVERFLOW_BASE,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
+        );
+        assert_eq!(
+            crate::flow_slot::SLOT_D,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_D as u32
+        );
+        assert_eq!(
+            crate::flow_slot::SLOT_BUDGET,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET as u32
+        );
+        assert_eq!(
+            crate::flow_group::OVERFLOW_LIGHT,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
+        );
+        assert_eq!(
+            crate::flow_group::OVERFLOW_HOG,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
         );
     }
 
@@ -473,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_200() {
+    fn sched_stats_size_is_288() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            200
+            288
         );
     }
 
@@ -495,12 +528,12 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_GROUP_HOG as u64
         );
         assert_eq!(
-            crate::flow_group::PARK_LIGHT,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+            crate::flow_group::OVERFLOW_LIGHT,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
         );
         assert_eq!(
-            crate::flow_group::PARK_HOG,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK_HOG as u64
+            crate::flow_group::OVERFLOW_HOG,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
         );
     }
 }

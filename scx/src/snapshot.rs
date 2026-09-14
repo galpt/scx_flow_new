@@ -1066,6 +1066,17 @@ impl<'a> Scheduler<'a> {
             preempt_skipped_group: s.preempt_skipped_group,
             preempt_skipped_mask: s.preempt_skipped_mask,
             preempt_skipped_rate: s.preempt_skipped_rate,
+            wheel_skips: s.wheel_skips,
+            wheel_overflow: s.wheel_overflow,
+            token_boosts: s.token_boosts,
+            wheel_head_hits: s.wheel_head_hits,
+            wheel_fine_hits: s.wheel_fine_hits,
+            wheel_coarse_hits: s.wheel_coarse_hits,
+            wheel_empty: s.wheel_empty,
+            slot_kicks: s.slot_kicks,
+            token_cas_fails: s.token_cas_fails,
+            slot_moves: s.slot_moves,
+            slot_defer: s.slot_defer,
         }
     }
 
