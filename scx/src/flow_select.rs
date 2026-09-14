@@ -23,6 +23,47 @@ pub const STEAL_MIN_DEPTH: u64 = 2;
 pub const KICK_COALESCE_NS: u64 = 50_000;
 
 /*
+ * Start peer for one dispatch from the cursor.
+ * Masks rate plus stand then steps one with wrap,
+ * so repeated passes spread across peers with no
+ * hot spot. Mirrors the BPF start read once per
+ * dispatch with mask. See src/bpf/dispatch.bpf.c
+ * for the scan use.
+ */
+#[cfg(test)]
+pub fn steal_start(cursor: u32, nr_cpus: usize) -> u32 {
+    use crate::flow_preempt::CURSOR_MASK;
+    if nr_cpus == 0 {
+        return 0;
+    }
+    if nr_cpus == 1 {
+        return 0;
+    }
+    ((cursor & CURSOR_MASK) + 1) % nr_cpus as u32
+}
+
+/*
+ * Peers visited by one 16 sweep from a start.
+ * Steps 16 from start with wrap, so high CPUs
+ * reach low peers with no dead read. First 8
+ * feed the same group scan, next 8 feed the cross
+ * group scan. BPF uses modulo with the same order
+ * for the verifier. Returns 16 entries in order.
+ * See src/bpf/dispatch.bpf.c for the phase use.
+ */
+#[cfg(test)]
+pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
+    let mut out = Vec::with_capacity(16);
+    if nr_cpus == 0 {
+        return out;
+    }
+    for off in 0..16 {
+        out.push((start.wrapping_add(off)) % nr_cpus as u32);
+    }
+    out
+}
+
+/*
  * Next steal cursor. The cursor rotates with rate
  * and stand masked out, so repeated reads spread
  * across peers. Dispatch scans bound peers with the
@@ -32,11 +73,7 @@ pub const KICK_COALESCE_NS: u64 = 50_000;
  */
 #[cfg(test)]
 pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
-    use crate::flow_preempt::CURSOR_MASK;
-    if nr_cpus == 0 {
-        return 0;
-    }
-    ((cursor & CURSOR_MASK) + 1) % nr_cpus as u32
+    steal_start(cursor, nr_cpus)
 }
 
 /*
@@ -48,13 +85,9 @@ pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
  */
 #[cfg(test)]
 pub fn steal_peers(cpu: u32, nr_cpus: usize) -> Vec<u32> {
-    let mut out = Vec::with_capacity(STEAL_BOUND);
-    let mut cur = cpu;
-    for _ in 0..STEAL_BOUND {
-        cur = steal_next(cur, nr_cpus);
-        out.push(cur);
-    }
-    out
+    let start = steal_start(cpu, nr_cpus);
+    let full = steal_peers_from(start, nr_cpus);
+    full.into_iter().take(STEAL_BOUND).collect()
 }
 
 /*

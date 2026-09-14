@@ -117,20 +117,26 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (off == 1 || off == 3)
 			over_moved += got;
 	}
-	/* Peer steal at steal bound with single move toward budget 32. Donor scan */
-	/* reads bound peers with one read each and no iterator, so shallow donors */
-	/* skip early. Need is 1 when idle empty, else 2, so idle owners collect */
-	/* the last task with no strand while busy owners leave one. Peers wrap */
-	/* with modulo plus live check, so high CPUs reach low peers with no */
-	/* dead read. Same group only by design, so groups keep cache apart */
-	/* with no cross scan and cross drains stay local. Single move keeps */
-	/* tail latency smooth with no burst theft, so one peer task per pass */
-	/* is enough with local trips owning the window. Window reads four */
-	/* local queues once after local trips with no global scan, so need */
-	/* plus defer plus sweep share one window with no extra reads. Scan */
-	/* keeps the first donor with work, then one shared drain moves a */
-	/* single task with mask wins, so one bad head never blocks later */
-	/* work. Single CPU hosts skip the whole pass with one check up front. */
+	/* Peer steal rotates from a cursor start with single move toward budget 32. */
+	/* Start reads the masked cursor plus one with wrap once per dispatch, so */
+	/* repeated passes spread across peers with no hot spot. Donor scan reads */
+	/* bound same group peers from start with one read each and no iterator, so */
+	/* shallow donors skip early. Need is 1 when idle empty, else 2, so idle */
+	/* owners collect the last task with no strand while busy owners leave one. */
+	/* Peers wrap with modulo plus live check, so high CPUs reach low peers with */
+	/* no dead read. Self visit stays allowed with no extra branch, so small */
+	/* hosts keep full cover with no dead pass. Same group only by design, so */
+	/* groups keep cache apart with no cross scan and cross drains stay local. */
+	/* Single move keeps tail smooth with no burst theft, so one peer task per */
+	/* pass is enough with local trips owning the window. Cursor steps by 8 */
+	/* with a bounded compare and swap that keeps rate plus stand and drops */
+	/* on race, so contended owners skip the step with no stall. Window reads */
+	/* four local queues once after local trips with no global scan, so need */
+	/* plus defer plus sweep share one window with no extra reads. Scan keeps */
+	/* the first donor with work, then one shared drain moves a single task */
+	/* with mask wins, so one bad head never blocks later work. Single CPU */
+	/* hosts skip the whole pass with one check. See intf.h for need plus */
+	/* cursor helpers. */
 	{
 		bool win_left;
 		struct flow_cpu_state *st;
@@ -147,16 +153,20 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			need = flow_steal_need(true);
 		else
 			need = flow_steal_need(false);
-		if (moved < budget && nr_cpu_ids > 1) {
+		if (moved < budget && nr_cpu_ids > 1 && st) {
+			u32 start;
+			u32 cas;
 			u64 steal_dsq = 0;
 			bool have = false;
+			start = (flow_cursor_val(st->cursor) +
+			    1U) % (u32)nr_cpu_ids;
 			bpf_for(off, 0, FLOW_STEAL_BOUND) {
 				u32 peer;
 				u64 pdsq;
 				u64 q;
 				if (have)
 					continue;
-				peer = ((u32)cpu + 1U + off) %
+				peer = (start + off) %
 				    (u32)nr_cpu_ids;
 				if (!flow_cpu_live(peer))
 					continue;
@@ -180,6 +190,25 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				/* See intf.h for the steal need helper. */
 				__sync_fetch_and_add(&flow_stats.steal_moves,
 					    (u64)got);
+			}
+			bpf_for(cas, 0, 4) {
+				u32 cur;
+				u32 masked;
+				u32 nxt_peer;
+				u32 nxt;
+				u32 got;
+				cur = st->cursor;
+				masked = flow_cursor_val(cur);
+				nxt_peer = (masked + 8U) %
+				    (u32)nr_cpu_ids;
+				nxt = (nxt_peer &
+				    (u32)FLOW_CURSOR_MASK) |
+				    (cur & ((u32)FLOW_CURSOR_RATE_BIT |
+				    (u32)FLOW_CURSOR_STAND_BIT));
+				got = __sync_val_compare_and_swap(
+				    &st->cursor, cur, nxt);
+				if (got == cur)
+					break;
 			}
 		}
 		if (moved != 0)

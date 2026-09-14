@@ -590,7 +590,8 @@ fn pinned_rests_in_overflow_with_bounded_drain() {
  * Steal wrap reaches low peers from high CPUs.
  * Chain from 7 at 8 visits 0 to 6 first with no
  * dead read, so high CPUs steal with wrap. Mirrors
- * the BPF steal helper chain with bound 8.
+ * the BPF steal helper chain with bound 8. See
+ * src/flow_select.rs and src/bpf/dispatch.bpf.c.
  */
 #[test]
 fn steal_wrap_reaches_low_peers() {
@@ -608,6 +609,100 @@ fn steal_wrap_reaches_low_peers() {
     assert_eq!(mid, vec![4, 5, 6, 7, 0, 1, 2, 3]);
     let single = steal_peers(0, 1);
     assert_eq!(single, vec![0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+/*
+ * Rotation start wraps with mask and rate plus stand.
+ * Start steps masked cursor plus one with wrap once
+ * per dispatch, so passes spread with no hot spot.
+ * Rate plus stand stay masked out, so flags never
+ * skew the order. Single host stays at zero with no
+ * scan. See src/flow_select.rs and
+ * src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_start_rotates_with_wrap() {
+    assert_eq!(steal_start(7, 8), 0);
+    assert_eq!(steal_start(0, 8), 1);
+    assert_eq!(steal_start(3, 8), 4);
+    assert_eq!(steal_start(0, 1), 0);
+    assert_eq!(steal_start(5, 1), 0);
+    let rate = crate::flow_preempt::CURSOR_RATE_BIT;
+    let stand = crate::flow_preempt::CURSOR_STAND_BIT;
+    assert_eq!(steal_start(7 | rate, 8), 0);
+    assert_eq!(steal_start(7 | stand, 8), 0);
+    assert_eq!(steal_start(rate | stand | 3, 8), 4);
+    assert_eq!(steal_start(15, 16), 0);
+    assert_eq!(steal_start(0, 16), 1);
+}
+
+/*
+ * Cursor stride keeps rate plus stand with step 8.
+ * Advance stores masked plus 8 with wrap while it
+ * keeps both flag bits from the old word, so a lost
+ * race can drop the step with no stall. Next start
+ * then lands 8 past the old start with wrap. See
+ * src/flow_preempt.rs and src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_cursor_stride_keeps_flags() {
+    let rate = crate::flow_preempt::CURSOR_RATE_BIT;
+    let stand = crate::flow_preempt::CURSOR_STAND_BIT;
+    let mask = crate::flow_preempt::CURSOR_MASK;
+    for nr in [16usize, 64, 256, 1024] {
+        for cur in [0u32, 1, 7, 15, 100] {
+            let masked = cur & mask;
+            let old = cur | rate | stand;
+            let nxt_peer = (masked + 8) % nr as u32;
+            let nxt = crate::flow_preempt::cursor_store(nxt_peer, old);
+            assert_eq!(nxt & rate, rate);
+            assert_eq!(nxt & stand, stand);
+            assert_eq!(nxt & mask, nxt_peer & mask);
+            let s0 = steal_start(cur, nr);
+            let s1 = steal_start(nxt, nr);
+            assert_eq!(s1, (s0 + 8) % nr as u32);
+        }
+    }
+    let plain = crate::flow_preempt::cursor_store(9, 0);
+    assert_eq!(plain & mask, 9);
+    assert_eq!(plain & rate, 0);
+}
+
+/*
+ * Sixteen sweep keeps order for many host sizes.
+ * Peers from start visit 16 in order with wrap, so
+ * first 8 feed same group and next 8 feed cross
+ * group with no dead read. At 16 the sweep covers
+ * every peer, past 16 it covers 16 distinct peers.
+ * Self visit stays allowed with no skip, so small
+ * hosts keep full cover. See src/flow_select.rs and
+ * src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_sixteen_sweep_covers_sizes() {
+    for nr in [16usize, 64, 256, 1024] {
+        for start in [0u32, 1, 7, 15] {
+            let s = start % nr as u32;
+            let peers = steal_peers_from(s, nr);
+            assert_eq!(peers.len(), 16);
+            for (i, p) in peers.iter().enumerate() {
+                assert_eq!(*p, (s + i as u32) % nr as u32);
+            }
+            let mut seen = std::collections::HashSet::new();
+            for p in &peers {
+                seen.insert(*p);
+            }
+            assert_eq!(seen.len(), 16);
+            let first8: Vec<u32> = peers.iter().take(8).cloned().collect();
+            let cpu = if s == 0 { nr as u32 - 1 } else { s - 1 };
+            let via = steal_peers(cpu, nr);
+            assert_eq!(via, first8);
+        }
+    }
+    let full = steal_peers_from(0, 16);
+    let mut sorted = full.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, (0..16).collect::<Vec<u32>>());
 }
 
 /*
