@@ -90,9 +90,13 @@ passes spread. The scan reads bound same group peers
 from start with wrap plus live check and keeps the first
 donor at need, which is 1 when idle with no moves and no
 window work, else 2. Self visit stays allowed with no
-extra branch, so hosts keep cover. Same group only keeps
-cache apart with no cross scan and steal_xmoves stays
-reserved at zero. Single move keeps tail smooth with local trips
+extra branch, so hosts keep cover. Same group scans first
+and keeps cache apart in strict with no cross scan. Perf
+only cross second scans bound other group peers from start
+plus 8 on same group miss with same need, keep first,
+one shared drain. Fold counts all peer moves in
+steal_moves with post hoc LSB compare in steal_xmoves with
+unconditional adds. Single move keeps tail smooth with local trips
 owning the window. Cursor steps by 8 with a bounded swap
 in 4 tries that keeps rate plus stand and drops on race. Single CPU
 hosts skip the pass. Pinned tasks rest in overflow, so
@@ -242,9 +246,10 @@ baseline with no realtime use.
 
 - Groups are strict when ready is zero and best effort
   when ready is one. Placement, dispatch, and pressure read the live table
-  seeded by online rank with offline light inert. Cross-group steal stays
-  off by design, so groups keep cache apart with same group peer steal
-  only and cross drains stay local on the owner CPU.
+  seeded by online rank with offline light inert. Same group steal scans
+  first and keeps cache apart in strict, perf only cross second scans
+  other group peers on same group miss with one shared drain, steal_moves
+  counts all peer moves and steal_xmoves counts the cross subset.
 - Topology with online set is snapshotted at attach, so
   a CPU hotplug needs a restart. Offline queues drain via overflow plus
   steal on the next pass, while the stale table window lasts until restart

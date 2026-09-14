@@ -6,8 +6,9 @@
  * stays the same on both sides of the boundary. Each CPU holds two queues
  * plus 2 overflow tails with FIFO only and no knob. The probe maps a
  * deadline to near or overflow, pinned tasks rest in overflow, dispatch
- * drains own plus overflow plus same group peer steal, defer counts capped
- * drains with work left, and the kick chain keeps idle owners moving.
+ * drains own plus overflow plus peer steal with same group first and perf
+ * only cross second, defer counts capped drains with work left, and the
+ * kick chain keeps idle owners moving.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
