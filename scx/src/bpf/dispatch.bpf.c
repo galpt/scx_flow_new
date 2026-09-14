@@ -2,12 +2,13 @@
 /*
  * Dispatch op
  *
- * Drains per CPU queues with overflow plus same group peer steal and a kick
+ * Drains per CPU queues with overflow plus peer steal and a kick
  * safety net. One shared drain body feeds every trip with mask wins and move
  * to local, so only DSQ id selection branches. Own per CPU own group runs
  * at 31, own overflow at 4, own CPU other group at 4, other overflow at 4,
- * then same group peer steal visits bound same group peers with single move
- * toward budget 32. Sweep covers zero move window only at 256 with reset on
+ * then same group peer steal visits bound same group peers first with single
+ * move toward budget 32 and perf only cross second on same group miss with
+ * one shared drain. Sweep covers zero move window only at 256 with reset on
  * move. Pinned tasks
  * rest in overflow, so trips visit them every pass. All trips share one
  * drain body with mask wins and move to local, so per queue order stays
@@ -126,17 +127,22 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* owners collect the last task with no strand while busy owners leave one. */
 	/* Peers wrap with modulo plus live check, so high CPUs reach low peers with */
 	/* no dead read. Self visit stays allowed with no extra branch, so small */
-	/* hosts keep full cover with no dead pass. Same group only by design, so */
-	/* groups keep cache apart with no cross scan and cross drains stay local. */
-	/* Single move keeps tail smooth with no burst theft, so one peer task per */
-	/* pass is enough with local trips owning the window. Cursor steps by 8 */
+	/* hosts keep full cover with no dead pass. Same group scans first, so */
+	/* groups keep cache apart in strict with no cross scan. Perf only cross */
+	/* second scans bound other group peers from start plus 8 on same group */
+	/* miss with same need and keep first, so perf adds cover with no extra */
+	/* drain. Fold counts all peer moves in steal moves with post hoc LSB */
+	/* compare in steal_xmoves with unconditional adds and zero keeps count */
+	/* still, so no branch on cross with one shared drain. Single move keeps */
+	/* tail smooth with no burst theft, so one peer task per pass is enough */
+	/* with local trips owning the window. Cursor steps by 8 */
 	/* with a bounded compare and swap in 4 tries that keeps rate plus stand */
 	/* and drops on race, so contended owners skip the step with no stall. */
 	/* When host size divides 8, step 8 is identity with no advance, */
 	/* harmless as the bound 8 scan covers all peers while donor priority */
 	/* goes stale. Window reads four local queues once after local trips */
 	/* with no global scan, so need plus defer plus sweep share one window */
-	/* with no extra reads. Scan keeps */
+	/* with no extra reads. Scans keep */
 	/* the first donor with work, then one shared drain moves a single task */
 	/* with mask wins, so one bad head never blocks later work. Single CPU */
 	/* hosts skip the whole pass with one check. See intf.h for need plus */
@@ -181,6 +187,27 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				steal_dsq = pdsq;
 				have = true;
 			}
+			if (flow_perf_enabled() && !have &&
+			    moved < budget && nr_cpu_ids > 1) {
+				bpf_for(off, 0, FLOW_STEAL_BOUND) {
+					u32 peer;
+					u64 pdsq;
+					u64 q;
+					if (have)
+						continue;
+					peer = (start + 8U + off) %
+					    (u32)nr_cpu_ids;
+					if (!flow_cpu_live(peer))
+						continue;
+					pdsq = flow_slot_cpu_dsq(peer,
+					    ogroup);
+					q = scx_bpf_dsq_nr_queued(pdsq);
+					if (q < need)
+						continue;
+					steal_dsq = pdsq;
+					have = true;
+				}
+			}
 			if (have) {
 				u32 lim = moved + 1U;
 				u32 got;
@@ -189,11 +216,21 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				got = flow_drain_one(cpu, steal_dsq, lim,
 				    moved);
 				moved += got;
-				/* Adds got with no branch, so the verifier keeps one state */
-				/* with no extra jump and zero adds no count change. */
-				/* See intf.h for the steal need helper. */
-				__sync_fetch_and_add(&flow_stats.steal_moves,
+				/* Fold counts all peer moves with no branch, */
+				/* so same plus cross share one drain with one */
+				/* state. Cross subset folds via post hoc LSB */
+				/* compare with unconditional adds and zero */
+				/* keeps count still. See intf.h for DSQ LSB. */
+				{
+					u64 x = ((steal_dsq & 1ULL) ^
+					    ((u64)sgroup & 1ULL)) & 1ULL;
+					__sync_fetch_and_add(
+					    &flow_stats.steal_moves,
 					    (u64)got);
+					__sync_fetch_and_add(
+					    &flow_stats.steal_xmoves,
+					    (u64)got * x);
+				}
 			}
 			bpf_for(cas, 0, 4) {
 				u32 cur;
