@@ -138,6 +138,9 @@ pub struct Metrics {
     #[stat(desc = "Capped drains with work left")]
     #[serde(default)]
     pub slot_defer: u64,
+    #[stat(desc = "Cross group peer moves")]
+    #[serde(default)]
+    pub steal_xmoves: u64,
 }
 
 /*
@@ -339,7 +342,7 @@ impl Metrics {
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
             wskips={} wover={} tboost={} \
             whead={} wfine={} wcoarse={} wempty={} \
-            skicks={} tcas={} smoves={} sdefer={}",
+            skicks={} tcas={} smoves={} sdefer={} stealx={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -378,6 +381,7 @@ impl Metrics {
             self.token_cas_fails,
             self.slot_moves,
             self.slot_defer,
+            self.steal_xmoves,
         )?;
         Ok(())
     }
@@ -439,6 +443,7 @@ impl Metrics {
             token_cas_fails: self.token_cas_fails.wrapping_sub(rhs.token_cas_fails),
             slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             slot_defer: self.slot_defer.wrapping_sub(rhs.slot_defer),
+            steal_xmoves: self.steal_xmoves.wrapping_sub(rhs.steal_xmoves),
         }
     }
 }

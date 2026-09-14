@@ -506,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_288() {
+    fn sched_stats_size_is_296() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            288
+            296
         );
     }
 

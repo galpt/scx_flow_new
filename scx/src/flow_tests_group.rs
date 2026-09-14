@@ -1858,7 +1858,7 @@ fn cpuperf_elapsed_is_wrap_safe() {
  * Active appends with no reorder, so old offsets
  * stay stable. Active feeds the energy probe with
  * full u64 wrap deltas in userspace. Stats grow 200B
- * to 288B with slot counters appended at the tail,
+ * to 296B with slot plus cross counters at the tail,
  * so old offsets stay stable.
  */
 #[test]
@@ -1875,6 +1875,6 @@ fn cpu_state_grows_to_56_with_active_tail() {
     assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     assert_eq!(
         std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-        288
+        296
     );
 }

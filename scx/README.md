@@ -89,7 +89,7 @@ queued work sleeps unkicked. Busy targets stay
 fail-closed with no preempt and total plus armed
 only, other reason fields stay frozen for compat
 with no writes. One coalesced count covers q2 idle
-skips in 50us at 288B. Second queued to idle in 50us
+skips in 50us at 296B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
 Delay persists across idle, delay shows stale

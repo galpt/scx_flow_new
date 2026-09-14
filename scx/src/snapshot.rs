@@ -1077,6 +1077,7 @@ impl<'a> Scheduler<'a> {
             token_cas_fails: s.token_cas_fails,
             slot_moves: s.slot_moves,
             slot_defer: s.slot_defer,
+            steal_xmoves: s.steal_xmoves,
         }
     }
 

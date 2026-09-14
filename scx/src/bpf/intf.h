@@ -128,7 +128,7 @@ struct flow_cpu_state {
 	u64 cpuperf_ema_at;
 	u64 active_ns;
 };
-/* Counters at 288B with group, coalesce, wheel, token, and slot. Total keeps */
+/* Counters at 296B with group, coalesce, wheel, token, and slot. Total keeps */
 /* the sum for compat. Busy stays fail closed with no preempt, so busy */
 /* no kicks count under total plus armed only with no other reason write. */
 /* Coalesced counts q2 idle skips in 50us. Overflow counts tail pins past */
@@ -138,8 +138,8 @@ struct flow_cpu_state {
 /* so old offsets stay stable with no new writes. Slot moves counts all */
 /* FIFO tasks moved via slot drains, park moves counts the overflow subset, */
 /* steal moves counts the peer subset, slot kicks counts safety net kicks, */
-/* and slot defer counts slot drains that hit the D cap with work left */
-/* deferred, all append only at the tail with BSS zero. */
+/* slot defer counts capped drains with work left, and cross moves counts */
+/* the cross group peer subset, all append only at the tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -177,6 +177,7 @@ struct flow_sched_stats {
 	u64 token_cas_fails;
 	u64 slot_moves;
 	u64 slot_defer;
+	u64 steal_xmoves;
 };
 
 /* Clamp estimate to the estimate range. */
