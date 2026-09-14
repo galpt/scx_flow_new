@@ -48,6 +48,13 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->running_pid = (u32)p->pid;
 		st->running_nice = (s16)nice;
 		st->running_weight = (u16)w;
+		/* Occupant group from live task state with LIGHT fallback, */
+		/* written here and cleared with pid, never read yet. */
+		if (tctx &&
+		    tctx->group == (u8)FLOW_GROUP_HOG)
+			st->occupant_group = (u8)FLOW_GROUP_HOG;
+		else
+			st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 		__sync_fetch_and_and(&st->cursor,
 		    ~(u32)FLOW_CURSOR_RATE_BIT);
 		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */

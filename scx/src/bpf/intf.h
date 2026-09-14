@@ -106,14 +106,17 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 56B with delay, rate, EMA, and active. */
+/* Per CPU state at 64B with delay, rate, EMA, active, and occupant. */
 /* Frontier, running, cursor, delay, and cpuperf EMA at 32B base. */
-/* The base carries 16B EMA tail with 8B active tail. EMA holds */
-/* the proportional budget in nanos capped at 1ms, at */
+/* The base carries 16B EMA tail with 8B active tail plus 8B occupant tail. */
+/* EMA holds the proportional budget in nanos capped at 1ms, at */
 /* holds the last EMA update time in nanos. Active holds */
-/* lifetime active nanos charged once per run segment. BSS zero */
-/* covers the cold start and explicit zero kept as */
-/* verify for the 48B to 56B growth with no trap. */
+/* lifetime active nanos charged once per run segment. Occupant holds */
+/* the group of the running task with LIGHT fallback, written in */
+/* running and cleared with pid, never read yet for the bound gate. */
+/* BSS zero covers the cold start and explicit zero kept as */
+/* verify for the 48B to 56B growth and the 56B to 64B growth */
+/* with no trap. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
@@ -127,6 +130,7 @@ struct flow_cpu_state {
 	u64 cpuperf_ema;
 	u64 cpuperf_ema_at;
 	u64 active_ns;
+	u8 occupant_group;
 };
 /* Counters at 296B with group, coalesce, wheel, token, and slot. Total keeps */
 /* the sum for compat. Busy stays fail closed with no preempt, so busy */

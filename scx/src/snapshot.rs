@@ -1100,6 +1100,7 @@ impl<'a> Scheduler<'a> {
             cpuperf_ema: 0,
             cpuperf_ema_at: 0,
             active_ns: 0,
+            occupant_group: 0,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;

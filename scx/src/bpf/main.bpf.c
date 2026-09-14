@@ -204,8 +204,8 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear running estimate, pid and nice to 0, weight to 1024, and rate bit. */
-/* Atomic clear, so a concurrent claim never loses. */
+/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024, */
+/* and rate bit. Atomic clear, so a concurrent claim never loses. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -220,6 +220,7 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
+	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 	__sync_fetch_and_and(&st->cursor,
 	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
@@ -242,6 +243,7 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_pid = 0;
 	st->running_nice = 0;
 	st->running_weight = 1024;
+	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 	__sync_fetch_and_and(&st->cursor,
 	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
@@ -543,6 +545,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		/* Active starts at zero with lifetime growth, so verify and keep explicit */
 		/* zero for the 48B to 56B growth with no trap. */
 		st->active_ns = 0;
+		/* Occupant starts at LIGHT with never read yet, so verify and keep */
+		/* explicit zero for the 56B to 64B growth with no trap. */
+		st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 		if (scx_bpf_cpuperf_set)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);

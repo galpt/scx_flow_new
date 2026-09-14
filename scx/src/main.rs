@@ -498,11 +498,15 @@ mod tests {
     }
 
     #[test]
-    fn cpu_size_with_ema_and_active_is_56() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
+    fn cpu_size_with_ema_active_and_occupant_is_64() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 64);
         assert_eq!(
             std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, active_ns),
             48
+        );
+        assert_eq!(
+            std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, occupant_group),
+            56
         );
     }
 

@@ -1854,24 +1854,26 @@ fn cpuperf_elapsed_is_wrap_safe() {
 }
 
 /*
- * CPU state grows 48B to 56B with the active tail.
- * Active appends with no reorder, so old offsets
+ * CPU state grows 48B to 64B with active plus occupant tails.
+ * Active plus occupant append with no reorder, so old offsets
  * stay stable. Active feeds the energy probe with
- * full u64 wrap deltas in userspace. Stats grow 200B
- * to 296B with slot counters plus one wired cross
- * tail counter, so old offsets stay stable.
+ * full u64 wrap deltas in userspace. Occupant holds the
+ * running group with LIGHT fallback and never reads yet.
+ * Stats stay 296B, so old offsets stay stable.
  */
 #[test]
-fn cpu_state_grows_to_56_with_active_tail() {
-    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
+fn cpu_state_grows_to_64_with_occupant_tail() {
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 64);
     let base = std::mem::MaybeUninit::<crate::bpf_intf::flow_cpu_state>::uninit();
     let ptr = base.as_ptr();
     let off_ema = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema) as usize - ptr as usize };
     let off_at = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema_at) as usize - ptr as usize };
     let off_active = unsafe { std::ptr::addr_of!((*ptr).active_ns) as usize - ptr as usize };
+    let off_occ = unsafe { std::ptr::addr_of!((*ptr).occupant_group) as usize - ptr as usize };
     assert_eq!(off_ema, 32);
     assert_eq!(off_at, 40);
     assert_eq!(off_active, 48);
+    assert_eq!(off_occ, 56);
     assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     assert_eq!(
         std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
