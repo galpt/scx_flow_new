@@ -34,7 +34,7 @@ fn read_trimmed(path: &Path) -> Option<String> {
 
 /*
  * Join one zone name under the base dir. Accepts letters, digits, dash,
- * underscore, colon, and dot. Intel-rapl with index forms then pass.
+ * underscore, colon, and dot. Intel RAPL with index forms then pass.
  * Anything else yields nothing, so parent climbs, separators, and absolute
  * paths stay out with no trap.
  */

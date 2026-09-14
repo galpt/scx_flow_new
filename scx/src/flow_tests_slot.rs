@@ -394,7 +394,7 @@ fn fifo_drain_keeps_arrival_order() {
 
 #[test]
 fn rescue_moves_one_per_dispatch_under_hot_own_load() {
-    // Mirrors dispatch.bpf.c lim2 = moved + 1U: rescue moves at most one
+    // Mirrors the dispatch body where lim2 holds one past moved. Rescue moves at most one
     // toward budget per dispatch. Hot own load keeps the own bucket
     // non-empty every dispatch yet leaves budget open, so rescue still
     // takes exactly one while own takes the rest.

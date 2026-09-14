@@ -354,7 +354,7 @@ fn exiting_runs_at_once_on_allowed_tgt() {
  * the task CPU mask only, so an allowed task CPU wins even
  * when the enqueuer is foreign, and a foreign task CPU
  * falls back even when the enqueuer is allowed. Mirrors the
- * BPF fix from here equals smp id to tgt equals task cpu.
+ * BPF fix from here equals smp id to tgt equals task CPU.
  */
 #[test]
 fn exiting_uses_task_cpu_not_enqueuer() {

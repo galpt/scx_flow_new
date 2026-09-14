@@ -42,10 +42,10 @@ Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
 tasks complete at once. Runnable tasks requeue FIFO
 into the probed bucket with a refreshed estimate. Burst
-allowance reads windowed depths over own cursor plus two
-fill plus rescue plus both overflows with six reads, so
+allowance reads windowed depths over own cursor, two
+fill, rescue, and both overflows with six reads, so
 quiet keeps 4ms and flood still floors at 1ms with no
-514 scan. Marks cover head plus fine only with far blocks
+514 scan. Marks cover head and fine only with far blocks
 in overflow, so one insert pays two atomics.
 
 ### Groups
@@ -77,39 +77,7 @@ by online rank with write by id. See
 
 ### Dispatch
 
-Strict order is own cursor bucket at 31, group
-overflow at 4, two fill ahead buckets at 4 each, other
-group overflow at 4, then the other group cursor
-bucket at 1 when it holds work. Overflow trips skip
-empty with one read and no iterator, so light pays no
-empty scan with no hide. One rescue suffices because rotation plus the kick sweep still cover every
-bucket, so cross-group rescue stays an exception path
-rather than a bulk path. The other overflow trip keeps
-a hog far tail drainable on an all-light host with mask
-wins. Rotation advances the cursor each dispatch with
-capped retain at most 3 in a row, so every occupied
-bucket drains within 1024 dispatches worst case with
-refill to zero on advance. Idle adds a far sweep that
-jumps to the next own bucket ahead with queued work
-when own holds no work, so boot 15 and 61 drain within
-3 hops with no 15 step walk and late 61 still jumps on
-the next idle pass. Hint checks the last near insert
-first with one read, window gate skips the 256 scan
-when overflow, fill, rescue, or other overflow holds
-work, else the full scan runs with no hide. Far runs
-only when own holds no work, so hot pays no scan with
-no storm. Bound is 256 hops worst case with one far
-progress kick while far jumps. Own at 31 leaves one
-slot for the rest, so saturated own still lets
-overflow, fill, other overflow, and rescue progress.
-A capped drain with window work left counts one defer.
-A kick safety net chains idle owners past the watchdog
-with progress and sweep kicks at 256 on window truth
-only with no far storm, plus one far progress kick
-when idle jumps far. All trips share one drain body
-with mask wins and move to local, so per queue order
-stays FIFO. Placement, dispatch, and pressure read the
-live table seeded by online rank.
+Strict order is own cursor bucket at 31, group overflow at 4, two fill ahead at 4 each, other group overflow at 4, then the other group cursor at 1 when it holds work. Overflow trips skip empty with one read and no iterator, so light pays no empty scan. One rescue suffices because rotation and the kick sweep cover every bucket, so cross-group rescue stays an exception path. The other overflow trip keeps a hog far tail drainable on an all-light host with mask wins. Rotation advances the cursor each dispatch with capped retain at most 3 in a row, so every occupied bucket drains within 1024 dispatches with refill to zero on advance. Idle adds a far sweep to the next own bucket ahead with queued work when own holds no work, so boot 15 and 61 drain within 3 hops. Hint checks the last near insert first with one read, window gate skips the 256 scan when overflow, fill, rescue, or other overflow holds work, else the full scan runs. Far runs only when own holds no work, so hot pays no scan with no storm. Bound is 256 hops worst case with one far progress kick while far jumps. Own at 31 leaves one slot for the rest, so saturated own still lets overflow, fill, other overflow, and rescue progress. A capped drain with window work left counts one defer. A kick safety net chains idle owners past the watchdog with progress and sweep kicks at 256 on window truth only with no far storm, and one far progress kick when idle jumps far. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
 
 ### Kicks
 
@@ -256,4 +224,8 @@ baseline with no realtime use.
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path
   with no peer scan.
+- Light load probe delay rises +163 to +223 percent in
+  relative terms while absolute delay stays sub-ms, so the
+  gap reads as a slot path tradeoff with no hot miss. See
+  `src/bpf/dispatch.bpf.c` and `src/flow_slot.rs`.
 - Needs a kernel with sched_ext enabled.

@@ -35,7 +35,7 @@ pub(crate) const PROBE_MIN_ARM_SECS: u64 = 20;
 /* the discard from a full arm, so twenty tolerates a few */
 /* missed ticks with no weak arm entering the sums. */
 pub(crate) const PROBE_MIN_KEPT: usize = 20;
-/* Settle seconds between arms. Thirty + three + thirty + three makes the */
+/* Settle seconds between arms. Two thirty second arms with two three second settles make the */
 /* sixty six second pair cycle. */
 pub(crate) const PROBE_SETTLE_SECS: u64 = 3;
 /* Relative noise bound. Idle CV 21.7 percent and soak light 11.2 percent */
@@ -1393,7 +1393,7 @@ mod tests {
         assert_eq!(got.mean_w, 50.0);
     }
 
-    /* Window edges hold at three + twenty eight. */
+    /* Window edges hold at three and twenty eight. */
     #[test]
     fn discard_window_edges_hold() {
         let mut samples = Vec::new();
@@ -1456,12 +1456,12 @@ mod tests {
                 joules: e,
             });
         }
-        /* Loud std 5.0 W tops max 1.5 W + 0.15 times 30 W. */
+        /* Loud std 5.0 W tops the max of 1.5 W and 0.15 times 30 W. */
         assert_eq!(
             evaluate_arm(&loud, 30.0, &[], &[]).unwrap_err(),
             ArmReject::TooNoisy
         );
-        /* Edge std 2.0 W stays under max 1.5 W + 0.15 times 30 W. */
+        /* Edge std 2.0 W stays under the max of 1.5 W and 0.15 times 30 W. */
         let got = evaluate_arm(&edge, 30.0, &[], &[]).unwrap();
         assert_eq!(got.trimmed, 0);
     }
@@ -1491,7 +1491,7 @@ mod tests {
         let got = evaluate_arm(&spike, 30.0, &[], &[]).unwrap();
         assert_eq!(got.trimmed, 1);
         assert!((got.median_w - 7.0).abs() < 1e-9);
-        /* Light hump 18.7 percent stays under 0.35 + 3.0 W. */
+        /* Light hump 18.7 percent stays under the max of 3.0 W and 0.35 times median. */
         let h = evaluate_arm(&hump, 30.0, &[], &[]).unwrap();
         assert_eq!(h.trimmed, 0);
     }
@@ -1700,8 +1700,8 @@ mod tests {
     /* Three light pairs span three times sixty six seconds. */
     #[test]
     fn throughput_three_light_pairs_take_198s() {
-        /* Pair cycle 30 + 3 + 30 + 3 is 66, three cycles is 198 with no */
-        /* waiting on 30 W. */
+        /* Pair cycle of thirty, three, thirty, and three is sixty six, three cycles are */
+        /* one hundred ninety eight with no waiting on 30 W. */
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 30.0, 30.0);
         run_pair(&mut p, 30.0, 30.0);

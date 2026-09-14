@@ -8,10 +8,10 @@
  * move to local, so only DSQ id selection branches. Seek
  * feeds stats only and never gates a drain or a kick, so
  * stale marks add no storm with no hide. Kicks use window
- * truth only, plus far progress when idle jumps far.
+ * truth only with far progress when idle jumps far.
  * Far jumps to the next own bucket ahead when idle with
  * no window, so boot 15 and 61 drain within 3 hops with
- * no 15 step walk and late 61 still chains. Hint plus
+ * no 15 step walk and late 61 still chains. Hint and
  * window gate keep the far scan off the hot path with
  * no hide.
  *
@@ -57,7 +57,7 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 /* Wheel seek over head and fine with count to first set. */
 /* Head holds near slots 0 to 7, fine holds 0 to 255. Each */
 /* level uses count trailing zeros, so no linear 256 scan */
-/* runs. No loop nests with for_each either way: seek runs */
+/* runs. No loop nests with for_each either way. Seek runs */
 /* before drains with no for_each inside seek and no seek */
 /* inside for_each. Head hit returns with no array read, fine */
 /* hit returns with no further read, empty returns 256 skips */
@@ -384,7 +384,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* open and rescue work only, so empty rescue pays one */
 	/* read with no iterator and no strand when own holds */
 	/* movable work. One keeps the cross-group visit with */
-	/* minimal jump cost while rotation plus the kick chain */
+	/* minimal jump cost while rotation and the kick chain */
 	/* still sweep every bucket. Both FIFO, so per DSQ one */
 	/* flavor holds with mask wins inside the shared body. */
 	/* Recomputes the index to keep no live across the loop. */
