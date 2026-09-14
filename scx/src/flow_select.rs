@@ -15,7 +15,7 @@ pub const MAX_CPUS: u32 = 1024;
 /* Bound of peers visited by one steal scan. */
 #[cfg(test)]
 pub const STEAL_BOUND: usize = 8;
-/* Least donor depth that always allows a steal, depth 1 needs rescue. */
+/* Least donor depth that always allows a steal, depth 1 needs idle empty. */
 #[cfg(test)]
 pub const STEAL_MIN_DEPTH: u64 = 2;
 /* Coalesce window in nanos at 50us. */
@@ -25,9 +25,10 @@ pub const KICK_COALESCE_NS: u64 = 50_000;
 /*
  * Next steal cursor. The cursor rotates with rate
  * and stand masked out, so repeated reads spread
- * across peers. Dispatch no longer scans peers, so
- * this covers the cursor rotation math only with no
- * queue use. Mirrors the BPF helper with mask.
+ * across peers. Dispatch scans 8 peers with the same
+ * mask, so this covers the cursor rotation math with
+ * no queue use. Mirrors the BPF helper with mask.
+ * See src/bpf/dispatch.bpf.c for the scan use.
  */
 #[cfg(test)]
 pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {

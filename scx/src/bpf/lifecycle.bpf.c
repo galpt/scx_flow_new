@@ -53,8 +53,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */
 		/* runnings with no double count. Dual max drops one sample max, decay */
 		/* intact, persists idle, decays at 1/8. Sample reads the per CPU */
-		/* queue plus overflow, since the per CPU store holds the backlog */
-		/* with no cursor use and no hint skew. */
+		/* queue plus overflow. */
 		q = 0;
 		{
 			u8 gg = flow_group_live((u32)cpu,
@@ -102,38 +101,29 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
-/* Pressure refresh from windowed queued counts capped at 4. Sums */
-/* light and hog queued tasks over the dispatch window plus both */
-/* overflow tails with 6 reads and no 514 scan, so stopping pays */
-/* window cost with no flood miss. Window holds own cursor plus */
-/* 2 fill ahead plus rescue plus both overflows, so quiet keeps */
-/* 4ms and flood fills the window plus overflows to the 1ms */
-/* floor. Far-only depth beyond the window may keep quiet one */
-/* step longer with no stall, since rotation plus rescue still */
-/* cover every bucket within 1024 dispatches. Placement uses */
-/* the live table seeded by online rank with offline inert, so */
-/* strict iff ready is zero, best effort iff ready is one. */
-/* Stores depths and allowance for snapshot with no task field. */
-/* Returns the allowance for the burst check. Stopping only, */
-/* never dispatch. */
+/* Pressure refresh from per CPU queued counts capped at 4. Sums light */
+/* and hog queued tasks over own per CPU plus other per CPU plus both */
+/* overflow tails with 4 reads and no full scan, so stopping pays window */
+/* cost with no flood miss. Window holds own per CPU plus other per CPU */
+/* plus both overflows, so quiet keeps 4ms and flood fills the window plus */
+/* overflows to the 1ms floor. Placement uses the live table seeded by */
+/* online rank with offline inert, so strict iff ready is zero, best effort */
+/* iff ready is one. Stores depths and allowance for snapshot with no task */
+/* field. Returns the allowance for the burst check. Stopping only, never */
+/* dispatch. */
 static __always_inline u64 flow_refresh_pressure(s32 cpu)
 {
 	u64 light = 0;
 	u64 hog = 0;
 	u64 allow;
 	u64 own_n;
-	u64 f0_n;
-	u64 f1_n;
-	u64 rd_n;
+	u64 other_n;
 	u64 lo_n;
 	u64 ho_n;
 	u8 g;
-	u8 cur;
 	u8 og;
 	u64 own;
-	u64 f0;
-	u64 f1;
-	u64 rd;
+	u64 other;
 	u64 lo;
 	u64 ho;
 	if (cpu < 0 || !flow_cpu_live((u32)cpu)) {
@@ -154,34 +144,23 @@ static __always_inline u64 flow_refresh_pressure(s32 cpu)
 		return allow;
 	}
 	g = flow_group_live((u32)cpu, nr_cpu_ids);
-	{
-		volatile u32 vcpu = (u32)cpu;
-		u32 sidx = vcpu & 1023U;
-		cur = flow_slot_cur[sidx];
-	}
-	own = flow_slot_dsq(g, (u64)cur);
-	f0 = flow_slot_dsq(g,
-	    (u64)flow_slot_add(cur, 0));
-	f1 = flow_slot_dsq(g,
-	    (u64)flow_slot_add(cur, 1));
 	og = g ^ 1U;
-	rd = flow_slot_dsq(og, (u64)cur);
+	own = flow_slot_cpu_dsq((u32)cpu, g);
+	other = flow_slot_cpu_dsq((u32)cpu, og);
 	lo = flow_slot_overflow_dsq(
 	    (u8)FLOW_GROUP_LIGHT);
 	ho = flow_slot_overflow_dsq(
 	    (u8)FLOW_GROUP_HOG);
 	own_n = scx_bpf_dsq_nr_queued(own);
-	f0_n = scx_bpf_dsq_nr_queued(f0);
-	f1_n = scx_bpf_dsq_nr_queued(f1);
-	rd_n = scx_bpf_dsq_nr_queued(rd);
+	other_n = scx_bpf_dsq_nr_queued(other);
 	lo_n = scx_bpf_dsq_nr_queued(lo);
 	ho_n = scx_bpf_dsq_nr_queued(ho);
 	if (g == (u8)FLOW_GROUP_HOG) {
-		light = rd_n + lo_n;
-		hog = own_n + f0_n + f1_n + ho_n;
+		light = other_n + lo_n;
+		hog = own_n + ho_n;
 	} else {
-		light = own_n + f0_n + f1_n + lo_n;
-		hog = rd_n + ho_n;
+		light = own_n + lo_n;
+		hog = other_n + ho_n;
 	}
 	if (light > 4)
 		light = 4;
@@ -360,9 +339,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    (u64)FLOW_CPUPERF_HALF_LIFE_NS);
 				est->cpuperf_ema_at = now_e;
 			}
-			/* Queue empty reads the per CPU queue plus overflow, */
-			/* since the per CPU store holds the backlog with no */
-			/* cursor use and no hint skew. */
+			/* Queue empty reads the per CPU queue plus overflow. */
 			dsq_nr = 0;
 			{
 				u8 gg = flow_group_live((u32)cpu,
@@ -417,9 +394,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		struct flow_cpu_state *st;
 		u64 dsq_nr;
 		u64 local_nr;
-		/* Queue empty reads the per CPU queue plus overflow, */
-		/* since the per CPU store holds the backlog with no */
-		/* cursor use and no hint skew. */
+		/* Queue empty reads the per CPU queue plus overflow. */
 		dsq_nr = 0;
 		{
 			u8 gg = flow_group_live((u32)cpu,

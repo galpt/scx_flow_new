@@ -182,65 +182,26 @@ fn burst_allowance_maps_depth_to_line() {
 }
 
 /*
- * Slot depths sum buckets per group with cap at 4.
- * Index order holds light buckets, hog buckets, light
- * overflow, then hog overflow. Buckets past 514 stay
- * out, missing entries count as zero, and both sides
- * stop early at 4 with no cross lift.
- */
-#[test]
-fn slot_depths_sum_per_group_capped_at_4() {
-    assert_eq!(slot_group_depths(&[]), (0, 0));
-    assert_eq!(slot_group_depths(&[0, 0, 0, 0]), (0, 0));
-    assert_eq!(slot_group_depths(&[1]), (1, 0));
-    let mut light_only = vec![0u64; 256];
-    light_only[0] = 1;
-    light_only[1] = 1;
-    assert_eq!(slot_group_depths(&light_only), (2, 0));
-    let mut hog_only = vec![0u64; 300];
-    hog_only[256] = 2;
-    hog_only[257] = 2;
-    assert_eq!(slot_group_depths(&hog_only), (0, 4));
-    let mut both = vec![0u64; 514];
-    both[0] = 2;
-    both[511] = 3;
-    both[512] = 1;
-    both[513] = 2;
-    assert_eq!(slot_group_depths(&both), (3, 4));
-    let mut flood = vec![10u64; 514];
-    flood[513] = 0;
-    assert_eq!(slot_group_depths(&flood), (4, 4));
-    let mut tails = vec![0u64; 514];
-    tails[512] = 6;
-    tails[513] = 1;
-    assert_eq!(slot_group_depths(&tails), (4, 1));
-}
-
-/*
  * Windowed depths keep quiet plus flood parity with
- * six reads. Quiet stays 4ms, flood still floors at
- * 1ms, far-only past the window may keep quiet one
- * step longer with no stall. Cap holds at 4.
+ * four reads. Quiet stays 4ms, flood still floors at
+ * 1ms. Cap holds at 4.
  */
 #[test]
 fn window_depths_keep_quiet_plus_flood() {
-    assert_eq!(slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT), (0, 0));
-    assert_eq!(slot_window_depths(1, 0, 0, 0, 0, 0, GROUP_LIGHT), (1, 0));
-    assert_eq!(slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_HOG), (0, 0));
+    assert_eq!(slot_window_depths(0, 0, 0, 0, GROUP_LIGHT), (0, 0));
+    assert_eq!(slot_window_depths(1, 0, 0, 0, GROUP_LIGHT), (1, 0));
+    assert_eq!(slot_window_depths(0, 0, 0, 0, GROUP_HOG), (0, 0));
     // Flood fills window plus overflows to the cap.
-    assert_eq!(slot_window_depths(2, 2, 2, 2, 6, 6, GROUP_LIGHT), (4, 4));
-    assert_eq!(slot_window_depths(2, 2, 2, 2, 6, 6, GROUP_HOG), (4, 4));
-    // Allowance parity: quiet 4ms, flood 1ms floor.
-    let (l, _) = slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT);
+    assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_LIGHT), (4, 4));
+    assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_HOG), (4, 4));
+    // Allowance parity checks quiet 4ms and flood 1ms floor.
+    let (l, _) = slot_window_depths(0, 0, 0, 0, GROUP_LIGHT);
     assert_eq!(burst_allowance(l), DEMOTE_BURST_NS);
-    let (lf, _) = slot_window_depths(2, 2, 2, 0, 0, 0, GROUP_LIGHT);
+    let (lf, _) = slot_window_depths(2, 0, 2, 0, GROUP_LIGHT);
     assert_eq!(burst_allowance(lf), DEMOTE_BURST_FLOOR_NS);
-    // Far-only past window keeps quiet one step longer.
-    let (far, _) = slot_window_depths(0, 0, 0, 0, 0, 0, GROUP_LIGHT);
-    assert_eq!(burst_allowance(far), DEMOTE_BURST_NS);
-    // Hog side mirrors with rescue plus overflow.
-    assert_eq!(slot_window_depths(0, 0, 0, 3, 0, 0, GROUP_LIGHT), (0, 3));
-    assert_eq!(slot_window_depths(0, 0, 0, 3, 0, 0, GROUP_HOG), (3, 0));
+    // Hog side mirrors with other plus overflow.
+    assert_eq!(slot_window_depths(0, 3, 0, 0, GROUP_LIGHT), (0, 3));
+    assert_eq!(slot_window_depths(0, 3, 0, 0, GROUP_HOG), (3, 0));
 }
 
 /*
@@ -1307,7 +1268,7 @@ fn weight_leaves_groups_unchanged() {
     assert!(!p);
     assert_eq!(st.group, GROUP_LIGHT);
     assert_eq!(burst_allowance(0), DEMOTE_BURST_NS);
-    assert_eq!(slot_group_depths(&[1]), (1, 0));
+    assert_eq!(slot_window_depths(1, 0, 0, 0, GROUP_LIGHT), (1, 0));
 }
 
 /*
@@ -1577,10 +1538,9 @@ fn sibling_online_pairs_ring_by_id() {
 
 /*
  * Least in group picks the first allowed with
- * lowest id on ties. The sharded store keeps no per
- * CPU backlog, so the group overflow tail feeds every
- * candidate equally. Halves view only with no live
- * table use. Bound is 0 to nr with no extra pass.
+ * lowest id on ties. The group overflow tail feeds
+ * every candidate equally. Halves view only with no
+ * live table use. Bound is 0 to nr with no extra pass.
  * Missing overflow reads as zero. Mirrors the BPF
  * first helper.
  */
@@ -1682,7 +1642,7 @@ fn least_keeps_bound_plus_halves_view() {
 
 /*
  * Running maps the stored EMA uniform both groups. Both groups share the same
- * map from the stored EMA with no per group hint, so cold zero maps to zero
+ * map from the stored EMA with no per group branch, so cold zero maps to zero
  * until the first climb. Init and no state holds max 1024. Locks the BPF header
  * and the Rust mirror with no stats change.
  */

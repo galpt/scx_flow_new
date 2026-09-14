@@ -3,25 +3,25 @@
 scx_flow is our own slot scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
-It keeps 512 FIFO slot queues sharded by two groups
+It keeps two FIFO queues per CPU, one per group,
 with one overflow tail per group and a fixed slice at
 1ms. Two groups split light waits and hog burn, strict
 exactly when ready is zero and best effort when ready
 is one.
 It is deliberately knob-free. It uses deadline mapped
-FIFO slots, vruntime fairness, and the fixed slice.
+FIFO queues, vruntime fairness, and the fixed slice.
 
 ## Overview
 
 ### Order and deadlines
 
-Tasks wait in FIFO slot buckets picked by deadline,
-with one overflow tail per group for far deadlines.
-Pinned tasks rest in the group overflow tail with no
-bucket use, so every owner dispatch visits them in the
-window. A probe maps the deadline to a near slot near
-64us or pins past the horizon to the tail, so arrival
-order holds inside each queue. The deadline adds
+Tasks wait in per CPU FIFO queues picked by deadline,
+with one overflow tail per group for past horizon
+deadlines. Pinned tasks rest in the group overflow
+tail with no per CPU use, so every owner dispatch
+visits them in the window. A probe maps the deadline
+to a near slot near 64us or pins past the horizon to
+the tail, so arrival order holds inside each queue. The deadline adds
 clamped virtual time and a scaled estimate at live
 weight from nice. Exiting tasks run at once on the
 task CPU via LOCAL_ON with no order wait. The task
@@ -43,12 +43,11 @@ Sleeper lag is capped at a weight scaled cap in 125us to
 Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
 tasks complete at once. Runnable tasks requeue FIFO
-into the probed bucket with a refreshed estimate. Burst
-allowance reads windowed depths over own cursor, two
-fill, rescue, and both overflows with six reads, so
+into the per CPU queue with a refreshed estimate. Burst
+allowance reads windowed depths over own per CPU,
+other per CPU, and both overflows with four reads, so
 quiet keeps 4ms and flood still floors at 1ms with no
-514 scan. Marks cover head and fine only with far blocks
-in overflow, so one insert pays two atomics.
+full scan.
 
 ### Groups
 
@@ -79,16 +78,15 @@ by online rank with write by id. See
 
 ### Dispatch
 
-Strict order is own cursor bucket at 31, group overflow at 4, two fill ahead at 4 each, other group overflow at 4, then other group cursor at 1 when holding work. Overflow trips skip empty with one read, so light pays no empty scan. One rescue suffices as rotation plus kick sweep cover every bucket, so cross-group rescue stays an exception path. Other overflow keeps a hog far tail drainable on an all-light host with mask wins. Pinned tasks rest in overflow, so trips visit them every pass with no rotation. Rotation advances each dispatch with retain at most 3, so every bucket drains within 1024 dispatches with refill to zero. Idle sweeps to next own bucket with work when own holds none, so boot 15 and 61 drain within 3 hops. Hint checks last near insert first, window gate skips the 256 scan when overflow, fill, rescue, or other overflow holds work, else the full scan runs. Far runs only when own holds no work, so hot pays no scan with no storm. Bound is 256 hops worst case with one far kick on any move while far jumps. Own at 31 leaves one slot, so saturated own lets overflow, fill, other overflow, and rescue progress. A capped drain with window work left counts one defer with no kick. A kick net chains idle owners past the watchdog with far kicks on any move when idle jumps far and sweep kicks at 256 on zero-move window only. Moves with window but no far ride the natural dispatch with no kick, since the loop visited every task. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
+Strict order is own per CPU own group at 31, own group overflow at 4, own CPU other group at 4, other group overflow at 4, then one peer steal with a single move toward 32. Overflow trips skip empty with one read, so light pays no empty scan. The steal scan reads 8 same group peer queues with one read each and keeps the first donor at need, which is 1 when the owner is idle with no local moves and no window work, else 2, so idle owners collect the last task while busy owners leave one. Single CPU hosts skip the pass. Pinned tasks rest in overflow, so trips visit them every pass. Own at 31 leaves budget open, so saturated own still lets overflow, other CPU, other overflow, and steal progress. A capped drain with window work left counts one defer with no kick. A kick net chains idle owners past the watchdog with sweep kicks at 256 on zero-move window only. Moves with window ride the natural dispatch with no kick, since the loop already visited every task. All trips share one drain body with mask wins and move to local, so per queue order stays FIFO. Placement, dispatch, and pressure read the live table. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and `src/flow_slot.rs`.
 
 ### Kicks
 
 Idle targets are always kicked with a mask check
-regardless of shared queue depth, so no idle CPU with
+regardless of queue depth, so no idle CPU with
 queued work sleeps unkicked. Busy targets stay
 fail-closed with no preempt and one armed skip count,
-since the sharded store keeps no per CPU depth for a
-deserved compare. The gate keeps total and five reason
+since busy never arms while delay stays display only. The gate keeps total and five reason
 counters with branch order armed, deserved, group,
 mask, and rate, so busy no-kicks count under armed
 only in the slot store. One coalesced count covers q2 idle
@@ -100,8 +98,8 @@ when idle. A missed wakeup is rescued on the next
 insert with no strand. Exiting uses
 a separate idle kick on the task CPU with no depth,
 no coalesce, and no preempt. Fallback overflow with
-no live CPU sends no kick and the next rotation or
-rescue pass collects it. Pinned overflow from a live
+no live CPU sends no kick and the next drain
+pass collects it. Pinned overflow from a live
 owner keeps the normal idle kick with no coalesce.
 Disarmed stays idle only. See `src/bpf/intf.h`,
 `src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
@@ -153,15 +151,15 @@ dashboard with a live trace. Details live in `src/rapl.rs`,
 
 ## Typical Use Cases
 
-- Latency-sensitive applications. Near deadlines land in near slots with
-  capped per bucket drains, so wakeups and frame work rarely wait behind
+- Latency-sensitive applications. Near deadlines land in per CPU queues with
+  capped trip drains, so wakeups and frame work rarely wait behind
   long work at one head.
 - General desktop use. The session stays responsive
   while long bursts serve with a fixed slice without blocking
   short arrivals.
 - Mixed batch workloads. Long jobs keep throughput
-  with FIFO slots while short arrivals keep draining
-  through rotation.
+  with FIFO queues while short arrivals keep draining
+  through trips plus steal.
 
 ## Production Ready?
 
@@ -219,17 +217,21 @@ baseline with no realtime use.
 
 - Groups are strict when ready is zero and best effort
   when ready is one. Placement, dispatch, and pressure read the live table
-  seeded by online rank with offline light inert. Rescue is mask only across
-  groups.
+  seeded by online rank with offline light inert. Cross-group drains are
+  mask only across groups.
 - Topology with online set is snapshotted at attach, so
   a CPU hotplug needs a restart. Snapshot covers online
   only with per CPU count matching online count.
+- Queue ids changed in 4.2.38, so upgrading from 4.2.37
+  needs a scheduler restart with no live transition.
 - Unknown frequency stays unknown with no effect on
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path
   with no peer scan.
-- Light load probe delay rises +163 to +223 percent in
-  relative terms while absolute delay stays sub-ms, so the
-  gap reads as a slot path tradeoff with no hot miss. See
-  `src/bpf/dispatch.bpf.c` and `src/flow_slot.rs`.
+- Light load probe delay rose +163 to +223 percent in
+  relative terms in the 4.2.37 gate while absolute delay
+  stayed sub-ms, so the gap reads as a slot path tradeoff
+  with no hot miss. Per CPU dispatch is not yet measured
+  in the same gate. See `src/bpf/dispatch.bpf.c` and
+  `src/flow_slot.rs`.
 - Needs a kernel with sched_ext enabled.

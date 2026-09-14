@@ -1185,73 +1185,26 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
 }
 
 /*
- * Both depths from slot queued counts capped at 4.
- * Single pass over the 512 sharded buckets plus the 2
- * overflow tails in id order with early stop when both
- * hit 4. Index order holds light buckets, hog buckets,
- * light overflow, then hog overflow, so the group split
- * needs no table read. Mirrors the BPF refresh with one
- * pass and bounded cost. Missing entries count as zero.
- */
-#[cfg(test)]
-pub fn slot_group_depths(queued: &[u64]) -> (u64, u64) {
-    let mut light = 0u64;
-    let mut hog = 0u64;
-    for (idx, &n) in queued.iter().enumerate() {
-        if idx >= 514 {
-            break;
-        }
-        let g = if idx < 256 {
-            GROUP_LIGHT
-        } else if idx < 512 {
-            GROUP_HOG
-        } else if idx == 512 {
-            GROUP_LIGHT
-        } else {
-            GROUP_HOG
-        };
-        if g == GROUP_LIGHT {
-            light = light.saturating_add(n);
-            if light >= 4 {
-                light = 4;
-            }
-        } else {
-            hog = hog.saturating_add(n);
-            if hog >= 4 {
-                hog = 4;
-            }
-        }
-        if light >= 4 && hog >= 4 {
-            break;
-        }
-    }
-    (light, hog)
-}
-
-/*
- * Both depths from the windowed slot counts capped
- * at 4. Window holds own cursor plus two fill ahead
- * plus rescue plus both overflows with six reads and
- * no 514 scan, so stopping pays window cost with no
- * flood miss. Quiet keeps 4ms and flood fills the
- * window plus overflows to the floor. Far-only depth
- * past the window may keep quiet one step longer with
- * no stall. Mirrors the BPF windowed refresh.
+ * Both depths from the per CPU window counts capped
+ * at 4. Window holds own per CPU plus other per CPU
+ * plus both overflows with four reads and no full
+ * scan, so stopping pays window cost with no flood
+ * miss. Quiet keeps 4ms and flood fills the window
+ * plus overflows to the floor. Mirrors the BPF
+ * windowed refresh with four reads.
  */
 #[cfg(test)]
 pub fn slot_window_depths(
     own: u64,
-    f0: u64,
-    f1: u64,
-    rescue: u64,
+    other: u64,
     light_over: u64,
     hog_over: u64,
     group: u8,
 ) -> (u64, u64) {
     let (light, hog) = if group == GROUP_HOG {
-        (rescue + light_over, own + f0 + f1 + hog_over)
+        (other + light_over, own + hog_over)
     } else {
-        (own + f0 + f1 + light_over, rescue + hog_over)
+        (own + light_over, other + hog_over)
     };
     (light.min(4), hog.min(4))
 }
@@ -1515,12 +1468,12 @@ pub fn first_in_group_live(
 }
 
 /*
- * Least queued allowed CPU in one group for tests. The sharded store keeps no
- * per CPU backlog, so depth reads the group overflow tail once with no per CPU
- * pass. Every candidate in the group shares that depth, so the scan keeps mask
- * and group order with lowest id on ties by strict less only. Missing overflow
- * reads as zero with no trap. Returns none when no allowed CPU lives in the
- * group. Mirrors the BPF first helper with frozen constants.
+ * Least queued allowed CPU in one group for tests. Depth reads the group
+ * overflow tail once with no per CPU pass. Every candidate in the group
+ * shares that depth, so the scan keeps mask and group order with lowest
+ * id on ties by strict less only. Missing overflow reads as zero with no
+ * trap. Returns none when no allowed CPU lives in the group. Mirrors the
+ * BPF first helper with frozen constants.
  */
 #[cfg(test)]
 pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, overflow: &[u64]) -> Option<u32> {
@@ -1550,13 +1503,12 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, overflow: &[u64]) 
 }
 
 /*
- * Least queued allowed CPU in one live group for tests. The sharded store
- * keeps no per CPU backlog, so depth reads the group overflow tail once with
- * no per CPU pass. Every candidate in the group shares that depth, so the scan
- * keeps mask order with lowest id on ties by strict less only. Missing overflow
- * reads as zero with no trap. Returns none when no allowed CPU lives in the
- * group. Placement keeps live with frozen constants. Mirrors the BPF first
- * helper.
+ * Least queued allowed CPU in one live group for tests. Depth reads the
+ * group overflow tail once with no per CPU pass. Every candidate in the
+ * group shares that depth, so the scan keeps mask order with lowest id on
+ * ties by strict less only. Missing overflow reads as zero with no trap.
+ * Returns none when no allowed CPU lives in the group. Placement keeps
+ * live with frozen constants. Mirrors the BPF first helper.
  */
 #[cfg(test)]
 pub fn least_in_group_live(

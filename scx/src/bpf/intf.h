@@ -79,20 +79,13 @@ enum flow_consts {
 	FLOW_WHEEL_HORIZON_NS = (64ULL * 1000ULL * 65536ULL),
 	FLOW_WHEEL_QUANT_LO = 0xFFFFULL,
 	FLOW_TOKEN_MAX = 255ULL,
-	FLOW_WHEEL_HEAD_BITS = 8ULL,
-	FLOW_WHEEL_FINE_WORDS = 4ULL,
-	FLOW_WHEEL_COARSE_WORDS = 4ULL,
 	FLOW_SLOT_BASE = 0x6000ULL,
-	FLOW_SLOT_PER_GROUP = 256ULL,
-	FLOW_SLOT_NGROUPS = 2ULL,
-	FLOW_SLOT_N = 512ULL,
 	FLOW_SLOT_OVERFLOW_BASE = 0x6800ULL,
 	FLOW_SLOT_OVERFLOW_N = 2ULL,
 	FLOW_SLOT_PER_CPU = 2ULL,
 	FLOW_SLOT_MAX_DSQS = 2050ULL,
 	FLOW_SLOT_D = 4ULL,
 	FLOW_SLOT_BUDGET = 32ULL,
-	FLOW_SLOT_RETAIN_MAX = 3ULL,
 	FLOW_SLOT_SWEEP_MAX = 256ULL,
 };
 /* Weight fits u16 for the running repack. */
@@ -138,13 +131,14 @@ struct flow_cpu_state {
 /* Counters at 288B with group, coalesce, split skip reasons, wheel, token, */
 /* and slot. Total keeps the sum for compat, reasons split fail-closed busy */
 /* no-kicks in branch order armed, deserved, group, mask, and rate. Coalesced */
-/* counts q2 idle skips in 50us. Wheel skips counts empty slots passed in */
-/* seek, overflow counts tail pins past the horizon, boosts counts token */
-/* spends, and cas fails counts lost token races. Head, fine, coarse, and */
-/* empty stay append only, so old offsets stay stable. Slot moves counts FIFO */
-/* tasks moved via slot drains, slot kicks counts safety net kicks, and slot */
-/* defer counts slot drains that hit the D cap with work left deferred, all */
-/* append only at the tail with BSS zero. */
+/* counts q2 idle skips in 50us. Overflow counts tail pins past the horizon, */
+/* boosts counts token spends, and cas fails counts lost token races. Skips, */
+/* head, fine, coarse, and empty stay frozen for compat, so old offsets stay */
+/* stable with no new writes. Slot moves counts all FIFO tasks moved via slot */
+/* drains, park moves counts the overflow subset, steal moves counts the peer */
+/* subset, slot kicks counts safety net kicks, and slot defer counts slot */
+/* drains that hit the D cap with work left deferred, all append only at the */
+/* tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -497,8 +491,8 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;
 }
-/* Next peer for steal scan with rotating cursor. Masks rate and stand, so */
-/* one kick per slice keeps the scan order with no extra state. */
+/* Next peer from one cursor with rate and stand masked, so repeated reads */
+/* spread across peers with no extra state. */
 static __always_inline u32 flow_steal_next(u32 cursor,
 	u32 nr_cpus)
 {
@@ -515,7 +509,7 @@ static __always_inline u32 flow_cursor_val(u32 cursor)
 }
 /* True when the stand latch is held in bit10. */
 /* Bits 0 to 9 hold peer, bit10 holds stand, top */
-/* holds rate, so rotation masks both flags. */
+/* holds rate, so peer reads mask both flags. */
 static __always_inline bool flow_stand_held(u32 cursor)
 {
 	return (cursor &
@@ -765,25 +759,6 @@ static __always_inline bool flow_token_eligible(bool clamped,
 	    ((u64)burn < (u64)FLOW_PROMOTE_BURN_NS) &&
 	    (err <= (u64)FLOW_WHEEL_SLOT_NS);
 }
-/* Bucket of one quantised deadline near 64us. Holds the low 8 slot bits, so */
-/* 256 buckets each cover one near slot with past 16ms resting in overflow. */
-/* Base is vruntime quantised deadline, never ktime, so order stays vruntime */
-/* only. */
-static __always_inline u64 flow_slot_bucket(u64 qdl)
-{
-	return (qdl >> 16ULL) & 0xFFULL;
-}
-/* FIFO id of one group bucket with light as default. Holds base plus group */
-/* times 256 plus bucket, so two groups shard 512 queues with no share. Bad */
-/* group falls to light with no trap, bucket keeps masked form. FIFO only, */
-/* never vtime, so per DSQ one flavor holds with mask wins on drain. */
-static __always_inline u64 flow_slot_dsq(u8 group,
-	u64 bucket)
-{
-	u64 g = group == (u8)FLOW_GROUP_HOG ? 1ULL : 0ULL;
-	return (u64)FLOW_SLOT_BASE + g * 256ULL +
-	    (bucket & 0xFFULL);
-}
 /* FIFO id of one group overflow with light as default. Holds overflow base */
 /* plus group, so two tails keep arrival order per group with no share. Bad */
 /* group falls to light with no trap. FIFO only, never vtime, so per DSQ one */
@@ -794,7 +769,7 @@ static __always_inline u64 flow_slot_overflow_dsq(u8 group)
 		return (u64)FLOW_SLOT_OVERFLOW_BASE + 1ULL;
 	return (u64)FLOW_SLOT_OVERFLOW_BASE;
 }
-/* FIFO id of one CPU group with light as default. Holds base plus cpu */
+/* FIFO id of one CPU group with light as default. Holds base plus CPU */
 /* times 2 plus group, so two per CPU keep light and hog apart with no */
 /* share. Bad group falls to light with no trap. FIFO only, never vtime, */
 /* so per DSQ one flavor holds with mask wins on drain. */
@@ -818,8 +793,8 @@ static __always_inline u64 flow_steal_need(bool idle_empty)
 		return 1ULL;
 	return (u64)FLOW_STEAL_MIN_DEPTH;
 }
-/* Cap of one slot trip at D under the dispatch budget. Returns the min of */
-/* budget and 4, so one bucket or overflow moves at most 4 with the shared */
+/* Cap of one trip at D under the dispatch budget. Returns the min of budget */
+/* and 4, so one per CPU queue or overflow moves at most 4 with the shared */
 /* loop and no K loop. Mirrors the drain cap with the same test. */
 static __always_inline u32 flow_slot_cap(u32 budget)
 {
@@ -827,29 +802,14 @@ static __always_inline u32 flow_slot_cap(u32 budget)
 		return (u32)FLOW_SLOT_D;
 	return budget;
 }
-/* Own cap of one dispatch at budget minus one. Holds 31 with */
-/* budget 32, so one slot stays for overflow, fill, other */
-/* overflow, and rescue with no strand on saturated own. Zero */
-/* stays zero with no wrap. Mirrors the BPF reserve. */
+/* Own cap of one dispatch at budget minus one. Holds 31 with budget 32, so */
+/* one slot stays for overflow, other CPU, and other overflow plus steal */
+/* with no strand on saturated own. Zero stays zero with no wrap. Mirrors */
+/* the BPF reserve. */
 static __always_inline u32 flow_slot_own_cap(u32 budget)
 {
 	if (budget == 0)
 		return 0;
 	return budget - 1U;
-}
-/* Next bucket of one slot cursor with wrap. Holds cur plus one truncated to */
-/* u8, so 255 wraps to zero with no branch and no divide. Base is the per CPU */
-/* slot cursor, never the steal cursor, so rotation stays independent. */
-static __always_inline u8 flow_slot_next(u8 cur)
-{
-	return (u8)(cur + 1);
-}
-/* Bucket ahead of one slot base with wrap. Holds base plus off plus one */
-/* truncated to u8, so the window stays distinct from own with no branch and */
-/* no divide. Off runs zero to one for two fill buckets at D each. */
-static __always_inline u8 flow_slot_add(u8 base,
-	u32 off)
-{
-	return (u8)(base + (u8)off + 1);
 }
 #endif

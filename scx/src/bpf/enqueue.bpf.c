@@ -81,11 +81,11 @@ static __always_inline u64 flow_ref_frontier(
 }
 /* Insert one task FIFO into the per CPU store. Pinned tasks rest in */
 /* the group overflow tail with no per CPU use, so every owner dispatch */
-/* visits them in the window with mask wins and no far need. The caller */
-/* shares the pinned bit, so no second pinned test runs. The pinned fast */
-/* path runs before the probe with a direct quant error, so one probe */
-/* feeds only migratable insert plus spend with no second pass. Migratable */
-/* probes the deadline in vruntime for quantised deadline, slot, error, */
+/* visits them in the window with mask wins. The caller shares the pinned */
+/* bit, so no second pinned test runs. The pinned fast path runs before */
+/* the probe with a direct quant error, so one probe feeds only migratable */
+/* insert plus spend with no second pass. Migratable probes the deadline in */
+/* vruntime for quantised deadline, slot, error, */
 /* and overflow, then inserts to the per CPU queue or the group overflow */
 /* tail with the same slice. Counts tail pins past the horizon, and reports */
 /* the quant error for the token spend. Returns the queue id for kick */
@@ -103,9 +103,8 @@ static __always_inline u64 flow_slot_insert(
 	/* Pinned tasks rest in the group overflow tail */
 	/* with FIFO arrival order and no per CPU use, so */
 	/* every owner dispatch visits them in the window */
-	/* with mask wins and no far need. Strict keeps */
-	/* the group, so the owner group always holds */
-	/* the task with no widen. */
+	/* with mask wins. Strict keeps the group, so the */
+	/* owner group always holds the task with no widen. */
 	if (pinned) {
 		sdsq = flow_slot_overflow_dsq(group);
 		scx_bpf_dsq_insert(p, sdsq, slice, 0);
