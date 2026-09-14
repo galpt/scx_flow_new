@@ -369,3 +369,40 @@ pub fn kick_step(moved: u32, window_left: bool, _far_left: bool, sweep: u16) -> 
     }
     (false, sweep)
 }
+
+/*
+ * Next own bucket ahead with queued work when idle.
+ * Scans 256 ahead from cur inclusive with exact
+ * truth and no mark use, so stale marks add no
+ * force. Returns the first bucket ahead with work,
+ * else none, so the caller jumps only on far work.
+ * Bound 256 covers every bucket in one pass, so
+ * boot 15 and 61 drain within 3 hops with no walk
+ * and late 61 still jumps on the next idle pass.
+ * Mirrors the BPF far scan with the same order.
+ */
+#[cfg(test)]
+pub fn far_next(cur: u8, occupied: &[bool; 256]) -> Option<u8> {
+    for off in 0..256u32 {
+        if off >= 256 {
+            break;
+        }
+        let b = cur.wrapping_add(off as u8);
+        if occupied[b as usize] {
+            return Some(b);
+        }
+    }
+    None
+}
+
+/*
+ * True when one far progress kick fires. Needs any
+ * move with window work or with an idle far jump,
+ * so late 61 still chains after 15 drains with no
+ * window. No jump keeps window only with no storm.
+ * Mirrors the BPF far kick with the same gate.
+ */
+#[cfg(test)]
+pub fn kick_far_ok(moved: u32, window_left: bool, far_jump: bool) -> bool {
+    moved > 0 && (window_left || far_jump)
+}

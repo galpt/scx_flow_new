@@ -83,13 +83,21 @@ on an all-light host with mask wins. Rotation advances
 the cursor each dispatch with capped retain at most 3
 in a row, so every occupied bucket drains within 1024
 dispatches worst case with refill to zero on advance.
-Own at 31 leaves one slot for the rest, so saturated
-own still lets overflow, fill, other overflow, and
-rescue progress. A capped drain with window work left
-counts one defer. A kick safety net chains idle owners
-past the watchdog with progress and sweep kicks at 256
-on window truth only with no far storm. All trips share
-one drain body with mask wins and move to local, so per
+Idle adds a far sweep that jumps to the next own bucket
+ahead with queued work when own holds no work, so boot
+15 and 61 drain within 3 hops with no 15 step walk and
+late 61 still jumps on the next idle pass. Far runs
+only when own holds no work, so hot pays no scan with
+no storm. Bound is 256 hops worst case with one far
+progress kick while far jumps. Own at 31
+leaves one slot for the rest, so saturated own still
+lets overflow, fill, other overflow, and rescue
+progress. A capped drain with window work left counts
+one defer. A kick safety net chains idle owners past
+the watchdog with progress and sweep kicks at 256 on
+window truth only with no far storm, plus one far
+progress kick when idle jumps far. All trips share one
+drain body with mask wins and move to local, so per
 queue order stays FIFO. Placement, dispatch, and
 pressure read the live table seeded by online rank.
 

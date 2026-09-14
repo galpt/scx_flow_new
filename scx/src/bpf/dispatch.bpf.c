@@ -8,7 +8,10 @@
  * move to local, so only DSQ id selection branches. Seek
  * feeds stats only and never gates a drain or a kick, so
  * stale marks add no storm with no hide. Kicks use window
- * truth only.
+ * truth only, plus far progress when idle jumps far.
+ * Far jumps to the next own bucket ahead when idle with
+ * no window, so boot 15 and 61 drain within 3 hops with
+ * no 15 step walk and late 61 still chains.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -106,6 +109,36 @@ static __always_inline u32 flow_wheel_seek_full(u32 *slot_out)
 	*slot_out = (u32)FLOW_WHEEL_TOTAL;
 	return 256U;
 }
+/* Next own bucket ahead with queued work when idle. */
+/* Scans 256 ahead from cur with nr_queued truth and */
+/* no mark use, so stale marks add no force. Returns */
+/* the first bucket ahead with work, else cur with */
+/* found clear, so the caller jumps only on far work. */
+/* Bound 256 covers every bucket in one pass, so boot */
+/* 15 and 61 drain within 3 hops with no 15 step walk. */
+static __always_inline u8 flow_slot_far_next(u8 cur,
+	u8 group, bool *found)
+{
+	u8 res = cur;
+	bool have = false;
+	u32 off;
+
+	bpf_for(off, 0, 256) {
+		u8 b;
+		u64 dsq;
+
+		if (have)
+			continue;
+		b = (u8)((u32)cur + off);
+		dsq = flow_slot_dsq(group, (u64)b);
+		if (scx_bpf_dsq_nr_queued(dsq) != 0) {
+			res = b;
+			have = true;
+		}
+	}
+	*found = have;
+	return res;
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
@@ -162,6 +195,49 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		volatile u32 vcpu = (u32)cpu;
 		u32 sidx = vcpu & 1023U;
 		slot_cur = flow_slot_cur[sidx];
+	}
+	/* Far sweep jumps to the next own bucket ahead when */
+	/* idle with no own work, so boot 15 and 61 drain */
+	/* within 3 hops with no 15 step walk and late 61 */
+	/* still finds a jump on the next idle pass. Scans */
+	/* own group only with nr_queued truth and no mark */
+	/* use, so stale marks add no force. Runs only when */
+	/* own holds no work, so hot pays no scan with no */
+	/* storm. Bound 256 worst hops with one far kick. */
+	/* Mark holds per CPU far jump this pass in BSS with */
+	/* no live across trips, so states stay flat. */
+	{
+		u64 pre_own;
+		bool pre_empty;
+
+		pre_own = flow_slot_dsq(sgroup,
+		    (u64)slot_cur);
+		pre_empty =
+		    scx_bpf_dsq_nr_queued(pre_own) == 0;
+		if (pre_empty) {
+			bool have = false;
+			u8 next = flow_slot_far_next(slot_cur,
+			    sgroup, &have);
+
+			if (have) {
+				volatile u32 vcpu2 = (u32)cpu;
+				u32 sidx2 = vcpu2 & 1023U;
+
+				slot_cur = next;
+				flow_slot_cur[sidx2] = next;
+				flow_slot_far[sidx2] = 1;
+			} else {
+				volatile u32 vcpu2 = (u32)cpu;
+				u32 sidx2 = vcpu2 & 1023U;
+
+				flow_slot_far[sidx2] = 0;
+			}
+		} else {
+			volatile u32 vcpu2 = (u32)cpu;
+			u32 sidx2 = vcpu2 & 1023U;
+
+			flow_slot_far[sidx2] = 0;
+		}
 	}
 	odsq_own = flow_slot_dsq(sgroup,
 	    (u64)slot_cur);
@@ -270,7 +346,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* with no storm. Safety net kicks once per dispatch with */
 	/* leftover: progress kick covers window leftover with any */
 	/* move, sweep kick covers zero-move window with bound 256 */
-	/* and reset on move with no infinite loop. Marks feed stats */
+	/* and reset on move with no infinite loop. Far adds one */
+	/* progress kick when idle jumps far, so late 61 still */
+	/* chains after 15 drains with no window. Marks feed stats */
 	/* only and never gate a kick. */
 	{
 		u64 own_left;
@@ -291,8 +369,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			volatile u32 vcpu3 = (u32)cpu;
 			u32 sidx3 = vcpu3 & 1023U;
 			u16 sweep = flow_slot_sweep_cnt[sidx3];
+			bool far = flow_slot_far[sidx3] != 0;
 			bool kick = false;
-			if (moved > 0 && window_left)
+			if (moved > 0 && (window_left || far))
 				kick = true;
 			else if (moved == 0 && window_left &&
 			    sweep < (u16)FLOW_SLOT_SWEEP_MAX) {

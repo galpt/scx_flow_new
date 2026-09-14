@@ -117,6 +117,12 @@ volatile u8 flow_slot_retain_cnt[1024];
 /* unmovable-only window work stops polling with no infinite */
 /* loop while movable work sweeps within 256. Resets on move. */
 volatile u16 flow_slot_sweep_cnt[1024];
+/* Per CPU far jump mark with one u8 per CPU for 1024 CPUs. */
+/* Each holds one when idle jumps far this pass with BSS */
+/* zero clear. Plain owning CPU use with no atomic. Set */
+/* before trips, read for the far kick, overwritten next */
+/* pass, so no live holds across trips with no storm. */
+volatile u8 flow_slot_far[1024];
 /* Mark one wheel slot after insert with head, fine, and coarse. Slot holds 0 */
 /* to 65535 from the probe cap. Head mirrors the first 8 near slots, fine */
 /* mirrors the first 256 near slots, coarse mirrors 256 far blocks, all with */

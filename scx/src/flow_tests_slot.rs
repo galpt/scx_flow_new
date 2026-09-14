@@ -709,3 +709,84 @@ fn high5_sustained_hot_far_bucket_bounded() {
     assert_eq!(count, 1024);
     assert_eq!(cur2, 0);
 }
+
+#[test]
+fn attach_far_sweep_bounds_guest_stall() {
+    // Exact guest stall: 4 tasks in 0x600f (light 15)
+    // plus 1 in 0x603d (light 61) with cursors at 0,
+    // watchdog 30s, zero cells, kicks 6, moves 1.
+    // Far must drain both within 3 hops with kicks
+    // and late 61 still jumps on the next idle pass.
+    let cpu = 0;
+    let mut occupied = [false; 256];
+    occupied[15] = true;
+    occupied[61] = true;
+    // First far jump from 0 lands on 15 at once.
+    assert_eq!(far_next(0, &occupied), Some(15));
+    assert!(kick_far_ok(1, false, true));
+    assert!(!kick_far_ok(1, false, false));
+    // Old rotation without far needs 15 steps to
+    // reach 15, so 6 kicks stall with no chain.
+    let mut cur: u8 = 0;
+    let mut steps = 0u32;
+    while cur != 15 && steps < 256 {
+        cur = slot_next(cur);
+        steps += 1;
+    }
+    assert_eq!(steps, 15);
+    // Far drain model: idle jump, move, kick, repeat.
+    let mut q15: VecDeque<PendingTask> = (0..4).map(|_| live_task(0, 2)).collect();
+    let mut q61: VecDeque<PendingTask> = VecDeque::from([live_task(0, 2)]);
+    let mut cur2: u8 = 0;
+    let mut moves = 0u32;
+    let mut hops = 0u32;
+    let mut occ2 = occupied;
+    // Two far hops drain 15 then 61 with idle jumps.
+    for _ in 0..257 {
+        // Pre-window holds no work at attach idle,
+        // so far runs on every idle pass with no
+        // premature clear as with the old cold flag.
+        let next = far_next(cur2, &occ2);
+        let Some(b) = next else {
+            break;
+        };
+        cur2 = b;
+        let far_jump = true;
+        let got = if b == 15 {
+            let m = slot_drain_model(&mut q15, cpu, SLOT_OWN_CAP, 0);
+            if q15.is_empty() {
+                occ2[15] = false;
+            }
+            m
+        } else if b == 61 {
+            let m = slot_drain_model(&mut q61, cpu, SLOT_OWN_CAP, 0);
+            if q61.is_empty() {
+                occ2[61] = false;
+            }
+            m
+        } else {
+            0
+        };
+        moves += got;
+        // Far progress kicks even with no window,
+        // so 61 still chains after 15 drains.
+        assert!(kick_far_ok(got, false, far_jump));
+        cur2 = slot_next(cur2);
+        hops += 1;
+        if q15.is_empty() && q61.is_empty() {
+            break;
+        }
+    }
+    assert!(q15.is_empty());
+    assert!(q61.is_empty());
+    assert_eq!(moves, 5);
+    assert!(hops <= 3);
+    // Truly idle finds none with no kick.
+    assert_eq!(far_next(cur2, &occ2), None);
+    assert!(!kick_far_ok(0, false, false));
+    // Late 61 after 15 drains still jumps: clear 15,
+    // keep 61, scan from 16 lands on 61 at once.
+    let mut late = [false; 256];
+    late[61] = true;
+    assert_eq!(far_next(16, &late), Some(61));
+}
