@@ -1858,8 +1858,8 @@ fn cpuperf_elapsed_is_wrap_safe() {
  * Active appends with no reorder, so old offsets
  * stay stable. Active feeds the energy probe with
  * full u64 wrap deltas in userspace. Stats grow 200B
- * to 296B with slot counters plus one reserved tail
- * counter, so old offsets stay stable.
+ * to 296B with slot counters plus one wired cross
+ * tail counter, so old offsets stay stable.
  */
 #[test]
 fn cpu_state_grows_to_56_with_active_tail() {
