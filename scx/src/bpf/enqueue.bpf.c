@@ -349,7 +349,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			target = st->frontier;
 		ref_f = flow_ref_frontier(p, sel);
 		/* Normal path only, no tctx and overflow keep their own probe. */
-		/* Corrected feeds clamp and deserved with max wrap safety. */
+		/* Corrected feeds clamp and deadline with max wrap safety. */
 		frontier = flow_frontier_max(ref_f, target);
 		nice = flow_nice_of(p);
 		w = flow_weight_of(nice);

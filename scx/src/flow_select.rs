@@ -43,9 +43,8 @@ pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
  * Peers visited by one steal scan from one CPU.
  * Chains the next helper bound times, so high CPUs
  * wrap to low peers with no dead read. BPF uses
- * increment plus wrap with the same order and no
- * divide for the verifier. Returns the visit order
- * with bound entries.
+ * modulo with the same order for the verifier.
+ * Returns the visit order with bound entries.
  */
 #[cfg(test)]
 pub fn steal_peers(cpu: u32, nr_cpus: usize) -> Vec<u32> {
