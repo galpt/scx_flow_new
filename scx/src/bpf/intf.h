@@ -639,6 +639,12 @@ static __always_inline u64 flow_slot_overflow_dsq(u8 group)
 /* times 2 plus group, so two per CPU keep light and hog apart with no */
 /* share. Bad group falls to light with no trap. FIFO only, never vtime, */
 /* so per DSQ one flavor holds with mask wins on drain. */
+/* DSQ low bit is group, so base plus stride stay even. */
+/* Base even keeps light even, stride 2 keeps hog odd. */
+_Static_assert((FLOW_SLOT_BASE & 1) == 0,
+    "slot base even keeps DSQ low bit group");
+_Static_assert((FLOW_SLOT_PER_CPU & 1) == 0,
+    "slot stride even keeps DSQ low bit group");
 static __always_inline u64 flow_slot_cpu_dsq(u32 cpu,
 	u8 group)
 {

@@ -683,6 +683,10 @@
           <span class="stat-value" id="steal">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
+          Steal cross:</span>
+          <span class="stat-value" id="steal-xmoves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
           Kicks:</span>
           <span class="stat-value" id="kicks">0</span>
         </div>
@@ -1312,6 +1316,8 @@
         fmt(s.park_moves || 0);
       el('steal').textContent =
         fmt(s.steal_moves || 0);
+      el('steal-xmoves').textContent =
+        fmt(s.steal_xmoves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
       el('no-tctx').textContent =

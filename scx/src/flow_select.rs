@@ -119,8 +119,9 @@ pub fn steal_cross_peers(start: u32, nr_cpus: usize) -> Vec<u32> {
  * Compares the DSQ low bit against the owner group low bit
  * with xor, so same group maps to zero and cross maps to
  * one with no branch. Holds pure after the shared drain
- * with no live across the drain, so the verifier keeps one
- * state. Mirrors the BPF post hoc xor with mask. Returns 0
+ * with scalar-only live across the inline drain, no
+ * map-pointer live, so the verifier keeps one state.
+ * Mirrors the BPF post hoc xor with mask. Returns 0
  * for same and 1 for cross. See src/bpf/dispatch.bpf.c for
  * the fold use.
  */

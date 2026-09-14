@@ -450,6 +450,7 @@ mod tests {
         assert_eq!(m.stats.token_cas_fails, 0);
         assert_eq!(m.stats.slot_moves, 0);
         assert_eq!(m.stats.slot_defer, 0);
+        assert_eq!(m.stats.steal_xmoves, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -483,7 +484,7 @@ mod tests {
                 requeues: 1,
                 completions: 2,
                 park_moves: 1,
-                steal_moves: 0,
+                steal_moves: 2,
                 kicks: 4,
                 edf_enqueued: 8,
                 edf_clamped: 1,
@@ -512,6 +513,7 @@ mod tests {
                 token_cas_fails: 0,
                 slot_moves: 40,
                 slot_defer: 3,
+                steal_xmoves: 1,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -566,6 +568,7 @@ mod tests {
         assert!(txt.contains("token_cas_fails"));
         assert!(txt.contains("slot_moves"));
         assert!(txt.contains("slot_defer"));
+        assert!(txt.contains("steal_xmoves"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
@@ -602,6 +605,8 @@ mod tests {
         assert_eq!(back.stats.token_cas_fails, 0);
         assert_eq!(back.stats.slot_moves, 40);
         assert_eq!(back.stats.slot_defer, 3);
+        assert_eq!(back.stats.steal_moves, 2);
+        assert_eq!(back.stats.steal_xmoves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
@@ -674,6 +679,16 @@ mod tests {
         assert!(html.contains("slot_defer"));
         assert!(html.contains("slot_kicks"));
         assert!(html.contains("wheel_skips"));
+    }
+
+    /* Dashboard shows the cross steal cell. */
+    #[test]
+    fn dashboard_shows_steal_xmoves_cell() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"steal-xmoves\""));
+        assert!(html.contains("steal_xmoves"));
+        assert!(html.contains("id=\"steal\""));
+        assert!(html.contains("steal_moves"));
     }
 
     /* Dashboard shows the strict and perf mode cell. */

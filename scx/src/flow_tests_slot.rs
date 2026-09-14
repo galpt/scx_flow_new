@@ -780,6 +780,42 @@ fn steal_cross_peers_sweep_start_plus_8() {
 }
 
 /*
+ * Cross peers wrap on small hosts with full union cover.
+ * Cross peers from start visit bound peers from start
+ * plus 8 with wrap, so nr 2, 3, and 9 keep no dead
+ * read with every entry below nr. Same plus cross
+ * union covers every peer, so small hosts keep full
+ * cover. Mirrors the BPF second loop with modulo.
+ * See src/flow_select.rs and src/bpf/dispatch.bpf.c.
+ */
+#[test]
+fn steal_cross_peers_small_hosts_cover_union() {
+    for nr in [2usize, 3, 9] {
+        for start in 0..nr as u32 {
+            let cross = steal_cross_peers(start, nr);
+            assert_eq!(cross.len(), STEAL_BOUND);
+            for (off, p) in cross.iter().enumerate() {
+                assert!((*p as usize) < nr);
+                assert_eq!(
+                    *p,
+                    start.wrapping_add(8).wrapping_add(off as u32) % nr as u32
+                );
+            }
+            let same = steal_peers_from(start, nr);
+            let mut seen = std::collections::HashSet::new();
+            for p in same.iter().take(STEAL_BOUND) {
+                seen.insert(*p);
+            }
+            for p in &cross {
+                seen.insert(*p);
+            }
+            assert_eq!(seen.len(), nr);
+        }
+    }
+    assert!(steal_cross_peers(0, 0).is_empty());
+}
+
+/*
  * LSB derive holds cross truth with no branch.
  * Same DSQ low bit matches owner, so mark stays zero
  * with no count. Cross DSQ low bit flips owner, so mark
