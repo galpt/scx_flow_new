@@ -91,8 +91,8 @@ from start with wrap plus live check and keeps the first
 donor at need, which is 1 when idle with no moves and no
 window work, else 2. Self visit stays allowed with no
 extra branch, so hosts keep cover. Same group only keeps
-cache apart with no cross scan and cross moves stay at
-zero. Single move keeps tail smooth with local trips
+cache apart with no cross scan and cross moves stay
+reserved at zero. Single move keeps tail smooth with local trips
 owning the window. Cursor steps by 8 with a bounded swap
 that keeps rate plus stand and drops on race. Single CPU
 hosts skip the pass. Pinned tasks rest in overflow, so

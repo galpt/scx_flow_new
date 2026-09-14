@@ -588,9 +588,9 @@ fn pinned_rests_in_overflow_with_bounded_drain() {
 
 /*
  * Steal wrap reaches low peers from high CPUs.
- * Chain from 7 at 8 visits 0 to 6 first with no
+ * Start from 7 at 8 visits 0 to 6 first with no
  * dead read, so high CPUs steal with wrap. Mirrors
- * the BPF steal helper chain with bound 8. See
+ * the BPF steal scan order with bound 8. See
  * src/flow_select.rs and src/bpf/dispatch.bpf.c.
  */
 #[test]
@@ -671,11 +671,12 @@ fn steal_cursor_stride_keeps_flags() {
 /*
  * Sixteen sweep keeps order for many host sizes.
  * Peers from start visit 16 in order with wrap, so
- * first 8 feed same group and next 8 feed cross
- * group with no dead read. At 16 the sweep covers
- * every peer, past 16 it covers 16 distinct peers.
- * Self visit stays allowed with no skip, so small
- * hosts keep full cover. See src/flow_select.rs and
+ * first 8 feed one same group scan and next 8
+ * preview the next scan after the stride 8 step.
+ * At 16 the sweep covers every peer, past 16 it
+ * covers 16 distinct peers. Self visit stays
+ * allowed with no skip, so small hosts keep full
+ * cover. See src/flow_select.rs and
  * src/bpf/dispatch.bpf.c.
  */
 #[test]

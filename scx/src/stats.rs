@@ -138,7 +138,7 @@ pub struct Metrics {
     #[stat(desc = "Capped drains with work left")]
     #[serde(default)]
     pub slot_defer: u64,
-    #[stat(desc = "Cross group peer moves")]
+    #[stat(desc = "Cross moves reserved at zero")]
     #[serde(default)]
     pub steal_xmoves: u64,
 }

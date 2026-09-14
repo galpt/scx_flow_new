@@ -43,13 +43,14 @@ pub fn steal_start(cursor: u32, nr_cpus: usize) -> u32 {
 }
 
 /*
- * Peers visited by one 16 sweep from a start.
+ * Peers visited by two rotation windows from a start.
  * Steps 16 from start with wrap, so high CPUs
  * reach low peers with no dead read. First 8
- * feed the same group scan, next 8 feed the cross
- * group scan. BPF uses modulo with the same order
- * for the verifier. Returns 16 entries in order.
- * See src/bpf/dispatch.bpf.c for the phase use.
+ * feed one same group scan, next 8 preview the
+ * next scan after the stride 8 step. BPF uses
+ * modulo with the same order for the verifier.
+ * Returns 16 entries in order. See
+ * src/bpf/dispatch.bpf.c for the scan use.
  */
 #[cfg(test)]
 pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
@@ -78,8 +79,8 @@ pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {
 
 /*
  * Peers visited by one steal scan from one CPU.
- * Chains the next helper bound times, so high CPUs
- * wrap to low peers with no dead read. BPF uses
+ * Takes bound peers from the start helper, so high
+ * CPUs wrap to low peers with no dead read. BPF uses
  * modulo with the same order for the verifier.
  * Returns the visit order with bound entries.
  */

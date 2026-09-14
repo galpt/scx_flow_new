@@ -138,8 +138,9 @@ struct flow_cpu_state {
 /* so old offsets stay stable with no new writes. Slot moves counts all */
 /* FIFO tasks moved via slot drains, park moves counts the overflow subset, */
 /* steal moves counts the peer subset, slot kicks counts safety net kicks, */
-/* slot defer counts capped drains with work left, and cross moves counts */
-/* the cross group peer subset, all append only at the tail with BSS zero. */
+/* slot defer counts capped drains with work left, and cross moves stays */
+/* reserved at zero with no BPF write, all append only at the tail with */
+/* BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
