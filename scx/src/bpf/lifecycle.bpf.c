@@ -49,7 +49,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		st->running_nice = (s16)nice;
 		st->running_weight = (u16)w;
 		/* Occupant group from live task state with LIGHT fallback, */
-		/* written here and cleared with pid, never read yet. */
+		/* written here and cleared with pid, read post-empty. */
 		if (tctx &&
 		    tctx->group == (u8)FLOW_GROUP_HOG)
 			st->occupant_group = (u8)FLOW_GROUP_HOG;

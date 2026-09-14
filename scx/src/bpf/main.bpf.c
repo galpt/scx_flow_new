@@ -545,7 +545,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		/* Active starts at zero with lifetime growth, so verify and keep explicit */
 		/* zero for the 48B to 56B growth with no trap. */
 		st->active_ns = 0;
-		/* Occupant starts at LIGHT with never read yet, so verify and keep */
+		/* Occupant starts at LIGHT with post-empty read, so verify and keep */
 		/* explicit zero for the 56B to 64B growth with no trap. */
 		st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 		if (scx_bpf_cpuperf_set)

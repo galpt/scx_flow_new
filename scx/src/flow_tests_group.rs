@@ -1858,7 +1858,7 @@ fn cpuperf_elapsed_is_wrap_safe() {
  * Active plus occupant append with no reorder, so old offsets
  * stay stable. Active feeds the energy probe with
  * full u64 wrap deltas in userspace. Occupant holds the
- * running group with LIGHT fallback and never reads yet.
+ * running group with LIGHT fallback and post-empty read.
  * Stats stay 296B, so old offsets stay stable.
  */
 #[test]

@@ -113,7 +113,7 @@ struct flow_task_ctx {
 /* holds the last EMA update time in nanos. Active holds */
 /* lifetime active nanos charged once per run segment. Occupant holds */
 /* the group of the running task with LIGHT fallback, written in */
-/* running and cleared with pid, never read yet for the bound gate. */
+/* running and cleared with pid, read post-empty in enqueue. */
 /* BSS zero covers the cold start and explicit zero kept as */
 /* verify for the 48B to 56B growth and the 56B to 64B growth */
 /* with no trap. */
