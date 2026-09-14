@@ -32,13 +32,13 @@ fn groups_split_by_halves_with_extra_to_hog() {
 }
 
 #[test]
-fn overflows_are_per_group_at_6200_plus_6201() {
-    assert_eq!(OVERFLOW_LIGHT, 0x6200);
-    assert_eq!(OVERFLOW_HOG, 0x6201);
+fn overflows_are_per_group_at_6800_plus_6801() {
+    assert_eq!(OVERFLOW_LIGHT, 0x6800);
+    assert_eq!(OVERFLOW_HOG, 0x6801);
     assert_ne!(OVERFLOW_LIGHT, OVERFLOW_HOG);
-    assert_eq!(overflow_for_group(GROUP_LIGHT), 0x6200);
-    assert_eq!(overflow_for_group(GROUP_HOG), 0x6201);
-    assert_eq!(overflow_for_group(7), 0x6200);
+    assert_eq!(overflow_for_group(GROUP_LIGHT), 0x6800);
+    assert_eq!(overflow_for_group(GROUP_HOG), 0x6801);
+    assert_eq!(overflow_for_group(7), 0x6800);
     assert_eq!(
         overflow_for_group(GROUP_LIGHT),
         crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64

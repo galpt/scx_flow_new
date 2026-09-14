@@ -2,11 +2,11 @@
 /*
  * Slot store helpers
  *
- * Holds the sharded FIFO slot helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. Two groups shard 512 slot
- * queues plus 2 overflow tails with FIFO only and no knob. The probe maps a
- * deadline to a bucket, pinned tasks rest in overflow, rotation spreads
- * drains, rescue covers the other group, defer counts capped drains with
+ * Holds the per CPU FIFO slot helpers that mirror the BPF header so behavior
+ * stays the same on both sides of the boundary. Each CPU holds two queues
+ * plus 2 overflow tails with FIFO only and no knob. The probe maps a
+ * deadline to near or overflow, pinned tasks rest in overflow, dispatch
+ * drains own plus overflow plus peer steal, defer counts capped drains with
  * work left, and the kick chain keeps idle owners moving.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -28,21 +28,27 @@ pub const SWEEP_MAX: u16 = 256;
 /* Base id of the sharded slot queues. */
 #[cfg(test)]
 pub const SLOT_BASE: u64 = 0x6000;
-/* Slots per group. One group holds 256 buckets. */
+/* Slots per group. One group holds 256 buckets. Kept for old drain compat. */
 #[cfg(test)]
 pub const SLOT_PER_GROUP: u64 = 256;
-/* Groups sharded by the store. Light and hog only. */
+/* Groups sharded by the store. Light and hog only. Kept for compat. */
 #[cfg(test)]
 pub const SLOT_NGROUPS: u64 = 2;
-/* Slot queues in both groups. */
+/* Slot queues in both groups. Kept for old init compat. */
 #[cfg(test)]
 pub const SLOT_N: u64 = 512;
-/* Base id of the group overflow tails. */
+/* Base id of the group overflow tails. Relocated to 0x6800 with no share. */
 #[cfg(test)]
-pub const SLOT_OVERFLOW_BASE: u64 = 0x6200;
+pub const SLOT_OVERFLOW_BASE: u64 = 0x6800;
 /* Overflow tails, one per group. */
 #[cfg(test)]
 pub const SLOT_OVERFLOW_N: u64 = 2;
+/* Queues per CPU. One light plus one hog with no share. */
+#[cfg(test)]
+pub const SLOT_PER_CPU: u64 = 2;
+/* Max DSQs at 1024 CPUs. Holds 2 times 1024 plus 2 with no share. */
+#[cfg(test)]
+pub const SLOT_MAX_DSQS: u64 = 2050;
 /* Slot width in nanos near 64us. */
 #[cfg(test)]
 pub const WHEEL_SLOT_NS: u64 = 64_000;
@@ -172,6 +178,69 @@ pub fn slot_overflow_dsq(group: u8) -> u64 {
     } else {
         SLOT_OVERFLOW_BASE
     }
+}
+
+/*
+ * FIFO id of one CPU group with light as default.
+ * Holds base plus cpu times two plus group, so two
+ * per CPU keep light and hog apart with no share.
+ * Bad group falls to light with no trap. FIFO only,
+ * never vtime. Mirrors the BPF per CPU helper.
+ */
+#[cfg(test)]
+pub fn slot_cpu_dsq(cpu: u32, group: u8) -> u64 {
+    let g = if group == crate::flow_group::GROUP_HOG {
+        1
+    } else {
+        0
+    };
+    SLOT_BASE + cpu as u64 * 2 + g
+}
+
+/*
+ * Count of DSQs for one host with per CPU plus
+ * overflow. Holds two times nr plus two, so eight
+ * CPUs need eighteen queues with 2050 max at 1024
+ * CPUs and no share. Mirrors the BPF count helper.
+ */
+#[cfg(test)]
+pub fn slot_nr_dsqs(nr: u64) -> u64 {
+    nr * 2 + 2
+}
+
+/*
+ * Least donor depth for one steal with idle empty
+ * fast path. Holds one when idle empty, else two,
+ * so idle owners collect the last task with no
+ * strand. Mirrors the BPF steal need helper.
+ */
+#[cfg(test)]
+pub fn steal_need(idle_empty: bool) -> u64 {
+    if idle_empty {
+        1
+    } else {
+        crate::flow_select::STEAL_MIN_DEPTH
+    }
+}
+
+/*
+ * DSQ id for one per CPU insert with pinned
+ * overflow. Pinned tasks rest in the group overflow
+ * tail with no per CPU use, so every owner dispatch
+ * visits them in the window with mask wins and no
+ * rotation need. Migratable tasks keep the per CPU
+ * queue or the horizon tail. Mirrors the BPF per
+ * CPU branch with the same group fallback.
+ */
+#[cfg(test)]
+pub fn insert_cpu_dsq(cpu: u32, group: u8, slot: u64, pinned: bool) -> u64 {
+    if pinned {
+        return slot_overflow_dsq(group);
+    }
+    if slot >= WHEEL_DIM {
+        return slot_overflow_dsq(group);
+    }
+    slot_cpu_dsq(cpu, group)
 }
 
 /*

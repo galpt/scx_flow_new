@@ -3,7 +3,7 @@
  * Shared flow header
  *
  * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
- * groups, and sharded FIFO slot queues. Mirrored by userspace so behavior
+ * groups, and per CPU FIFO slot queues. Mirrored by userspace so behavior
  * stays the same on both sides of the boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -28,7 +28,7 @@ typedef int pid_t;
 #ifndef __noinline
 #define __noinline __attribute__((noinline))
 #endif
-/* Fixed slice at 1ms, two groups, sharded FIFO slots. */
+/* Fixed slice at 1ms, two groups, per CPU FIFO slots. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
@@ -86,8 +86,10 @@ enum flow_consts {
 	FLOW_SLOT_PER_GROUP = 256ULL,
 	FLOW_SLOT_NGROUPS = 2ULL,
 	FLOW_SLOT_N = 512ULL,
-	FLOW_SLOT_OVERFLOW_BASE = 0x6200ULL,
+	FLOW_SLOT_OVERFLOW_BASE = 0x6800ULL,
 	FLOW_SLOT_OVERFLOW_N = 2ULL,
+	FLOW_SLOT_PER_CPU = 2ULL,
+	FLOW_SLOT_MAX_DSQS = 2050ULL,
 	FLOW_SLOT_D = 4ULL,
 	FLOW_SLOT_BUDGET = 32ULL,
 	FLOW_SLOT_RETAIN_MAX = 3ULL,
@@ -791,6 +793,30 @@ static __always_inline u64 flow_slot_overflow_dsq(u8 group)
 	if (group == (u8)FLOW_GROUP_HOG)
 		return (u64)FLOW_SLOT_OVERFLOW_BASE + 1ULL;
 	return (u64)FLOW_SLOT_OVERFLOW_BASE;
+}
+/* FIFO id of one CPU group with light as default. Holds base plus cpu */
+/* times 2 plus group, so two per CPU keep light and hog apart with no */
+/* share. Bad group falls to light with no trap. FIFO only, never vtime, */
+/* so per DSQ one flavor holds with mask wins on drain. */
+static __always_inline u64 flow_slot_cpu_dsq(u32 cpu,
+	u8 group)
+{
+	u64 g = group == (u8)FLOW_GROUP_HOG ? 1ULL : 0ULL;
+	return (u64)FLOW_SLOT_BASE + (u64)cpu * 2ULL + g;
+}
+/* Count of DSQs for one host with per CPU plus overflow. Holds 2 times nr */
+/* plus 2, so 8 CPUs need 18 queues with 2050 max at 1024 CPUs and no share. */
+static __always_inline u64 flow_slot_nr_dsqs(u64 nr)
+{
+	return nr * 2ULL + 2ULL;
+}
+/* Least donor depth for one steal with idle empty fast path. Holds 1 when */
+/* idle empty, else 2, so idle owners collect the last task with no strand. */
+static __always_inline u64 flow_steal_need(bool idle_empty)
+{
+	if (idle_empty)
+		return 1ULL;
+	return (u64)FLOW_STEAL_MIN_DEPTH;
 }
 /* Cap of one slot trip at D under the dispatch budget. Returns the min of */
 /* budget and 4, so one bucket or overflow moves at most 4 with the shared */

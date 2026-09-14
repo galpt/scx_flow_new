@@ -19,10 +19,10 @@ pub const GROUP_LIGHT: u8 = 0;
 pub const GROUP_HOG: u8 = 1;
 /* Overflow id of the light group. */
 #[cfg(test)]
-pub const OVERFLOW_LIGHT: u64 = 0x6200;
+pub const OVERFLOW_LIGHT: u64 = 0x6800;
 /* Overflow id of the hog group. */
 #[cfg(test)]
-pub const OVERFLOW_HOG: u64 = 0x6201;
+pub const OVERFLOW_HOG: u64 = 0x6801;
 /* Window length in nanos at 32ms. */
 #[cfg(test)]
 pub const WIN_NS: u64 = 32_000_000;
@@ -970,7 +970,7 @@ pub fn sibling_table_online(cores_id: &[Vec<u32>], online: &[u32]) -> [u16; GROU
 
 /*
  * Overflow id of one group with light as default. Hog
- * uses 0x6201. Any other value uses 0x6200.
+ * uses 0x6801. Any other value uses 0x6800.
  */
 #[cfg(test)]
 pub fn overflow_for_group(group: u8) -> u64 {

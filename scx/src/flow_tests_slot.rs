@@ -2,7 +2,7 @@
 /*
  * Slot store unit tests
  *
- * Covers the sharded FIFO slot helpers with probe, bucket, rotation, rescue,
+ * Covers the per CPU FIFO slot helpers with probe, ids, rotation, rescue,
  * defer, and kick checks. Run with cargo test -p scx_flow flow_tests_slot.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -18,8 +18,10 @@ fn slot_ids_match_header() {
     assert_eq!(SLOT_PER_GROUP, 256);
     assert_eq!(SLOT_NGROUPS, 2);
     assert_eq!(SLOT_N, 512);
-    assert_eq!(SLOT_OVERFLOW_BASE, 0x6200);
+    assert_eq!(SLOT_OVERFLOW_BASE, 0x6800);
     assert_eq!(SLOT_OVERFLOW_N, 2);
+    assert_eq!(SLOT_PER_CPU, 2);
+    assert_eq!(SLOT_MAX_DSQS, 2050);
     assert_eq!(SLOT_D, 4);
     assert_eq!(SLOT_BUDGET, 32);
     assert_eq!(SLOT_OWN_CAP, 31);
@@ -44,6 +46,14 @@ fn slot_ids_match_header() {
         SLOT_OVERFLOW_N,
         crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_N as u64
     );
+    assert_eq!(
+        SLOT_PER_CPU,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_PER_CPU as u64
+    );
+    assert_eq!(
+        SLOT_MAX_DSQS,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_MAX_DSQS as u64
+    );
     assert_eq!(SLOT_D, crate::bpf_intf::flow_consts_FLOW_SLOT_D as u32);
     assert_eq!(
         SLOT_BUDGET,
@@ -59,6 +69,43 @@ fn slot_ids_match_header() {
     );
     assert_eq!(crate::flow::SLOT_BASE, SLOT_BASE);
     assert_eq!(crate::flow::SLOT_BUDGET, SLOT_BUDGET);
+}
+
+#[test]
+fn per_cpu_ids_match_topology() {
+    assert_eq!(slot_cpu_dsq(0, GROUP_LIGHT), 0x6000);
+    assert_eq!(slot_cpu_dsq(0, GROUP_HOG), 0x6001);
+    assert_eq!(slot_cpu_dsq(1, GROUP_LIGHT), 0x6002);
+    assert_eq!(slot_cpu_dsq(1, GROUP_HOG), 0x6003);
+    assert_eq!(slot_cpu_dsq(255, GROUP_LIGHT), 0x61FE);
+    assert_eq!(slot_cpu_dsq(255, GROUP_HOG), 0x61FF);
+    assert_eq!(slot_cpu_dsq(256, GROUP_LIGHT), 0x6200);
+    assert_eq!(slot_cpu_dsq(1023, GROUP_HOG), 0x67FF);
+    assert_eq!(slot_cpu_dsq(7, 9), slot_cpu_dsq(7, GROUP_LIGHT));
+    assert_ne!(slot_cpu_dsq(0, GROUP_LIGHT), slot_cpu_dsq(0, GROUP_HOG));
+    assert_ne!(slot_cpu_dsq(0, GROUP_LIGHT), slot_cpu_dsq(1, GROUP_LIGHT));
+    assert_eq!(slot_overflow_dsq(GROUP_LIGHT), 0x6800);
+    assert_eq!(slot_overflow_dsq(GROUP_HOG), 0x6801);
+    assert_eq!(slot_nr_dsqs(8), 18);
+    assert_eq!(slot_nr_dsqs(1024), 2050);
+    assert_eq!(slot_nr_dsqs(1), 4);
+    assert_eq!(steal_need(true), 1);
+    assert_eq!(steal_need(false), 2);
+    assert_eq!(
+        SLOT_MAX_DSQS,
+        crate::bpf_intf::flow_consts_FLOW_SLOT_MAX_DSQS as u64
+    );
+    assert_eq!(slot_cpu_dsq(0, GROUP_LIGHT), SLOT_BASE);
+    assert_eq!(slot_overflow_dsq(GROUP_LIGHT), SLOT_OVERFLOW_BASE);
+    assert_eq!(insert_cpu_dsq(3, GROUP_LIGHT, 9, false), slot_cpu_dsq(3, GROUP_LIGHT));
+    assert_eq!(
+        insert_cpu_dsq(3, GROUP_HOG, 300, false),
+        slot_overflow_dsq(GROUP_HOG)
+    );
+    assert_eq!(
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, true),
+        slot_overflow_dsq(GROUP_LIGHT)
+    );
 }
 
 #[test]
@@ -153,13 +200,13 @@ fn slot_dsq_shards_groups_with_no_share() {
 
 #[test]
 fn overflow_tails_are_per_group() {
-    assert_eq!(slot_overflow_dsq(GROUP_LIGHT), 0x6200);
-    assert_eq!(slot_overflow_dsq(GROUP_HOG), 0x6201);
-    assert_eq!(slot_overflow_dsq(7), 0x6200);
+    assert_eq!(slot_overflow_dsq(GROUP_LIGHT), 0x6800);
+    assert_eq!(slot_overflow_dsq(GROUP_HOG), 0x6801);
+    assert_eq!(slot_overflow_dsq(7), 0x6800);
     assert_eq!(overflow_for_group(GROUP_LIGHT), OVERFLOW_LIGHT);
     assert_eq!(overflow_for_group(GROUP_HOG), OVERFLOW_HOG);
-    assert_eq!(OVERFLOW_LIGHT, 0x6200);
-    assert_eq!(OVERFLOW_HOG, 0x6201);
+    assert_eq!(OVERFLOW_LIGHT, 0x6800);
+    assert_eq!(OVERFLOW_HOG, 0x6801);
     assert_eq!(
         OVERFLOW_LIGHT,
         crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64

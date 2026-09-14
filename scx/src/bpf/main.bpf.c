@@ -644,6 +644,33 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			return ret;
 		}
 	}
+	/* Per CPU queues at 2 times nr plus 2 overflow with FIFO only. One */
+	/* bounded pass creates all per CPU ids with a LOCAL_ON check per id, */
+	/* so init pays once with no dispatch cost. Each CPU holds base plus */
+	/* cpu times 2 plus group, overflows hold new base plus group, so groups */
+	/* stay apart with no share. Max 2050 at 1024 CPUs. Needs restart on */
+	/* upgrade with no live move, so old 512 ids stay made above for now. */
+	bpf_for(cpu, 0, 2048) {
+		u64 dsq;
+		u32 pc;
+		u8 gg;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= n * 2ULL)
+			break;
+		pc = (u32)(cpu >> 1);
+		gg = (u8)(cpu & 1);
+		dsq = flow_slot_cpu_dsq(pc, gg);
+		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
+			scx_bpf_error("dsq id over bound");
+			return -EINVAL;
+		}
+		ret = scx_bpf_create_dsq(dsq, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("dsq create failed");
+			return ret;
+		}
+	}
 	return 0;
 }
 void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
