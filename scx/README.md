@@ -114,10 +114,24 @@ See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and
 
 Idle targets are always kicked with a mask check
 regardless of queue depth, so no idle CPU with
-queued work sleeps unkicked. Busy targets stay
-fail-closed with no preempt and total plus armed
-only, other reason fields stay frozen for compat
-with no writes. One coalesced count covers q2 idle
+queued work sleeps unkicked. Busy targets use
+a bound preempt gate with no armed check and
+total plus reason counts at 296B. The chain is
+pinned, then empty at most one queued, then
+deserved or hog, then same with perf bypass,
+then mask, then rate last as a single CAS.
+Pinned and deep count total only with no reason
+write. Deserved needs woken deadline past frontier
+plus granule plus 32us slack or hog occupant with
+no time cap. Same keeps group with perf forced true
+and no recount, so group skips stay flat in perf.
+Mask keeps allowed. Rate keeps one win per slice,
+win sends PREEMPT with kicks live since 4.2.41,
+miss counts total plus rate. Deserved, group, mask,
+and rate stay live since 4.2.41 with armed retired
+frozen for compat. Occupant group rides a u8 tail
+at 64B with LIGHT fallback, written in running and
+cleared with pid. One coalesced count covers q2 idle
 skips in 50us at 296B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
@@ -129,7 +143,8 @@ no coalesce, and no preempt. Fallback overflow with
 no live CPU sends no kick and the next drain
 pass collects it. Pinned overflow from a live
 owner keeps the normal idle kick with no coalesce.
-Disarmed stays idle only. See `src/bpf/intf.h`,
+Storm stays reverted with deep quiet and no extra
+kick. See `src/bpf/intf.h`,
 `src/bpf/main.bpf.c`, `src/bpf/enqueue.bpf.c`, and
 `src/flow_select.rs`.
 
@@ -240,7 +255,12 @@ Pin measurement threads to dedicated CPUs, use the
 monotonic clock and the performance governor, and move
 device IRQs off the measured CPUs. The harness probe
 wakes each 10ms and records wake delay as a light
-baseline with no realtime use.
+baseline with no realtime use. To bench the bound gate,
+run a shallow light flood against a hog occupant and
+read preempt_kicks plus deserved, group, mask, and rate
+skips over the poll interval with the same pin and clock
+method, so shallow deserved wakes show kicks with deep
+quiet and hog occupants show kicks past deserved.
 
 ## Limitations
 
@@ -257,6 +277,9 @@ baseline with no realtime use.
   only with per CPU count matching online count.
 - Queue ids changed in 4.2.38, so upgrading from 4.2.37
   needs a scheduler restart with no live transition.
+- CPU state grew 56B to 64B and preempt counters unfroze
+  in 4.2.41, so upgrading from 4.2.40 needs a scheduler
+  restart with no live transition.
 - Unknown frequency stays unknown with no effect on
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path
