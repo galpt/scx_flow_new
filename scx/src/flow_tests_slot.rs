@@ -638,11 +638,15 @@ fn steal_start_rotates_with_wrap() {
 
 /*
  * Cursor stride keeps rate plus stand with step 8.
- * Advance stores masked plus 8 with wrap while it
- * keeps both flag bits from the old word, so a lost
- * race can drop the step with no stall. Next start
- * then lands 8 past the old start with wrap. See
- * src/flow_preempt.rs and src/bpf/dispatch.bpf.c.
+ * Advance stores masked plus 8 with wrap in 4 compare
+ * and swap tries while it keeps both flag bits from
+ * the old word, so a lost race can drop the step with
+ * no stall. Next start then lands 8 past the old start
+ * with wrap. When host size divides 8, step 8 is
+ * identity with no advance, harmless as the bound 8
+ * scan covers all peers while donor priority goes
+ * stale. See src/flow_preempt.rs and
+ * src/bpf/dispatch.bpf.c.
  */
 #[test]
 fn steal_cursor_stride_keeps_flags() {
@@ -666,6 +670,23 @@ fn steal_cursor_stride_keeps_flags() {
     let plain = crate::flow_preempt::cursor_store(9, 0);
     assert_eq!(plain & mask, 9);
     assert_eq!(plain & rate, 0);
+    for cur in [0u32, 1, 7] {
+        let masked = cur & mask;
+        let old = cur | rate | stand;
+        let nxt_peer = (masked + 8) % 8;
+        assert_eq!(nxt_peer, masked);
+        let nxt = crate::flow_preempt::cursor_store(nxt_peer, old);
+        assert_eq!(nxt & mask, masked);
+        let s0 = steal_start(cur, 8);
+        let s1 = steal_start(nxt, 8);
+        assert_eq!(s1, s0);
+        assert_eq!(s1, (s0 + 8) % 8);
+        let peers = steal_peers(cur, 8);
+        assert_eq!(peers.len(), STEAL_BOUND);
+        let mut sorted = peers.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..8).collect::<Vec<u32>>());
+    }
 }
 
 /*

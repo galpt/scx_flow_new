@@ -48,7 +48,7 @@ pub struct Metrics {
     #[stat(desc = "Moves from the park queue")]
     #[serde(default)]
     pub park_moves: u64,
-    #[stat(desc = "Moves from a peer queue")]
+    #[stat(desc = "Moves from a same group peer queue")]
     #[serde(default)]
     pub steal_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]

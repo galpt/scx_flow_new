@@ -47,10 +47,10 @@ pub fn steal_start(cursor: u32, nr_cpus: usize) -> u32 {
  * Steps 16 from start with wrap, so high CPUs
  * reach low peers with no dead read. First 8
  * feed one same group scan, next 8 preview the
- * next scan after the stride 8 step. BPF uses
- * modulo with the same order for the verifier.
- * Returns 16 entries in order. See
- * src/bpf/dispatch.bpf.c for the scan use.
+ * next scan after the stride 8 step with 4 compare
+ * and swap tries. BPF uses modulo with the same
+ * order for the verifier. Returns 16 entries in
+ * order. See src/bpf/dispatch.bpf.c for the scan use.
  */
 #[cfg(test)]
 pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
@@ -65,12 +65,13 @@ pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
 }
 
 /*
- * Next steal cursor. The cursor rotates with rate
- * and stand masked out, so repeated reads spread
- * across peers. Dispatch scans bound peers with the
- * same mask, so this covers the cursor rotation math
- * with no queue use. Mirrors the BPF helper with
- * mask. See src/bpf/dispatch.bpf.c for the scan use.
+ * Start step for one steal scan from a cursor.
+ * Masks rate plus stand then steps one with wrap,
+ * so this models the per dispatch start read with
+ * no queue use. The cursor advance is separate at
+ * stride 8 with 4 compare and swap tries that keep
+ * rate plus stand, see cursor_store in flow_preempt
+ * plus src/bpf/dispatch.bpf.c for the advance use.
  */
 #[cfg(test)]
 pub fn steal_next(cursor: u32, nr_cpus: usize) -> u32 {

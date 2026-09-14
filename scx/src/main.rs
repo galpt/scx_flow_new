@@ -300,7 +300,7 @@ impl<'a> Scheduler<'a> {
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
             wskips={} wover={} tboost={} \
             whead={} wfine={} wcoarse={} wempty={} \
-            skicks={} tcas={} smoves={} sdefer={} \
+            skicks={} tcas={} smoves={} sdefer={} stealx={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -336,6 +336,7 @@ impl<'a> Scheduler<'a> {
             m.token_cas_fails,
             m.slot_moves,
             m.slot_defer,
+            m.steal_xmoves,
             runtime,
             oncpu,
         );

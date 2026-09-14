@@ -2,12 +2,13 @@
 /*
  * Dispatch op
  *
- * Drains per CPU queues with overflow plus peer steal and a kick safety net.
- * One shared drain body feeds every trip with mask wins and move to local,
- * so only DSQ id selection branches. Own per CPU own group runs at 31,
- * own overflow at 4, own CPU other group at 4, other overflow at 4, then
- * peer steal visits bound peers with single move toward budget 32. Sweep
- * covers zero move window only at 256 with reset on move. Pinned tasks
+ * Drains per CPU queues with overflow plus same group peer steal and a kick
+ * safety net. One shared drain body feeds every trip with mask wins and move
+ * to local, so only DSQ id selection branches. Own per CPU own group runs
+ * at 31, own overflow at 4, own CPU other group at 4, other overflow at 4,
+ * then same group peer steal visits bound same group peers with single move
+ * toward budget 32. Sweep covers zero move window only at 256 with reset on
+ * move. Pinned tasks
  * rest in overflow, so trips visit them every pass. All trips share one
  * drain body with mask wins and move to local, so per queue order stays
  * FIFO.
@@ -129,10 +130,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* groups keep cache apart with no cross scan and cross drains stay local. */
 	/* Single move keeps tail smooth with no burst theft, so one peer task per */
 	/* pass is enough with local trips owning the window. Cursor steps by 8 */
-	/* with a bounded compare and swap that keeps rate plus stand and drops */
-	/* on race, so contended owners skip the step with no stall. Window reads */
-	/* four local queues once after local trips with no global scan, so need */
-	/* plus defer plus sweep share one window with no extra reads. Scan keeps */
+	/* with a bounded compare and swap in 4 tries that keeps rate plus stand */
+	/* and drops on race, so contended owners skip the step with no stall. */
+	/* When host size divides 8, step 8 is identity with no advance, */
+	/* harmless as the bound 8 scan covers all peers while donor priority */
+	/* goes stale. Window reads four local queues once after local trips */
+	/* with no global scan, so need plus defer plus sweep share one window */
+	/* with no extra reads. Scan keeps */
 	/* the first donor with work, then one shared drain moves a single task */
 	/* with mask wins, so one bad head never blocks later work. Single CPU */
 	/* hosts skip the whole pass with one check. See intf.h for need plus */
