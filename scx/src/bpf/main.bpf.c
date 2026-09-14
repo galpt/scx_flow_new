@@ -193,16 +193,19 @@ static __always_inline bool flow_token_try_spend(u32 cpu,
 /* keeps no op with no trap. Stopping piggybacks here with no vruntime, */
 /* frontier, classify, or cpuperf change. Plain store on the wide word pairs */
 /* with the single attempt spend, so a concurrent spend fails with no spend */
-/* while refill wins to full with no skew. */
+/* while refill wins to full with no skew. Mask keeps the index proven with */
+/* no change for live CPUs. */
 static __always_inline void flow_token_refill(u32 cpu)
 {
+	volatile u32 vcpu = cpu;
+	u32 idx = vcpu & 1023U;
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return;
 	if ((u64)cpu >= nr_cpu_ids)
 		return;
 	if ((u32)cpu >= 1024)
 		return;
-	flow_token_stor[cpu] = (u32)FLOW_TOKEN_MAX;
+	flow_token_stor[idx] = (u32)FLOW_TOKEN_MAX;
 }
 static __always_inline u64 flow_now(void)
 {

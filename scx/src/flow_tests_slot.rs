@@ -97,7 +97,10 @@ fn per_cpu_ids_match_topology() {
     );
     assert_eq!(slot_cpu_dsq(0, GROUP_LIGHT), SLOT_BASE);
     assert_eq!(slot_overflow_dsq(GROUP_LIGHT), SLOT_OVERFLOW_BASE);
-    assert_eq!(insert_cpu_dsq(3, GROUP_LIGHT, 9, false), slot_cpu_dsq(3, GROUP_LIGHT));
+    assert_eq!(
+        insert_cpu_dsq(3, GROUP_LIGHT, 9, false),
+        slot_cpu_dsq(3, GROUP_LIGHT)
+    );
     assert_eq!(
         insert_cpu_dsq(3, GROUP_HOG, 300, false),
         slot_overflow_dsq(GROUP_HOG)
