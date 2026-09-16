@@ -612,11 +612,11 @@ fn steal_wrap_reaches_low_peers() {
 }
 
 /*
- * Rotation start wraps with mask and rate plus stand.
+ * Rotation start wraps with mask and stand.
  * Start steps masked cursor plus one with wrap once
  * per dispatch, so passes spread with no hot spot.
- * Rate plus stand stay masked out, so flags never
- * skew the order. Single host stays at zero with no
+ * Stand stays masked out, so the flag never skews
+ * the order. Single host stays at zero with no
  * scan. See src/flow_select.rs and
  * src/bpf/dispatch.bpf.c.
  */
@@ -627,19 +627,17 @@ fn steal_start_rotates_with_wrap() {
     assert_eq!(steal_start(3, 8), 4);
     assert_eq!(steal_start(0, 1), 0);
     assert_eq!(steal_start(5, 1), 0);
-    let rate = crate::flow_preempt::CURSOR_RATE_BIT;
     let stand = crate::flow_preempt::CURSOR_STAND_BIT;
-    assert_eq!(steal_start(7 | rate, 8), 0);
     assert_eq!(steal_start(7 | stand, 8), 0);
-    assert_eq!(steal_start(rate | stand | 3, 8), 4);
+    assert_eq!(steal_start(stand | 3, 8), 4);
     assert_eq!(steal_start(15, 16), 0);
     assert_eq!(steal_start(0, 16), 1);
 }
 
 /*
- * Cursor stride keeps rate plus stand with step 8.
+ * Cursor stride keeps stand with step 8.
  * Advance stores masked plus 8 with wrap in 4 compare
- * and swap tries while it keeps both flag bits from
+ * and swap tries while it keeps the flag bit from
  * the old word, so a lost race can drop the step with
  * no stall. Next start then lands 8 past the old start
  * with wrap. When host size divides 8, step 8 is
@@ -649,17 +647,15 @@ fn steal_start_rotates_with_wrap() {
  * src/bpf/dispatch.bpf.c.
  */
 #[test]
-fn steal_cursor_stride_keeps_flags() {
-    let rate = crate::flow_preempt::CURSOR_RATE_BIT;
+fn steal_cursor_stride_keeps_stand() {
     let stand = crate::flow_preempt::CURSOR_STAND_BIT;
     let mask = crate::flow_preempt::CURSOR_MASK;
     for nr in [16usize, 64, 256, 1024] {
         for cur in [0u32, 1, 7, 15, 100] {
             let masked = cur & mask;
-            let old = cur | rate | stand;
+            let old = cur | stand;
             let nxt_peer = (masked + 8) % nr as u32;
             let nxt = crate::flow_preempt::cursor_store(nxt_peer, old);
-            assert_eq!(nxt & rate, rate);
             assert_eq!(nxt & stand, stand);
             assert_eq!(nxt & mask, nxt_peer & mask);
             let s0 = steal_start(cur, nr);
@@ -669,10 +665,10 @@ fn steal_cursor_stride_keeps_flags() {
     }
     let plain = crate::flow_preempt::cursor_store(9, 0);
     assert_eq!(plain & mask, 9);
-    assert_eq!(plain & rate, 0);
+    assert_eq!(plain & stand, 0);
     for cur in [0u32, 1, 7] {
         let masked = cur & mask;
-        let old = cur | rate | stand;
+        let old = cur | stand;
         let nxt_peer = (masked + 8) % 8;
         assert_eq!(nxt_peer, masked);
         let nxt = crate::flow_preempt::cursor_store(nxt_peer, old);

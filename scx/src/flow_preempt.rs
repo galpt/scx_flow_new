@@ -28,12 +28,9 @@ pub const GRANULE_FLOOR_NS: u64 = 64_000;
 /* Deserved slack in nanos at 32us. */
 #[cfg(test)]
 pub const DESERVED_SLACK_NS: u64 = 32_000;
-/* Rate bit in the cursor top bit. */
-#[cfg(test)]
-pub const CURSOR_RATE_BIT: u32 = 0x8000_0000;
 /* Stand bit in cursor bit10 with peer in 0 to 9. */
 pub const CURSOR_STAND_BIT: u32 = 0x0000_0400;
-/* Cursor peer mask without rate and stand. */
+/* Cursor peer mask without stand, top stays masked. */
 #[cfg(test)]
 pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
@@ -91,8 +88,8 @@ pub fn delay_armed_latched(win: u8, held: bool) -> bool {
 
 /*
  * True when the stand latch is held in bit10.
- * Bits 0 to 9 hold peer, bit10 holds stand, top
- * holds rate, so rotation masks both flags.
+ * Bits 0 to 9 hold peer, bit10 holds stand, so
+ * rotation masks the flag.
  */
 pub fn stand_held(cursor: u32) -> bool {
     (cursor & CURSOR_STAND_BIT) != 0
@@ -176,7 +173,7 @@ pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
 }
 
 /*
- * Cursor peer without rate and stand.
+ * Cursor peer without stand, top stays masked.
  */
 #[cfg(test)]
 pub fn cursor_val(cursor: u32) -> u32 {
@@ -184,17 +181,17 @@ pub fn cursor_val(cursor: u32) -> u32 {
 }
 
 /*
- * Store peer, keep rate, and stand. Masks the peer, so rotation keeps order
- * with no extra state. Dispatch CAS keeps fresh flags, model is sequential
- * form, timing only.
+ * Store peer, keep stand. Masks the peer, so rotation keeps order
+ * with no extra state. Dispatch CAS keeps the fresh flag, model
+ * is sequential form, timing only.
  */
 #[cfg(test)]
 pub fn cursor_store(peer: u32, old: u32) -> u32 {
-    (peer & CURSOR_MASK) | (old & (CURSOR_RATE_BIT | CURSOR_STAND_BIT))
+    (peer & CURSOR_MASK) | (old & CURSOR_STAND_BIT)
 }
 
 /*
- * Set the stand latch, keep peer, and rate.
+ * Set the stand latch, keep peer.
  */
 #[cfg(test)]
 pub fn stand_set(cursor: u32) -> u32 {
@@ -202,41 +199,11 @@ pub fn stand_set(cursor: u32) -> u32 {
 }
 
 /*
- * Clear the stand latch, keep peer, and rate.
+ * Clear the stand latch, keep peer.
  */
 #[cfg(test)]
 pub fn stand_clear(cursor: u32) -> u32 {
     cursor & !CURSOR_STAND_BIT
-}
-
-/*
- * True when the rate bit is clear for one kick.
- * Read only, so claim below does the atomic set.
- */
-#[cfg(test)]
-pub fn rate_clear(cursor: u32) -> bool {
-    (cursor & CURSOR_RATE_BIT) == 0
-}
-
-/*
- * Set the rate bit after one kick.
- */
-#[cfg(test)]
-pub fn rate_set(cursor: u32) -> u32 {
-    cursor | CURSOR_RATE_BIT
-}
-
-/*
- * Atomically set rate and report prior clear. One
- * winner per slice with no check then set. Models the
- * retired per slice CAS kept for regression reference,
- * gate 6 uses the 1ms flow_rate_at window, see enqueue.
- */
-#[cfg(test)]
-pub fn rate_claim(cursor: &mut u32) -> bool {
-    let old = *cursor;
-    *cursor |= CURSOR_RATE_BIT;
-    rate_clear(old)
 }
 
 /*

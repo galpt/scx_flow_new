@@ -69,7 +69,6 @@ enum flow_consts {
 	FLOW_DELAY_WIN_LEN = 8ULL,
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
 	FLOW_DESERVED_SLACK_NS = 32000ULL,
-	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
 	FLOW_KICK_COALESCE_NS = 50000ULL,
@@ -489,14 +488,14 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;
 }
-/* Cursor peer without rate and stand. */
+/* Cursor peer without stand, top stays masked. */
 static __always_inline u32 flow_cursor_val(u32 cursor)
 {
 	return cursor & (u32)FLOW_CURSOR_MASK;
 }
 /* True when the stand latch is held in bit10. */
-/* Bits 0 to 9 hold peer, bit10 holds stand, top */
-/* holds rate, so peer reads mask both flags. */
+/* Bits 0 to 9 hold peer, bit10 holds stand, so */
+/* peer reads mask the flag. */
 static __always_inline bool flow_stand_held(u32 cursor)
 {
 	return (cursor &
@@ -722,22 +721,6 @@ static __always_inline bool flow_deserved(u64 woken_dl,
 {
 	return flow_time_before(woken_dl,
 	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
-}
-/* Retired rate check kept for layout with no gate use. */
-/* Enqueue uses the 1ms window in flow_rate_at, see enqueue. */
-static __always_inline bool flow_rate_clear(u32 cursor)
-{
-	return (cursor &
-	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
-}
-/* Retired rate claim kept for layout with no gate use. */
-/* Enqueue uses the 1ms window in flow_rate_at, see enqueue. */
-static __always_inline bool flow_rate_claim(u32 *cursor)
-{
-	u32 old;
-	old = __sync_fetch_and_or(cursor,
-	    (u32)FLOW_CURSOR_RATE_BIT);
-	return flow_rate_clear(old);
 }
 /* True when one queue holds at most one task for empty first. */
 /* Holds when queued is zero or one, else false, so deep */
