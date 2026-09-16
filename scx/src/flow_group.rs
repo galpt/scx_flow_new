@@ -23,34 +23,34 @@ pub const OVERFLOW_LIGHT: u64 = 0x6800;
 /* Overflow id of the hog group. */
 #[cfg(test)]
 pub const OVERFLOW_HOG: u64 = 0x6801;
-/* Window length in nanos at 32ms. */
+/* Window length in nanos at 640ms. */
 #[cfg(test)]
-pub const WIN_NS: u64 = 32_000_000;
-/* Window burn in nanos at 16ms for demote. */
+pub const WIN_NS: u64 = 640_000_000;
+/* Window burn in nanos at 320ms for demote. */
 #[cfg(test)]
-pub const DEMOTE_BURN_NS: u64 = 16_000_000;
-/* Single burst in nanos at 4ms for demote. */
+pub const DEMOTE_BURN_NS: u64 = 320_000_000;
+/* Single burst in nanos at 80ms for demote. */
 /* Quiet case of the adaptive check with depth 0. */
 #[cfg(test)]
-pub const DEMOTE_BURST_NS: u64 = 4_000_000;
-/* Mild burst in nanos at 2ms for demote. */
+pub const DEMOTE_BURST_NS: u64 = 80_000_000;
+/* Mild burst in nanos at 40ms for demote. */
 #[cfg(test)]
-pub const DEMOTE_BURST_MID_NS: u64 = 2_000_000;
-/* Floor burst in nanos at 1ms for demote. */
+pub const DEMOTE_BURST_MID_NS: u64 = 40_000_000;
+/* Floor burst in nanos at 20ms for demote. */
 #[cfg(test)]
-pub const DEMOTE_BURST_FLOOR_NS: u64 = 1_000_000;
-/* Window burn in nanos below 4ms for promote. */
+pub const DEMOTE_BURST_FLOOR_NS: u64 = 20_000_000;
+/* Window burn in nanos below 80ms for promote. */
 #[cfg(test)]
-pub const PROMOTE_BURN_NS: u64 = 4_000_000;
+pub const PROMOTE_BURN_NS: u64 = 80_000_000;
 /* Low windows needed for one promote near 2s. */
 #[cfg(test)]
-pub const PROMOTE_WINS: u8 = 64;
+pub const PROMOTE_WINS: u8 = 3;
 /* Extra deadline in nanos at 8ms for pinned hog. */
 #[cfg(test)]
 pub const PINNED_INFLATE_NS: u64 = 8_000_000;
-/* Short block in nanos below 1ms for wake. */
+/* Short block in nanos below 20ms for wake. */
 #[cfg(test)]
-pub const WAKE_SHORT_NS: u64 = 1_000_000;
+pub const WAKE_SHORT_NS: u64 = 20_000_000;
 /* Short blocks needed for one fast promote. */
 #[cfg(test)]
 pub const PROMOTE_WAKE_HITS: u16 = 8;
@@ -70,9 +70,9 @@ pub const CPUPERF_LEVEL: u32 = 1024;
 /* CPU perf idle at zero for blocked empty. */
 #[cfg(test)]
 pub const CPUPERF_IDLE: u32 = 0;
-/* CPU perf EMA budget in nanos at 1ms. */
+/* CPU perf EMA budget in nanos at 20ms. */
 #[cfg(test)]
-pub const CPUPERF_BUDGET_NS: u64 = 1_000_000;
+pub const CPUPERF_BUDGET_NS: u64 = 20_000_000;
 /* CPU perf EMA half-life in nanos at 24ms. */
 #[cfg(test)]
 pub const CPUPERF_HALF_LIFE_NS: u64 = 24_000_000;
@@ -1007,7 +1007,7 @@ pub fn should_restore_hint(runnable: bool, dsq_nr: u64, local_nr: u64) -> bool {
 }
 
 /*
- * Climb the EMA toward the 1ms budget with a gap step.
+ * Climb the EMA toward the 20ms budget with a gap step.
  * Pure-EMA proportional at M2 with uniform both groups.
  * Delta clamps to the budget first with u64 order, so a
  * long burst never overshoots in one step. Step is gap
@@ -1119,7 +1119,7 @@ pub fn cpuperf_elapsed(at: u64, now: u64) -> u64 {
 }
 
 /*
- * True when one window of 32ms has passed. Zero
+ * True when one window of 640ms has passed. Zero
  * start means no window yet, so the check fails
  * closed and the caller starts a fresh window.
  */
@@ -1132,8 +1132,8 @@ pub fn win_ready(now: u64, win_start: u64) -> bool {
 }
 
 /*
- * True when window burn reaches 16ms for demote.
- * The 4x gap above the 4ms promote line keeps
+ * True when window burn reaches 320ms for demote.
+ * The 4x gap above the 80ms promote line keeps
  * flips rare with no extra state.
  */
 #[cfg(test)]
@@ -1142,7 +1142,7 @@ pub fn burn_hot(burn: u32) -> bool {
 }
 
 /*
- * True when one burst reaches 4ms for demote. A
+ * True when one burst reaches 80ms for demote. A
  * single long burst moves to hog at once with no
  * wait for the window end. Quiet case with depth 0.
  */
@@ -1153,11 +1153,12 @@ pub fn burst_hot(delta: u64) -> bool {
 
 /*
  * Allowance from light depth with flood backpressure. Depth sums queued tasks
- * in light per CPU queues capped at 4. Table is depth 0 to 1 to 4ms, depth 2 to
- * 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so solo bursts still move
- * fast alone. Mild pressure steps down to 2ms so rising flood reacts sooner yet
- * stays clear of one slice chatter. Deep flood pins at 1ms, so per task worst
- * case is one slice during flood. Recomputed per stop with no new task field,
+ * in light per CPU queues capped at 4. Table is depth 0 to 1 to 80ms, depth 2
+ * to 3 to 40ms, depth 4 and above to 20ms. Quiet keeps 80ms so solo bursts
+ * still move fast alone. Mild pressure steps down to 40ms so rising flood
+ * reacts sooner yet stays clear of one slice chatter. Deep flood pins at 20ms,
+ * so per task worst case is one slice during flood. Recomputed per stop with
+ * no new task field,
  * so task stays at 48B. Halves matches dispatch view with no table cost in the
  * stop path. Strict iff ready is zero, best effort iff ready is one with
  * placement on the live table.
@@ -1189,7 +1190,7 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
  * at 4. Window holds own per CPU plus other per CPU
  * plus both overflows with four reads and no full
  * scan, so stopping pays window cost with no flood
- * miss. Quiet keeps 4ms and flood fills the window
+ * miss. Quiet keeps 80ms and flood fills the window
  * plus overflows to the floor. Mirrors the BPF
  * windowed refresh with four reads.
  */
@@ -1210,9 +1211,9 @@ pub fn slot_window_depths(
 }
 
 /*
- * True when window burn stays below 4ms for
+ * True when window burn stays below 80ms for
  * promote. Only low windows move the streak
- * forward toward 64 wins near 2s.
+ * forward toward 3 wins near 2s.
  */
 #[cfg(test)]
 pub fn burn_low(burn: u32) -> bool {
@@ -1220,7 +1221,7 @@ pub fn burn_low(burn: u32) -> bool {
 }
 
 /*
- * True when one block is short below 1ms for wake.
+ * True when one block is short below 20ms for wake.
  * Short blocks count toward fast promote with low
  * burn, so brief waits return to light quickly.
  */
@@ -1232,7 +1233,7 @@ pub fn wake_short(delta: u64) -> bool {
 /*
  * True when wake hits reach 8 for fast promote.
  * Eight qualifying short blocks move hog to light
- * at once with no wait for 64 wins.
+ * at once with no wait for 3 wins.
  */
 #[cfg(test)]
 pub fn wake_ready(hits: u16) -> bool {
@@ -1314,7 +1315,7 @@ pub fn burn_add(burn: u32, delta: u64) -> u32 {
 /*
  * One classifier step for tests. Mirrors the BPF stopping path with burn and
  * wake at quiet depth. Quiet wrapper around the depth step with depth 0, so
- * lone bursts keep the 4ms line with no pressure. See the depth step for the
+ * lone bursts keep the 80ms line with no pressure. See the depth step for the
  * full move table.
  */
 #[cfg(test)]
@@ -1325,15 +1326,16 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
 /*
  * One classifier step with light depth for tests. Mirrors the BPF stopping path
  * with burn and wake. Adds the burst to burn, then checks the allowance for the
- * depth, then wake fast promote, then window end. Allowance is 4ms at depth 0
- * to 1, 2ms at depth 2 to 3, 1ms at depth 4 and above. Eight short blocks below
- * 1ms with burn below 4ms move hog to light at once. A burst at the allowance
- * clears wake hits. A short with burn at or past 4ms clears wake hits. A 16ms
- * window moves light to hog at the window end. A hot window at or past 16ms
- * clears wake hits. A low window below 4ms moves the streak forward and keeps
- * wake hits. A middle window at the end clears wake hits with low runs and no
- * move. A window in progress keeps wake hits. A hog needs 64 low wins near 2s
- * or 8 short hits to return to light. Allowance is recomputed per stop with no
+ * depth, then wake fast promote, then window end. Allowance is 80ms at depth 0
+ * to 1, 40ms at depth 2 to 3, 20ms at depth 4 and above. Eight short blocks
+ * below 20ms with burn below 80ms move hog to light at once. A burst at the
+ * allowance clears wake hits. A short with burn at or past 80ms clears wake
+ * hits. A 320ms window moves light to hog at the window end. A hot window at
+ * or past 320ms clears wake hits. A low window below 80ms moves the streak
+ * forward and keeps wake hits. A middle window at the end clears wake hits
+ * with low runs and no move. A window in progress keeps wake hits. A hog needs
+ * 3 low wins near 2s or 8 short hits to return to light. Allowance is
+ * recomputed per stop with no
  * new task field, so task stays at 48B. Returns true for demote and true for
  * promote when each move runs.
  */

@@ -23,8 +23,8 @@ fn est_clamp_caps_at_one_second() {
 }
 
 #[test]
-fn slice_is_fixed_at_1ms() {
-    assert_eq!(SLICE_NS, 1_000_000);
+fn slice_is_fixed_at_20ms() {
+    assert_eq!(SLICE_NS, 20_000_000);
     assert_eq!(crate::flow::SLICE_NS, SLICE_NS);
     assert_eq!(crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64, SLICE_NS);
 }
@@ -41,13 +41,13 @@ fn edf_weight_matches_fixed() {
 
 #[test]
 fn edf_clamp_bounds_match_slice() {
-    assert_eq!(clamp_vruntime(0, 100_000_000, SLICE_NS), 99_000_000);
+    assert_eq!(clamp_vruntime(0, 100_000_000, SLICE_NS), 80_000_000);
     assert!(was_clamped(0, 100_000_000, SLICE_NS));
     assert_eq!(
-        clamp_vruntime(99_000_000, 100_000_000, SLICE_NS),
-        99_000_000
+        clamp_vruntime(80_000_000, 100_000_000, SLICE_NS),
+        80_000_000
     );
-    assert!(!was_clamped(99_000_000, 100_000_000, SLICE_NS));
+    assert!(!was_clamped(80_000_000, 100_000_000, SLICE_NS));
     assert_eq!(
         clamp_vruntime(99_500_000, 100_000_000, SLICE_NS),
         99_500_000
@@ -133,7 +133,7 @@ fn s3_frontier_monotonic_with_wrap_holds() {
     assert_eq!(frontier_max(old, next), next);
     assert_eq!(frontier_step(old, next, true, 1), next);
     assert_eq!(frontier_step(old, next, false, 0), next);
-    let lag = u64::MAX - 2_000_000;
+    let lag = u64::MAX - 22_000_000;
     let top = u64::MAX - 1_000_000;
     assert_eq!(
         clamp_vruntime(lag, top, SLICE_NS),
@@ -246,7 +246,8 @@ fn kick_recent_needs_50us_with_zero_open() {
 /*
  * Coalesce needs q2, idle, recent, and not pinned. Q1, busy, missing, and
  * pinned stay open with a kick. Overflow stays out with no kick use, see the
- * overflow helper. Exiting uses its own idle kick with no coalesce, see exiting helpers.
+ * overflow helper. Exiting uses its own idle kick with no coalesce, see
+ * exiting helpers.
  */
 #[test]
 fn kick_coalesce_needs_q2_idle_recent_unpinned() {
@@ -1405,9 +1406,9 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert_eq!(m2.slice_ns, 1_000_000);
     assert_eq!(m2.delay_win, 0);
     assert!(!m2.delay_armed);
-    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":494,\"slice_ns\":1000000}";
+    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":494,\"slice_ns\":20000000}";
     let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
-    assert_eq!(m3.slice_ns, 1_000_000);
+    assert_eq!(m3.slice_ns, 20_000_000);
     assert_eq!(m3.running_nice, 10);
     assert_eq!(m3.running_weight, 494);
     let txt4 = "{\"id\":3,\"delay_win\":16,\"delay_armed\":true}";
@@ -1626,7 +1627,7 @@ fn corrected_frontier_feeds_clamp_and_deserved() {
     let (_, dl_target, _) = edf_insert(v, target, slice, est, weight);
     assert!(time_before(dl_target, dl_corrected));
     let gran = crate::flow_preempt::granule_for_weight(weight, slice);
-    let woken_dl = 95_000_000u64;
+    let woken_dl = 100_000_000u64;
     let deserved_target = crate::flow_preempt::deserved(woken_dl, target, gran);
     let deserved_corrected = crate::flow_preempt::deserved(woken_dl, corrected, gran);
     assert!(!deserved_target);

@@ -395,15 +395,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* Dual max drops one sample max, decay intact. */
 		/* Busy uses empty first plus deserved or hog plus same */
 		/* plus mask plus rate with no armed check, so shallow */
-		/* wakes preempt once per slice with no storm. Empty */
+		/* wakes preempt once per 1ms window with no storm. Empty */
 		/* needs at most one queued, deserved needs woken deadline */
 		/* past frontier plus granule plus slack or hog occupant */
 		/* with no time cap, same keeps group with perf bypass, */
-		/* mask keeps allowed, rate keeps one CAS win per slice. */
+		/* mask keeps allowed, rate keeps one win per 1ms window. */
 		/* Pinned plus deep count total only, others count total */
 		/* plus reason. Kick uses PREEMPT with kicks count. */
 		/* No loop. Delay persists across idle, next running */
-		/* decays, delay shows stale idle. Kick at stays idle only. */
+		/* decays, delay shows stale idle. Kick at stays idle only, */
+		/* rate at stays busy only, see main. */
 		if (flow_cpu_ok(p, cpu)) {
 			u64 q;
 			u64 now;
@@ -523,15 +524,30 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				    1);
 				return;
 			}
-			/* Rate keeps one CAS win per slice with kicks count. */
-			if (!flow_rate_claim(&st->cursor)) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_rate,
-				    1);
-				return;
+			/* Rate keeps one win per 1ms window with kicks count. */
+			/* Zero last always wins with wrap, see main. */
+			{
+				volatile u32 vcpu = (u32)cpu;
+				u32 idx = vcpu & 1023U;
+				if ((u32)cpu < 1024 &&
+				    flow_cpu_live((u32)cpu))
+					last = flow_rate_at[idx];
+				else
+					last = 0;
+				now = flow_now();
+				if (last != 0 &&
+				    now - last < 1000000ULL) {
+					__sync_fetch_and_add(
+					    &flow_stats.preempt_skipped,
+					    1);
+					__sync_fetch_and_add(
+					    &flow_stats.preempt_skipped_rate,
+					    1);
+					return;
+				}
+				if ((u32)cpu < 1024 &&
+				    flow_cpu_live((u32)cpu))
+					flow_rate_at[idx] = now;
 			}
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 			__sync_fetch_and_add(

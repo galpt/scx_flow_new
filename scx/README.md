@@ -5,7 +5,7 @@ in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
 It keeps two FIFO queues per CPU, one per group,
 with one overflow tail per group and a fixed slice at
-1ms. Two groups split light waits and hog burn, strict
+20ms. Two groups split light waits and hog burn, strict
 exactly when ready is zero and best effort when ready
 is one.
 It is deliberately knob-free. It uses deadline mapped
@@ -32,22 +32,22 @@ back when the task CPU is not allowed.
 
 ### Fixed slice
 
-The slice is fixed at 1ms with no knob. Fresh tasks join
+The slice is fixed at 20ms with no knob. Fresh tasks join
 with the slice, so the start stays neutral. Estimates hold
 the last burst clamped at 1ns to 1 second.
 
 ### Fairness
 
-Sleeper lag is capped at a weight scaled cap in 125us to
-8ms, so a waking task gains at most the cap of advantage.
+Sleeper lag is capped at a weight scaled cap in 2.5ms to
+160ms, so a waking task gains at most the cap of advantage.
 Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
 tasks complete at once. Runnable tasks requeue FIFO
 into the per CPU queue with a refreshed estimate. Burst
 allowance reads windowed depths over own per CPU,
 other per CPU, and both overflows with four reads, so
-quiet keeps 4ms and flood still floors at 1ms with no
-full scan.
+quiet keeps 80ms with mild at 40ms and flood still floors
+at 20ms over a 640ms window with no full scan.
 
 ### Groups
 
@@ -119,7 +119,7 @@ a bound preempt gate with no armed check and
 total plus reason counts at 296B. The chain is
 pinned, then empty at most one queued, then
 deserved or hog, then same with perf bypass,
-then mask, then rate last as a single CAS.
+then mask, then rate last as a 1ms window.
 Pinned and deep count total only with no reason
 write. Deserved needs woken deadline past frontier
 plus granule plus 32us slack or occupant hog
@@ -127,7 +127,7 @@ regardless of waker class with no time cap, still
 bounded by empty plus same plus mask plus rate. Same
 keeps group with perf forced true
 and no recount, so group skips stay flat in perf.
-Mask keeps allowed, defensive, expect ~0. Rate keeps one win per slice,
+Mask keeps allowed, defensive, expect ~0. Rate keeps one 1ms window,
 win sends PREEMPT with kicks live since 4.2.41,
 miss counts total plus rate. Deserved, group, mask,
 and rate stay live since 4.2.41 with armed retired
@@ -172,7 +172,7 @@ See `src/topology.rs`, `src/snapshot.rs`, and `ui/index.html`.
 Running maps the stored EMA to 0 to 1024
 uniform both groups with no tier. Stopping
 decays by elapsed with 24ms half-life then
-climbs on the burst toward the 1ms budget
+climbs on the burst toward the 20ms budget
 with 12x in FP8, so boost follows load with
 fast attack and slow decay. Blocked with
 empty queues maps the decayed EMA, long sleep
@@ -182,7 +182,7 @@ period decay. Init and no state hold max
 `src/bpf/lifecycle.bpf.c`, and `src/bpf/main.bpf.c`.
 
 Weight follows nice from minus 20 to 19 with center 1024
-and no knob. The slice stays fixed at 1ms. The version is
+and no knob. The slice stays fixed at 20ms. The version is
 in `Cargo.toml`.
 
 ### Energy probe

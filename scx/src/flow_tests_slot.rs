@@ -396,12 +396,12 @@ fn steal_single_move_toward_budget() {
 
 #[test]
 fn token_eligible_needs_full_conjunct() {
-    assert!(token_eligible(true, 5, 1_000_000, 0, 100));
-    assert!(!token_eligible(false, 5, 1_000_000, 0, 100));
-    assert!(!token_eligible(true, 0, 1_000_000, 0, 100));
-    assert!(!token_eligible(true, 5, 1_000_001, 0, 100));
-    assert!(!token_eligible(true, 5, 1_000_000, 4_000_000, 100));
-    assert!(!token_eligible(true, 5, 1_000_000, 0, 64_001));
+    assert!(token_eligible(true, 5, 20_000_000, 0, 100));
+    assert!(!token_eligible(false, 5, 20_000_000, 0, 100));
+    assert!(!token_eligible(true, 0, 20_000_000, 0, 100));
+    assert!(!token_eligible(true, 5, 20_000_001, 0, 100));
+    assert!(!token_eligible(true, 5, 20_000_000, 80_000_000, 100));
+    assert!(!token_eligible(true, 5, 20_000_000, 0, 64_001));
     assert!(token_eligible(true, 255, 1, 0, 64_000));
 }
 

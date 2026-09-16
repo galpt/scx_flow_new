@@ -2,8 +2,8 @@
 /*
  * Flow scheduler front end
  *
- * Loads the BPF object, wires stats and the dashboard, and drives the run loop until
- * shutdown or exit. Snapshot reads live in snapshot.
+ * Loads the BPF object, wires stats and the dashboard, and drives the run loop
+ * until shutdown or exit. Snapshot reads live in snapshot.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -432,7 +432,7 @@ mod tests {
             crate::flow_slice::SLICE_NS,
             crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
         );
-        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
+        assert_eq!(crate::flow_slice::SLICE_NS, 20_000_000);
         assert_eq!(
             crate::flow_slice::EST_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64

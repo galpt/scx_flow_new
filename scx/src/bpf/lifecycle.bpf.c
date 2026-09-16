@@ -55,8 +55,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			st->occupant_group = (u8)FLOW_GROUP_HOG;
 		else
 			st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-		__sync_fetch_and_and(&st->cursor,
-		    ~(u32)FLOW_CURSOR_RATE_BIT);
 		/* Own count and close with no loop. Enqueue stamps max only, so 8 means 8 */
 		/* runnings with no double count. Dual max drops one sample max, decay */
 		/* intact, persists idle, decays at 1/8. Sample reads the per CPU */

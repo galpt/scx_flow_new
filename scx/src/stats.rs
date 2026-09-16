@@ -152,7 +152,7 @@ pub struct Metrics {
  * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
  * per-CPU map on each poll. The slice holds the fixed
- * slice at 1ms. Group holds 0 for light and 1 for hog.
+ * slice at 20ms. Group holds 0 for light and 1 for hog.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {

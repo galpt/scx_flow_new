@@ -2,7 +2,7 @@
 /*
  * Shared flow header
  *
- * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
+ * Defines the shared constants, structs, helpers with a fixed 20ms slice, two
  * groups, and per CPU FIFO slot queues. Mirrored by userspace so behavior
  * stays the same on both sides of the boundary.
  *
@@ -28,31 +28,31 @@ typedef int pid_t;
 #ifndef __noinline
 #define __noinline __attribute__((noinline))
 #endif
-/* Fixed slice at 1ms, two groups, per CPU FIFO slots. */
+/* Fixed slice at 20ms, two groups, per CPU FIFO slots. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
-	FLOW_SLICE_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_SLICE_NS = (20ULL * 1000ULL * 1000ULL),
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_NGROUPS = 2ULL,
 	FLOW_GROUP_LIGHT = 0ULL,
 	FLOW_GROUP_HOG = 1ULL,
-	FLOW_WIN_NS = (32ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURN_NS = (16ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_NS = (4ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_MID_NS = (2ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_FLOOR_NS = (1ULL * 1000ULL * 1000ULL),
-	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
-	FLOW_PROMOTE_WINS = 64ULL,
+	FLOW_WIN_NS = (640ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURN_NS = (320ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_NS = (80ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_MID_NS = (40ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_FLOOR_NS = (20ULL * 1000ULL * 1000ULL),
+	FLOW_PROMOTE_BURN_NS = (80ULL * 1000ULL * 1000ULL),
+	FLOW_PROMOTE_WINS = 3ULL,
 	FLOW_PROMOTE_WAKE_HITS = 8ULL,
-	FLOW_WAKE_SHORT_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_WAKE_SHORT_NS = (20ULL * 1000ULL * 1000ULL),
 	FLOW_HETERO_SPREAD_PCT = 10ULL,
 	FLOW_PINNED_INFLATE_NS = (8ULL * 1000ULL * 1000ULL),
 	FLOW_PERF_LIGHT = 1024ULL,
 	FLOW_PERF_HOG = 1024ULL,
 	FLOW_CPUPERF_LEVEL = 1024ULL,
 	FLOW_CPUPERF_IDLE = 0ULL,
-	FLOW_CPUPERF_BUDGET_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_CPUPERF_BUDGET_NS = (20ULL * 1000ULL * 1000ULL),
 	FLOW_CPUPERF_HALF_LIFE_NS = (24ULL * 1000ULL * 1000ULL),
 	FLOW_CPUPERF_ALPHA = 3072ULL,
 	FLOW_CPUPERF_FP_SHIFT = 8ULL,
@@ -109,7 +109,7 @@ struct flow_task_ctx {
 /* Per CPU state at 64B with delay, rate, EMA, active, and occupant. */
 /* Frontier, running, cursor, delay, and cpuperf EMA at 32B base. */
 /* The base carries 16B EMA tail with 8B active tail plus 8B occupant tail. */
-/* EMA holds the proportional budget in nanos capped at 1ms, at */
+/* EMA holds the proportional budget in nanos capped at 20ms, at */
 /* holds the last EMA update time in nanos. Active holds */
 /* lifetime active nanos charged once per run segment. Occupant holds */
 /* the group of the running task with LIGHT fallback, written in */
@@ -222,7 +222,7 @@ static __always_inline bool flow_should_restore_hint(
 {
 	return !runnable && dsq_nr == 0 && local_nr == 0;
 }
-/* Climb the EMA toward the 1ms budget with a gap step. */
+/* Climb the EMA toward the 20ms budget with a gap step. */
 /* Pure-EMA proportional at M2 with uniform both groups. */
 /* Delta clamps to the budget first with u64 order, so a */
 /* long burst never overshoots in one step. Step is gap */
@@ -319,7 +319,7 @@ static __always_inline u32 flow_cpuperf_from_ema(u64 ema)
 		return 1024;
 	return (u32)v;
 }
-/* True when one window of 32ms has passed. */
+/* True when one window of 640ms has passed. */
 static __always_inline bool flow_win_ready(u64 now,
 	u64 win_start)
 {
@@ -327,19 +327,19 @@ static __always_inline bool flow_win_ready(u64 now,
 		return false;
 	return now - win_start >= (u64)FLOW_WIN_NS;
 }
-/* True when window burn reaches 16ms for demote. */
+/* True when window burn reaches 320ms for demote. */
 static __always_inline bool flow_burn_hot(u32 burn)
 {
 	return (u64)burn >= (u64)FLOW_DEMOTE_BURN_NS;
 }
 /* Burst allowance from light depth with flood backpressure. Depth sums */
 /* queued tasks in light per CPU queues capped at 4. Table is depth 0 to 1 to */
-/* 4ms, depth 2 to 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so */
-/* lone bursts move fast with no pressure. Mild halves to 2ms so flood bursts */
-/* move earlier but still above one slice with no flap on single slices. Deep */
-/* floors at 1ms, so per task worst case is the floor during flood. Halves */
-/* keeps the view matched to dispatch isolation with no BSS cost in stopping. */
-/* Strict iff ready is zero, best effort iff ready is one. */
+/* 80ms, depth 2 to 3 to 40ms, depth 4 and above to 20ms. Quiet keeps 80ms so */
+/* lone bursts move fast with no pressure. Mild halves to 40ms so flood */
+/* bursts move earlier but still above one slice with no flap on single */
+/* slices. Deep floors at 20ms, so per task worst case is the floor during */
+/* flood. Halves keeps the view matched to dispatch isolation with no BSS */
+/* cost in stopping. Strict iff ready is zero, best effort iff ready is one. */
 static __always_inline u64 flow_burst_allowance(u64 depth)
 {
 	if (depth >= 4)
@@ -354,12 +354,12 @@ static __always_inline bool flow_burst_hot_at(u64 delta,
 {
 	return delta >= allow;
 }
-/* True when window burn stays below 4ms for promote. */
+/* True when window burn stays below 80ms for promote. */
 static __always_inline bool flow_burn_low(u32 burn)
 {
 	return (u64)burn < (u64)FLOW_PROMOTE_BURN_NS;
 }
-/* True when one block is short below 1ms for wake. */
+/* True when one block is short below 20ms for wake. */
 static __always_inline bool flow_wake_short(u64 delta)
 {
 	return delta < (u64)FLOW_WAKE_SHORT_NS;
@@ -503,7 +503,7 @@ static __always_inline bool flow_stand_held(u32 cursor)
 	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
 }
 /* Delay sample in 32us units from queued count. */
-/* One queued is 31 units, half slice arms at 16. */
+/* One queued is 31 units, 512us arms at 16. */
 /* Cap is 250 at 8ms with integer math only. */
 static __always_inline u8 flow_delay_from_queued(
 	u64 queued)
@@ -723,16 +723,15 @@ static __always_inline bool flow_deserved(u64 woken_dl,
 	return flow_time_before(woken_dl,
 	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
 }
-/* True when the rate bit is clear for one kick. Read only, so claim below */
-/* does the atomic set. Minimal with no wrap. */
+/* Retired rate check kept for layout with no gate use. */
+/* Enqueue uses the 1ms window in flow_rate_at, see enqueue. */
 static __always_inline bool flow_rate_clear(u32 cursor)
 {
 	return (cursor &
 	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
 }
-/* Atomically set rate and report prior clear. One winner per slice with no */
-/* check then set. Single CAS keeps one kick with no storm. Minimal with no */
-/* loop. */
+/* Retired rate claim kept for layout with no gate use. */
+/* Enqueue uses the 1ms window in flow_rate_at, see enqueue. */
 static __always_inline bool flow_rate_claim(u32 *cursor)
 {
 	u32 old;

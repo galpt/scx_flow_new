@@ -60,19 +60,19 @@ fn perf_is_1024_for_both_groups() {
 
 #[test]
 fn window_consts_match_spec() {
-    assert_eq!(WIN_NS, 32_000_000);
-    assert_eq!(DEMOTE_BURN_NS, 16_000_000);
-    assert_eq!(DEMOTE_BURST_NS, 4_000_000);
-    assert_eq!(DEMOTE_BURST_MID_NS, 2_000_000);
-    assert_eq!(DEMOTE_BURST_FLOOR_NS, 1_000_000);
-    assert_eq!(PROMOTE_BURN_NS, 4_000_000);
-    assert_eq!(PROMOTE_WINS, 64);
+    assert_eq!(WIN_NS, 640_000_000);
+    assert_eq!(DEMOTE_BURN_NS, 320_000_000);
+    assert_eq!(DEMOTE_BURST_NS, 80_000_000);
+    assert_eq!(DEMOTE_BURST_MID_NS, 40_000_000);
+    assert_eq!(DEMOTE_BURST_FLOOR_NS, 20_000_000);
+    assert_eq!(PROMOTE_BURN_NS, 80_000_000);
+    assert_eq!(PROMOTE_WINS, 3);
     assert_eq!(PROMOTE_WAKE_HITS, 8);
-    assert_eq!(WAKE_SHORT_NS, 1_000_000);
+    assert_eq!(WAKE_SHORT_NS, 20_000_000);
     assert_eq!(HETERO_SPREAD_PCT, 10);
     assert_eq!(PINNED_INFLATE_NS, 8_000_000);
-    assert_eq!(WIN_NS, 64 * 500_000);
-    assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 2_048_000_000);
+    assert_eq!(WIN_NS, 64 * 10_000_000);
+    assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 1_920_000_000);
     assert_eq!(DEMOTE_BURN_NS, 4 * PROMOTE_BURN_NS);
     assert_eq!(WIN_NS, crate::bpf_intf::flow_consts_FLOW_WIN_NS as u64);
     assert_eq!(
@@ -131,7 +131,7 @@ fn cold_starts_light_with_no_window() {
 }
 
 #[test]
-fn window_ready_needs_32ms() {
+fn window_ready_needs_640ms() {
     assert!(!win_ready(1_000_000, 1_000_000));
     assert!(!win_ready(1_000_000 + WIN_NS - 1, 1_000_000));
     assert!(win_ready(1_000_000 + WIN_NS, 1_000_000));
@@ -140,24 +140,24 @@ fn window_ready_needs_32ms() {
 }
 
 #[test]
-fn burst_hot_needs_4ms() {
+fn burst_hot_needs_80ms() {
     assert!(!burst_hot(0));
     assert!(!burst_hot(DEMOTE_BURST_NS - 1));
     assert!(burst_hot(DEMOTE_BURST_NS));
     assert!(burst_hot(DEMOTE_BURST_NS + 1));
-    assert!(burst_hot(16_000_000));
+    assert!(burst_hot(320_000_000));
 }
 
 /*
  * Allowance maps depth to the burst line. Quiet
- * keeps 4ms, mild halves to 2ms, deep floors at 1ms.
+ * keeps 80ms, mild halves to 40ms, deep floors at 20ms.
  * Header values match the Rust mirrors with no knob.
  */
 #[test]
 fn burst_allowance_maps_depth_to_line() {
-    assert_eq!(DEMOTE_BURST_NS, 4_000_000);
-    assert_eq!(DEMOTE_BURST_MID_NS, 2_000_000);
-    assert_eq!(DEMOTE_BURST_FLOOR_NS, 1_000_000);
+    assert_eq!(DEMOTE_BURST_NS, 80_000_000);
+    assert_eq!(DEMOTE_BURST_MID_NS, 40_000_000);
+    assert_eq!(DEMOTE_BURST_FLOOR_NS, 20_000_000);
     assert_eq!(
         DEMOTE_BURST_MID_NS,
         crate::bpf_intf::flow_consts_FLOW_DEMOTE_BURST_MID_NS as u64
@@ -166,25 +166,25 @@ fn burst_allowance_maps_depth_to_line() {
         DEMOTE_BURST_FLOOR_NS,
         crate::bpf_intf::flow_consts_FLOW_DEMOTE_BURST_FLOOR_NS as u64
     );
-    assert_eq!(burst_allowance(0), 4_000_000);
-    assert_eq!(burst_allowance(1), 4_000_000);
-    assert_eq!(burst_allowance(2), 2_000_000);
-    assert_eq!(burst_allowance(3), 2_000_000);
-    assert_eq!(burst_allowance(4), 1_000_000);
-    assert_eq!(burst_allowance(5), 1_000_000);
-    assert_eq!(burst_allowance(100), 1_000_000);
-    assert!(!burst_hot_at(3_999_999, burst_allowance(1)));
-    assert!(burst_hot_at(4_000_000, burst_allowance(1)));
-    assert!(!burst_hot_at(1_999_999, burst_allowance(2)));
-    assert!(burst_hot_at(2_000_000, burst_allowance(2)));
-    assert!(!burst_hot_at(999_999, burst_allowance(4)));
-    assert!(burst_hot_at(1_000_000, burst_allowance(4)));
+    assert_eq!(burst_allowance(0), 80_000_000);
+    assert_eq!(burst_allowance(1), 80_000_000);
+    assert_eq!(burst_allowance(2), 40_000_000);
+    assert_eq!(burst_allowance(3), 40_000_000);
+    assert_eq!(burst_allowance(4), 20_000_000);
+    assert_eq!(burst_allowance(5), 20_000_000);
+    assert_eq!(burst_allowance(100), 20_000_000);
+    assert!(!burst_hot_at(79_999_999, burst_allowance(1)));
+    assert!(burst_hot_at(80_000_000, burst_allowance(1)));
+    assert!(!burst_hot_at(39_999_999, burst_allowance(2)));
+    assert!(burst_hot_at(40_000_000, burst_allowance(2)));
+    assert!(!burst_hot_at(19_999_999, burst_allowance(4)));
+    assert!(burst_hot_at(20_000_000, burst_allowance(4)));
 }
 
 /*
  * Windowed depths keep quiet plus flood parity with
- * four reads. Quiet stays 4ms, flood still floors at
- * 1ms. Cap holds at 4.
+ * four reads. Quiet stays 80ms, flood still floors at
+ * 20ms. Cap holds at 4.
  */
 #[test]
 fn window_depths_keep_quiet_plus_flood() {
@@ -194,7 +194,7 @@ fn window_depths_keep_quiet_plus_flood() {
     // Flood fills window plus overflows to the cap.
     assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_LIGHT), (4, 4));
     assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_HOG), (4, 4));
-    // Allowance parity checks quiet 4ms and flood 1ms floor.
+    // Allowance parity checks quiet 80ms and flood 20ms floor.
     let (l, _) = slot_window_depths(0, 0, 0, 0, GROUP_LIGHT);
     assert_eq!(burst_allowance(l), DEMOTE_BURST_NS);
     let (lf, _) = slot_window_depths(2, 0, 2, 0, GROUP_LIGHT);
@@ -205,76 +205,76 @@ fn window_depths_keep_quiet_plus_flood() {
 }
 
 /*
- * Quiet keeps the 4ms line. A burst just below 4ms
- * stays light, a burst at 4ms demotes at once.
+ * Quiet keeps the 80ms line. A burst just below 80ms
+ * stays light, a burst at 80ms demotes at once.
  */
 #[test]
-fn quiet_keeps_4ms_line() {
+fn quiet_keeps_80ms_line() {
     let mut stay = GroupState::cold();
     stay.win_start = 100_000_000;
-    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 3_999_999, 0);
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 79_999_999, 0);
     assert!(!d);
     assert!(!p);
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 4_000_000, 1);
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 80_000_000, 1);
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
 }
 
 /*
- * Mild pressure uses the 2ms line. A burst just
- * below 2ms stays light, a burst at 2ms demotes.
+ * Mild pressure uses the 40ms line. A burst just
+ * below 40ms stays light, a burst at 40ms demotes.
  */
 #[test]
-fn mild_pressure_uses_2ms_line() {
+fn mild_pressure_uses_40ms_line() {
     let mut stay = GroupState::cold();
     stay.win_start = 100_000_000;
-    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 1_999_999, 2);
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 39_999_999, 2);
     assert!(!d);
     assert!(!p);
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 2_000_000, 3);
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 40_000_000, 3);
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
 }
 
 /*
- * Deep pressure demotes at the 1ms floor. A burst
- * just below 1ms stays light, a burst at 1ms moves
+ * Deep pressure demotes at the 20ms floor. A burst
+ * just below 20ms stays light, a burst at 20ms moves
  * to hog at once with per task worst case at floor.
  */
 #[test]
 fn deep_pressure_demotes_at_floor() {
     let mut stay = GroupState::cold();
     stay.win_start = 100_000_000;
-    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 999_999, 4);
+    let (d, p) = classify_step_depth(&mut stay, 101_000_000, 19_999_999, 4);
     assert!(!d);
     assert!(!p);
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 1_000_000, 4);
+    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 20_000_000, 4);
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
     let mut deep = GroupState::cold();
     deep.win_start = 100_000_000;
-    let (d3, p3) = classify_step_depth(&mut deep, 101_000_000, 1_000_000, 100);
+    let (d3, p3) = classify_step_depth(&mut deep, 101_000_000, 20_000_000, 100);
     assert!(d3);
     assert!(!p3);
     assert_eq!(deep.group, GROUP_HOG);
 }
 
 #[test]
-fn burn_hot_needs_16ms_with_4x_gap() {
+fn burn_hot_needs_320ms_with_4x_gap() {
     assert!(!burn_hot(0));
-    assert!(!burn_hot(4_000_000 - 1));
+    assert!(!burn_hot(80_000_000 - 1));
     assert!(!burn_hot((DEMOTE_BURN_NS - 1) as u32));
     assert!(burn_hot(DEMOTE_BURN_NS as u32));
     assert!(burn_hot((DEMOTE_BURN_NS + 1) as u32));
@@ -290,7 +290,7 @@ fn burst_demotes_light_at_once() {
     let mut st = GroupState::cold();
     let now = 100_000_000;
     st.win_start = now;
-    let (demoted, promoted) = classify_step(&mut st, now + 1_000_000, 4_000_000);
+    let (demoted, promoted) = classify_step(&mut st, now + 1_000_000, 80_000_000);
     assert!(demoted);
     assert!(!promoted);
     assert_eq!(st.group, GROUP_HOG);
@@ -315,7 +315,7 @@ fn short_bursts_stay_light() {
 }
 
 #[test]
-fn window_burn_demotes_at_16ms() {
+fn window_burn_demotes_at_320ms() {
     let mut st = GroupState::cold();
     let start = 100_000_000;
     st.win_start = start;
@@ -323,8 +323,8 @@ fn window_burn_demotes_at_16ms() {
     let mut now = start;
     let mut demoted = false;
     for _ in 0..8 {
-        now += 5_000_000;
-        let step = 3_000_000;
+        now += 100_000_000;
+        let step = 60_000_000;
         let (d, _) = classify_step(&mut st, now, step);
         if d {
             demoted = true;
@@ -338,20 +338,20 @@ fn window_burn_demotes_at_16ms() {
     }
     let mut st2 = GroupState::cold();
     st2.win_start = start;
-    st2.burn = 15_000_000;
+    st2.burn = 300_000_000;
     let (d2, _) = classify_step(&mut st2, start + WIN_NS + 1, 1);
     assert!(!d2);
     assert_eq!(st2.group, GROUP_LIGHT);
     let mut st3 = GroupState::cold();
     st3.win_start = start;
-    st3.burn = 16_000_000 - 500_000;
+    st3.burn = 320_000_000 - 500_000;
     let (d3, _) = classify_step(&mut st3, start + WIN_NS + 1, 500_000);
     assert!(d3);
     assert_eq!(st3.group, GROUP_HOG);
 }
 
 #[test]
-fn hog_needs_64_low_wins_near_2s() {
+fn hog_needs_3_low_wins_near_2s() {
     let mut st = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
@@ -360,14 +360,14 @@ fn hog_needs_64_low_wins_near_2s() {
         wake_hits: 0,
     };
     let mut now = st.win_start;
-    for i in 0..63 {
+    for i in 0..2 {
         now += WIN_NS + 1;
         let (d, p) = classify_step(&mut st, now, 2_000_000);
         assert!(!d);
         assert!(!p, "promote early at {i}");
         assert_eq!(st.group, GROUP_HOG);
     }
-    assert_eq!(st.low_runs, 63);
+    assert_eq!(st.low_runs, 2);
     now += WIN_NS + 1;
     let (d, p) = classify_step(&mut st, now, 2_000_000);
     assert!(!d);
@@ -386,7 +386,7 @@ fn middle_burn_breaks_streak_with_no_move() {
         wake_hits: 0,
     };
     let now = st.win_start + WIN_NS + 1;
-    let mid: u64 = 8_000_000;
+    let mid: u64 = 160_000_000;
     assert!(!burn_low(mid as u32));
     assert!(!burn_hot(mid as u32));
     let (d, p) = classify_step(&mut st, now, mid);
@@ -402,10 +402,10 @@ fn hog_burst_breaks_streak_with_no_promote() {
         group: GROUP_HOG,
         win_start: 100_000_000,
         burn: 0,
-        low_runs: 60,
+        low_runs: 2,
         wake_hits: 0,
     };
-    let (d, p) = classify_step(&mut st, 101_000_000, 4_000_000);
+    let (d, p) = classify_step(&mut st, 101_000_000, 80_000_000);
     assert!(!d);
     assert!(!p);
     assert_eq!(st.group, GROUP_HOG);
@@ -444,13 +444,13 @@ fn burn_add_caps_at_max() {
 }
 
 #[test]
-fn wake_short_needs_1ms() {
+fn wake_short_needs_20ms() {
     assert!(wake_short(0));
     assert!(wake_short(500_000));
     assert!(wake_short(WAKE_SHORT_NS - 1));
     assert!(!wake_short(WAKE_SHORT_NS));
     assert!(!wake_short(WAKE_SHORT_NS + 1));
-    assert!(!wake_short(4_000_000));
+    assert!(!wake_short(80_000_000));
 }
 
 #[test]
@@ -528,14 +528,14 @@ fn burn_gated_anti_game_breaks_wake_streak() {
         low_runs: 0,
         wake_hits: 7,
     };
-    let (d, p) = classify_step(&mut st, 101_000_000, 4_000_000);
+    let (d, p) = classify_step(&mut st, 101_000_000, 80_000_000);
     assert!(!d);
     assert!(!p);
     assert_eq!(st.wake_hits, 0);
     let mut hot = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
-        burn: 10_000_000,
+        burn: 200_000_000,
         low_runs: 0,
         wake_hits: 7,
     };
@@ -548,7 +548,7 @@ fn burn_gated_anti_game_breaks_wake_streak() {
 }
 
 #[test]
-fn slow_64_win_path_stays_intact_with_wake() {
+fn slow_3_win_path_stays_intact_with_wake() {
     let mut st = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
@@ -557,14 +557,14 @@ fn slow_64_win_path_stays_intact_with_wake() {
         wake_hits: 0,
     };
     let mut now = st.win_start;
-    for _ in 0..64 {
+    for _ in 0..3 {
         now += WIN_NS + 1;
         let _ = classify_step(&mut st, now, 2_000_000);
     }
     assert_eq!(st.group, GROUP_LIGHT);
     let mut burst = GroupState::cold();
     burst.win_start = 100_000_000;
-    let (d, _) = classify_step(&mut burst, 101_000_000, 4_000_000);
+    let (d, _) = classify_step(&mut burst, 101_000_000, 80_000_000);
     assert!(d);
     assert_eq!(burst.wake_hits, 0);
 }
@@ -1716,13 +1716,13 @@ fn idle_restore_needs_blocked_and_empty() {
 }
 
 /*
- * CPU perf EMA consts match the header at M2. Budget is 1ms, half-life is 24ms,
- * alpha is 3072 at 12x in FP8 with shift 8 and one 256. Names use the
+ * CPU perf EMA consts match the header at M2. Budget is 20ms, half-life is
+ * 24ms, alpha is 3072 at 12x in FP8 with shift 8 and one 256. Names use the
  * FLOW_CPUPERF prefix to guard FP clashes.
  */
 #[test]
 fn cpuperf_consts_match_header() {
-    assert_eq!(CPUPERF_BUDGET_NS, 1_000_000);
+    assert_eq!(CPUPERF_BUDGET_NS, 20_000_000);
     assert_eq!(CPUPERF_HALF_LIFE_NS, 24_000_000);
     assert_eq!(CPUPERF_ALPHA, 3072);
     assert_eq!(CPUPERF_FP_SHIFT, 8);
@@ -1759,14 +1759,14 @@ fn cpuperf_consts_match_header() {
  */
 #[test]
 fn ema_climb_vectors_match_spec() {
-    assert_eq!(ema_climb(0, 250_000), CPUPERF_BUDGET_NS);
-    assert_eq!(ema_climb(0, 1_000_000), CPUPERF_BUDGET_NS);
-    assert_eq!(ema_climb(0, 2_000_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 5_000_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 20_000_000), CPUPERF_BUDGET_NS);
+    assert_eq!(ema_climb(0, 40_000_000), CPUPERF_BUDGET_NS);
     assert_eq!(ema_climb(0, 0), 0);
     let mid = ema_climb(CPUPERF_BUDGET_NS / 2, 10_000);
     assert!(mid > CPUPERF_BUDGET_NS / 2);
     assert!(mid < CPUPERF_BUDGET_NS);
-    assert_eq!(mid, 560_000);
+    assert_eq!(mid, 10_060_000);
     assert_eq!(ema_climb(CPUPERF_BUDGET_NS, 0), CPUPERF_BUDGET_NS);
     assert_eq!(ema_climb(CPUPERF_BUDGET_NS, 500_000), CPUPERF_BUDGET_NS);
     assert_eq!(
@@ -1818,8 +1818,8 @@ fn ema_decay_vectors_match_spec() {
         CPUPERF_HALF_LIFE_NS / 2,
         CPUPERF_HALF_LIFE_NS,
     );
-    assert!(half_half > 700_000 && half_half < 730_000);
-    assert_eq!(half_half, 713_867);
+    assert!(half_half > 14_000_000 && half_half < 14_600_000);
+    assert_eq!(half_half, 14_277_344);
     assert_eq!(ema_decay(1_000_000, 1, 0), 1_000_000);
 }
 

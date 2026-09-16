@@ -52,6 +52,10 @@ volatile u16 flow_sibling_by_cpu[1024];
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_kick_at[1024];
+/* Last busy kick time per CPU in nanos at 1ms. */
+/* Zero init, so first kick always runs with wrap. */
+/* Enqueue only with no slide on skip, see enqueue. */
+volatile u64 flow_rate_at[1024];
 /* Governor flag for S0 and S1 with zero init strict. Zero keeps 4.2.21 paths */
 /* bit identical with group and mask isolation. One widens placement to any */
 /* allowed on in group miss with same tier order and bypasses the kick group */
@@ -204,8 +208,8 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024, */
-/* and rate bit. Atomic clear, so a concurrent claim never loses. */
+/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024. */
+/* Plain stores with no cursor use, see enqueue rate window. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -221,8 +225,6 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st->running_nice = 0;
 	st->running_weight = 1024;
 	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-	__sync_fetch_and_and(&st->cursor,
-	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Clear running only when the pid owns it, so a disable and an exit never */
 /* clears a new owner after a switch. */
@@ -244,8 +246,6 @@ static __always_inline void flow_clear_running_if_owner(
 	st->running_nice = 0;
 	st->running_weight = 1024;
 	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-	__sync_fetch_and_and(&st->cursor,
-	    ~(u32)FLOW_CURSOR_RATE_BIT);
 }
 /* Charge one leftover run segment at most once. stopping owns the normal */
 /* charge and clears run at, so a later disable and exit sees zero with no */

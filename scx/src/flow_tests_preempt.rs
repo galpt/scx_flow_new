@@ -182,12 +182,12 @@ fn delay_window_push_fast_arm_slow_fall() {
 
 #[test]
 fn granule_is_weight_aware_with_64us_floor() {
-    let slice = 1_000_000u64;
-    assert_eq!(granule_for_weight(1024, slice), 250_000);
-    assert_eq!(granule_for_weight(2048, slice), 125_000);
-    assert_eq!(granule_for_weight(256, slice), 1_000_000);
+    let slice = 20_000_000u64;
+    assert_eq!(granule_for_weight(1024, slice), 5_000_000);
+    assert_eq!(granule_for_weight(2048, slice), 2_500_000);
+    assert_eq!(granule_for_weight(256, slice), 20_000_000);
     assert_eq!(granule_for_weight(1024, 0), 64_000);
-    assert_eq!(granule_for_weight(0, slice), 250_000);
+    assert_eq!(granule_for_weight(0, slice), 5_000_000);
     assert_eq!(granule_for_weight(0, 0), 64_000);
     assert_eq!(granule_for_weight(0, 10_000), 64_000);
     assert_eq!(granule_for_weight(u32::MAX, slice), 64_000);
@@ -198,9 +198,9 @@ fn granule_is_weight_aware_with_64us_floor() {
 
 #[test]
 fn frontier_deserved_beats_floor_by_granule() {
-    let slice = 1_000_000u64;
+    let slice = 20_000_000u64;
     let gran = granule_for_weight(1024, slice);
-    assert_eq!(gran, 250_000);
+    assert_eq!(gran, 5_000_000);
     assert_eq!(DESERVED_SLACK_NS, 32_000);
     let frontier = 100_000_000u64;
     let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
@@ -210,7 +210,7 @@ fn frontier_deserved_beats_floor_by_granule() {
     assert!(deserved(bound.wrapping_sub(1), frontier, gran));
     assert!(!deserved(bound, frontier, gran));
     assert!(!deserved(bound.wrapping_add(1), frontier, gran));
-    assert!(!deserved(frontier + 1_000_000, frontier, gran));
+    assert!(!deserved(frontier + 20_000_000, frontier, gran));
     let old = u64::MAX - 10;
     let wrap_gran = 20u64;
     let wrap_sum = old.wrapping_add(wrap_gran);
@@ -230,9 +230,9 @@ fn frontier_deserved_beats_floor_by_granule() {
  */
 #[test]
 fn deserved_slack_eases_by_32us() {
-    let slice = 1_000_000u64;
+    let slice = 20_000_000u64;
     let gran = granule_for_weight(1024, slice);
-    assert_eq!(gran, 250_000);
+    assert_eq!(gran, 5_000_000);
     assert_eq!(DESERVED_SLACK_NS, 32_000);
     assert_eq!(DESERVED_SLACK_NS * 2, GRANULE_FLOOR_NS);
     let frontier = 100_000_000u64;

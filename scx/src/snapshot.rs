@@ -35,8 +35,8 @@ pub(crate) const PROBE_MIN_ARM_SECS: u64 = 20;
 /* the discard from a full arm, so twenty tolerates a few */
 /* missed ticks with no weak arm entering the sums. */
 pub(crate) const PROBE_MIN_KEPT: usize = 20;
-/* Settle seconds between arms. Two thirty second arms with two three second settles make the */
-/* sixty six second pair cycle. */
+/* Settle seconds between arms. Two thirty second arms with two three second */
+/* settles make the sixty six second pair cycle. */
 pub(crate) const PROBE_SETTLE_SECS: u64 = 3;
 /* Relative noise bound. Idle CV 21.7 percent and soak light 11.2 percent */
 /* need headroom, light 4.2 percent and load 2.0 percent stay well under, so */
@@ -1083,8 +1083,8 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Read one CPU state without heap use. Failed lookups yield an idle view
-     * with fixed slice and zero EMA. Slice stays fixed at 1ms. Zero EMA matches
-     * BSS and init with no trap.
+     * with fixed slice and zero EMA. Slice stays fixed at 20ms. Zero EMA
+     * matches BSS and init with no trap.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {
@@ -1125,7 +1125,7 @@ impl<'a> Scheduler<'a> {
     /*
      * Dashboard snapshot. Merges the static cards with live state by online
      * rank. Gauges only, no deltas. Frequency, LLC, and CPU cards stay display
-     * only and never feed placement or division. Slice stays fixed at 1ms.
+     * only and never feed placement or division. Slice stays fixed at 20ms.
      * Group follows the live table when ready, else halves fallback with no
      * trap. Offline stays out, so per CPU count matches online count. Version,
      * timestamp, topology, depths, allowance, mode, and governor join the
@@ -1493,7 +1493,8 @@ mod tests {
         let got = evaluate_arm(&spike, 30.0, &[], &[]).unwrap();
         assert_eq!(got.trimmed, 1);
         assert!((got.median_w - 7.0).abs() < 1e-9);
-        /* Light hump 18.7 percent stays under the max of 3.0 W and 0.35 times median. */
+        /* Light hump 18.7 percent stays under the max of 3.0 W and */
+        /* 0.35 times median. */
         let h = evaluate_arm(&hump, 30.0, &[], &[]).unwrap();
         assert_eq!(h.trimmed, 0);
     }
@@ -1702,8 +1703,8 @@ mod tests {
     /* Three light pairs span three times sixty six seconds. */
     #[test]
     fn throughput_three_light_pairs_take_198s() {
-        /* Pair cycle of thirty, three, thirty, and three is sixty six, three cycles are */
-        /* one hundred ninety eight with no waiting on 30 W. */
+        /* Pair cycle of thirty, three, thirty, and three is sixty six, three */
+        /* cycles are one hundred ninety eight with no waiting on 30 W. */
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 30.0, 30.0);
         run_pair(&mut p, 30.0, 30.0);

@@ -39,7 +39,7 @@ pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
 /*
  * Sample in 32us units from queued count. One queued
- * is 31 units, half slice arms at 16. Cap is 250 at
+ * is 31 units, 512us arms at 16. Cap is 250 at
  * 8ms with integer math only.
  */
 #[cfg(test)]
@@ -63,7 +63,7 @@ pub fn delay_decay(old: u8) -> u8 {
 
 /*
  * True when the delay window is armed at 16. 16 is
- * 512us in 32us units near half slice. Display
+ * 512us in 32us units with absolute use. Display
  * only since 4.2.41 with no gate use, see dots.
  */
 pub fn delay_armed(win: u8) -> bool {

@@ -639,8 +639,8 @@ pub fn filter_allowed(
 
 /*
  * Synthetic card for tests. Builds one display only card with the given id,
- * frequency, LLC, and thread role. Slice stays fixed at 1ms. Group stays light
- * with zero.
+ * frequency, LLC, and thread role. Slice stays fixed at 20ms. Group stays
+ * light with zero.
  */
 #[cfg(test)]
 pub fn synthetic_card(
