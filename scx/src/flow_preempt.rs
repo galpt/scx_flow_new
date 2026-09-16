@@ -228,8 +228,9 @@ pub fn rate_set(cursor: u32) -> u32 {
 
 /*
  * Atomically set rate and report prior clear. One
- * winner per slice with no check then set. Models
- * the BPF fetch_or claim in enqueue.
+ * winner per slice with no check then set. Models the
+ * retired per slice CAS kept for regression reference,
+ * gate 6 uses the 1ms flow_rate_at window, see enqueue.
  */
 #[cfg(test)]
 pub fn rate_claim(cursor: &mut u32) -> bool {

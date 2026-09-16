@@ -247,6 +247,7 @@ mod tests {
         assert!(s.contains("batch=32"));
     }
 
+    #[test]
     /*
      * Defaults match the shared header with the fixed slice at 20ms.
      * Kick coalesce stays at 50us with no slice use, see flow_select.

@@ -1406,7 +1406,10 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert_eq!(m2.slice_ns, 1_000_000);
     assert_eq!(m2.delay_win, 0);
     assert!(!m2.delay_armed);
-    let txt3 = "{\"id\":2,\"running_nice\":10,\"running_weight\":494,\"slice_ns\":20000000}";
+    let txt3 = concat!(
+        "{\"id\":2,\"running_nice\":10,",
+        "\"running_weight\":494,\"slice_ns\":20000000}"
+    );
     let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
     assert_eq!(m3.slice_ns, 20_000_000);
     assert_eq!(m3.running_nice, 10);

@@ -677,8 +677,8 @@ fn hog_or_truth_needs_no_time_cap() {
 /*
  * Rate claim keeps a single winner per slice. First
  * claim wins, second fails, fresh wins once more with
- * stand kept. Mirrors the BPF fetch OR claim with no
- * check then set.
+ * stand kept. Models the retired per slice CAS kept for
+ * regression reference, gate 6 uses the 1ms flow_rate_at window.
  */
 #[test]
 fn rate_claim_holds_single_winner_stable() {

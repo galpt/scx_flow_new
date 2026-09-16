@@ -218,7 +218,12 @@ fn quiet_keeps_80ms_line() {
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 80_000_000, 1);
+    let (d2, p2) = classify_step_depth(
+        &mut move_light,
+        101_000_000,
+        80_000_000,
+        1,
+    );
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
@@ -238,7 +243,12 @@ fn mild_pressure_uses_40ms_line() {
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 40_000_000, 3);
+    let (d2, p2) = classify_step_depth(
+        &mut move_light,
+        101_000_000,
+        40_000_000,
+        3,
+    );
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
@@ -259,7 +269,12 @@ fn deep_pressure_demotes_at_floor() {
     assert_eq!(stay.group, GROUP_LIGHT);
     let mut move_light = GroupState::cold();
     move_light.win_start = 100_000_000;
-    let (d2, p2) = classify_step_depth(&mut move_light, 101_000_000, 20_000_000, 4);
+    let (d2, p2) = classify_step_depth(
+        &mut move_light,
+        101_000_000,
+        20_000_000,
+        4,
+    );
     assert!(d2);
     assert!(!p2);
     assert_eq!(move_light.group, GROUP_HOG);
@@ -290,7 +305,11 @@ fn burst_demotes_light_at_once() {
     let mut st = GroupState::cold();
     let now = 100_000_000;
     st.win_start = now;
-    let (demoted, promoted) = classify_step(&mut st, now + 1_000_000, 80_000_000);
+    let (demoted, promoted) = classify_step(
+        &mut st,
+        now + 1_000_000,
+        80_000_000,
+    );
     assert!(demoted);
     assert!(!promoted);
     assert_eq!(st.group, GROUP_HOG);
