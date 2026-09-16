@@ -71,8 +71,8 @@ allowed, see governor mode. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
 rest in the task group overflow tail in arrival order.
-Placement scans up to nr CPUs outside the queue store
-constant claim. Frequency cards stay display only
+Placement scans up to nr CPUs, bounded at nr<=1024,
+outside the queue-store O(1) claim. Frequency cards stay display only
 and never shape placement. Pinned subsets stay in
 mask. Groups seed by online rank with write by id. See
 `src/bpf/select_cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.

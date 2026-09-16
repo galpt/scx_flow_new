@@ -306,8 +306,8 @@ static __always_inline u8 flow_group_live(u32 cpu,
 /* CPU, so depth reads each candidate per CPU queue with one read per */
 /* candidate. The scan keeps mask and group order with lowest id on ties */
 /* by strict less only. Missing reads zero with no trap. Placement only */
-/* scans up to nr CPUs outside the queue store O1 claim with no dispatch */
-/* use. Placement keeps live, constants frozen. */
+/* scans up to nr CPUs, bounded nr<=1024, outside queue-store O(1) with */
+/* no dispatch use. Placement keeps live, constants frozen. */
 static __always_inline s32 flow_first_in_group(
 	const struct task_struct *p, u8 group)
 {
@@ -428,8 +428,8 @@ static __always_inline s32 flow_free_in_group(
 /* backlog per CPU, so depth reads each candidate per CPU queue plus its */
 /* group overflow tail. The scan keeps mask order with lowest id on ties */
 /* by strict less only, so equal depths keep the first id with no extra */
-/* pass. Placement only scans up to nr CPUs outside the queue store O1 */
-/* claim with no dispatch use. Perf only on in group miss with same rule */
+/* pass. Placement scans up to nr CPUs, bounded nr<=1024, outside */
+/* queue-store O(1) with no dispatch use. Perf only on group miss, same rule */
 /* over the widened set. Mask always wins with no dispatch use. */
 static __always_inline s32 flow_first_allowed(
 	const struct task_struct *p)

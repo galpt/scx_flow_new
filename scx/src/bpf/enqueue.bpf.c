@@ -33,7 +33,7 @@ static __always_inline bool flow_task_pinned(
 /* queued depth with lowest id on ties. Strict keeps group only, perf */
 /* widens to any allowed on miss with same least rule over the widened */
 /* set. Mask always wins with no dispatch use. Placement only scans up */
-/* to nr CPUs outside the queue store O1 claim. */
+/* to nr CPUs, bounded at nr<=1024, outside the queue-store O(1). */
 static __always_inline s32 flow_pick_in_group(
 	const struct task_struct *p, s32 sel,
 	u8 group)
