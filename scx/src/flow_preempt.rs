@@ -254,11 +254,11 @@ pub fn same_override(same_group: bool, perf: bool) -> bool {
 /*
  * True when the bound preempt gate passes. Pinned
  * false, empty at most one queued, deserved or hog,
- * same group, mask allowed, and rate clear with kick
+ * same group, mask allowed, and rate ok with kick
  * on all pass. Branch order is pinned, empty,
  * deserved or hog, same, mask, and rate, rate last
- * as the atomic claim. Pinned plus deep count total
- * only at 296B with no reason. Armed retired frozen
+ * as the window check. Pinned plus deep count total
+ * only at 256B with no reason. Armed retired frozen
  * with display only, see delay dots.
  */
 #[cfg(test)]
@@ -268,7 +268,7 @@ pub fn preempt_ok(
     deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
-    is_rate_clear: bool,
+    rate_ok: bool,
 ) -> bool {
     if pinned {
         return false;
@@ -285,7 +285,7 @@ pub fn preempt_ok(
     if !mask_ok {
         return false;
     }
-    is_rate_clear
+    rate_ok
 }
 
 /*
@@ -293,10 +293,10 @@ pub fn preempt_ok(
  * deserved or hog, same, mask, and rate. Returns
  * none on kick, else the first failing gate. Pinned
  * plus empty map to total only with no reason write
- * at 296B, deserved maps to 2, group to 3, mask to
+ * at 256B, deserved maps to 2, group to 3, mask to
  * 4, rate to 5 with armed 1 retired frozen. Mirrors
  * the BPF sequential checks in enqueue with rate
- * last as the atomic claim.
+ * last as the window check.
  */
 #[cfg(test)]
 pub fn skip_reason(
@@ -305,7 +305,7 @@ pub fn skip_reason(
     deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
-    is_rate_clear: bool,
+    rate_ok: bool,
 ) -> Option<u8> {
     if pinned {
         return Some(6);
@@ -322,7 +322,7 @@ pub fn skip_reason(
     if !mask_ok {
         return Some(4);
     }
-    if !is_rate_clear {
+    if !rate_ok {
         return Some(5);
     }
     None

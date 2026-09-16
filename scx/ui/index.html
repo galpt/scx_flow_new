@@ -770,10 +770,6 @@
           Slot kicks:</span>
           <span class="stat-value" id="slot-kicks">0</span>
         </div>
-        <div><span style="color:var(--text-muted)">
-          Wheel skips (frozen):</span>
-          <span class="stat-value" id="wheel-skips">0</span>
-        </div>
       </div>
     </div>
 
@@ -1360,8 +1356,6 @@
         fmt(s.slot_defer || 0);
       el('slot-kicks').textContent =
         fmt(s.slot_kicks || 0);
-      el('wheel-skips').textContent =
-        fmt(s.wheel_skips || 0);
 
       renderCoreCards(data);
     }

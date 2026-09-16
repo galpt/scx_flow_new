@@ -24,7 +24,7 @@ pub const KICK_COALESCE_NS: u64 = 50_000;
 
 /*
  * Start peer for one dispatch from the cursor.
- * Masks rate plus stand then steps one with wrap,
+ * Masks stand then steps one with wrap,
  * so repeated passes spread across peers with no
  * hot spot. Mirrors the BPF start read once per
  * dispatch with mask. See src/bpf/dispatch.bpf.c
@@ -66,11 +66,11 @@ pub fn steal_peers_from(start: u32, nr_cpus: usize) -> Vec<u32> {
 
 /*
  * Start step for one steal scan from a cursor.
- * Masks rate plus stand then steps one with wrap,
+ * Masks stand then steps one with wrap,
  * so this models the per dispatch start read with
  * no queue use. The cursor advance is separate at
  * stride 8 with 4 compare and swap tries that keep
- * rate plus stand, see cursor_store in flow_preempt
+ * stand, see cursor_store in flow_preempt
  * plus src/bpf/dispatch.bpf.c for the advance use.
  */
 #[cfg(test)]

@@ -439,13 +439,8 @@ mod tests {
         assert_eq!(m.stats.preempt_skipped_mask, 0);
         assert_eq!(m.stats.preempt_skipped_rate, 0);
         assert_eq!(m.stats.kick_coalesced, 0);
-        assert_eq!(m.stats.wheel_skips, 0);
         assert_eq!(m.stats.wheel_overflow, 0);
         assert_eq!(m.stats.token_boosts, 0);
-        assert_eq!(m.stats.wheel_head_hits, 0);
-        assert_eq!(m.stats.wheel_fine_hits, 0);
-        assert_eq!(m.stats.wheel_coarse_hits, 0);
-        assert_eq!(m.stats.wheel_empty, 0);
         assert_eq!(m.stats.slot_kicks, 0);
         assert_eq!(m.stats.token_cas_fails, 0);
         assert_eq!(m.stats.slot_moves, 0);
@@ -502,13 +497,8 @@ mod tests {
                 preempt_skipped_group: 1,
                 preempt_skipped_mask: 1,
                 preempt_skipped_rate: 2,
-                wheel_skips: 11,
                 wheel_overflow: 1,
                 token_boosts: 2,
-                wheel_head_hits: 5,
-                wheel_fine_hits: 3,
-                wheel_coarse_hits: 1,
-                wheel_empty: 4,
                 slot_kicks: 2,
                 token_cas_fails: 0,
                 slot_moves: 40,
@@ -557,13 +547,8 @@ mod tests {
         assert!(txt.contains("preempt_skipped_mask"));
         assert!(txt.contains("preempt_skipped_rate"));
         assert!(txt.contains("kick_coalesced"));
-        assert!(txt.contains("wheel_skips"));
         assert!(txt.contains("wheel_overflow"));
         assert!(txt.contains("token_boosts"));
-        assert!(txt.contains("wheel_head_hits"));
-        assert!(txt.contains("wheel_fine_hits"));
-        assert!(txt.contains("wheel_coarse_hits"));
-        assert!(txt.contains("wheel_empty"));
         assert!(txt.contains("slot_kicks"));
         assert!(txt.contains("token_cas_fails"));
         assert!(txt.contains("slot_moves"));
@@ -594,13 +579,8 @@ mod tests {
         assert_eq!(back.stats.preempt_skipped_mask, 1);
         assert_eq!(back.stats.preempt_skipped_rate, 2);
         assert_eq!(back.stats.kick_coalesced, 2);
-        assert_eq!(back.stats.wheel_skips, 11);
         assert_eq!(back.stats.wheel_overflow, 1);
         assert_eq!(back.stats.token_boosts, 2);
-        assert_eq!(back.stats.wheel_head_hits, 5);
-        assert_eq!(back.stats.wheel_fine_hits, 3);
-        assert_eq!(back.stats.wheel_coarse_hits, 1);
-        assert_eq!(back.stats.wheel_empty, 4);
         assert_eq!(back.stats.slot_kicks, 2);
         assert_eq!(back.stats.token_cas_fails, 0);
         assert_eq!(back.stats.slot_moves, 40);
@@ -678,7 +658,6 @@ mod tests {
         assert!(html.contains("slot_moves"));
         assert!(html.contains("slot_defer"));
         assert!(html.contains("slot_kicks"));
-        assert!(html.contains("wheel_skips"));
     }
 
     /* Dashboard shows the cross steal cell. */

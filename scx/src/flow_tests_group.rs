@@ -1859,7 +1859,8 @@ fn cpuperf_elapsed_is_wrap_safe() {
  * stay stable. Active feeds the energy probe with
  * full u64 wrap deltas in userspace. Occupant holds the
  * running group with LIGHT fallback and post-empty read.
- * Stats stay 296B, so old offsets stay stable.
+ * Stats shrink to 256B with frozen wheel drops, so tail offsets
+ * shift once with no new writes.
  */
 #[test]
 fn cpu_state_grows_to_64_with_occupant_tail() {
@@ -1877,6 +1878,6 @@ fn cpu_state_grows_to_64_with_occupant_tail() {
     assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     assert_eq!(
         std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-        296
+        256
     );
 }

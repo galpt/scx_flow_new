@@ -131,7 +131,7 @@ struct flow_cpu_state {
 	u64 active_ns;
 	u8 occupant_group;
 };
-/* Counters at 296B with group, coalesce, wheel, token, and slot. Total keeps */
+/* Counters at 256B with group, coalesce, overflow, token, slot. Total keeps */
 /* the sum for compat. Busy uses the bound gate with empty first plus */
 /* deserved or hog plus same plus mask plus rate, so busy kicks count */
 /* under kicks live since 4.2.41 and busy no kicks count under total */
@@ -140,9 +140,8 @@ struct flow_cpu_state {
 /* no other reason write. Mask stays defensive, expect ~0 with outer */
 /* check. Coalesced counts q2 idle skips in 50us. */
 /* Overflow counts tail pins past the horizon, boosts counts token spends, */
-/* and cas fails counts lost token races. Armed plus skips plus head */
-/* plus fine plus coarse plus empty stay frozen for compat, so old offsets */
-/* stay stable with no new writes. Slot moves counts all */
+/* and cas fails counts lost token races. Armed stays frozen for compat, */
+/* so tail offsets shift once with no new writes. Slot moves counts all */
 /* FIFO tasks moved via slot drains, park moves counts the overflow subset, */
 /* steal moves counts all peer moves, steal x moves counts the cross */
 /* subset with post hoc LSB compare and unconditional adds, slot kicks */
@@ -174,13 +173,8 @@ struct flow_sched_stats {
 	u64 preempt_skipped_group;
 	u64 preempt_skipped_mask;
 	u64 preempt_skipped_rate;
-	u64 wheel_skips;
 	u64 wheel_overflow;
 	u64 token_boosts;
-	u64 wheel_head_hits;
-	u64 wheel_fine_hits;
-	u64 wheel_coarse_hits;
-	u64 wheel_empty;
 	u64 slot_kicks;
 	u64 token_cas_fails;
 	u64 slot_moves;

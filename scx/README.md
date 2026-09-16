@@ -98,7 +98,7 @@ one shared drain. Fold counts all peer moves in
 steal_moves with post hoc LSB compare in steal_xmoves with
 unconditional adds. Single move keeps tail smooth with local trips
 owning the window. Cursor steps by 8 with a bounded swap
-in 4 tries that keeps rate plus stand and drops on race. Single CPU
+in 4 tries that keeps stand and drops on race. Single CPU
 hosts skip the pass. Pinned tasks rest in overflow, so
 trips visit them each pass. Own at 31 leaves budget open
 for overflow plus steal. A capped drain with work left
@@ -116,7 +116,7 @@ Idle targets are always kicked with a mask check
 regardless of queue depth, so no idle CPU with
 queued work sleeps unkicked. Busy targets use
 a bound preempt gate with no armed check and
-total plus reason counts at 296B. The chain is
+total plus reason counts at 256B. The chain is
 pinned, then empty at most one queued, then
 deserved or hog, then same with perf bypass,
 then mask, then rate last as a 1ms window.
@@ -134,7 +134,7 @@ and rate stay live since 4.2.41 with armed retired
 frozen for compat. Occupant group rides a u8 tail
 at 64B with LIGHT fallback, written in running,
 cleared with pid. One coalesced count covers q2 idle
-skips in 50us at 296B. Second queued to idle in 50us
+skips in 50us at 256B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
 Delay persists across idle, shows stale
