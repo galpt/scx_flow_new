@@ -515,7 +515,7 @@
           <span class="stat-value" id="energy-yearly" style="display:none">unavailable</span>
           <a class="energy-ref" href="#energy-note-1"
             style="display:none">[1]<span
-            class="energy-tip">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf.</span></a>
+            class="energy-tip">Placement follows the governor only. Headline parked while the probe holds strict.</span></a>
           <a class="energy-ref" href="#energy-note-2"
             style="display:none">[2]<span
             class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
@@ -544,7 +544,7 @@
       </p>
       <p id="energy-live" style="margin-top:4px;
         font-family: Georgia, 'Times New Roman', Times, serif;
-        font-size:0.75rem;color:var(--text-secondary)">waiting for 3 accepted pairs</p>
+        font-size:0.75rem;color:var(--text-secondary)">headline parked, probe holds strict</p>
       <div id="energy-legend" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-secondary)">
         <p class="legend-row"><span class="legend-sym"><i>E_saved</i></span> <span class="legend-def">is saved energy in kWh over the span.</span></p>
@@ -559,13 +559,13 @@
       <p id="energy-note" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-muted)"></p>
       <p id="energy-footnote" style="margin-top:4px;
-        font-size:0.75rem;color:var(--text-muted)">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</p>
+        font-size:0.75rem;color:var(--text-muted)">Placement follows the governor only. Headline parked while the probe holds strict.</p>
       <div id="energy-notes" style="display:none">
         <hr style="border:none;border-top:1px solid var(--border);
           margin:1.5em 0">
         <p class="subsection-label">Notes</p>
         <ol class="energy-notes-list">
-          <li id="energy-note-1">Perf arms widen placement with natural hints at about 45 percent duty. Headline extrapolates strict versus forced perf. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+          <li id="energy-note-1">Placement follows the governor only. Headline parked while the probe holds strict. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
           <li id="energy-note-2">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
         </ol>
       </div>
@@ -1091,10 +1091,10 @@
           (energy.accepted_pairs || 0) + ' accepted, ' +
           (energy.rejected_pairs || 0) + ' rejected';
         note = 'Waiting for load above 20 W. ' +
-          'Headlines need 3 accepted pairs.';
+          'Headline parked with no compare.';
       } else if (!energy.has_headline) {
         var have = energy.accepted_pairs || 0;
-        var waiting = 'collecting ' + have + '/3 pairs';
+        var waiting = 'headline parked';
         el('energy-daily').textContent = waiting;
         el('energy-daily-kwh').textContent = waiting;
         el('energy-yearly').textContent = waiting;
@@ -1103,8 +1103,8 @@
         el('energy-pairs').textContent =
           have + ' accepted, ' +
           (energy.rejected_pairs || 0) + ' rejected';
-        note = 'Collecting pairs. ' +
-          'Headlines need 3 accepted pairs.';
+        note = 'Collecting strict arms. ' +
+          'Headline parked with no compare.';
       } else {
         var conf = energy.low_confidence ?
           ' (low confidence)' : '';
@@ -1137,7 +1137,7 @@
       } else if (state === 'waiting') {
         live = 'waiting for load above 20 W';
       } else if (!energy.has_headline) {
-        live = 'waiting for 3 accepted pairs';
+        live = 'headline parked, probe holds strict';
       } else {
         var saveW = (energy.daily_kwh || 0) * 1000 / 24;
         live = '(' + fmtLiveNum(saveW) +
@@ -1190,9 +1190,9 @@
 
       /* Energy savings with daily, yearly, and trace. */
       /* Unavailable stays literal, baseline stays paused, */
-      /* collecting waits for three pairs, headlines show */
-      /* one ratio in percent and kWh. Yearly */
-      /* is a projection, since running is an estimate. */
+      /* collecting holds strict arms, headline stays parked */
+      /* with no compare. Yearly is a projection, */
+      /* since running is an estimate. */
       updateEnergy(data);
 
       var s = data.stats || {};

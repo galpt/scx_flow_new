@@ -415,12 +415,13 @@ pub(crate) struct ProbeSample<'a> {
 }
 
 /*
- * A/B probe over package joules. Alternates strict and perf arms with settle
- * gaps, judges each pair as a unit, and keeps the ratio of sums once three
- * pairs land. Idle parks in waiting on low W with no pair cost, load returns on
- * high W, timeout tries one pair with re wait. Suspend, resume, hotplug, and
- * gaps discard the in flight pair with no partial credit. Restart clears all
- * history, since nothing is stored off process.
+ * Strict only probe over package joules. Holds strict arms with settle
+ * gaps and keeps no compare, so accepted stays zero with headline
+ * parked. Idle parks in waiting on low W with no pair cost, load returns
+ * on high W, timeout tries one pair with re wait. Suspend, resume,
+ * hotplug, and gaps discard the in flight pair with no partial credit.
+ * Restart clears all history, since nothing is stored off process.
+ * Placement follows the governor only with no probe force.
  */
 pub(crate) struct EnergyProbe {
     state: ProbeState,
@@ -467,7 +468,7 @@ impl EnergyProbe {
             state: ProbeState::Collecting,
             phase: ProbePhase::Settle,
             phase_left: PROBE_SETTLE_SECS,
-            perf_first: true,
+            perf_first: false,
             pending_perf: false,
             arm: Vec::new(),
             arm_wall_s: 0.0,
@@ -502,7 +503,7 @@ impl EnergyProbe {
         p
     }
 
-    /* True while the perf arm wants the internal force. */
+    /* Pinned false with the probe frozen strict. */
     pub(crate) fn want_force(&self) -> bool {
         self.want_force
     }
@@ -527,31 +528,30 @@ impl EnergyProbe {
     }
 
     /* Open one arm with a fresh window. */
+    /* Probe stays frozen strict, so perf stays false. */
     fn begin_arm(&mut self, perf: bool) {
+        debug_assert!(!perf, "probe frozen strict.");
         self.arm.clear();
         self.arm_wall_s = 0.0;
         self.settle_wall_s = 0.0;
         self.pending_miss_s = 0.0;
         self.arm_active_start.clear();
-        self.phase = if perf {
-            ProbePhase::Perf
-        } else {
-            ProbePhase::Strict
-        };
+        self.phase = ProbePhase::Strict;
         self.phase_left = PROBE_ARM_SECS.max(PROBE_MIN_ARM_SECS);
-        self.want_force = perf;
+        self.want_force = false;
     }
 
-    /* Open one pair through settle with alternating order. */
+    /* Open one pair through settle with strict order. */
+    /* Freeze holds no alternation with pending false. */
     fn begin_pair(&mut self) {
-        self.perf_first = !self.perf_first;
+        self.perf_first = false;
         self.first = None;
         self.arm.clear();
         self.arm_wall_s = 0.0;
         self.settle_wall_s = 0.0;
         self.pending_miss_s = 0.0;
         self.arm_active_start.clear();
-        self.pending_perf = self.perf_first;
+        self.pending_perf = false;
         self.phase = ProbePhase::Settle;
         self.phase_left = PROBE_SETTLE_SECS;
         self.want_force = false;
@@ -595,16 +595,18 @@ impl EnergyProbe {
     }
 
     /* Close one arm and move the pair forward. */
+    /* Freeze keeps strict only with no sums, so accepted stays zero. */
     fn finish_arm(&mut self, active_end: &[stats::PerCpuMetrics]) {
         let is_perf = self.phase == ProbePhase::Perf;
+        debug_assert!(!is_perf, "probe frozen strict.");
         let wall = self.arm_wall_s;
         self.last_active = Self::active_hint(&self.arm_active_start, active_end, wall);
         match evaluate_arm(&self.arm, wall, &self.arm_active_start, active_end) {
             Ok(stats) => {
                 if self.first.is_none() {
                     self.first = Some(stats);
-                    self.first_is_perf = is_perf;
-                    self.pending_perf = !is_perf;
+                    self.first_is_perf = false;
+                    self.pending_perf = false;
                     self.phase = ProbePhase::Settle;
                     self.phase_left = PROBE_SETTLE_SECS;
                     self.want_force = false;
@@ -614,28 +616,21 @@ impl EnergyProbe {
                     self.pending_miss_s = 0.0;
                     self.arm_active_start.clear();
                 } else {
+                    /* Parked compare keeps arms for trace with no sums. */
                     let first = self.first.unwrap_or_default();
                     let (strict, perf) = if self.first_is_perf {
                         (stats, first)
                     } else {
                         (first, stats)
                     };
-                    let delta = perf.joules - strict.joules;
-                    self.sum_d_j += delta;
-                    self.sum_perf_j += perf.joules;
-                    self.sum_secs += strict.secs + perf.secs;
-                    self.sum_perf_secs += perf.secs;
-                    self.sum_strict_secs += strict.secs;
-                    self.accepted_pairs += 1;
-                    self.last_pair = Some(PairRecord {
-                        strict_j: strict.joules,
-                        perf_j: perf.joules,
-                        delta_j: delta,
-                        secs: strict.secs + perf.secs,
-                    });
                     self.last_strict = Some(strict);
                     self.last_perf = Some(perf);
                     self.last_reject = None;
+                    /* Keep joules live for helpers with no sums use. */
+                    let _ = strict.joules;
+                    let _ = strict.secs;
+                    let _ = perf.joules;
+                    let _ = perf.secs;
                     self.begin_pair();
                 }
             }
@@ -791,29 +786,8 @@ impl EnergyProbe {
         if let Some((id, share)) = &self.last_active {
             t.push_str(&format!("active max CPU{id} {share:.1} percent of wall\n"));
         }
-        match headline_pct(self.sum_d_j, self.sum_perf_j, self.accepted_pairs) {
-            Some(pct) => {
-                t.push_str(&format!(
-                    "headline {pct:+.2} percent over {} pairs",
-                    self.accepted_pairs
-                ));
-                if self.accepted_pairs <= 4 {
-                    t.push_str(", low confidence");
-                }
-                t.push('\n');
-            }
-            None => {
-                t.push_str(&format!(
-                    "headline needs {} pairs, have {}\n",
-                    PROBE_MIN_PAIRS, self.accepted_pairs
-                ));
-            }
-        }
-        if self.state != ProbeState::Unavailable {
-            t.push_str(
-                "perf arms widen placement with natural hints at about 45 percent duty, headline extrapolates strict versus forced perf\n",
-            );
-        }
+        /* Headline stays parked with strict only and no compare. */
+        t.push_str("headline parked, probe holds strict with no compare\n");
         self.trace = t;
     }
 
@@ -943,12 +917,14 @@ impl EnergyProbe {
                 self.settle_wall_s += s.dt_s;
                 self.refresh_countdown();
                 if self.settle_wall_s >= PROBE_SETTLE_SECS as f64 {
-                    self.begin_arm(self.pending_perf);
+                    /* Freeze pins strict with no perf arm. */
+                    self.begin_arm(false);
                     self.refresh_countdown();
                 }
             }
             ProbePhase::Strict | ProbePhase::Perf => {
-                self.want_force = self.phase == ProbePhase::Perf;
+                /* Freeze holds strict only with force pinned false. */
+                self.want_force = false;
                 if self.arm.is_empty() && self.arm_wall_s == 0.0 {
                     self.arm_active_start = s.active.to_vec();
                 }
@@ -993,34 +969,24 @@ impl EnergyProbe {
     }
 
     /* Snapshot view for the dashboard schema. */
-    pub(crate) fn output(&self, uptime_s: f64) -> EnergyMetrics {
-        let pct = headline_pct(self.sum_d_j, self.sum_perf_j, self.accepted_pairs);
-        let has = pct.is_some();
-        let sum_strict_j = self.sum_perf_j - self.sum_d_j;
-        let save_w = if has {
-            saved_watts(
-                self.sum_perf_j,
-                self.sum_perf_secs,
-                sum_strict_j,
-                self.sum_strict_secs,
-            )
-        } else {
-            0.0
-        };
-        let p = pct.unwrap_or(0.0);
-        let (daily_kwh, yearly_kwh, since_kwh) = if has {
-            (
-                energy_kwh(save_w, 24.0),
-                energy_kwh(save_w, 8760.0),
-                energy_kwh(save_w, uptime_s / 3600.0),
-            )
-        } else {
-            (0.0, 0.0, 0.0)
-        };
+    /* Headline stays parked with no live compare. */
+    pub(crate) fn output(&self, _uptime_s: f64) -> EnergyMetrics {
+        /* Freeze parks the headline with zeroed savings. */
+        /* Keep helpers live for tests with no headline use. */
+        let _ = headline_pct(self.sum_d_j, self.sum_perf_j, self.accepted_pairs);
+        let _ = saved_watts(self.sum_perf_j, self.sum_perf_secs, 0.0, 1.0);
+        let _ = energy_kwh(0.0, 0.0);
+        let _ = self.sum_secs;
+        let _ = self.sum_strict_secs;
+        let has = false;
+        let p = 0.0;
+        let daily_kwh = 0.0;
+        let yearly_kwh = 0.0;
+        let since_kwh = 0.0;
         EnergyMetrics {
             state: self.state_text().to_string(),
             has_headline: has,
-            low_confidence: has && self.accepted_pairs <= 4,
+            low_confidence: false,
             headline_pct: p,
             accepted_pairs: self.accepted_pairs,
             rejected_pairs: self.rejected_pairs,
@@ -1213,9 +1179,9 @@ impl<'a> Scheduler<'a> {
             crate::topology::describe_topology(&self.cpu_static)
         };
         /*
-         * Energy probe tick at 1s cadence. Samples package joules and per CPU
-         * active time, then drives the strict and perf arms. The BSS force
-         * follows arm transitions only, so strict stays quiet.
+         * Energy probe tick at 1s cadence. Samples package joules and per
+         * CPU active time, then drives strict arms only with headline
+         * parked. Placement follows the governor only with no BSS force.
          */
         let now_tick = std::time::Instant::now();
         let rapl_due = self
@@ -1242,14 +1208,8 @@ impl<'a> Scheduler<'a> {
                 online_changed: changed,
                 active: &per_cpu,
             });
-            let want: u8 = if self.probe.want_force() { 1 } else { 0 };
-            if want != self.probe_force {
-                self.probe_force = want;
-                if let Some(bss) = self.skel.maps.bss_data.as_mut() {
-                    bss.flow_probe_perf = want;
-                }
-                log::info!("probe force {want}");
-            }
+            /* Keep force getter live for tests with no BSS use. */
+            let _ = self.probe.want_force();
             let uptime_s = self.started_at.elapsed().as_secs_f64();
             self.energy = self.probe.output(uptime_s);
             self.rapl_read_at = Some(now_tick);
@@ -1680,7 +1640,7 @@ mod tests {
         assert!(p.accepted_pairs >= have);
     }
 
-    /* Waiting holds strict force with no perf widen. */
+    /* Waiting holds strict with force pinned false. */
     #[test]
     fn waiting_holds_strict_force() {
         let mut p = EnergyProbe::new();
@@ -1697,7 +1657,7 @@ mod tests {
         assert_eq!(p.output(200.0).state, "waiting");
     }
 
-    /* Three light pairs span three times sixty six seconds. */
+    /* Three strict cycles span three times sixty six seconds. */
     #[test]
     fn throughput_three_light_pairs_take_198s() {
         /* Pair cycle of thirty, three, thirty, and three is sixty six, three */
@@ -1706,7 +1666,8 @@ mod tests {
         run_pair(&mut p, 30.0, 30.0);
         run_pair(&mut p, 30.0, 30.0);
         run_pair(&mut p, 30.0, 30.0);
-        assert_eq!(p.accepted_pairs, 3);
+        assert_eq!(p.accepted_pairs, 0);
+        assert!(!p.output(500.0).has_headline);
         assert_eq!(
             3 * (PROBE_ARM_SECS + PROBE_SETTLE_SECS + PROBE_ARM_SECS + PROBE_SETTLE_SECS),
             198
@@ -1745,23 +1706,27 @@ mod tests {
         assert!(evaluate_arm(&samples, 30.0, &[], &[]).is_ok());
     }
 
-    /* One pair never headlines, three pairs do. */
+    /* One pair never headlines with parked headline. */
     #[test]
     fn one_pair_never_headlines() {
+        /* Ratio needs three pairs with perf past one millijoule. */
+        assert!(headline_pct(1.0, 100.0, 1).is_none());
+        assert!(headline_pct(1.0, 100.0, 3).is_some());
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 50.0, 49.0);
-        assert_eq!(p.accepted_pairs, 1);
+        assert_eq!(p.accepted_pairs, 0);
         let e = p.output(3600.0);
         assert_eq!(e.state, "collecting");
         assert!(!e.has_headline);
         assert_eq!(e.headline_pct, 0.0);
         run_pair(&mut p, 50.0, 49.0);
+        assert_eq!(p.accepted_pairs, 0);
         assert!(!p.output(3600.0).has_headline);
         run_pair(&mut p, 49.0, 50.0);
         let e3 = p.output(3600.0);
-        assert!(e3.has_headline);
-        assert!(e3.low_confidence);
-        assert_eq!(e3.accepted_pairs, 3);
+        assert!(!e3.has_headline);
+        assert!(!e3.low_confidence);
+        assert_eq!(e3.accepted_pairs, 0);
         assert_eq!(e3.rejected_pairs, 0);
     }
 
@@ -1772,16 +1737,17 @@ mod tests {
         run_pair(&mut p, 100.0, 90.0);
         run_pair(&mut p, 45.0, 50.0);
         run_pair(&mut p, 200.0, 190.0);
+        assert_eq!(p.accepted_pairs, 0);
         let e = p.output(7200.0);
-        assert!(e.has_headline);
+        assert!(!e.has_headline);
+        assert_eq!(e.headline_pct, 0.0);
+        assert_eq!(e.daily_pct, 0.0);
+        assert_eq!(e.yearly_pct, 0.0);
+        /* Hand sums keep minus six twenty five over eighty one */
+        /* twenty five with no mean of ratios. */
         let want = -625.0 / 8125.0 * 100.0;
-        assert!(
-            (e.headline_pct - want).abs() < 1e-6,
-            "got {}",
-            e.headline_pct
-        );
-        assert!((e.daily_pct - want).abs() < 1e-9);
-        assert!((e.yearly_pct - want).abs() < 1e-9);
+        let got = headline_pct(-625.0, 8125.0, 3).unwrap();
+        assert!((got - want).abs() < 1e-6, "got {}", got);
     }
 
     /* Daily, yearly, and since running share one saved W. */
@@ -1797,10 +1763,12 @@ mod tests {
         run_pair(&mut p, 50.0, 49.0);
         run_pair(&mut p, 49.0, 50.0);
         run_pair(&mut p, 50.0, 49.0);
+        assert_eq!(p.accepted_pairs, 0);
         let e = p.output(3600.0);
-        assert!((e.daily_kwh - -0.024).abs() < 1e-9, "got {}", e.daily_kwh);
-        assert!((e.yearly_kwh - -8.76).abs() < 1e-9, "got {}", e.yearly_kwh);
-        assert!((e.since_running_kwh - -0.001).abs() < 1e-12);
+        assert!(!e.has_headline);
+        assert_eq!(e.daily_kwh, 0.0);
+        assert_eq!(e.yearly_kwh, 0.0);
+        assert_eq!(e.since_running_kwh, 0.0);
     }
 
     /* Per arm means carry no bias with unequal kept durations. */
@@ -1815,17 +1783,19 @@ mod tests {
         assert_eq!(PROBE_MIN_J, 1e-3);
     }
 
-    /* One or two pairs keep all kWh at zero with no headline. */
+    /* Parked headline keeps all kWh at zero with no compare. */
     #[test]
     fn no_headline_keeps_kwh_at_zero() {
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 50.0, 49.0);
+        assert_eq!(p.accepted_pairs, 0);
         let one = p.output(3600.0);
         assert!(!one.has_headline);
         assert_eq!(one.daily_kwh, 0.0);
         assert_eq!(one.yearly_kwh, 0.0);
         assert_eq!(one.since_running_kwh, 0.0);
         run_pair(&mut p, 50.0, 49.0);
+        assert_eq!(p.accepted_pairs, 0);
         let two = p.output(7200.0);
         assert!(!two.has_headline);
         assert_eq!(two.daily_kwh, 0.0);
@@ -1864,8 +1834,9 @@ mod tests {
         }
         run_settle(&mut p);
         run_arm(&mut p, 50.0);
-        assert_eq!(p.accepted_pairs, 1);
+        assert_eq!(p.accepted_pairs, 0);
         assert_eq!(p.rejected_pairs, 0);
+        assert!(!p.output(60.0).has_headline);
         let strict = p.last_strict.expect("pair keeps strict arm");
         let perf = p.last_perf.expect("pair keeps perf arm");
         assert!((strict.mean_w - 50.0).abs() < 1e-9, "got {}", strict.mean_w);
@@ -1881,7 +1852,7 @@ mod tests {
         let mut p = EnergyProbe::new();
         p.sum_d_j = -0.0004;
         p.sum_perf_j = 0.0005;
-        p.accepted_pairs = 3;
+        p.accepted_pairs = 0;
         assert!(p.output(60.0).has_headline == false);
     }
 
@@ -1906,6 +1877,8 @@ mod tests {
         let want = (PROBE_ARM_SECS as f64 - 2.0).ceil() as u64;
         assert_eq!(p.output(10.0).countdown_s, want);
         assert_eq!(want, 28);
+        assert_eq!(p.accepted_pairs, 0);
+        assert!(!p.output(10.0).has_headline);
         let small = ProbeSample {
             rapl_present: true,
             delta_uj: Some(25_000_000),
@@ -1937,7 +1910,7 @@ mod tests {
         assert_eq!(p.accepted_pairs, 0);
     }
 
-    /* Five pairs clear the low confidence hint. */
+    /* Five strict cycles stay parked with no confidence hint. */
     #[test]
     fn five_pairs_clear_low_confidence() {
         let mut p = EnergyProbe::new();
@@ -1945,9 +1918,9 @@ mod tests {
             run_pair(&mut p, 50.0, 49.0);
         }
         let e = p.output(3600.0);
-        assert!(e.has_headline);
+        assert!(!e.has_headline);
         assert!(!e.low_confidence);
-        assert_eq!(e.accepted_pairs, 5);
+        assert_eq!(e.accepted_pairs, 0);
     }
 
     /* Perf governor suspends into baseline with force clear. */
@@ -2018,19 +1991,18 @@ mod tests {
         assert_eq!(p.output(200.0).state, "collecting");
     }
 
-    /* Order alternates strict first then perf first. */
+    /* Probe stays frozen strict with no perf arm. */
     #[test]
-    fn order_alternates_per_pair() {
+    fn probe_frozen_strict_with_no_perf() {
         let mut p = EnergyProbe::new();
-        let mut force_seen = Vec::new();
         for _ in 0..(66 * 2 + 5) {
             let q = quiet(50.0);
             p.tick(&q);
-            force_seen.push(p.want_force());
+            assert!(!p.want_force());
+            assert_ne!(p.phase, ProbePhase::Perf);
         }
-        assert!(!force_seen[10]);
-        assert!(force_seen[70]);
-        assert_eq!(p.accepted_pairs, 2);
+        assert_eq!(p.accepted_pairs, 0);
+        assert!(!p.output(3600.0).has_headline);
     }
 
     /* Missing RAPL parks the probe unavailable. */
@@ -2049,7 +2021,7 @@ mod tests {
         assert!(e.trace.contains("unavailable"));
     }
 
-    /* Trace carries state, counts, and derivation. */
+    /* Trace carries state, counts, and parked strict line. */
     #[test]
     fn trace_carries_derivation() {
         let mut p = EnergyProbe::new();
@@ -2057,16 +2029,11 @@ mod tests {
         run_pair(&mut p, 50.0, 49.0);
         run_pair(&mut p, 49.0, 50.0);
         assert!(p.trace.contains("collecting"));
-        assert!(p.trace.contains("accepted 3"));
+        assert!(p.trace.contains("accepted 0"));
         assert!(p.trace.contains("rejected 0"));
-        assert!(p.trace.contains("last pair"));
-        assert!(p.trace.contains("median"));
-        assert!(p.trace.contains("p50"));
-        assert!(p.trace.contains("p99"));
+        assert!(p.trace.contains("strict"));
+        assert!(p.trace.contains("parked"));
         assert!(p.trace.contains("headline"));
-        assert!(p.trace.contains("perf arms widen placement"));
-        assert!(p.trace.contains("45 percent duty"));
-        assert!(p.trace.contains("strict versus forced perf"));
         assert!(!p.trace.contains("cpu0"));
     }
 

@@ -578,20 +578,18 @@ static __always_inline bool flow_kick_recent(u64 now,
 	return now - last <
 	    (u64)FLOW_KICK_COALESCE_NS;
 }
-/* True when perf mode is on for S0 and S1. BSS flag holds zero for strict */
-/* and one for perf. Zero init keeps strict paths bit identical. Probe force */
-/* joins here, so one predicate covers grouping in select and enqueue with */
-/* strict default bit for bit. Perf arms widen placement with natural hints */
-/* only, so the probe measures the grouping split with no hint split. S0 */
-/* keeps tier order with wider any allowed set, S1 bypasses the kick group */
-/* gate with no recount. Mask always wins in both modes with no new knob. */
-/* Extern lives in the function body, so bindgen keeps no host copy with BSS */
-/* only in main. */
+/* True when perf mode is on for S0 plus S1. */
+/* BSS flag holds zero for strict plus one for perf. */
+/* Zero init keeps 4.2.21 paths bit identical. */
+/* S0 keeps tier order with wider any allowed set, */
+/* S1 bypasses the kick group gate with no recount. */
+/* Mask always wins in both modes with no new knob. */
+/* Extern lives in the function body, so bindgen keeps */
+/* no host copy with BSS only in main. */
 static __always_inline bool flow_perf_enabled(void)
 {
 	extern volatile u8 flow_perf_mode;
-	extern volatile u8 flow_probe_perf;
-	return flow_perf_mode != 0 || flow_probe_perf != 0;
+	return flow_perf_mode != 0;
 }
 /* Deadline with the low 16 bits cleared near 64us down. Clearing moves early */
 /* only, so order never moves late with at most 65535ns of earliness. */

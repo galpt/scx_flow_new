@@ -138,10 +138,8 @@ pub(crate) struct Scheduler<'a> {
     governor_read_at: Option<std::time::Instant>,
     /* Package energy reader. None parks the probe. */
     rapl: Option<crate::rapl::RaplReader>,
-    /* A/B probe over package joules on the 1s tick. */
+    /* Strict only probe over package joules on the 1s tick. */
     probe: crate::snapshot::EnergyProbe,
-    /* Last forced perf written to BSS. */
-    probe_force: u8,
     /* Latest energy view for the dashboard. */
     energy: crate::stats::EnergyMetrics,
     /* Last RAPL sample for the 1s tick cadence. */
@@ -262,7 +260,6 @@ impl<'a> Scheduler<'a> {
             governor_read_at: None,
             rapl,
             probe: crate::snapshot::EnergyProbe::new(),
-            probe_force: 0,
             energy: crate::stats::EnergyMetrics::default(),
             rapl_read_at: None,
         })

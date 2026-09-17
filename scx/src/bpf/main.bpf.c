@@ -68,12 +68,6 @@ volatile u32 flow_lifo_seq[2050];
 /* Userspace writes on governor transition only. Single flag with no per CPU */
 /* array. */
 volatile u8 flow_perf_mode;
-/* Probe force for A/B arms with zero init strict. Zero keeps strict paths */
-/* bit identical with group and mask isolation. One widens placement with */
-/* natural hints on the perf arm with no governor write, so the probe */
-/* measures the grouping split with no hint split. Userspace writes on arm */
-/* transition only. Single flag with no per CPU array. */
-volatile u8 flow_probe_perf;
 /* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
 /* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
 /* atomic compare and swap on 32 bits, since 8 bit atomics stay unsupported. */
