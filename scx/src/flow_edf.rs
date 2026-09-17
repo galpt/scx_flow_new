@@ -3,7 +3,7 @@
  * Deadline and queue helpers
  *
  * Holds the deadline and queue helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. The slice is fixed at 20ms
+ * stays the same on both sides of the boundary. The slice is fixed at 1ms
  * with no knob.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

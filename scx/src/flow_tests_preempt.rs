@@ -177,12 +177,12 @@ fn delay_window_push_fast_arm_slow_fall() {
 
 #[test]
 fn granule_is_weight_aware_with_64us_floor() {
-    let slice = 20_000_000u64;
-    assert_eq!(granule_for_weight(1024, slice), 5_000_000);
-    assert_eq!(granule_for_weight(2048, slice), 2_500_000);
-    assert_eq!(granule_for_weight(256, slice), 20_000_000);
+    let slice = 1_000_000u64;
+    assert_eq!(granule_for_weight(1024, slice), 250_000);
+    assert_eq!(granule_for_weight(2048, slice), 125_000);
+    assert_eq!(granule_for_weight(256, slice), 1_000_000);
     assert_eq!(granule_for_weight(1024, 0), 64_000);
-    assert_eq!(granule_for_weight(0, slice), 5_000_000);
+    assert_eq!(granule_for_weight(0, slice), 250_000);
     assert_eq!(granule_for_weight(0, 0), 64_000);
     assert_eq!(granule_for_weight(0, 10_000), 64_000);
     assert_eq!(granule_for_weight(u32::MAX, slice), 64_000);
@@ -193,9 +193,9 @@ fn granule_is_weight_aware_with_64us_floor() {
 
 #[test]
 fn frontier_deserved_beats_floor_by_granule() {
-    let slice = 20_000_000u64;
+    let slice = 1_000_000u64;
     let gran = granule_for_weight(1024, slice);
-    assert_eq!(gran, 5_000_000);
+    assert_eq!(gran, 250_000);
     assert_eq!(DESERVED_SLACK_NS, 32_000);
     let frontier = 100_000_000u64;
     let bound = frontier.wrapping_add(gran).wrapping_add(DESERVED_SLACK_NS);
@@ -205,7 +205,7 @@ fn frontier_deserved_beats_floor_by_granule() {
     assert!(deserved(bound.wrapping_sub(1), frontier, gran));
     assert!(!deserved(bound, frontier, gran));
     assert!(!deserved(bound.wrapping_add(1), frontier, gran));
-    assert!(!deserved(frontier + 20_000_000, frontier, gran));
+    assert!(!deserved(frontier + 1_000_000, frontier, gran));
     let old = u64::MAX - 10;
     let wrap_gran = 20u64;
     let wrap_sum = old.wrapping_add(wrap_gran);
@@ -225,9 +225,9 @@ fn frontier_deserved_beats_floor_by_granule() {
  */
 #[test]
 fn deserved_slack_eases_by_32us() {
-    let slice = 20_000_000u64;
+    let slice = 1_000_000u64;
     let gran = granule_for_weight(1024, slice);
-    assert_eq!(gran, 5_000_000);
+    assert_eq!(gran, 250_000);
     assert_eq!(DESERVED_SLACK_NS, 32_000);
     assert_eq!(DESERVED_SLACK_NS * 2, GRANULE_FLOOR_NS);
     let frontier = 100_000_000u64;
@@ -434,7 +434,7 @@ fn cursor_cas_keeps_fresh_flags() {
  * Split reasons follow bound order pinned, empty,
  * deserved or hog, same, mask, and rate. First fail
  * wins, rate last as the window check. Pinned plus
- * empty count total only at 256B with no reason, so
+ * empty count total only at 272B with no reason, so
  * total covers reasons plus total only. Deserved is
  * 2, group is 3, mask is 4, rate is 5 with armed 1
  * retired frozen.
@@ -475,7 +475,7 @@ fn skip_reason_follows_branch_order() {
  * Skip reason matches the bound gate check. None means
  * all pass with kick, some means first fail wins in
  * pinned, empty, deserved or hog, same, mask, and
- * rate order at 256B.
+ * rate order at 272B.
  */
 #[test]
 fn skip_reason_matches_preempt_ok() {
@@ -626,7 +626,7 @@ fn hog_or_truth_needs_no_time_cap() {
  * Skip reason holds bound gate order stable with total
  * only intact. None means all pass with kick, some means
  * first fail wins in pinned, empty, deserved or hog,
- * same, mask, and rate order at 256B. Deserved stays
+ * same, mask, and rate order at 272B. Deserved stays
  * 2, group stays 3, mask stays 4, rate stays 5 with
  * armed 1 retired frozen and total only 6 for pinned
  * plus deep. Empty boundary plus hog OR stay live with

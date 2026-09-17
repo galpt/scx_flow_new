@@ -12,7 +12,7 @@
  * move. Pinned tasks
  * rest in overflow, so trips visit them every pass. All trips share one
  * drain body with mask wins and move to local, so per queue order stays
- * FIFO.
+ * bounded LIFO at K 8.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

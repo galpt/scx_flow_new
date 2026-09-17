@@ -27,7 +27,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /*
- * Counters at 256B with bound gate live since 4.2.41.
+ * Counters at 272B with bound gate live since 4.2.41.
  * Kicks plus deserved plus group plus mask plus rate
  * stay live with armed retired frozen for compat.
  */
@@ -131,13 +131,19 @@ pub struct Metrics {
     #[stat(desc = "Moves from a cross group peer queue")]
     #[serde(default)]
     pub steal_xmoves: u64,
+    #[stat(desc = "Head inserts at K 8")]
+    #[serde(default)]
+    pub lifo_heads: u64,
+    #[stat(desc = "Tail inserts for bound")]
+    #[serde(default)]
+    pub lifo_bound_hits: u64,
 }
 
 /*
  * One card of the per-CPU grid. Static fields come from
  * topology once at attach. Dynamic fields come from the
  * per-CPU map on each poll. The slice holds the fixed
- * slice at 20ms. Group holds 0 for light and 1 for hog.
+ * slice at 1ms. Group holds 0 for light and 1 for hog.
  */
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
@@ -331,7 +337,8 @@ impl Metrics {
             pkick={} pskip={} kcoal={} \
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
             wover={} tboost={} \
-            skicks={} tcas={} smoves={} sdefer={} stealx={}",
+            skicks={} tcas={} smoves={} sdefer={} stealx={} \
+            lheads={} lbound={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -366,6 +373,8 @@ impl Metrics {
             self.slot_moves,
             self.slot_defer,
             self.steal_xmoves,
+            self.lifo_heads,
+            self.lifo_bound_hits,
         )?;
         Ok(())
     }
@@ -423,6 +432,8 @@ impl Metrics {
             slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             slot_defer: self.slot_defer.wrapping_sub(rhs.slot_defer),
             steal_xmoves: self.steal_xmoves.wrapping_sub(rhs.steal_xmoves),
+            lifo_heads: self.lifo_heads.wrapping_sub(rhs.lifo_heads),
+            lifo_bound_hits: self.lifo_bound_hits.wrapping_sub(rhs.lifo_bound_hits),
         }
     }
 }

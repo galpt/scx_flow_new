@@ -24,6 +24,8 @@ mod flow_tests_edf;
 #[cfg(test)]
 mod flow_tests_group;
 #[cfg(test)]
+mod flow_tests_lifo;
+#[cfg(test)]
 mod flow_tests_preempt;
 #[cfg(test)]
 mod flow_tests_slot;
@@ -426,7 +428,7 @@ mod tests {
             crate::flow_slice::SLICE_NS,
             crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
         );
-        assert_eq!(crate::flow_slice::SLICE_NS, 20_000_000);
+        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
         assert_eq!(
             crate::flow_slice::EST_MIN_NS,
             crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
@@ -505,10 +507,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_256() {
+    fn sched_stats_size_is_272() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            256
+            272
         );
     }
 

@@ -23,8 +23,8 @@ fn est_clamp_caps_at_one_second() {
 }
 
 #[test]
-fn slice_is_fixed_at_20ms() {
-    assert_eq!(SLICE_NS, 20_000_000);
+fn slice_is_fixed_at_1ms() {
+    assert_eq!(SLICE_NS, 1_000_000);
     assert_eq!(crate::flow::SLICE_NS, SLICE_NS);
     assert_eq!(crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64, SLICE_NS);
 }
@@ -41,13 +41,13 @@ fn edf_weight_matches_fixed() {
 
 #[test]
 fn edf_clamp_bounds_match_slice() {
-    assert_eq!(clamp_vruntime(0, 100_000_000, SLICE_NS), 80_000_000);
+    assert_eq!(clamp_vruntime(0, 100_000_000, SLICE_NS), 99_000_000);
     assert!(was_clamped(0, 100_000_000, SLICE_NS));
     assert_eq!(
-        clamp_vruntime(80_000_000, 100_000_000, SLICE_NS),
-        80_000_000
+        clamp_vruntime(99_000_000, 100_000_000, SLICE_NS),
+        99_000_000
     );
-    assert!(!was_clamped(80_000_000, 100_000_000, SLICE_NS));
+    assert!(!was_clamped(99_000_000, 100_000_000, SLICE_NS));
     assert_eq!(
         clamp_vruntime(99_500_000, 100_000_000, SLICE_NS),
         99_500_000
@@ -1408,10 +1408,10 @@ fn per_cpu_nice_plus_weight_decode_with_alias() {
     assert!(!m2.delay_armed);
     let txt3 = concat!(
         "{\"id\":2,\"running_nice\":10,",
-        "\"running_weight\":494,\"slice_ns\":20000000}"
+        "\"running_weight\":494,\"slice_ns\":1000000}"
     );
     let m3: crate::stats::PerCpuMetrics = serde_json::from_str(txt3).unwrap();
-    assert_eq!(m3.slice_ns, 20_000_000);
+    assert_eq!(m3.slice_ns, 1_000_000);
     assert_eq!(m3.running_nice, 10);
     assert_eq!(m3.running_weight, 494);
     let txt4 = "{\"id\":3,\"delay_win\":16,\"delay_armed\":true}";

@@ -56,6 +56,11 @@ volatile u64 flow_kick_at[1024];
 /* Zero init, so first kick always runs with wrap. */
 /* Enqueue only with no slide on skip, see enqueue. */
 volatile u64 flow_rate_at[1024];
+/* Per queue LIFO sequence at 2050 with BSS zero start. */
+/* Holds one u32 per per CPU queue plus two overflow tails, so per CPU holds */
+/* CPU times 2 plus group and overflow holds 2048 plus group with total 2050 */
+/* matching slot max. BSS zero starts at head with no init pass. */
+volatile u32 flow_lifo_seq[2050];
 /* Governor flag for S0 and S1 with zero init strict. Zero keeps 4.2.21 paths */
 /* bit identical with group and mask isolation. One widens placement to any */
 /* allowed on in group miss with same tier order and bypasses the kick group */
@@ -552,7 +557,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			scx_bpf_cpuperf_set(cpu,
 			    (u32)FLOW_CPUPERF_LEVEL);
 	}
-	/* Per CPU queues at 2 times nr plus 2 overflow with FIFO only. One */
+	/* Per CPU queues at 2 times nr plus 2 overflow with bounded LIFO. One */
 	/* bounded pass creates all per CPU ids with a LOCAL_ON check per id, */
 	/* so init pays once with no dispatch cost. Each CPU holds base plus */
 	/* CPU times 2 plus group, overflows hold new base plus group, so groups */
@@ -579,7 +584,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			return ret;
 		}
 	}
-	/* Group overflow tails at 2 with FIFO only. One bounded pass creates */
+	/* Group overflow tails at 2 with bounded LIFO. One bounded pass creates */
 	/* both overflow ids with a LOCAL_ON check per id, so groups stay apart */
 	/* with no share. Needs restart on upgrade with no live move. */
 	bpf_for(cpu, 0, 2) {

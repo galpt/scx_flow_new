@@ -1073,12 +1073,14 @@ impl<'a> Scheduler<'a> {
             slot_moves: s.slot_moves,
             slot_defer: s.slot_defer,
             steal_xmoves: s.steal_xmoves,
+            lifo_heads: s.lifo_heads,
+            lifo_bound_hits: s.lifo_bound_hits,
         }
     }
 
     /*
      * Read one CPU state without heap use. Failed lookups yield an idle view
-     * with fixed slice and zero EMA. Slice stays fixed at 20ms. Zero EMA
+     * with fixed slice and zero EMA. Slice stays fixed at 1ms. Zero EMA
      * matches BSS and init with no trap.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
@@ -1120,7 +1122,7 @@ impl<'a> Scheduler<'a> {
     /*
      * Dashboard snapshot. Merges the static cards with live state by online
      * rank. Gauges only, no deltas. Frequency, LLC, and CPU cards stay display
-     * only and never feed placement or division. Slice stays fixed at 20ms.
+     * only and never feed placement or division. Slice stays fixed at 1ms.
      * Group follows the live table when ready, else halves fallback with no
      * trap. Offline stays out, so per CPU count matches online count. Version,
      * timestamp, topology, depths, allowance, mode, and governor join the

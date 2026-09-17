@@ -509,8 +509,8 @@ mod tests {
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
                 group: 1,
-                slice_ns: 20_000_000,
-                running_est_ns: 20_000_000,
+                slice_ns: 1_000_000,
+                running_est_ns: 1_000_000,
                 running_pid: 7,
                 running_nice: -5,
                 running_weight: 1218,
@@ -524,7 +524,7 @@ mod tests {
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
             hog_depth: 2,
-            burst_allowance_ns: 40_000_000,
+            burst_allowance_ns: 2_000_000,
             perf_mode: 1,
             governor: "performance (epp:performance)".to_string(),
             energy: crate::stats::EnergyMetrics::default(),
@@ -587,7 +587,7 @@ mod tests {
         assert_eq!(back.stats.slot_defer, 3);
         assert_eq!(back.stats.steal_moves, 2);
         assert_eq!(back.stats.steal_xmoves, 1);
-        assert_eq!(back.per_cpu[0].slice_ns, 20_000_000);
+        assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
         assert_eq!(back.per_cpu[0].running_weight, 1218);
@@ -602,7 +602,7 @@ mod tests {
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
-        assert_eq!(back.burst_allowance_ns, 40_000_000);
+        assert_eq!(back.burst_allowance_ns, 2_000_000);
         assert_eq!(back.perf_mode, 1);
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");

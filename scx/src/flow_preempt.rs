@@ -258,7 +258,7 @@ pub fn same_override(same_group: bool, perf: bool) -> bool {
  * on all pass. Branch order is pinned, empty,
  * deserved or hog, same, mask, and rate, rate last
  * as the window check. Pinned plus deep count total
- * only at 256B with no reason. Armed retired frozen
+ * only at 272B with no reason. Armed retired frozen
  * with display only, see delay dots.
  */
 #[cfg(test)]
@@ -293,7 +293,7 @@ pub fn preempt_ok(
  * deserved or hog, same, mask, and rate. Returns
  * none on kick, else the first failing gate. Pinned
  * plus empty map to total only with no reason write
- * at 256B, deserved maps to 2, group to 3, mask to
+ * at 272B, deserved maps to 2, group to 3, mask to
  * 4, rate to 5 with armed 1 retired frozen. Mirrors
  * the BPF sequential checks in enqueue with rate
  * last as the window check.

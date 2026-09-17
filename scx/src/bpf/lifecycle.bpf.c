@@ -110,8 +110,8 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 /* and hog queued tasks over own per CPU plus other per CPU plus both */
 /* overflow tails with 4 reads and no full scan, so stopping pays window */
 /* cost with no flood miss. Window holds own per CPU plus other per CPU */
-/* plus both overflows, so quiet keeps 80ms and flood fills the window plus */
-/* overflows to the 20ms floor. Placement uses the live table seeded by */
+/* plus both overflows, so quiet keeps 4ms and flood fills the window plus */
+/* overflows to the 1ms floor. Placement uses the live table seeded by */
 /* online rank with offline inert, so strict iff ready is zero, best effort */
 /* iff ready is one. Stores depths and allowance for snapshot with no task */
 /* field. Returns the allowance for the burst check. Stopping only, never */
@@ -178,12 +178,12 @@ static __always_inline u64 flow_refresh_pressure(s32 cpu)
 	return allow;
 }
 /* Burn step for one stop with window, burst, and wake. Burst allowance */
-/* adapts to light depth with 80ms quiet to 40ms mild to 20ms floor during */
-/* flood. Short blocks below 20ms with burn below 80ms count toward 8 fast */
+/* adapts to light depth with 4ms quiet to 2ms mild to 1ms floor during */
+/* flood. Short blocks below 1ms with burn below 4ms count toward 8 fast */
 /* promote. A burst at the allowance clears wake hits. A short with burn at */
-/* or past 80ms clears wake hits. A hot window at or past 320ms clears wake */
+/* or past 4ms clears wake hits. A hot window at or past 16ms clears wake */
 /* hits. A middle window at the end clears wake hits with low runs. A low */
-/* window below 80ms keeps wake hits. A window in progress keeps wake hits. */
+/* window below 4ms keeps wake hits. A window in progress keeps wake hits. */
 /* Slow path with 3 low wins stays intact. Stopping only, never dispatch. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,

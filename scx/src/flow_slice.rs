@@ -3,7 +3,7 @@
  * Slice and estimate helpers
  *
  * Holds the slice and estimate helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. The slice is fixed at 20ms with
+ * stays the same on both sides of the boundary. The slice is fixed at 1ms with
  * no knob. Frequency, LLC, and CPU cards stay display only and never shape
  * placement.
  *
@@ -14,8 +14,8 @@
 pub const EST_MIN_NS: u64 = 1;
 /* Upper bound of a per task estimate in nanos. */
 pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Fixed slice in nanos at 20ms. */
-pub const SLICE_NS: u64 = 20_000_000;
+/* Fixed slice in nanos at 1ms. */
+pub const SLICE_NS: u64 = 1_000_000;
 /* Running repack holds weight in u16. */
 const _: () = assert!(2048 <= u16::MAX as u64);
 /* Running repack holds nice minus 20 to 19 in s16. */

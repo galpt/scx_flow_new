@@ -2,9 +2,9 @@
 /*
  * Shared flow header
  *
- * Defines the shared constants, structs, helpers with a fixed 20ms slice, two
- * groups, and per CPU FIFO slot queues. Mirrored by userspace so behavior
- * stays the same on both sides of the boundary.
+ * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
+ * groups, and per CPU bounded LIFO slot queues. Mirrored by userspace so
+ * behavior stays the same on both sides of the boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -28,31 +28,31 @@ typedef int pid_t;
 #ifndef __noinline
 #define __noinline __attribute__((noinline))
 #endif
-/* Fixed slice at 20ms, two groups, per CPU FIFO slots. */
+/* Fixed slice at 1ms, two groups, per CPU bounded LIFO slots. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
-	FLOW_SLICE_NS = (20ULL * 1000ULL * 1000ULL),
+	FLOW_SLICE_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_NGROUPS = 2ULL,
 	FLOW_GROUP_LIGHT = 0ULL,
 	FLOW_GROUP_HOG = 1ULL,
-	FLOW_WIN_NS = (640ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURN_NS = (320ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_NS = (80ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_MID_NS = (40ULL * 1000ULL * 1000ULL),
-	FLOW_DEMOTE_BURST_FLOOR_NS = (20ULL * 1000ULL * 1000ULL),
-	FLOW_PROMOTE_BURN_NS = (80ULL * 1000ULL * 1000ULL),
+	FLOW_WIN_NS = (32ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURN_NS = (16ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_NS = (4ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_MID_NS = (2ULL * 1000ULL * 1000ULL),
+	FLOW_DEMOTE_BURST_FLOOR_NS = (1ULL * 1000ULL * 1000ULL),
+	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_WINS = 3ULL,
 	FLOW_PROMOTE_WAKE_HITS = 8ULL,
-	FLOW_WAKE_SHORT_NS = (20ULL * 1000ULL * 1000ULL),
+	FLOW_WAKE_SHORT_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_HETERO_SPREAD_PCT = 10ULL,
 	FLOW_PINNED_INFLATE_NS = (8ULL * 1000ULL * 1000ULL),
 	FLOW_PERF_LIGHT = 1024ULL,
 	FLOW_PERF_HOG = 1024ULL,
 	FLOW_CPUPERF_LEVEL = 1024ULL,
 	FLOW_CPUPERF_IDLE = 0ULL,
-	FLOW_CPUPERF_BUDGET_NS = (20ULL * 1000ULL * 1000ULL),
+	FLOW_CPUPERF_BUDGET_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_CPUPERF_HALF_LIFE_NS = (24ULL * 1000ULL * 1000ULL),
 	FLOW_CPUPERF_ALPHA = 3072ULL,
 	FLOW_CPUPERF_FP_SHIFT = 8ULL,
@@ -86,6 +86,8 @@ enum flow_consts {
 	FLOW_SLOT_D = 4ULL,
 	FLOW_SLOT_BUDGET = 32ULL,
 	FLOW_SLOT_SWEEP_MAX = 256ULL,
+	FLOW_LIFO_K = 8ULL,
+	FLOW_LIFO_PERIOD = 9ULL,
 };
 /* Weight fits u16 for the running repack. */
 /* Nice minus 20 to 19 fits s16 for repack. */
@@ -108,7 +110,7 @@ struct flow_task_ctx {
 /* Per CPU state at 64B with delay, rate, EMA, active, and occupant. */
 /* Frontier, running, cursor, delay, and cpuperf EMA at 32B base. */
 /* The base carries 16B EMA tail with 8B active tail plus 8B occupant tail. */
-/* EMA holds the proportional budget in nanos capped at 20ms, at */
+/* EMA holds the proportional budget in nanos capped at 1ms, at */
 /* holds the last EMA update time in nanos. Active holds */
 /* lifetime active nanos charged once per run segment. Occupant holds */
 /* the group of the running task with LIGHT fallback, written in */
@@ -131,7 +133,7 @@ struct flow_cpu_state {
 	u64 active_ns;
 	u8 occupant_group;
 };
-/* Counters at 256B with group, coalesce, overflow, token, slot. Total keeps */
+/* Counters at 272B with group, coalesce, overflow, token, slot. Total keeps */
 /* the sum for compat. Busy uses the bound gate with empty first plus */
 /* deserved or hog plus same plus mask plus rate, so busy kicks count */
 /* under kicks live since 4.2.41 and busy no kicks count under total */
@@ -146,7 +148,8 @@ struct flow_cpu_state {
 /* steal moves counts all peer moves, steal x moves counts the cross */
 /* subset with post hoc LSB compare and unconditional adds, slot kicks */
 /* counts safety net kicks, slot defer counts capped drains with work */
-/* left, all append only at the tail with BSS zero. */
+/* left, lifo heads counts head inserts at K 8, bound hits counts tail, */
+/* all append only at the tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -180,7 +183,19 @@ struct flow_sched_stats {
 	u64 slot_moves;
 	u64 slot_defer;
 	u64 steal_xmoves;
+	u64 lifo_heads;
+	u64 lifo_bound_hits;
 };
+/* Soft preempt shortens the occupant slice out of band to zero at the kick */
+/* win, so the kick sticks on the waker with no remainder race. Stuck */
+/* shortens match preempt_kicks one for one, kicks sent exceed it by */
+/* declined plus null or self. A declined shorten keeps kick only with */
+/* total plus rate, null or self sends kick only with no count, and no */
+/* counter is added. */
+/* Bounded LIFO takes head for K 8 with one tail in period 9, so per queue */
+/* order stays fresh with no starve and no preempt use. Head needs the weak */
+/* enum with zero fallback to tail on old kernels, so old kernels keep FIFO */
+/* with no trap. Total 2050 matches slot max with per CPU plus overflow. */
 
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -215,7 +230,7 @@ static __always_inline bool flow_should_restore_hint(
 {
 	return !runnable && dsq_nr == 0 && local_nr == 0;
 }
-/* Climb the EMA toward the 20ms budget with a gap step. */
+/* Climb the EMA toward the 1ms budget with a gap step. */
 /* Pure-EMA proportional at M2 with uniform both groups. */
 /* Delta clamps to the budget first with u64 order, so a */
 /* long burst never overshoots in one step. Step is gap */
@@ -312,7 +327,7 @@ static __always_inline u32 flow_cpuperf_from_ema(u64 ema)
 		return 1024;
 	return (u32)v;
 }
-/* True when one window of 640ms has passed. */
+/* True when one window of 32ms has passed. */
 static __always_inline bool flow_win_ready(u64 now,
 	u64 win_start)
 {
@@ -320,17 +335,17 @@ static __always_inline bool flow_win_ready(u64 now,
 		return false;
 	return now - win_start >= (u64)FLOW_WIN_NS;
 }
-/* True when window burn reaches 320ms for demote. */
+/* True when window burn reaches 16ms for demote. */
 static __always_inline bool flow_burn_hot(u32 burn)
 {
 	return (u64)burn >= (u64)FLOW_DEMOTE_BURN_NS;
 }
 /* Burst allowance from light depth with flood backpressure. Depth sums */
 /* queued tasks in light per CPU queues capped at 4. Table is depth 0 to 1 to */
-/* 80ms, depth 2 to 3 to 40ms, depth 4 and above to 20ms. Quiet keeps 80ms so */
-/* lone bursts move fast with no pressure. Mild halves to 40ms so flood */
+/* 4ms, depth 2 to 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so */
+/* lone bursts move fast with no pressure. Mild halves to 2ms so flood */
 /* bursts move earlier but still above one slice with no flap on single */
-/* slices. Deep floors at 20ms, so per task worst case is the floor during */
+/* slices. Deep floors at 1ms, so per task worst case is the floor during */
 /* flood. Halves keeps the view matched to dispatch isolation with no BSS */
 /* cost in stopping. Strict iff ready is zero, best effort iff ready is one. */
 static __always_inline u64 flow_burst_allowance(u64 depth)
@@ -347,12 +362,12 @@ static __always_inline bool flow_burst_hot_at(u64 delta,
 {
 	return delta >= allow;
 }
-/* True when window burn stays below 80ms for promote. */
+/* True when window burn stays below 4ms for promote. */
 static __always_inline bool flow_burn_low(u32 burn)
 {
 	return (u64)burn < (u64)FLOW_PROMOTE_BURN_NS;
 }
-/* True when one block is short below 20ms for wake. */
+/* True when one block is short below 1ms for wake. */
 static __always_inline bool flow_wake_short(u64 delta)
 {
 	return delta < (u64)FLOW_WAKE_SHORT_NS;
@@ -651,6 +666,27 @@ static __always_inline u64 flow_slot_cpu_dsq(u32 cpu,
 {
 	u64 g = group == (u8)FLOW_GROUP_HOG ? 1ULL : 0ULL;
 	return (u64)FLOW_SLOT_BASE + (u64)cpu * 2ULL + g;
+}
+/* True when one insert takes head with bounded LIFO at K 8. */
+/* Takes head for 8 of 9 with one tail, so fresh work wins fast with no */
+/* starve and no preempt use. Pure with no state, so tests mirror the */
+/* period with no BSS use. */
+static __always_inline bool flow_lifo_take_head(u32 seq)
+{
+	return (seq % (u32)FLOW_LIFO_PERIOD) !=
+	    (u32)FLOW_LIFO_K;
+}
+/* Index of one LIFO sequence with per CPU plus overflow at 2050. */
+/* Per CPU holds CPU times 2 plus group, overflow holds 2048 plus group, */
+/* so total 2050 matches slot max with no share. Bad group falls to light */
+/* with no trap. Pure with no state. */
+static __always_inline u32 flow_lifo_idx(bool over,
+	u32 cpu, u8 group)
+{
+	u32 g = group == (u8)FLOW_GROUP_HOG ? 1U : 0U;
+	if (over)
+		return 2048U + g;
+	return cpu * 2U + g;
 }
 /* Least donor depth for one steal with idle empty fast path. Holds 1 when */
 /* idle empty, else 2, so idle owners collect the last task with no strand. */

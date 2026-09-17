@@ -3,19 +3,19 @@
 scx_flow is our own slot scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
-It keeps two FIFO queues per CPU, one per group,
+It keeps two bounded LIFO queues at K 8 per CPU, one per group,
 with one overflow tail per group and a fixed slice at
-20ms. Two groups split light waits and hog burn, strict
+1ms. Two groups split light waits and hog burn, strict
 exactly when ready is zero and best effort when ready
 is one.
 It is deliberately knob-free. It uses deadline mapped
-FIFO queues, vruntime fairness, and the fixed slice.
+bounded LIFO queues at K 8, vruntime fairness, and the fixed slice.
 
 ## Overview
 
 ### Order and deadlines
 
-Tasks wait in per CPU FIFO queues picked by deadline,
+Tasks wait in per CPU bounded LIFO queues at K 8 picked by deadline,
 with one overflow tail per group for past horizon
 deadlines. Pinned tasks rest in the group overflow
 tail with no per CPU use, so every owner dispatch
@@ -32,22 +32,22 @@ back when the task CPU is not allowed.
 
 ### Fixed slice
 
-The slice is fixed at 20ms with no knob. Fresh tasks join
+The slice is fixed at 1ms with no knob. Fresh tasks join
 with the slice, so the start stays neutral. Estimates hold
 the last burst clamped at 1ns to 1 second.
 
 ### Fairness
 
-Sleeper lag is capped at a weight scaled cap in 2.5ms to
-160ms, so a waking task gains at most the cap of advantage.
+Sleeper lag is capped at a weight scaled cap in 125us to
+8ms, so a waking task gains at most the cap of advantage.
 Virtual time moves forward with scaled runtime while work
 stays queued and resets to waking time on idle. Blocked
-tasks complete at once. Runnable tasks requeue FIFO
+tasks complete at once. Runnable tasks requeue bounded LIFO at K 8
 into the per CPU queue with a refreshed estimate. Burst
 allowance reads windowed depths over own per CPU,
 other per CPU, and both overflows with four reads, so
-quiet keeps 80ms with mild at 40ms and flood still floors
-at 20ms over a 640ms window with no full scan.
+quiet keeps 4ms with mild at 2ms and flood still floors
+at 1ms over a 32ms window with no full scan.
 
 ### Groups
 
@@ -105,7 +105,7 @@ for overflow plus steal. A capped drain with work left
 counts one defer with no kick. Sweep kicks at 256 run on
 zero-move window only. Moves with window ride the next
 dispatch with no kick. All trips share one drain with
-mask wins and move to local, so order stays FIFO.
+mask wins and move to local, so order stays bounded LIFO at K 8.
 Placement, dispatch, and pressure read the live table.
 See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and
 `src/flow_slot.rs`.
@@ -116,7 +116,7 @@ Idle targets are always kicked with a mask check
 regardless of queue depth, so no idle CPU with
 queued work sleeps unkicked. Busy targets use
 a bound preempt gate with no armed check and
-total plus reason counts at 256B. The chain is
+total plus reason counts at 272B. The chain is
 pinned, then empty at most one queued, then
 deserved or hog, then same with perf bypass,
 then mask, then rate last as a 1ms window.
@@ -134,7 +134,7 @@ and rate stay live since 4.2.41 with armed retired
 frozen for compat. Occupant group rides a u8 tail
 at 64B with LIGHT fallback, written in running,
 cleared with pid. One coalesced count covers q2 idle
-skips in 50us at 256B. Second queued to idle in 50us
+skips in 50us at 272B. Second queued to idle in 50us
 skips when not pinned with no slide, single queued
 always kicks, deep always kicks, pinned never skips.
 Delay persists across idle, shows stale
@@ -172,7 +172,7 @@ See `src/topology.rs`, `src/snapshot.rs`, and `ui/index.html`.
 Running maps the stored EMA to 0 to 1024
 uniform both groups with no tier. Stopping
 decays by elapsed with 24ms half-life then
-climbs on the burst toward the 20ms budget
+climbs on the burst toward the 1ms budget
 with 12x in FP8, so boost follows load with
 fast attack and slow decay. Blocked with
 empty queues maps the decayed EMA, long sleep
@@ -182,7 +182,7 @@ period decay. Init and no state hold max
 `src/bpf/lifecycle.bpf.c`, and `src/bpf/main.bpf.c`.
 
 Weight follows nice from minus 20 to 19 with center 1024
-and no knob. The slice stays fixed at 20ms. The version is
+and no knob. The slice stays fixed at 1ms. The version is
 in `Cargo.toml`.
 
 ### Energy probe
@@ -204,7 +204,7 @@ dashboard with a live trace. Details live in `src/rapl.rs`,
   while long bursts serve with a fixed slice without blocking
   short arrivals.
 - Mixed batch workloads. Long jobs keep throughput
-  with FIFO queues while short arrivals keep draining
+  with bounded LIFO queues at K 8 while short arrivals keep draining
   through trips plus steal.
 
 ## Production Ready?
@@ -242,7 +242,7 @@ to download the full snapshot as JSON.
 - Facade: `src/flow.rs`
 - Tests: `src/flow_tests_edf.rs`,
   `src/flow_tests_group.rs`, `src/flow_tests_preempt.rs`,
-  `src/flow_tests_slot.rs`
+  `src/flow_tests_slot.rs`, `src/flow_tests_lifo.rs`
 - Constant validation: `src/config.rs`
 - Generated bindings and skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`
@@ -282,6 +282,9 @@ quiet and hog occupants show kicks past deserved.
 - CPU state grew 56B to 64B and preempt counters unfroze
   in 4.2.41, so upgrading from 4.2.40 needs a scheduler
   restart with no live transition.
+- Slice moved 20ms to 1ms with bounded LIFO at K 8 and stats 256B to 272B
+  in 4.2.46, so upgrading from 4.2.42 needs a scheduler restart with no
+  live transition.
 - Unknown frequency stays unknown with no effect on
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path

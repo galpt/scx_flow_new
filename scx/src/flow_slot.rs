@@ -2,9 +2,10 @@
 /*
  * Slot store helpers
  *
- * Holds the per CPU FIFO slot helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. Each CPU holds two queues
- * plus 2 overflow tails with FIFO only and no knob. The probe maps a
+ * Holds the per CPU bounded LIFO slot helpers that mirror the BPF header so
+ * behavior stays the same on both sides of the boundary. Each CPU holds two
+ * queues plus 2 overflow tails with bounded LIFO at K 8 and no knob. The
+ * probe maps a
  * deadline to near or overflow, pinned tasks rest in overflow, dispatch
  * drains own plus overflow plus peer steal with same group first and perf
  * only cross second, defer counts capped drains with work left, and the
@@ -56,6 +57,15 @@ pub const WHEEL_QUANT_LO: u64 = 0xFFFF;
 /* Tokens held per CPU for the sleeper boost. */
 #[cfg(test)]
 pub const TOKEN_MAX: u32 = 255;
+/* Head inserts in one LIFO period at 8 with one tail. */
+#[cfg(test)]
+pub const LIFO_K: u64 = 8;
+/* Inserts in one LIFO period at 9 with 8 heads. */
+#[cfg(test)]
+pub const LIFO_PERIOD: u64 = 9;
+/* LIFO sequences at 2050 with per CPU plus overflow. */
+#[cfg(test)]
+pub const LIFO_NSEQ: u64 = 2050;
 
 /*
  * Deadline with the low 16 bits cleared near 64us
@@ -423,4 +433,31 @@ pub fn steal_pick_fold(
         return Some((dsq, true));
     }
     None
+}
+
+/*
+ * True when one insert takes head with bounded LIFO at K 8. Takes head for 8
+ * of 9 with one tail, so fresh work wins fast with no starve and no preempt
+ * use. Pure with no state, so BPF and tests share the period with no BSS use.
+ * Mirrors the BPF take head with the same modulo.
+ */
+#[cfg(test)]
+pub fn lifo_take_head(seq: u32) -> bool {
+    (seq as u64 % LIFO_PERIOD) != LIFO_K
+}
+
+/*
+ * Index of one LIFO sequence with per CPU plus overflow at 2050. Per CPU
+ * holds CPU times 2 plus group, overflow holds 2048 plus group, so total
+ * 2050 matches slot max with no share. Bad group falls to light with no
+ * trap. Pure with no state. Mirrors the BPF index with the same map.
+ */
+#[cfg(test)]
+pub fn lifo_idx(over: bool, cpu: u32, group: u8) -> u32 {
+    let g = if group == crate::flow_group::GROUP_HOG {
+        1
+    } else {
+        0
+    };
+    if over { 2048 + g } else { cpu * 2 + g }
 }
