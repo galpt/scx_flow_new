@@ -188,24 +188,13 @@ pub struct PerCpuMetrics {
     /* decodes via the alias for one release. */
     #[serde(default, alias = "tq_ns")]
     pub slice_ns: u64,
-    /* Lifetime active nanos from BPF. Full u64 wrap deltas. */
-    /* Display only for the energy probe plausibility. */
+    /* Lifetime active nanos from BPF. Display only. */
     #[serde(default)]
     pub active_ns: u64,
 }
 
-impl PerCpuMetrics {
-    /*
-     * Active delta since one older card. Full u64 wrap,
-     * so BPF lifetime growth never traps in userspace.
-     */
-    pub fn active_delta(&self, prev: &Self) -> u64 {
-        self.active_ns.wrapping_sub(prev.active_ns)
-    }
-}
-
 /* Default state text of the energy object. Unavailable */
-/* keeps old JSON honest with no silent zero headline. */
+/* keeps old JSON honest with no silent meter. */
 fn default_energy_state() -> String {
     "unavailable".to_string()
 }
@@ -213,46 +202,22 @@ fn default_energy_state() -> String {
 /*
  * Energy meter view for the web dashboard. One nested object with defaults on
  * every field, so old JSON without energy still decodes into the unavailable
- * state. Headline, daily, and yearly stay parked at zero with no live use.
- * Since running holds used kWh from package joules since launch. Trace holds
- * the live derivation in monospace for the page.
+ * state. Since running holds used kWh from package joules since launch.
+ * Live watts holds the last good watts. Trace holds the live derivation in
+ * monospace for the page.
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnergyMetrics {
     /* Probe state. unavailable, baseline, collecting, waiting, backoff. */
     #[serde(default = "default_energy_state")]
     pub state: String,
-    /* Always false while headline stays parked. */
-    #[serde(default)]
-    pub has_headline: bool,
-    /* Always false while headline stays parked. */
-    #[serde(default)]
-    pub low_confidence: bool,
-    /* Parked zero with no live use. Signed. */
-    #[serde(default)]
-    pub headline_pct: f64,
-    /* Accepted pairs in the sums. */
-    #[serde(default)]
-    pub accepted_pairs: u64,
-    /* Rejected pairs kept out of the sums. */
-    #[serde(default)]
-    pub rejected_pairs: u64,
-    /* Daily parked percent. Stays zero. */
-    #[serde(default)]
-    pub daily_pct: f64,
-    /* Daily parked energy in kWh. Stays zero. */
-    #[serde(default)]
-    pub daily_kwh: f64,
-    /* Yearly parked percent. Stays zero. */
-    #[serde(default)]
-    pub yearly_pct: f64,
-    /* Yearly parked energy in kWh. Stays zero. */
-    #[serde(default)]
-    pub yearly_kwh: f64,
     /* Used energy since launch in kWh, a meter. */
     #[serde(default)]
     pub since_running_kwh: f64,
-    /* Seconds left in the running arm or settle. */
+    /* Last good watts for the live readout. Zero before use. */
+    #[serde(default)]
+    pub live_watts: f64,
+    /* Seconds left in waiting or backoff from wall clock. */
     #[serde(default)]
     pub countdown_s: u64,
     /* Live derivation in monospace for the page. */
@@ -261,20 +226,12 @@ pub struct EnergyMetrics {
 }
 
 impl Default for EnergyMetrics {
-    /* Missing energy means unavailable, never zero headline. */
+    /* Missing energy means unavailable with an empty meter. */
     fn default() -> Self {
         Self {
             state: default_energy_state(),
-            has_headline: false,
-            low_confidence: false,
-            headline_pct: 0.0,
-            accepted_pairs: 0,
-            rejected_pairs: 0,
-            daily_pct: 0.0,
-            daily_kwh: 0.0,
-            yearly_pct: 0.0,
-            yearly_kwh: 0.0,
             since_running_kwh: 0.0,
+            live_watts: 0.0,
             countdown_s: 0,
             trace: String::new(),
         }

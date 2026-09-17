@@ -187,10 +187,10 @@ in `Cargo.toml`.
 
 ### Energy probe
 
-Package energy comes from RAPL counters with per-CPU active time from BPF
-state. The section reports used energy in kWh since launch with a live
-trace and no compare, so users can note the numbers and compare runs by
-hand. Details live in `src/rapl.rs`,
+Package energy comes from RAPL counters. The section reports used energy
+in kWh since launch with live watts, state, countdown, and a live trace,
+so users can note the numbers and compare runs by hand. Placement
+follows the governor only. Details live in `src/rapl.rs`,
 `src/snapshot.rs`, and `src/stats.rs`. See `src/webui.rs`,
 `ui/index.html`, and `src/bpf/intf.h` for the full path.
 
