@@ -206,88 +206,34 @@
         gap: 4px;
       }
     }
-    /* Energy hero. Answer first with mono numerals, primary ink, tabular figures. */
-    .energy-hero .stat-value,
+    /* Energy meter. Calm stack with hero answer first. */
+    .energy-meter {
+      display: grid;
+      gap: 14px;
+      padding: 6px 0 12px;
+    }
+    /* Hero numerals stay mono with tabular figures. */
     #energy-since,
-    #energy-watts,
-    #energy-state,
-    #energy-countdown {
+    #energy-watts {
       font-family: var(--font-mono);
-      font-size: 0.875rem;
-      font-weight: 700;
       color: var(--text-primary);
       font-feature-settings: "tnum";
       line-height: 1.3;
     }
-    /* Hero labels stay muted, small, sans, so numerals carry the answer. */
-    .energy-hero span:first-child {
-      font-size: 0.8125rem;
-    }
-    /* Legend definition rows. Symbol chips sit on elevated ground, definitions stay secondary. */
-    .energy-legend {
-      display: grid;
-      gap: 4px;
-    }
-    .energy-legend .legend-row {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-      margin: 0;
-      line-height: 1.55;
-    }
-    .energy-legend .legend-sym {
-      flex: none;
-      padding: 0 6px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--elevated);
-      color: var(--text-primary);
-      font-family: Georgia, 'Times New Roman', Times, serif;
-      font-style: italic;
-      font-size: 0.75rem;
-      line-height: 1.5;
-    }
-    .energy-legend .legend-def {
-      color: var(--text-secondary);
-      font-size: 0.75rem;
-    }
-    /* Trace well and parsed rows. Keys stay muted, values stay secondary, outcomes add weight and markers. */
-    #energy-trace {
-      border: 1px solid var(--border-hover);
-      border-radius: 8px;
-      background: var(--elevated);
-      padding: 8px 10px;
-    }
-    /* Trace rows for parsed lines. Unknown lines fall through to plain rows, kept secondary. */
-    .trace-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin: 0;
-      line-height: 1.5;
-    }
-    .trace-key {
-      color: var(--text-muted);
-      flex: none;
-    }
-    .trace-val {
-      color: var(--text-secondary);
-      text-align: right;
-      overflow-wrap: anywhere;
-    }
-    .trace-row--plain {
-      color: var(--text-secondary);
-      font-weight: 400;
-    }
-    .trace-meter {
+    /* Hero holds the one number, large and quiet. */
+    #energy-since {
+      font-size: 1.75rem;
       font-weight: 700;
     }
-    /* Meter stays live, so trace marks the meter line. */
-    .trace-meter {
-      color: var(--text-primary);
+    /* Live watts stays smaller as supporting readout. */
+    #energy-watts {
+      font-size: 0.875rem;
+      font-weight: 600;
     }
-    .trace-meter .trace-val::before {
-      content: "» ";
+    /* Meter labels stay muted sans so numerals carry the answer. */
+    .energy-label {
+      font-size: 0.8125rem;
+      color: var(--text-muted);
     }
     /* Note. Muted sans line carries the manual compare note. */
     #energy-note {
@@ -296,7 +242,7 @@
       color: var(--text-muted);
       line-height: 1.55;
     }
-    /* State note marker. Weight marks the note, never color alone. */
+    /* Note weight marks the line, never color alone. */
     #energy-note:not(:empty) {
       font-weight: 500;
     }
@@ -324,12 +270,6 @@
     #core-cards > .card:not(.core-card) {
       border-style: dashed;
       font-weight: 600;
-    }
-    /* Narrow widths. Hero stacks full width with meter. */
-    @media (max-width: 640px) {
-      .energy-hero {
-        grid-column: 1 / -1;
-      }
     }
   </style>
 </head>
@@ -395,43 +335,20 @@
         id="summary-explanation"></p>
     </div>
 
-    <!-- Energy with used energy since launch, live watts, and trace -->
+    <!-- Energy meter with used energy since launch and live watts -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Energy</p>
-      <div class="sys-grid">
-        <div class="energy-hero" style="grid-column:1/-1"><span style="color:var(--text-muted)">
-          Consumed since launch:</span>
-          <span class="stat-value" id="energy-since">unavailable</span>
+      <div class="energy-meter">
+        <div><div class="energy-label">
+          Consumed since launch</div>
+          <div class="stat-value" id="energy-since">unavailable</div>
           <!-- Meter shows used energy since launch. -->
         </div>
-        <div><span style="color:var(--text-muted)">
+        <div><span class="energy-label">
           Live watts:</span>
-          <span class="stat-value" id="energy-watts">unavailable</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          State:</span>
-          <span class="stat-value" id="energy-state">unavailable</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Countdown:</span>
-          <span class="stat-value" id="energy-countdown">unavailable</span>
+          <span class="stat-value" id="energy-watts">—</span>
         </div>
       </div>
-      <p style="margin-top:8px;
-        font-family: Georgia, 'Times New Roman', Times, serif;
-        font-size:0.875rem;color:var(--text-primary)">
-        <i>E_used</i> = package joules ÷ 3600000000000
-      </p>
-      <div class="energy-legend" style="margin-top:4px;
-        font-size:0.75rem;color:var(--text-secondary)">
-        <p class="legend-row"><span class="legend-sym"><i>E_used</i></span> <span class="legend-def">is used energy in kWh since launch.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>package joules</i></span> <span class="legend-def">is summed RAPL package energy since launch.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>kWh</i></span> <span class="legend-def">is joules divided by 3600000000000.</span></p>
-      </div>
-      <pre id="energy-trace" style="margin-top:8px;
-        font-family:var(--font-mono);font-size:0.6875rem;
-        line-height:1.5;color:var(--text-secondary);
-        white-space:pre-wrap;word-break:break-word;">unavailable</pre>
       <p id="energy-note" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-muted)">Section shows energy consumed since launch. Note numbers for manual compare across runs. Placement follows the governor only.</p>
     </div>
@@ -839,7 +756,6 @@
     }
 
     /* Meter formatters. kWh holds six decimals, watts holds one. */
-    /* Trace carries live watts and countdown with meter. */
     /* Used kWh with six decimals for the meter. */
     function fmtKwh(x) {
       var v = +x || 0;
@@ -852,104 +768,23 @@
       if (v <= 0) return '—';
       return v.toFixed(1) + ' W';
     }
-    /* Countdown in seconds, dash when idle at zero. */
-    function fmtCountdown(s) {
-      var v = Math.round(+s || 0);
-      if (v <= 0) return '—';
-      return v + 's';
-    }
-    function traceClass(line) {
-      if (line.indexOf('meter') >= 0) {
-        return 'trace-meter';
-      }
-      return '';
-    }
 
-    /* Parsed trace rows keep every byte, unknown lines stay plain with no marker. */
-    function renderTrace(text) {
-      var host = el('energy-trace');
-      host.textContent = '';
-      var src = String(text);
-      var lines = src.split('\n');
-      var trailing = src.length > 0 &&
-        src.charAt(src.length - 1) === '\n';
-      if (trailing) {
-        lines.pop();
-      }
-      for (var i = 0; i < lines.length; i++) {
-        var line = lines[i];
-        var row = document.createElement('span');
-        row.className = 'trace-row';
-        var mark = traceClass(line);
-        var at = line.indexOf(': ');
-        if (at >= 0) {
-          var keyEl = document.createElement('span');
-          keyEl.className = 'trace-key';
-          keyEl.textContent = line.slice(0, at);
-          var valEl = document.createElement('span');
-          valEl.className = 'trace-val';
-          valEl.textContent = line.slice(at + 2);
-          row.appendChild(keyEl);
-          row.appendChild(document.createTextNode(': '));
-          row.appendChild(valEl);
-        } else {
-          row.className += ' trace-row--plain';
-          row.textContent = line;
-        }
-        if (mark) {
-          row.className += ' ' + mark;
-        }
-        host.appendChild(row);
-        if (i < lines.length - 1 || trailing) {
-          host.appendChild(document.createTextNode('\n'));
-        }
-      }
-    }
-
-    /* Energy meter, live watts, state, countdown, trace, and note. */
+    /* Energy meter with used energy and live watts. */
     /* Runs on the single one second poll with no extra timer */
     /* and no stored history, so a restart resets the view. */
     function updateEnergy(data) {
-      var energy = data.energy || {};
-      var state = energy.state || 'unavailable';
-      renderTrace(energy.trace || state);
+      var energy = (data && data.energy) || {};
       var sinceText = fmtKwh(energy.since_running_kwh);
       var wattsText = fmtWatts(energy.live_watts);
-      var countText = fmtCountdown(energy.countdown_s);
       var note = 'Section shows energy consumed since launch. ' +
         'Note numbers for manual compare across runs. ' +
         'Placement follows the governor only.';
-      if (state === 'unavailable') {
+      if (energy.state === 'unavailable') {
         el('energy-since').textContent = 'unavailable';
-        el('energy-watts').textContent = 'unavailable';
-        el('energy-state').textContent = 'unavailable';
-        el('energy-countdown').textContent = 'unavailable';
-        note = 'No package counter found. ' +
-          'The probe needs energy reads. ' + note;
-      } else if (state === 'baseline') {
-        el('energy-since').textContent = sinceText;
-        el('energy-watts').textContent = wattsText;
-        el('energy-state').textContent = state;
-        el('energy-countdown').textContent = countText;
-        note = 'Paused while the governor reads ' +
-          'performance. ' + note;
-      } else if (state === 'waiting') {
-        el('energy-since').textContent = sinceText;
-        el('energy-watts').textContent = wattsText;
-        el('energy-state').textContent = state;
-        el('energy-countdown').textContent = countText;
-        note = 'Waiting for load above 20 W. ' + note;
-      } else if (state === 'backoff') {
-        el('energy-since').textContent = sinceText;
-        el('energy-watts').textContent = wattsText;
-        el('energy-state').textContent = state;
-        el('energy-countdown').textContent = countText;
-        note = 'Cooling down after bad reads. ' + note;
+        el('energy-watts').textContent = '—';
       } else {
         el('energy-since').textContent = sinceText;
         el('energy-watts').textContent = wattsText;
-        el('energy-state').textContent = state;
-        el('energy-countdown').textContent = countText;
       }
       el('energy-note').textContent = note;
     }
@@ -968,8 +803,8 @@
       el('mode-badge').textContent = perf;
       el('mode-badge').title = gov;
 
-      /* Energy meter with used energy, live watts, state, */
-      /* countdown, and trace. Since running is the meter. */
+      /* Energy meter with used energy and live watts. */
+      /* Since running is the meter. */
       updateEnergy(data);
 
       var s = data.stats || {};

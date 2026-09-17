@@ -654,26 +654,50 @@ mod tests {
         assert!(html.contains("governor"));
     }
 
-    /* Dashboard shows the meter section above groups. */
+    /* Dashboard shows the calm meter-only energy section. */
     #[test]
     fn dashboard_shows_energy_section() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"energy-since\""));
         assert!(html.contains("id=\"energy-watts\""));
-        assert!(html.contains("id=\"energy-state\""));
-        assert!(html.contains("id=\"energy-countdown\""));
-        assert!(html.contains("id=\"energy-trace\""));
         assert!(html.contains("id=\"energy-note\""));
         assert!(html.contains("Consumed since launch"));
         assert!(html.contains("Live watts"));
         assert!(html.contains("Section shows energy consumed since launch"));
         assert!(html.contains("Note numbers for manual compare"));
-        assert!(html.contains("E_used"));
+        assert!(html.contains("Placement follows the governor only"));
         assert!(html.contains("unavailable"));
-        assert!(html.contains("baseline"));
         assert!(html.contains("data.energy"));
         assert!(html.contains("since_running_kwh"));
         assert!(html.contains("live_watts"));
+        assert!(html.contains("energy-meter"));
+        assert!(html.contains("energy-label"));
+        assert!(!html.contains("id=\"energy-state\""));
+        assert!(!html.contains("id=\"energy-countdown\""));
+        assert!(!html.contains("id=\"energy-trace\""));
+        assert!(!html.contains("energy-legend"));
+        assert!(!html.contains("legend-row"));
+        assert!(!html.contains("legend-sym"));
+        assert!(!html.contains("trace-row"));
+        assert!(!html.contains("trace-key"));
+        assert!(!html.contains("trace-val"));
+        assert!(!html.contains("trace-meter"));
+        assert!(!html.contains("renderTrace"));
+        assert!(!html.contains("traceClass"));
+        assert!(!html.contains("fmtCountdown"));
+        assert!(!html.contains("countdown_s"));
+        assert!(!html.contains("energy.trace"));
+        assert!(!html.contains("Countdown:</span>"));
+        assert!(!html.contains("State:</span>"));
+        assert!(!html.contains("Waiting for load"));
+        assert!(!html.contains("Cooling down"));
+        assert!(!html.contains("Paused while the governor"));
+        assert!(!html.contains("No package counter found"));
+        assert!(!html.contains("'waiting'"));
+        assert!(!html.contains("'collecting'"));
+        assert!(!html.contains("'baseline'"));
+        assert!(!html.contains("'backoff'"));
+        assert!(!html.contains("E_used"));
         assert!(!html.contains("E_saved"));
         assert!(!html.contains("energy-pairs"));
         assert!(!html.contains("energy-daily"));
