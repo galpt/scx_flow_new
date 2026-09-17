@@ -73,17 +73,6 @@ pub(crate) const PROBE_WAIT_EXIT_TICKS: u32 = 5;
 /* Waiting timeout seconds. One hundred eighty seconds parks idle, */
 /* then one pair attempts with re wait on still idle W. */
 pub(crate) const PROBE_WAIT_TIMEOUT_SECS: u64 = 180;
-/* Accepted pairs before headlines. One pair never headlines, */
-/* three to four pairs carry a low confidence hint. Three */
-/* is policy, not measurement. */
-/* Parked bound stays for tests with no live use. */
-#[allow(dead_code)]
-pub(crate) const PROBE_MIN_PAIRS: u64 = 3;
-/* Smallest honest perf joules for a headline. Below one */
-/* millijoule the ratio turns noise into absurd percent. */
-/* Parked bound stays for tests with no live use. */
-#[allow(dead_code)]
-pub(crate) const PROBE_MIN_J: f64 = 1e-3;
 /* Bad intervals before backoff. Five straight bad seconds park */
 /* the probe for a minute, then collection starts over. */
 pub(crate) const PROBE_MAX_CONSEC_INVALID: u32 = 5;
@@ -113,23 +102,17 @@ pub(crate) enum ProbePhase {
     Settle,
 }
 
-/* One tick inside an arm. */
+/* One tick inside an arm. Offset orders the discard window, watts holds */
+/* the gap corrected power so the mean stays honest over missed reads. */
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ArmSample {
     offset_s: f64,
-    dt_s: f64,
     watts: f64,
-    joules: f64,
 }
 
-/* Accepted arm summary. */
-/* Joules and secs stay for tests with no live use. */
+/* Accepted arm summary. Live watts stats only with no joules use. */
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ArmStats {
-    #[allow(dead_code)]
-    joules: f64,
-    #[allow(dead_code)]
-    secs: f64,
     kept: u64,
     mean_w: f64,
     median_w: f64,
@@ -211,10 +194,6 @@ pub(crate) fn evaluate_arm(
     active_end: &[stats::PerCpuMetrics],
 ) -> Result<ArmStats, ArmReject> {
     let mut watts: Vec<f64> = Vec::new();
-    let mut kept_joules: Vec<f64> = Vec::new();
-    let mut kept_dt: Vec<f64> = Vec::new();
-    let mut joules = 0.0;
-    let mut secs = 0.0;
     let mut min_w = f64::INFINITY;
     let mut max_w = f64::NEG_INFINITY;
     for s in samples {
@@ -225,10 +204,6 @@ pub(crate) fn evaluate_arm(
             continue;
         }
         watts.push(s.watts);
-        kept_joules.push(s.joules);
-        kept_dt.push(s.dt_s);
-        joules += s.joules;
-        secs += s.dt_s;
         if s.watts < min_w {
             min_w = s.watts;
         }
@@ -261,8 +236,6 @@ pub(crate) fn evaluate_arm(
             }
         }
         return Ok(ArmStats {
-            joules,
-            secs,
             kept: watts.len() as u64,
             mean_w: mean,
             median_w: median,
@@ -302,8 +275,6 @@ pub(crate) fn evaluate_arm(
             dropped[order[k]] = true;
         }
         let mut tw: Vec<f64> = Vec::with_capacity(watts.len() - drop);
-        let mut tj = 0.0;
-        let mut ts = 0.0;
         let mut tmin = f64::INFINITY;
         let mut tmax = f64::NEG_INFINITY;
         for (i, w) in watts.iter().enumerate() {
@@ -311,8 +282,6 @@ pub(crate) fn evaluate_arm(
                 continue;
             }
             tw.push(*w);
-            tj += kept_joules[i];
-            ts += kept_dt[i];
             if *w < tmin {
                 tmin = *w;
             }
@@ -345,8 +314,6 @@ pub(crate) fn evaluate_arm(
             return Err(ArmReject::Implausible);
         }
         return Ok(ArmStats {
-            joules: tj,
-            secs: ts,
             kept: tw.len() as u64,
             mean_w: tmean,
             median_w: tmedian,
@@ -825,9 +792,7 @@ impl EnergyProbe {
                         self.arm_wall_s += s.dt_s;
                         self.arm.push(ArmSample {
                             offset_s: self.arm_wall_s,
-                            dt_s: use_dt,
                             watts: uj as f64 / use_dt / 1_000_000.0,
-                            joules: uj as f64 / 1_000_000.0,
                         });
                         self.pending_miss_s = 0.0;
                     }
@@ -1192,8 +1157,6 @@ mod tests {
         assert_eq!(PROBE_WAIT_ENTER_TICKS, 5);
         assert_eq!(PROBE_WAIT_EXIT_TICKS, 5);
         assert_eq!(PROBE_WAIT_TIMEOUT_SECS, 180);
-        assert_eq!(PROBE_MIN_PAIRS, 3);
-        assert_eq!(PROBE_MIN_J, 1e-3);
         assert_eq!(PROBE_BACKOFF_SECS, 60);
         assert_eq!(PROBE_MAX_CONSEC_INVALID, 5);
     }
@@ -1221,15 +1184,11 @@ mod tests {
         for i in 1..=30 {
             samples.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: 50.0,
-                joules: 50.0,
             });
         }
         let got = evaluate_arm(&samples, 30.0, &[], &[]).unwrap();
         assert_eq!(got.kept, 25);
-        assert_eq!(got.secs, 25.0);
-        assert_eq!(got.joules, 1250.0);
         assert_eq!(got.mean_w, 50.0);
     }
 
@@ -1240,17 +1199,13 @@ mod tests {
         for off in [2.9, 3.0, 27.9, 28.0] {
             samples.push(ArmSample {
                 offset_s: off,
-                dt_s: 1.0,
                 watts: 50.0,
-                joules: 50.0,
             });
         }
         for i in 0..20 {
             samples.push(ArmSample {
                 offset_s: 10.0 + i as f64 * 0.1,
-                dt_s: 1.0,
                 watts: 50.0,
-                joules: 50.0,
             });
         }
         let got = evaluate_arm(&samples, 30.0, &[], &[]).unwrap();
@@ -1264,9 +1219,7 @@ mod tests {
         for i in 1..=21 {
             samples.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: 50.0,
-                joules: 50.0,
             });
         }
         assert_eq!(
@@ -1284,16 +1237,12 @@ mod tests {
             let w = if i % 2 == 0 { 35.0 } else { 25.0 };
             loud.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: w,
-                joules: w,
             });
             let e = if i % 2 == 0 { 32.0 } else { 28.0 };
             edge.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: e,
-                joules: e,
             });
         }
         /* Loud std 5.0 W tops the max of 1.5 W and 0.15 times 30 W. */
@@ -1315,16 +1264,12 @@ mod tests {
             let idle = if i == 15 { 15.9 } else { 7.0 };
             spike.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: idle,
-                joules: idle,
             });
             let light = if i == 15 { 35.6 } else { 30.0 };
             hump.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: light,
-                joules: light,
             });
         }
         /* Idle spike 127 percent over median trims one and passes. */
@@ -1345,9 +1290,7 @@ mod tests {
             let w = if i % 2 == 0 { 8.5 } else { 5.5 };
             v.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: w,
-                joules: w,
             });
         }
         /* Idle CV 21.7 percent maps near 1.5 W at 7 W median. */
@@ -1364,9 +1307,7 @@ mod tests {
             let w = if i % 2 == 0 { 31.3 } else { 28.7 };
             v.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: w,
-                joules: w,
             });
         }
         /* Light CV 4.2 percent maps near 1.3 W at 30 W median. */
@@ -1383,9 +1324,7 @@ mod tests {
             let w = if i % 2 == 0 { 102.0 } else { 98.0 };
             v.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: w,
-                joules: w,
             });
         }
         /* Load CV 2.0 percent maps near 2.0 W at 100 W median. */
@@ -1394,26 +1333,21 @@ mod tests {
         assert!((got.mean_w - 100.0).abs() < 0.5);
     }
 
-    /* Close idle arms accept with no headline bias by construction. */
+    /* Close idle arms accept with small bias and parked headline. */
     #[test]
     fn close_idle_arms_accept_with_small_bias() {
-        /* Bias under 0.5 W carries no headline bias by construction, since */
-        /* ratio of sums weights by kept seconds and per arm means with equal */
-        /* windows. */
+        /* Bias under 0.5 W stays small by construction with equal */
+        /* windows and live watts only and headline parked. */
         let mut a = Vec::new();
         let mut b = Vec::new();
         for i in 1..=30 {
             a.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: 7.05,
-                joules: 7.05,
             });
             b.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: 7.37,
-                joules: 7.37,
             });
         }
         let ga = evaluate_arm(&a, 30.0, &[], &[]).unwrap();
@@ -1435,9 +1369,7 @@ mod tests {
             };
             v.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: w,
-                joules: w,
             });
         }
         /* Five spikes need five dropped, two leave three and fail. */
@@ -1558,9 +1490,7 @@ mod tests {
         for i in 1..=30 {
             samples.push(ArmSample {
                 offset_s: i as f64,
-                dt_s: 1.0,
                 watts: 50.0,
-                joules: 50.0,
             });
         }
         /* One card with fixed active nanos for plausibility. */

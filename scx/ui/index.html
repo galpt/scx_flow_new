@@ -205,64 +205,8 @@
         gap: 4px;
       }
     }
-    /* Energy notes and ref pills. Serif notes stay quiet
-     * beside the formula, pills stay muted till hover. */
-    .energy-ref {
-      display: inline-block;
-      margin-left: 4px;
-      padding: 0 5px;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--elevated);
-      color: var(--text-secondary);
-      font-family: var(--font-sans);
-      font-size: 0.75rem;
-      font-weight: 500;
-      line-height: 1.5;
-      text-decoration: none;
-      vertical-align: super;
-      position: relative;
-    }
-    .energy-ref:hover {
-      color: var(--text-primary);
-      border-color: var(--border-hover);
-    }
-    .energy-ref:focus {
-      color: var(--text-primary);
-      border-color: var(--border-hover);
-      outline: 1px solid var(--border-hover);
-      outline-offset: 1px;
-    }
-    /* Tooltips open below and grow with content. Height stays auto with no cap and visible overflow, width stays capped. */
-    .energy-tip {
-      display: none;
-      position: absolute;
-      top: 1.6em;
-      bottom: auto;
-      left: 50%;
-      transform: translateX(-50%);
-      width: max-content;
-      max-width: min(240px, 100vw - 32px);
-      height: auto;
-      max-height: none;
-      overflow: visible;
-      padding: 6px 8px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--elevated);
-      color: var(--text-secondary);
-      font-family: Georgia, 'Times New Roman', Times, serif;
-      font-size: 0.75rem;
-      font-weight: 400;
-      line-height: 1.45;
-      white-space: normal;
-      z-index: 1;
-    }
-    .energy-ref:hover .energy-tip,
-    .energy-ref:focus .energy-tip,
-    .energy-ref:focus-within .energy-tip {
-      display: block;
-    }
+    /* Energy notes. Serif notes stay quiet beside the formula. */
+    /* Headline stays parked, so no pill refs remain. */
     .energy-notes-list {
       margin: 0;
       padding-left: 1.25em;
@@ -359,7 +303,6 @@
     }
     .trace-accepted,
     .trace-rejected,
-    .trace-low,
     .trace-headline {
       font-weight: 700;
     }
@@ -375,13 +318,7 @@
     .trace-rejected .trace-val::before {
       content: "✕ ";
     }
-    .trace-low {
-      color: var(--warning);
-      font-weight: 600;
-    }
-    .trace-low .trace-val::before {
-      content: "! ";
-    }
+    /* Headline stays parked, so trace marks the parked line. */
     .trace-headline {
       color: var(--text-primary);
     }
@@ -429,16 +366,10 @@
       border-style: dashed;
       font-weight: 600;
     }
-    /* Narrow widths. Hero stacks full width, tips stay off where anchors carry the notes. */
+    /* Narrow widths. Hero stacks full width with parked headline. */
     @media (max-width: 640px) {
       .energy-hero {
         grid-column: 1 / -1;
-      }
-      .energy-tip,
-      .energy-ref:hover .energy-tip,
-      .energy-ref:focus .energy-tip,
-      .energy-ref:focus-within .energy-tip {
-        display: none !important;
       }
     }
   </style>
@@ -513,12 +444,8 @@
           Saved:</span>
           <span class="stat-value" id="energy-daily">unavailable</span>
           <span class="stat-value" id="energy-yearly" style="display:none">unavailable</span>
-          <a class="energy-ref" href="#energy-note-1"
-            style="display:none">[1]<span
-            class="energy-tip">Placement follows the governor only. Headline parked while the probe holds strict.</span></a>
-          <a class="energy-ref" href="#energy-note-2"
-            style="display:none">[2]<span
-            class="energy-tip">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings.</span></a>
+          <!-- Headline stays parked, so no pill refs ever show. -->
+          <!-- Notes below carry the governor truth and estimates. -->
         </div>
         <div><span style="color:var(--text-muted)">
           Daily energy:</span>
@@ -973,35 +900,11 @@
       return d / dt;
     }
 
-    /* Signed percent with two decimals for savings. */
-    function fmtSignedPct(x) {
-      x = +x || 0;
-      return (x >= 0 ? '+' : '') +
-        x.toFixed(2) + ' %';
-    }
-
-    /* Signed kWh with two decimals. */
-    function fmtSignedKwh(x) {
-      x = +x || 0;
-      return (x >= 0 ? '+' : '') +
-        x.toFixed(2) + ' kWh';
-    }
-
-    /* Live numbers in the same shape as the formula. */
-    /* Aggregate saved W over one day in all accepted pairs. */
-    function fmtLiveNum(x) {
-      var s = (+x || 0).toFixed(3);
-      if (s.charAt(0) === '-') {
-        s = '−' + s.slice(1);
-      }
-      return s;
-    }
-
+    /* Headline stays parked, so no savings formatters remain. */
+    /* Trace carries live watts and countdown with parked pairs. */
     /* Trace outcome class by word match, class only with no text change. */
+    /* Low confidence never renders with headline parked. */
     function traceClass(line) {
-      if (line.indexOf('low confidence') >= 0) {
-        return 'trace-low';
-      }
       if (line.indexOf('rejected') >= 0) {
         return 'trace-rejected';
       }
@@ -1087,13 +990,16 @@
         el('energy-yearly').textContent = 'waiting';
         el('energy-yearly-kwh').textContent = 'waiting';
         el('energy-since').textContent = 'waiting';
+        /* Pairs stay parked at zero with live rejected counts. */
+        /* Headline parked with no compare, so no accumulation shows. */
         el('energy-pairs').textContent =
-          (energy.accepted_pairs || 0) + ' accepted, ' +
+          'parked, ' +
           (energy.rejected_pairs || 0) + ' rejected';
         note = 'Waiting for load above 20 W. ' +
           'Headline parked with no compare.';
-      } else if (!energy.has_headline) {
-        var have = energy.accepted_pairs || 0;
+      } else {
+        /* Collecting and backoff share parked headline with no compare. */
+        /* Pairs stay parked at zero with live rejected counts. */
         var waiting = 'headline parked';
         el('energy-daily').textContent = waiting;
         el('energy-daily-kwh').textContent = waiting;
@@ -1101,30 +1007,10 @@
         el('energy-yearly-kwh').textContent = waiting;
         el('energy-since').textContent = waiting;
         el('energy-pairs').textContent =
-          have + ' accepted, ' +
+          'parked, ' +
           (energy.rejected_pairs || 0) + ' rejected';
         note = 'Collecting strict arms. ' +
           'Headline parked with no compare.';
-      } else {
-        var conf = energy.low_confidence ?
-          ' (low confidence)' : '';
-        var shared = fmtSignedPct(energy.headline_pct) + conf +
-          ' across ' + (energy.accepted_pairs || 0) + ' pairs';
-        el('energy-daily').textContent = shared;
-        el('energy-yearly').textContent = shared;
-        el('energy-daily-kwh').textContent =
-          fmtSignedKwh(energy.daily_kwh) + ' / day estimate';
-        el('energy-yearly-kwh').textContent =
-          fmtSignedKwh(energy.yearly_kwh) + ' / yr projection';
-        el('energy-since').textContent =
-          fmtSignedKwh(energy.since_running_kwh) + ' estimate';
-        el('energy-pairs').textContent =
-          (energy.accepted_pairs || 0) + ' accepted, ' +
-          (energy.rejected_pairs || 0) + ' rejected';
-        if (energy.low_confidence) {
-          note = 'Low confidence with 3 to 4 pairs. ' +
-            'Yearly is a projection.';
-        }
       }
       if (state === 'backoff') {
         note = 'Cooling down after bad reads. ' + note;
@@ -1136,21 +1022,16 @@
         live = 'paused for baseline';
       } else if (state === 'waiting') {
         live = 'waiting for load above 20 W';
-      } else if (!energy.has_headline) {
-        live = 'headline parked, probe holds strict';
       } else {
-        var saveW = (energy.daily_kwh || 0) * 1000 / 24;
-        live = '(' + fmtLiveNum(saveW) +
-          ' W) × 24 h ÷ 1000 = ' +
-          fmtLiveNum(energy.daily_kwh) + ' kWh';
+        /* Headline parked, so live holds strict with no savings math. */
+        live = 'headline parked, probe holds strict';
       }
       el('energy-live').textContent = live;
       el('energy-note').textContent = note;
       /* Notes hold for every state except unavailable. */
       /* Method and estimates stay true in baseline, waiting, */
-      /* and collecting too, so the block shows */
-      /* there. Pills show only with headlines, so no */
-      /* dangling refs in early states. */
+      /* and collecting too, so the block shows there. */
+      /* Headline stays parked, so no pill refs ever show. */
       var notes = el('energy-notes');
       if (notes) {
         notes.style.display =
@@ -1164,14 +1045,7 @@
         footnote.style.display =
           (state === 'unavailable') ? '' : 'none';
       }
-      var showRefs = !!energy.has_headline &&
-        state !== 'unavailable' &&
-        state !== 'baseline' &&
-        state !== 'waiting';
-      var refs = document.querySelectorAll('.energy-ref');
-      for (var i = 0; i < refs.length; i++) {
-        refs[i].style.display = showRefs ? '' : 'none';
-      }
+      /* No pill refs remain with headline parked. */
     }
 
     function updateUI(data) {
