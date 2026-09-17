@@ -629,7 +629,7 @@ mod tests {
         }
     }
 
-    /* Ticks since a fresh probe with no meter use. */
+    /* Ticks since a fresh probe with meter live. */
     fn fresh_ticks(p: &mut EnergyProbe, n: u64) {
         for _ in 0..n {
             let q = quiet(50.0);
