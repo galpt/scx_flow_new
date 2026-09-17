@@ -16,10 +16,10 @@ on:
 
 env:
   BPF_CLANG: clang-19
-  # Pinned upstream workspace ref (sched-ext/scx main as of 2026-09-07).
+  # Pinned upstream workspace ref (sched-ext/scx main as of 2026-09-15).
   # Bump deliberately after verifying the overlay still builds; the
-  # overlay needs scx_* 1.1.3 + libbpf-rs 0.27.0 from the workspace.
-  SCX_REF: 7cec98c51376a9d38b05a1e39e30cf7e5909cf16
+  # overlay needs scx_* 1.1.3 + libbpf-rs 0.27.1 from the workspace.
+  SCX_REF: 6752d59a4297d8918e8fd4d7237b50e2fceb1d14
 
 jobs:
   test:
