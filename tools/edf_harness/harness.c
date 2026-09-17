@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- *
  * Periodic harness for the flow scheduler.
  * Each worker runs periodic jobs with start jitter
  * plus period plus execution.
@@ -13,6 +11,8 @@
  * miss when wall completion passes release plus
  * deadline. Switch counts use voluntary switches
  * from thread resource use with no extra sampling.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #define _GNU_SOURCE
 #include <errno.h>

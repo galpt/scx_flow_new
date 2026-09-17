@@ -580,7 +580,6 @@ static __always_inline bool flow_kick_recent(u64 now,
 }
 /* True when perf mode is on for S0 plus S1. */
 /* BSS flag holds zero for strict plus one for perf. */
-/* Zero init keeps 4.2.21 paths bit identical. */
 /* S0 keeps tier order with wider any allowed set, */
 /* S1 bypasses the kick group gate with no recount. */
 /* Mask always wins in both modes with no new knob. */
@@ -602,9 +601,8 @@ static __always_inline u64 flow_qdl_round_down(u64 dl)
 /* rounded deadline with slot zero and no overflow. Inside keeps the rounded */
 /* deadline with the slot from the rounded distance shifted by 16. Outside */
 /* pins to the tail at frontier plus horizon minus one with the last slot */
-/* to the tail at frontier plus horizon minus one with the last slot and */
-/* overflow set. Error holds deadline minus rounded deadline in 0 to 65535. */
-/* One pass keeps a single horizon test with no double read. */
+/* and overflow set. Error holds deadline minus rounded deadline */
+/* in 0 to 65535. One pass keeps a single horizon test with no double read. */
 static __always_inline u64 flow_wheel_probe(u64 dl,
 	u64 frontier, u64 *slot, u64 *err, bool *over)
 {

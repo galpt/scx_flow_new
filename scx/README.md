@@ -188,9 +188,9 @@ in `Cargo.toml`.
 ### Energy probe
 
 Package energy comes from RAPL counters with per-CPU active time from BPF
-state. The probe alternates strict and baseline arms and reports collecting,
-waiting, and unavailable states until enough accepted pairs exist for a
-headline. Daily, yearly, and since attach savings appear in kWh on the
+state. The probe holds strict arms with settle gaps and keeps no compare,
+so accepted stays zero with headline parked. Daily, yearly, and since attach
+savings stay parked in kWh on the
 dashboard with a live trace. Details live in `src/rapl.rs`,
 `src/snapshot.rs`, and `src/stats.rs`. See `src/webui.rs`,
 `ui/index.html`, and `src/bpf/intf.h` for the full path.

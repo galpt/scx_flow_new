@@ -34,8 +34,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		u16 ncnt;
 		/* Pure-EMA hint at M2 uniform both groups. No group branch, so light and */
 		/* hog share the same map from the stored EMA. Cold zero maps to zero until */
-		/* the first climb. Perf arm keeps natural hints with no pin, so the probe */
-		/* measures the grouping split with no hint split. */
+		/* the first climb. Keeps natural hints with no pin, so no hint split. */
 		perf = flow_cpuperf_from_ema(
 		    st->cpuperf_ema);
 		if (scx_bpf_cpuperf_set)
@@ -363,10 +362,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				    (u32)FLOW_CPUPERF_IDLE;
 				/* M2 maps the decayed EMA. */
 				/* Long idle still maps to zero. */
-				/* Perf arm keeps natural hints */
-				/* with no pin, so the probe */
-				/* measures the grouping split */
-				/* with no hint split. */
+				/* Keeps natural hints with no pin, */
+				/* so no hint split. */
 				if (est)
 					perf =
 					    flow_cpuperf_from_ema(
@@ -461,10 +458,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			/* the decayed EMA with no hard zero. */
 			/* Long sleep decays to zero before */
 			/* the climb, so zero delta maps zero. */
-			/* Perf arm keeps natural hints */
-			/* with no pin, so the probe */
-			/* measures the grouping split */
-			/* with no hint split. */
+			/* Keeps natural hints with no pin, */
+			/* so no hint split. */
 			if (st)
 				perf = flow_cpuperf_from_ema(
 				    st->cpuperf_ema);

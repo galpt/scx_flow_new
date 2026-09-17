@@ -1,9 +1,10 @@
 <!--
   SPDX-License-Identifier: GPL-2.0
   scx_flow dashboard page
-  Live view of per CPU queues, per CPU running tasks, and system counters. Offline single
-  file with no external assets. Data source is the loopback snapshot route with /api/snapshot
-  and /api/stats.
+  Live view of per CPU queues, per CPU running tasks, and system
+  counters. Offline single file with no external assets. Data
+  source is the loopback snapshot route with /api/snapshot and
+  /api/stats.
   Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 -->
 <!doctype html>
@@ -475,8 +476,8 @@
       <div id="energy-legend" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-secondary)">
         <p class="legend-row"><span class="legend-sym"><i>E_saved</i></span> <span class="legend-def">is saved energy in kWh over the span.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>P_perf</i></span> <span class="legend-def">is mean perf power in W over kept seconds in all accepted pairs.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>P_strict</i></span> <span class="legend-def">is mean strict power in W over kept seconds in all accepted pairs.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_perf</i></span> <span class="legend-def">is mean perf power in W over kept seconds in all accepted pairs with headline parked.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>P_strict</i></span> <span class="legend-def">is mean strict power in W over kept seconds in all accepted pairs with headline parked.</span></p>
         <p class="legend-row"><span class="legend-sym"><i>t</i></span> <span class="legend-def">is hours in the span.</span></p>
       </div>
       <pre id="energy-trace" style="margin-top:8px;

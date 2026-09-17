@@ -306,7 +306,7 @@ fn live_task(cpu: usize, nr: usize) -> PendingTask {
 }
 
 #[test]
-fn fifo_drain_skips_dead_head() {
+fn slot_drain_skips_dead_head() {
     let mut q = VecDeque::from([
         PendingTask {
             live: false,
@@ -321,7 +321,7 @@ fn fifo_drain_skips_dead_head() {
 }
 
 #[test]
-fn fifo_drain_skips_failed_move_with_progress() {
+fn slot_drain_skips_failed_move_with_progress() {
     let mut q = VecDeque::from([
         PendingTask {
             fail: true,
@@ -336,7 +336,7 @@ fn fifo_drain_skips_failed_move_with_progress() {
 }
 
 #[test]
-fn fifo_drain_respects_cap_plus_base() {
+fn slot_drain_respects_cap_plus_base() {
     let mut q = VecDeque::from([
         live_task(0, 2),
         live_task(0, 2),
@@ -353,7 +353,7 @@ fn fifo_drain_respects_cap_plus_base() {
 }
 
 #[test]
-fn fifo_drain_keeps_arrival_order() {
+fn slot_drain_keeps_queue_order() {
     let mut q = VecDeque::from([live_task(0, 2), live_task(1, 2)]);
     let moved = slot_drain_model(&mut q, 0, SLOT_BUDGET, 0);
     assert_eq!(moved, 1);

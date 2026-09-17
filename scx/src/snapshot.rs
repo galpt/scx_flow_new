@@ -19,17 +19,17 @@ use stats::EnergyMetrics;
 
 /* Seconds of one probe arm. Thirty second arms hold the */
 /* ninety five percent half width near half a W in the */
-/* light regime, see the SE table in the RAPL probe data. */
+/* light regime with measured margin. */
 pub(crate) const PROBE_ARM_SECS: u64 = 30;
 /* Lead seconds dropped per arm. Power and frequency settle inside three */
-/* seconds after a step in the RAPL probe data. */
+/* seconds after a step with measured margin. */
 pub(crate) const PROBE_DISCARD_LEAD_S: f64 = 3.0;
 /* Tail seconds dropped per arm. Teardown tails run two to */
-/* four seconds in the RAPL probe data, two keeps twenty five. */
+/* four seconds with measured margin, two keeps twenty five. */
 pub(crate) const PROBE_DISCARD_TAIL_S: f64 = 2.0;
 /* Shortest honest arm in seconds. Twenty seconds still resolves */
-/* near one W at ninety five percent in the light regime, */
-/* see the detection table in the RAPL probe data. Never lower. */
+/* near one W at ninety five percent in the light regime */
+/* with measured margin. Never lower. */
 pub(crate) const PROBE_MIN_ARM_SECS: u64 = 20;
 /* Fewest kept samples to accept one arm. Twenty five survive */
 /* the discard from a full arm, so twenty tolerates a few */

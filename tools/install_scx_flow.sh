@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-#
 # Install the flow scheduler by overlaying the scx dir into
 # a workspace checkout and building the binary.
+#
+# Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

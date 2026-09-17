@@ -223,13 +223,13 @@ pub struct EnergyMetrics {
     /* Probe state. unavailable, baseline, collecting, waiting, backoff. */
     #[serde(default = "default_energy_state")]
     pub state: String,
-    /* True once three accepted pairs back the headline. */
+    /* Always false while headline stays parked. */
     #[serde(default)]
     pub has_headline: bool,
-    /* True with three to four pairs. Yearly stays a projection. */
+    /* Always false while headline stays parked. Yearly stays a projection. */
     #[serde(default)]
     pub low_confidence: bool,
-    /* Saved percent from the ratio of sums. Signed. */
+    /* Parked zero with no live compare. Signed. */
     #[serde(default)]
     pub headline_pct: f64,
     /* Accepted pairs in the sums. */

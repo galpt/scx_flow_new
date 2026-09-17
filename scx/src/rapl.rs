@@ -2,9 +2,11 @@
 /*
  * Package energy reads
  *
- * Discovers the RAPL package zone by name, samples the energy counter on the snapshot tick,
- * and turns counter wraps into plain joule deltas. Missing files yield fallback values with
- * no trap, so the scheduler keeps running with the probe parked in the unavailable state.
+ * Discovers the RAPL package zone by name, samples the energy
+ * counter on the snapshot tick, and turns counter wraps into
+ * plain joule deltas. Missing files yield fallback values with
+ * no trap, so the scheduler keeps running with the probe parked
+ * in the unavailable state.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
