@@ -188,10 +188,9 @@ in `Cargo.toml`.
 ### Energy probe
 
 Package energy comes from RAPL counters with per-CPU active time from BPF
-state. The probe holds strict arms with settle gaps and keeps no compare,
-so accepted stays zero with headline parked. Daily, yearly, and since attach
-savings stay parked in kWh on the
-dashboard with a live trace. Details live in `src/rapl.rs`,
+state. The section reports used energy in kWh since launch with a live
+trace and no compare, so users can note the numbers and compare runs by
+hand. Details live in `src/rapl.rs`,
 `src/snapshot.rs`, and `src/stats.rs`. See `src/webui.rs`,
 `ui/index.html`, and `src/bpf/intf.h` for the full path.
 
