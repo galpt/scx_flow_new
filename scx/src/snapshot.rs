@@ -84,6 +84,8 @@ pub(crate) const PROBE_MAX_GAP_S: f64 = 5.0;
 /* Active plausibility slack in nanos. Ten milliseconds covers boundary */
 /* segments and clock read skew over one arm. */
 pub(crate) const PROBE_ACTIVE_SLACK_NS: u64 = 10_000_000;
+/* Microjoules in one kWh. Maps package joules to kWh for the meter. */
+pub(crate) const UJ_PER_KWH: f64 = 3_600_000_000_000.0;
 
 /* Top state of the energy probe. */
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -343,9 +345,9 @@ pub(crate) struct ProbeSample<'a> {
 
 /*
  * Strict only probe over package joules. Holds strict arms with settle
- * gaps and keeps no compare, so accepted stays zero with headline
- * parked. Idle parks in waiting on low W with no pair cost, load returns
- * on high W, timeout tries one pair with re wait. Suspend, resume,
+ * gaps and counts used joules since launch, so accepted stays zero with
+ * headline zero. Idle parks in waiting on low W with no pair cost, load
+ * returns on high W, timeout tries one pair with re wait. Suspend, resume,
  * hotplug, and gaps discard the in flight pair with no partial credit.
  * Restart clears all history, since nothing is stored off process.
  * Placement follows the governor only.
@@ -362,6 +364,8 @@ pub(crate) struct EnergyProbe {
     arm_active_start: Vec<stats::PerCpuMetrics>,
     first: Option<ArmStats>,
     rejected_pairs: u64,
+    /* Used microjoules since launch for the meter. */
+    total_uj: u64,
     last_strict: Option<ArmStats>,
     last_perf: Option<ArmStats>,
     last_active: Option<(u32, f64)>,
@@ -392,6 +396,7 @@ impl EnergyProbe {
             arm_active_start: Vec::new(),
             first: None,
             rejected_pairs: 0,
+            total_uj: 0,
             last_strict: None,
             last_perf: None,
             last_active: None,
@@ -503,7 +508,7 @@ impl EnergyProbe {
                     self.pending_miss_s = 0.0;
                     self.arm_active_start.clear();
                 } else {
-                    /* Parked compare keeps arms for trace with no sums. */
+                    /* Parked arms stay for trace with no sums. */
                     let first = self.first.unwrap_or_default();
                     self.last_strict = Some(first);
                     self.last_perf = Some(stats);
@@ -650,8 +655,12 @@ impl EnergyProbe {
         if let Some((id, share)) = &self.last_active {
             t.push_str(&format!("active max CPU{id} {share:.1} percent of wall\n"));
         }
-        /* Headline stays parked with strict only and no compare. */
-        t.push_str("headline parked, probe holds strict with no compare\n");
+        /* Meter shows used energy with strict only. */
+        t.push_str(&format!(
+            "meter used {:.6} kWh since launch\n",
+            self.total_uj as f64 / UJ_PER_KWH
+        ));
+        t.push_str("section shows energy consumed since launch, note numbers for manual compare\n");
         self.trace = t;
     }
 
@@ -663,10 +672,14 @@ impl EnergyProbe {
      * boundary with no reject, load returns on high W, timeout tries one pair
      * with re wait. Missed ticks freeze waiting counts with no reset and no
      * advance. One missed read keeps its wall in pending and wall, so the next
-     * good delta over the gap keeps true mean. Countdown follows wall clock,
-     * not tick count.
+     * good delta over the gap keeps true mean. Used joules add to the meter
+     * on every good read. Countdown follows wall clock, not tick count.
      */
     pub(crate) fn tick(&mut self, s: &ProbeSample) {
+        /* Count used joules for the meter with no arm use. */
+        if let Some(uj) = s.delta_uj {
+            self.total_uj = self.total_uj.saturating_add(uj);
+        }
         if !s.rapl_present {
             if self.state != ProbeState::Unavailable {
                 self.discard_pair();
@@ -822,14 +835,14 @@ impl EnergyProbe {
     }
 
     /* Snapshot view for the dashboard schema. */
-    /* Headline stays parked with no live compare. */
+    /* Meter holds used kWh with headline zero. */
     pub(crate) fn output(&self, _uptime_s: f64) -> EnergyMetrics {
-        /* Parked headline keeps zeroed savings. */
+        /* Parked headline keeps zeroed use with live meter. */
         let has = false;
         let p = 0.0;
         let daily_kwh = 0.0;
         let yearly_kwh = 0.0;
-        let since_kwh = 0.0;
+        let since_kwh = self.total_uj as f64 / UJ_PER_KWH;
         EnergyMetrics {
             state: self.state_text().to_string(),
             has_headline: has,
@@ -1027,8 +1040,8 @@ impl<'a> Scheduler<'a> {
         };
         /*
          * Energy probe tick at 1s cadence. Samples package joules and per
-         * CPU active time, then drives strict arms only with headline
-         * parked. Placement follows the governor only.
+         * CPU active time, then drives strict arms only with meter live.
+         * Placement follows the governor only.
          */
         let now_tick = std::time::Instant::now();
         let rapl_due = self
@@ -1333,11 +1346,11 @@ mod tests {
         assert!((got.mean_w - 100.0).abs() < 0.5);
     }
 
-    /* Close idle arms accept with small bias and parked headline. */
+    /* Close idle arms accept with small bias and meter live. */
     #[test]
     fn close_idle_arms_accept_with_small_bias() {
         /* Bias under 0.5 W stays small by construction with equal */
-        /* windows and live watts only and headline parked. */
+        /* windows and live watts only and meter live. */
         let mut a = Vec::new();
         let mut b = Vec::new();
         for i in 1..=30 {
@@ -1449,7 +1462,7 @@ mod tests {
         assert_eq!(p.output(500.0).state, "waiting");
     }
 
-    /* Waiting holds strict with no compare. */
+    /* Waiting holds strict with meter live. */
     #[test]
     fn waiting_holds_strict_force() {
         let mut p = EnergyProbe::new();
@@ -1512,7 +1525,7 @@ mod tests {
         assert!(evaluate_arm(&samples, 30.0, &[], &[]).is_ok());
     }
 
-    /* One pair never headlines with parked headline. */
+    /* One pair never headlines with meter live. */
     #[test]
     fn one_pair_never_headlines() {
         let mut p = EnergyProbe::new();
@@ -1531,22 +1544,24 @@ mod tests {
         assert_eq!(e3.rejected_pairs, 0);
     }
 
-    /* Parked headline keeps all kWh at zero with no compare. */
+    /* Meter holds used kWh with daily and yearly parked. */
     #[test]
-    fn no_headline_keeps_kwh_at_zero() {
+    fn meter_holds_used_kwh_with_parked_daily_yearly() {
         let mut p = EnergyProbe::new();
         run_pair(&mut p, 50.0, 49.0);
         let one = p.output(3600.0);
         assert!(!one.has_headline);
         assert_eq!(one.daily_kwh, 0.0);
         assert_eq!(one.yearly_kwh, 0.0);
-        assert_eq!(one.since_running_kwh, 0.0);
+        let want_one = 2_970_000_000_f64 / UJ_PER_KWH;
+        assert!((one.since_running_kwh - want_one).abs() < 1e-12);
         run_pair(&mut p, 50.0, 49.0);
         let two = p.output(7200.0);
         assert!(!two.has_headline);
         assert_eq!(two.daily_kwh, 0.0);
         assert_eq!(two.yearly_kwh, 0.0);
-        assert_eq!(two.since_running_kwh, 0.0);
+        let want_two = 5_940_000_000_f64 / UJ_PER_KWH;
+        assert!((two.since_running_kwh - want_two).abs() < 1e-12);
     }
 
     /* One missed read keeps true mean with no spike and no waste. */
@@ -1734,7 +1749,7 @@ mod tests {
         assert!(e.trace.contains("unavailable"));
     }
 
-    /* Trace carries state, counts, and parked strict line. */
+    /* Trace carries state, counts, and meter line. */
     #[test]
     fn trace_carries_derivation() {
         let mut p = EnergyProbe::new();
@@ -1745,8 +1760,12 @@ mod tests {
         assert!(p.trace.contains("accepted 0"));
         assert!(p.trace.contains("rejected 0"));
         assert!(p.trace.contains("strict"));
-        assert!(p.trace.contains("parked"));
-        assert!(p.trace.contains("headline"));
+        assert!(p.trace.contains("meter"));
+        assert!(p.trace.contains("since launch"));
+        assert!(p.trace.contains("note numbers"));
+        assert!(p.trace.contains("manual compare"));
+        assert!(!p.trace.contains("headline"));
+        assert!(!p.trace.contains("parked"));
         assert!(!p.trace.contains("cpu0"));
     }
 

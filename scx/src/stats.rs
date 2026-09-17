@@ -211,12 +211,11 @@ fn default_energy_state() -> String {
 }
 
 /*
- * Energy savings view for the web dashboard. One nested object with defaults on
+ * Energy meter view for the web dashboard. One nested object with defaults on
  * every field, so old JSON without energy still decodes into the unavailable
- * state. Headline, daily, and yearly share one savings ratio from measured
- * package joules. Daily, yearly, and since running energies come from the same
- * saved W over different spans. Trace holds the live derivation in monospace
- * for the page.
+ * state. Headline, daily, and yearly stay parked at zero with no live use.
+ * Since running holds used kWh from package joules since launch. Trace holds
+ * the live derivation in monospace for the page.
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EnergyMetrics {
@@ -226,10 +225,10 @@ pub struct EnergyMetrics {
     /* Always false while headline stays parked. */
     #[serde(default)]
     pub has_headline: bool,
-    /* Always false while headline stays parked. Yearly stays a projection. */
+    /* Always false while headline stays parked. */
     #[serde(default)]
     pub low_confidence: bool,
-    /* Parked zero with no live compare. Signed. */
+    /* Parked zero with no live use. Signed. */
     #[serde(default)]
     pub headline_pct: f64,
     /* Accepted pairs in the sums. */
@@ -238,19 +237,19 @@ pub struct EnergyMetrics {
     /* Rejected pairs kept out of the sums. */
     #[serde(default)]
     pub rejected_pairs: u64,
-    /* Daily saved percent. Same ratio as the headline. */
+    /* Daily parked percent. Stays zero. */
     #[serde(default)]
     pub daily_pct: f64,
-    /* Daily saved energy in kWh. */
+    /* Daily parked energy in kWh. Stays zero. */
     #[serde(default)]
     pub daily_kwh: f64,
-    /* Yearly saved percent. Same ratio as the headline. */
+    /* Yearly parked percent. Stays zero. */
     #[serde(default)]
     pub yearly_pct: f64,
-    /* Yearly saved energy in kWh, a projection. */
+    /* Yearly parked energy in kWh. Stays zero. */
     #[serde(default)]
     pub yearly_kwh: f64,
-    /* Saved energy since attach in kWh, an estimate. */
+    /* Used energy since launch in kWh, a meter. */
     #[serde(default)]
     pub since_running_kwh: f64,
     /* Seconds left in the running arm or settle. */
@@ -321,7 +320,7 @@ pub struct WebMetrics {
     /* Governor display with EPP and platform suffix. */
     #[serde(default)]
     pub governor: String,
-    /* Energy savings view. Defaults to unavailable. */
+    /* Energy meter view. Defaults to unavailable. */
     #[serde(default)]
     pub energy: EnergyMetrics,
 }

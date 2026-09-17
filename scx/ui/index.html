@@ -207,7 +207,7 @@
       }
     }
     /* Energy notes. Serif notes stay quiet beside the formula. */
-    /* Headline stays parked, so no pill refs remain. */
+    /* Meter shows used energy, so no pill refs remain. */
     .energy-notes-list {
       margin: 0;
       padding-left: 1.25em;
@@ -233,7 +233,7 @@
     }
     /* Energy hero pair. Answer first with mono numerals, primary ink, tabular figures. */
     .energy-hero .stat-value,
-    #energy-daily,
+    #energy-since,
     #energy-daily-kwh {
       font-family: var(--font-mono);
       font-size: 0.875rem;
@@ -304,7 +304,7 @@
     }
     .trace-accepted,
     .trace-rejected,
-    .trace-headline {
+    .trace-meter {
       font-weight: 700;
     }
     .trace-accepted {
@@ -319,14 +319,14 @@
     .trace-rejected .trace-val::before {
       content: "✕ ";
     }
-    /* Headline stays parked, so trace marks the parked line. */
-    .trace-headline {
+    /* Meter stays live, so trace marks the meter line. */
+    .trace-meter {
       color: var(--text-primary);
     }
-    .trace-headline .trace-val::before {
+    .trace-meter .trace-val::before {
       content: "» ";
     }
-    /* Footnotes. Muted sans lines carry state notes, estimates, projections. */
+    /* Footnotes. Muted sans lines carry state notes and meter. */
     #energy-note,
     #energy-footnote {
       font-family: var(--font-sans);
@@ -338,7 +338,7 @@
     #energy-note:not(:empty) {
       font-weight: 500;
     }
-    /* Live derivation line. Serif secondary line follows the formula, quiet till headlines. */
+    /* Live line. Serif secondary line follows the formula. */
     #energy-live {
       font-weight: 400;
     }
@@ -367,7 +367,7 @@
       border-style: dashed;
       font-weight: 600;
     }
-    /* Narrow widths. Hero stacks full width with parked headline. */
+    /* Narrow widths. Hero stacks full width with meter. */
     @media (max-width: 640px) {
       .energy-hero {
         grid-column: 1 / -1;
@@ -437,16 +437,17 @@
         id="summary-explanation"></p>
     </div>
 
-    <!-- Energy with daily, yearly savings, and trace -->
+    <!-- Energy with used energy since launch, and trace -->
     <div class="card" style="margin-bottom:16px">
       <p class="section-label">Energy</p>
       <div class="sys-grid">
         <div class="energy-hero" style="grid-column:1/-1"><span style="color:var(--text-muted)">
-          Saved:</span>
-          <span class="stat-value" id="energy-daily">unavailable</span>
+          Consumed since launch:</span>
+          <span class="stat-value" id="energy-since">unavailable</span>
+          <span class="stat-value" id="energy-daily" style="display:none">unavailable</span>
           <span class="stat-value" id="energy-yearly" style="display:none">unavailable</span>
-          <!-- Headline stays parked, so no pill refs ever show. -->
-          <!-- Notes below carry the governor truth and estimates. -->
+          <!-- Meter shows used energy since launch. -->
+          <!-- Notes below carry the governor truth and meter. -->
         </div>
         <div><span style="color:var(--text-muted)">
           Daily energy:</span>
@@ -457,10 +458,6 @@
           <span class="stat-value" id="energy-yearly-kwh">unavailable</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Since running:</span>
-          <span class="stat-value" id="energy-since">unavailable</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           Pairs:</span>
           <span class="stat-value" id="energy-pairs">unavailable</span>
         </div>
@@ -468,17 +465,16 @@
       <p id="energy-formula" style="margin-top:8px;
         font-family: Georgia, 'Times New Roman', Times, serif;
         font-size:0.875rem;color:var(--text-primary)">
-        <i>E_saved</i> = (<i>P_perf</i> − <i>P_strict</i>) × <i>t</i> ÷ 1000
+        <i>E_used</i> = package joules ÷ 3600000000000
       </p>
       <p id="energy-live" style="margin-top:4px;
         font-family: Georgia, 'Times New Roman', Times, serif;
-        font-size:0.75rem;color:var(--text-secondary)">headline parked, probe holds strict</p>
+        font-size:0.75rem;color:var(--text-secondary)">live meter since launch</p>
       <div id="energy-legend" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-secondary)">
-        <p class="legend-row"><span class="legend-sym"><i>E_saved</i></span> <span class="legend-def">is saved energy in kWh over the span.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>P_perf</i></span> <span class="legend-def">is mean perf power in W over kept seconds in all accepted pairs with headline parked.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>P_strict</i></span> <span class="legend-def">is mean strict power in W over kept seconds in all accepted pairs with headline parked.</span></p>
-        <p class="legend-row"><span class="legend-sym"><i>t</i></span> <span class="legend-def">is hours in the span.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>E_used</i></span> <span class="legend-def">is used energy in kWh since launch.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>package joules</i></span> <span class="legend-def">is summed RAPL package energy since launch.</span></p>
+        <p class="legend-row"><span class="legend-sym"><i>kWh</i></span> <span class="legend-def">is joules divided by 3600000000000.</span></p>
       </div>
       <pre id="energy-trace" style="margin-top:8px;
         font-family:var(--font-mono);font-size:0.6875rem;
@@ -487,14 +483,14 @@
       <p id="energy-note" style="margin-top:4px;
         font-size:0.75rem;color:var(--text-muted)"></p>
       <p id="energy-footnote" style="margin-top:4px;
-        font-size:0.75rem;color:var(--text-muted)">Placement follows the governor only. Headline parked while the probe holds strict.</p>
+        font-size:0.75rem;color:var(--text-muted)">Section shows energy consumed since launch. Note numbers for manual compare across runs. Placement follows the governor only.</p>
       <div id="energy-notes" style="display:none">
         <hr style="border:none;border-top:1px solid var(--border);
           margin:1.5em 0">
         <p class="subsection-label">Notes</p>
         <ol class="energy-notes-list">
-          <li id="energy-note-1">Placement follows the governor only. Headline parked while the probe holds strict. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
-          <li id="energy-note-2">These figures are estimates based on real measurements collected while scx_flow is running. They approximate the energy saved by strict mode since launch. For a more exact comparison, record energy use with scx_flow in strict mode and without scx_flow, then compare the two readings. <a class="energy-backlink" href="#energy-daily" aria-label="Back to values">↩</a></li>
+          <li id="energy-note-1">Placement follows the governor only. Section shows energy consumed since launch. <a class="energy-backlink" href="#energy-since" aria-label="Back to values">↩</a></li>
+          <li id="energy-note-2">Section shows energy consumed since launch from real measurements. Note numbers for manual compare across runs, such as powersave versus performance sessions. <a class="energy-backlink" href="#energy-since" aria-label="Back to values">↩</a></li>
         </ol>
       </div>
     </div>
@@ -901,10 +897,16 @@
       return d / dt;
     }
 
-    /* Headline stays parked, so no savings formatters remain. */
-    /* Trace carries live watts and countdown with parked pairs. */
+    /* Meter stays live, so no extra formatters remain. */
+    /* Trace carries live watts and countdown with meter. */
     /* Trace outcome class by word match, class only with no text change. */
-    /* Low confidence never renders with headline parked. */
+    /* Low confidence never renders with meter live. */
+    /* Used kWh with six decimals for the meter. */
+    function fmtKwh(x) {
+      var v = +x || 0;
+      if (v < 0) v = 0;
+      return v.toFixed(6) + ' kWh';
+    }
     function traceClass(line) {
       if (line.indexOf('rejected') >= 0) {
         return 'trace-rejected';
@@ -912,8 +914,8 @@
       if (line.indexOf('accepted') >= 0) {
         return 'trace-accepted';
       }
-      if (line.indexOf('headline') >= 0) {
-        return 'trace-headline';
+      if (line.indexOf('meter') >= 0) {
+        return 'trace-meter';
       }
       return '';
     }
@@ -967,6 +969,9 @@
       var state = energy.state || 'unavailable';
       renderTrace(energy.trace || state);
       var note = '';
+      var sinceText = fmtKwh(energy.since_running_kwh);
+      var dash = '—';
+      var pairsText = (energy.rejected_pairs || 0) + ' rejected';
       if (state === 'unavailable') {
         el('energy-daily').textContent = 'unavailable';
         el('energy-daily-kwh').textContent = 'unavailable';
@@ -977,41 +982,37 @@
         note = 'No package counter found. ' +
           'The probe needs energy reads.';
       } else if (state === 'baseline') {
-        el('energy-daily').textContent = 'baseline';
-        el('energy-daily-kwh').textContent = 'baseline';
-        el('energy-yearly').textContent = 'baseline';
-        el('energy-yearly-kwh').textContent = 'baseline';
-        el('energy-since').textContent = 'baseline';
-        el('energy-pairs').textContent = 'baseline';
+        el('energy-daily').textContent = dash;
+        el('energy-daily-kwh').textContent = dash;
+        el('energy-yearly').textContent = dash;
+        el('energy-yearly-kwh').textContent = dash;
+        el('energy-since').textContent = sinceText;
+        el('energy-pairs').textContent = pairsText;
         note = 'Paused while the governor reads ' +
-          'performance. Showing baseline.';
+          'performance. Meter shows energy used since launch. ' +
+          'Note numbers for manual compare across runs.';
       } else if (state === 'waiting') {
-        el('energy-daily').textContent = 'waiting';
-        el('energy-daily-kwh').textContent = 'waiting';
-        el('energy-yearly').textContent = 'waiting';
-        el('energy-yearly-kwh').textContent = 'waiting';
-        el('energy-since').textContent = 'waiting';
-        /* Pairs stay parked at zero with live rejected counts. */
-        /* Headline parked with no compare, so no accumulation shows. */
-        el('energy-pairs').textContent =
-          'parked, ' +
-          (energy.rejected_pairs || 0) + ' rejected';
+        el('energy-daily').textContent = dash;
+        el('energy-daily-kwh').textContent = dash;
+        el('energy-yearly').textContent = dash;
+        el('energy-yearly-kwh').textContent = dash;
+        el('energy-since').textContent = sinceText;
+        /* Pairs show live rejected counts with meter live. */
+        el('energy-pairs').textContent = pairsText;
         note = 'Waiting for load above 20 W. ' +
-          'Headline parked with no compare.';
+          'Meter shows energy used since launch. ' +
+          'Note numbers for manual compare across runs.';
       } else {
-        /* Collecting and backoff share parked headline with no compare. */
-        /* Pairs stay parked at zero with live rejected counts. */
-        var waiting = 'headline parked';
-        el('energy-daily').textContent = waiting;
-        el('energy-daily-kwh').textContent = waiting;
-        el('energy-yearly').textContent = waiting;
-        el('energy-yearly-kwh').textContent = waiting;
-        el('energy-since').textContent = waiting;
-        el('energy-pairs').textContent =
-          'parked, ' +
-          (energy.rejected_pairs || 0) + ' rejected';
-        note = 'Collecting strict arms. ' +
-          'Headline parked with no compare.';
+        /* Collecting and backoff share live meter with daily dash. */
+        /* Pairs show live rejected counts with meter live. */
+        el('energy-daily').textContent = dash;
+        el('energy-daily-kwh').textContent = dash;
+        el('energy-yearly').textContent = dash;
+        el('energy-yearly-kwh').textContent = dash;
+        el('energy-since').textContent = sinceText;
+        el('energy-pairs').textContent = pairsText;
+        note = 'Meter shows energy used since launch. ' +
+          'Note numbers for manual compare across runs.';
       }
       if (state === 'backoff') {
         note = 'Cooling down after bad reads. ' + note;
@@ -1020,19 +1021,19 @@
       if (state === 'unavailable') {
         live = 'waiting for package counter';
       } else if (state === 'baseline') {
-        live = 'paused for baseline';
+        live = 'paused for baseline, meter live since launch';
       } else if (state === 'waiting') {
-        live = 'waiting for load above 20 W';
+        live = 'waiting for load above 20 W, meter live since launch';
       } else {
-        /* Headline parked, so live holds strict with no savings math. */
-        live = 'headline parked, probe holds strict';
+        /* Meter live, so live holds meter with no extra math. */
+        live = 'live meter since launch';
       }
       el('energy-live').textContent = live;
       el('energy-note').textContent = note;
       /* Notes hold for every state except unavailable. */
-      /* Method and estimates stay true in baseline, waiting, */
+      /* Method and meter stay true in baseline, waiting, */
       /* and collecting too, so the block shows there. */
-      /* Headline stays parked, so no pill refs ever show. */
+      /* Meter stays live, so no pill refs ever show. */
       var notes = el('energy-notes');
       if (notes) {
         notes.style.display =
@@ -1040,13 +1041,13 @@
       }
       /* Footnote backs unavailable alone. */
       /* Other states hide the fallback line so */
-      /* note two carries estimates with no double. */
+      /* note two carries meter with no double. */
       var footnote = el('energy-footnote');
       if (footnote) {
         footnote.style.display =
           (state === 'unavailable') ? '' : 'none';
       }
-      /* No pill refs remain with headline parked. */
+      /* No pill refs remain with meter live. */
     }
 
     function updateUI(data) {
@@ -1063,11 +1064,10 @@
       el('mode-badge').textContent = perf;
       el('mode-badge').title = gov;
 
-      /* Energy savings with daily, yearly, and trace. */
+      /* Energy meter with used energy, and trace. */
       /* Unavailable stays literal, baseline stays paused, */
-      /* collecting holds strict arms, headline stays parked */
-      /* with no compare. Yearly is a projection, */
-      /* since running is an estimate. */
+      /* collecting holds strict arms, meter stays live */
+      /* with daily dash. Since running is live meter. */
       updateEnergy(data);
 
       var s = data.stats || {};
