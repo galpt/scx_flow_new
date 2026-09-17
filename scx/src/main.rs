@@ -2,8 +2,8 @@
 /*
  * Flow scheduler front end
  *
- * Loads the BPF object, wires stats and the dashboard, and drives the run loop until
- * shutdown or exit. Snapshot reads live in snapshot.
+ * Loads the BPF object, wires stats and the dashboard, and drives the run loop
+ * until shutdown or exit. Snapshot reads live in snapshot.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -18,12 +18,17 @@ mod flow_group;
 mod flow_preempt;
 mod flow_select;
 mod flow_slice;
+mod flow_slot;
 #[cfg(test)]
 mod flow_tests_edf;
 #[cfg(test)]
 mod flow_tests_group;
 #[cfg(test)]
+mod flow_tests_lifo;
+#[cfg(test)]
 mod flow_tests_preempt;
+#[cfg(test)]
+mod flow_tests_slot;
 mod rapl;
 mod snapshot;
 mod stats;
@@ -133,10 +138,8 @@ pub(crate) struct Scheduler<'a> {
     governor_read_at: Option<std::time::Instant>,
     /* Package energy reader. None parks the probe. */
     rapl: Option<crate::rapl::RaplReader>,
-    /* A/B probe over package joules on the 1s tick. */
+    /* Strict only probe over package joules on the 1s tick. */
     probe: crate::snapshot::EnergyProbe,
-    /* Last forced perf written to BSS. */
-    probe_force: u8,
     /* Latest energy view for the dashboard. */
     energy: crate::stats::EnergyMetrics,
     /* Last RAPL sample for the 1s tick cadence. */
@@ -257,7 +260,6 @@ impl<'a> Scheduler<'a> {
             governor_read_at: None,
             rapl,
             probe: crate::snapshot::EnergyProbe::new(),
-            probe_force: 0,
             energy: crate::stats::EnergyMetrics::default(),
             rapl_read_at: None,
         })
@@ -295,6 +297,9 @@ impl<'a> Scheduler<'a> {
             demote={} promote={} wpromote={} pinfl={} gskip={} \
             pkick={} pskip={} kcoal={} \
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
+            wover={} tboost={} \
+            skicks={} tcas={} smoves={} sdefer={} stealx={} \
+            lheads={} lbound={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -319,6 +324,15 @@ impl<'a> Scheduler<'a> {
             m.preempt_skipped_group,
             m.preempt_skipped_mask,
             m.preempt_skipped_rate,
+            m.wheel_overflow,
+            m.token_boosts,
+            m.slot_kicks,
+            m.token_cas_fails,
+            m.slot_moves,
+            m.slot_defer,
+            m.steal_xmoves,
+            m.lifo_heads,
+            m.lifo_bound_hits,
             runtime,
             oncpu,
         );
@@ -426,14 +440,30 @@ mod tests {
     }
 
     #[test]
-    fn dsq_matches_header() {
+    fn slot_matches_header() {
         assert_eq!(
-            crate::flow_edf::DSQ_BASE,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_BASE as u64
+            crate::flow_slot::SLOT_BASE,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_BASE as u64
         );
         assert_eq!(
-            crate::flow_edf::DSQ_PARK,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+            crate::flow_slot::SLOT_OVERFLOW_BASE,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
+        );
+        assert_eq!(
+            crate::flow_slot::SLOT_D,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_D as u32
+        );
+        assert_eq!(
+            crate::flow_slot::SLOT_BUDGET,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET as u32
+        );
+        assert_eq!(
+            crate::flow_group::OVERFLOW_LIGHT,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
+        );
+        assert_eq!(
+            crate::flow_group::OVERFLOW_HOG,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
         );
     }
 
@@ -464,19 +494,23 @@ mod tests {
     }
 
     #[test]
-    fn cpu_size_with_ema_and_active_is_56() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
+    fn cpu_size_with_ema_active_and_occupant_is_64() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 64);
         assert_eq!(
             std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, active_ns),
             48
         );
+        assert_eq!(
+            std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, occupant_group),
+            56
+        );
     }
 
     #[test]
-    fn sched_stats_size_is_200() {
+    fn sched_stats_size_is_272() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            200
+            272
         );
     }
 
@@ -495,12 +529,12 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_GROUP_HOG as u64
         );
         assert_eq!(
-            crate::flow_group::PARK_LIGHT,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+            crate::flow_group::OVERFLOW_LIGHT,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
         );
         assert_eq!(
-            crate::flow_group::PARK_HOG,
-            crate::bpf_intf::flow_consts_FLOW_DSQ_PARK_HOG as u64
+            crate::flow_group::OVERFLOW_HOG,
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
         );
     }
 }

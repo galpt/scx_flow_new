@@ -14,3 +14,4 @@ pub use crate::flow_preempt::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
 pub use crate::flow_slice::*;
+pub use crate::flow_slot::*;

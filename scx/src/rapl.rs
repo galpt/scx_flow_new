@@ -2,9 +2,11 @@
 /*
  * Package energy reads
  *
- * Discovers the RAPL package zone by name, samples the energy counter on the snapshot tick,
- * and turns counter wraps into plain joule deltas. Missing files yield fallback values with
- * no trap, so the scheduler keeps running with the probe parked in the unavailable state.
+ * Discovers the RAPL package zone by name, samples the energy
+ * counter on the snapshot tick, and turns counter wraps into
+ * plain joule deltas. Missing files yield fallback values with
+ * no trap, so the scheduler keeps running with the probe parked
+ * in the unavailable state.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,7 +36,7 @@ fn read_trimmed(path: &Path) -> Option<String> {
 
 /*
  * Join one zone name under the base dir. Accepts letters, digits, dash,
- * underscore, colon, and dot. Intel-rapl with index forms then pass.
+ * underscore, colon, and dot. Intel RAPL with index forms then pass.
  * Anything else yields nothing, so parent climbs, separators, and absolute
  * paths stay out with no trap.
  */

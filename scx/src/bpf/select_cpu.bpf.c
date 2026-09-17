@@ -4,7 +4,7 @@
  *
  * Picks an idle CPU in group with mask and locality first, then any idle,
  * previous, and first allowed. Keeps placement only with no dispatch use and
- * mask always wins.
+ * mask always wins. Target feeds per CPU queue with overflow fallback.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

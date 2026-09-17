@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# Copyright (c) 2026 Galih Tama <galpt@v.recipes>
-#
 # Run the periodic harness across load levels.
 # Each level calibrates thread count for a target use
 # on the host CPU count with average burst plus period.
@@ -10,6 +8,8 @@
 # a light baseline. Set CONTROL to 1 to mark runs as
 # control for A and B comparison. The binary is built
 # on each run with no checked in binary.
+#
+# Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_C="${HERE}/harness.c"

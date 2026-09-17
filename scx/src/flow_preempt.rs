@@ -28,18 +28,15 @@ pub const GRANULE_FLOOR_NS: u64 = 64_000;
 /* Deserved slack in nanos at 32us. */
 #[cfg(test)]
 pub const DESERVED_SLACK_NS: u64 = 32_000;
-/* Rate bit in the cursor top bit. */
-#[cfg(test)]
-pub const CURSOR_RATE_BIT: u32 = 0x8000_0000;
 /* Stand bit in cursor bit10 with peer in 0 to 9. */
 pub const CURSOR_STAND_BIT: u32 = 0x0000_0400;
-/* Cursor peer mask without rate and stand. */
+/* Cursor peer mask without stand, top stays masked. */
 #[cfg(test)]
 pub const CURSOR_MASK: u32 = 0x7fff_fbff;
 
 /*
  * Sample in 32us units from queued count. One queued
- * is 31 units, half slice arms at 16. Cap is 250 at
+ * is 31 units, 512us arms at 16. Cap is 250 at
  * 8ms with integer math only.
  */
 #[cfg(test)]
@@ -63,7 +60,8 @@ pub fn delay_decay(old: u8) -> u8 {
 
 /*
  * True when the delay window is armed at 16. 16 is
- * 512us in 32us units near half slice.
+ * 512us in 32us units with absolute use. Display
+ * only with no gate use, see dots.
  */
 pub fn delay_armed(win: u8) -> bool {
     (win as u64) >= DELAY_ARM
@@ -75,7 +73,8 @@ pub fn delay_armed(win: u8) -> bool {
  * stand at 8 with the latched flag. Persists
  * across idle with no decay sans traffic. Delay
  * shows stale when idle, see dashboard. Next
- * running decays at 1/8 per window.
+ * running decays at 1/8 per window. Display only
+ * with no gate use, see dots.
  */
 pub fn delay_armed_latched(win: u8, held: bool) -> bool {
     if delay_armed(win) {
@@ -89,8 +88,8 @@ pub fn delay_armed_latched(win: u8, held: bool) -> bool {
 
 /*
  * True when the stand latch is held in bit10.
- * Bits 0 to 9 hold peer, bit10 holds stand, top
- * holds rate, so rotation masks both flags.
+ * Bits 0 to 9 hold peer, bit10 holds stand, so
+ * rotation masks the flag.
  */
 pub fn stand_held(cursor: u32) -> bool {
     (cursor & CURSOR_STAND_BIT) != 0
@@ -174,7 +173,7 @@ pub fn granule_for_weight(weight: u32, slice: u64) -> u64 {
 }
 
 /*
- * Cursor peer without rate and stand.
+ * Cursor peer without stand, top stays masked.
  */
 #[cfg(test)]
 pub fn cursor_val(cursor: u32) -> u32 {
@@ -182,17 +181,17 @@ pub fn cursor_val(cursor: u32) -> u32 {
 }
 
 /*
- * Store peer, keep rate, and stand. Masks the peer, so rotation keeps order
- * with no extra state. Dispatch CAS keeps fresh flags, model is sequential
- * form, timing only.
+ * Store peer, keep stand. Masks the peer, so rotation keeps order
+ * with no extra state. Dispatch CAS keeps the fresh flag, model
+ * is sequential form, timing only.
  */
 #[cfg(test)]
 pub fn cursor_store(peer: u32, old: u32) -> u32 {
-    (peer & CURSOR_MASK) | (old & (CURSOR_RATE_BIT | CURSOR_STAND_BIT))
+    (peer & CURSOR_MASK) | (old & CURSOR_STAND_BIT)
 }
 
 /*
- * Set the stand latch, keep peer, and rate.
+ * Set the stand latch, keep peer.
  */
 #[cfg(test)]
 pub fn stand_set(cursor: u32) -> u32 {
@@ -200,40 +199,11 @@ pub fn stand_set(cursor: u32) -> u32 {
 }
 
 /*
- * Clear the stand latch, keep peer, and rate.
+ * Clear the stand latch, keep peer.
  */
 #[cfg(test)]
 pub fn stand_clear(cursor: u32) -> u32 {
     cursor & !CURSOR_STAND_BIT
-}
-
-/*
- * True when the rate bit is clear for one kick.
- * Read only, so claim below does the atomic set.
- */
-#[cfg(test)]
-pub fn rate_clear(cursor: u32) -> bool {
-    (cursor & CURSOR_RATE_BIT) == 0
-}
-
-/*
- * Set the rate bit after one kick.
- */
-#[cfg(test)]
-pub fn rate_set(cursor: u32) -> u32 {
-    cursor | CURSOR_RATE_BIT
-}
-
-/*
- * Atomically set rate and report prior clear. One
- * winner per slice with no check then set. Models
- * the BPF fetch_or claim in enqueue.
- */
-#[cfg(test)]
-pub fn rate_claim(cursor: &mut u32) -> bool {
-    let old = *cursor;
-    *cursor |= CURSOR_RATE_BIT;
-    rate_clear(old)
 }
 
 /*
@@ -282,42 +252,68 @@ pub fn same_override(same_group: bool, perf: bool) -> bool {
 }
 
 /*
- * True when all five preempt gates pass. Armed, deserved, same group, mask, and
- * rate clear with fail closed on any clear. Branch order is armed, deserved,
- * group, mask, and rate, rate last as the atomic claim. Each fail counts total
- * and its reason at 200B. Disarmed, rate, and isolation no longer share one
- * count.
+ * True when the bound preempt gate passes. Pinned
+ * false, empty at most one queued, deserved or hog,
+ * same group, mask allowed, and rate ok with kick
+ * on all pass. Branch order is pinned, empty,
+ * deserved or hog, same, mask, and rate, rate last
+ * as the window check. Pinned plus deep count total
+ * only at 272B with no reason. Armed retired frozen
+ * with display only, see delay dots.
  */
 #[cfg(test)]
 pub fn preempt_ok(
-    armed: bool,
-    is_deserved: bool,
-    is_rate_clear: bool,
+    pinned: bool,
+    empty_ok: bool,
+    deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
+    rate_ok: bool,
 ) -> bool {
-    armed && is_deserved && is_rate_clear && same_group && mask_ok
+    if pinned {
+        return false;
+    }
+    if !empty_ok {
+        return false;
+    }
+    if !deserved_or_hog {
+        return false;
+    }
+    if !same_group {
+        return false;
+    }
+    if !mask_ok {
+        return false;
+    }
+    rate_ok
 }
 
 /*
- * Skip reason in branch order armed, deserved, group, mask, and rate. Returns
- * none when all gates pass, else the first failing gate. Mirrors the BPF
- * sequential checks in enqueue with rate last as the atomic claim. Total and
- * reason both count at 200B. Zero means kick, one to five name the reason in
- * order.
+ * Skip reason in bound order pinned, empty,
+ * deserved or hog, same, mask, and rate. Returns
+ * none on kick, else the first failing gate. Pinned
+ * plus empty map to total only with no reason write
+ * at 272B, deserved maps to 2, group to 3, mask to
+ * 4, rate to 5 with armed 1 retired frozen. Mirrors
+ * the BPF sequential checks in enqueue with rate
+ * last as the window check.
  */
 #[cfg(test)]
 pub fn skip_reason(
-    armed: bool,
-    is_deserved: bool,
+    pinned: bool,
+    empty_ok: bool,
+    deserved_or_hog: bool,
     same_group: bool,
     mask_ok: bool,
-    is_rate_clear: bool,
+    rate_ok: bool,
 ) -> Option<u8> {
-    if !armed {
-        return Some(1);
+    if pinned {
+        return Some(6);
     }
-    if !is_deserved {
+    if !empty_ok {
+        return Some(6);
+    }
+    if !deserved_or_hog {
         return Some(2);
     }
     if !same_group {
@@ -326,15 +322,18 @@ pub fn skip_reason(
     if !mask_ok {
         return Some(4);
     }
-    if !is_rate_clear {
+    if !rate_ok {
         return Some(5);
     }
     None
 }
 
 /*
- * Name of one skip reason for dominance logs. Zero is
- * kick with no skip, one to five follow branch order.
+ * Name of one skip reason for logs. Zero is kick
+ * with no skip, one is armed retired frozen, two to
+ * five follow bound order deserved, group, mask, and
+ * rate, six is total only for pinned plus deep with
+ * no reason write.
  */
 #[cfg(test)]
 pub fn skip_reason_name(reason: u8) -> &'static str {
@@ -345,6 +344,33 @@ pub fn skip_reason_name(reason: u8) -> &'static str {
         3 => "group",
         4 => "mask",
         5 => "rate",
+        6 => "total-only",
         _ => "unknown",
     }
+}
+
+/*
+ * True when one queue holds at most one task for empty
+ * first. Holds when queued is zero or one, else false,
+ * so deep queues stay quiet with no storm and no time
+ * use. Minimal compare with no wrap. Mirrors the BPF
+ * empty check for the bound gate.
+ */
+#[cfg(test)]
+pub fn empty_ok(q: u64) -> bool {
+    q <= 1
+}
+
+/*
+ * True when one wake earns the CPU by earliness or hog.
+ * Holds when deserved holds or occupant holds hog
+ * regardless of waker class, so hog occupants preempt
+ * with no time cap past empty first, still bounded by
+ * empty plus same plus mask plus rate. Minimal OR
+ * with no wrap. Mirrors the BPF hog OR for the bound
+ * gate.
+ */
+#[cfg(test)]
+pub fn deserved_or_hog(deserved: bool, occupant_hog: bool) -> bool {
+    deserved || occupant_hog
 }

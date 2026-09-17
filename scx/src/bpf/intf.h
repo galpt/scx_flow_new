@@ -3,8 +3,8 @@
  * Shared flow header
  *
  * Defines the shared constants, structs, helpers with a fixed 1ms slice, two
- * groups, and ordered queues. Mirrored by userspace so behavior stays the same
- * on both sides of the boundary.
+ * groups, and per CPU bounded LIFO slot queues. Mirrored by userspace so
+ * behavior stays the same on both sides of the boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,15 +25,15 @@ typedef int pid_t;
 #ifndef __always_inline
 #define __always_inline inline __attribute__((__always_inline__))
 #endif
-/* Fixed slice at 1ms, two groups, ordered queues. */
+#ifndef __noinline
+#define __noinline __attribute__((noinline))
+#endif
+/* Fixed slice at 1ms, two groups, per CPU bounded LIFO slots. */
 enum flow_consts {
 	FLOW_EST_MIN_NS = 1ULL,
 	FLOW_EST_MAX_NS = (1ULL * 1000ULL * 1000ULL * 1000ULL),
 	FLOW_SLICE_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_MAX_CPUS = 1024ULL,
-	FLOW_DSQ_BASE = 0x4000ULL,
-	FLOW_DSQ_PARK = 0x5000ULL,
-	FLOW_DSQ_PARK_HOG = 0x5001ULL,
 	FLOW_NGROUPS = 2ULL,
 	FLOW_GROUP_LIGHT = 0ULL,
 	FLOW_GROUP_HOG = 1ULL,
@@ -69,10 +69,25 @@ enum flow_consts {
 	FLOW_DELAY_WIN_LEN = 8ULL,
 	FLOW_GRANULE_FLOOR_NS = 64000ULL,
 	FLOW_DESERVED_SLACK_NS = 32000ULL,
-	FLOW_CURSOR_RATE_BIT = 0x80000000ULL,
 	FLOW_CURSOR_STAND_BIT = 0x400ULL,
 	FLOW_CURSOR_MASK = 0x7ffffbffULL,
 	FLOW_KICK_COALESCE_NS = 50000ULL,
+	FLOW_WHEEL_SLOT_NS = (64ULL * 1000ULL),
+	FLOW_WHEEL_DIM = 256ULL,
+	FLOW_WHEEL_TOTAL = 65536ULL,
+	FLOW_WHEEL_HORIZON_NS = (64ULL * 1000ULL * 65536ULL),
+	FLOW_WHEEL_QUANT_LO = 0xFFFFULL,
+	FLOW_TOKEN_MAX = 255ULL,
+	FLOW_SLOT_BASE = 0x6000ULL,
+	FLOW_SLOT_OVERFLOW_BASE = 0x6800ULL,
+	FLOW_SLOT_OVERFLOW_N = 2ULL,
+	FLOW_SLOT_PER_CPU = 2ULL,
+	FLOW_SLOT_MAX_DSQS = 2050ULL,
+	FLOW_SLOT_D = 4ULL,
+	FLOW_SLOT_BUDGET = 32ULL,
+	FLOW_SLOT_SWEEP_MAX = 256ULL,
+	FLOW_LIFO_K = 8ULL,
+	FLOW_LIFO_PERIOD = 9ULL,
 };
 /* Weight fits u16 for the running repack. */
 /* Nice minus 20 to 19 fits s16 for repack. */
@@ -92,14 +107,17 @@ struct flow_task_ctx {
 	u8 low_runs;
 	u16 wake_hits;
 };
-/* Per CPU state at 56B with delay, rate, EMA, and active. */
+/* Per CPU state at 64B with delay, rate, EMA, active, and occupant. */
 /* Frontier, running, cursor, delay, and cpuperf EMA at 32B base. */
-/* The base carries 16B EMA tail with 8B active tail. EMA holds */
-/* the proportional budget in nanos capped at 1ms, at */
+/* The base carries 16B EMA tail with 8B active tail plus 8B occupant tail. */
+/* EMA holds the proportional budget in nanos capped at 1ms, at */
 /* holds the last EMA update time in nanos. Active holds */
-/* lifetime active nanos charged once per run segment. BSS zero */
-/* covers the cold start and explicit zero kept as */
-/* verify for the 48B to 56B growth with no trap. */
+/* lifetime active nanos charged once per run segment. Occupant holds */
+/* the group of the running task with LIGHT fallback, written in */
+/* running and cleared with pid, read post-empty in enqueue. */
+/* BSS zero covers the cold start and explicit zero kept as */
+/* verify for the 48B to 56B growth and the 56B to 64B growth */
+/* with no trap. */
 struct flow_cpu_state {
 	u64 frontier;
 	u64 running_est;
@@ -113,11 +131,24 @@ struct flow_cpu_state {
 	u64 cpuperf_ema;
 	u64 cpuperf_ema_at;
 	u64 active_ns;
+	u8 occupant_group;
 };
-/* Counters at 200B with group, coalesce, and split skip reasons. Total keeps */
-/* the sum for compat, reasons split fail-closed busy no-kicks in branch */
-/* order armed, deserved, group, mask, and rate. Coalesced counts q2 idle */
-/* skips in 50us. */
+/* Counters at 272B with group, coalesce, overflow, token, slot. Total keeps */
+/* the sum for compat. Busy uses the bound gate with empty first plus */
+/* deserved or hog plus same plus mask plus rate, so busy kicks count */
+/* under kicks and busy no kicks count under total plus deserved plus */
+/* group plus mask plus rate with armed retired frozen for compat and empty */
+/* plus pinned total only with no other reason write. Mask stays defensive, */
+/* expect near zero with outer check. Coalesced counts q2 idle skips in */
+/* 50us. Overflow counts tail pins past the horizon, boosts counts token */
+/* spends, and cas fails counts lost token races. Armed stays frozen for */
+/* compat, so tail offsets shift once with no new writes. Slot moves counts */
+/* all slot tasks moved via slot drains, park moves counts the overflow */
+/* subset, steal moves counts all peer moves, steal x moves counts the cross */
+/* subset with post hoc LSB compare and unconditional adds, slot kicks */
+/* counts safety net kicks, slot defer counts capped drains with work left, */
+/* LIFO heads counts head inserts at K 8, bound hits counts tail, all append */
+/* only at the tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -144,7 +175,27 @@ struct flow_sched_stats {
 	u64 preempt_skipped_group;
 	u64 preempt_skipped_mask;
 	u64 preempt_skipped_rate;
+	u64 wheel_overflow;
+	u64 token_boosts;
+	u64 slot_kicks;
+	u64 token_cas_fails;
+	u64 slot_moves;
+	u64 slot_defer;
+	u64 steal_xmoves;
+	u64 lifo_heads;
+	u64 lifo_bound_hits;
 };
+/* Soft preempt shortens the occupant slice out of band to zero at the kick */
+/* win, so the kick sticks on the waker with no remainder race. Stuck */
+/* shortens match preempt_kicks one for one, kicks sent exceed it by */
+/* declined plus null or self. A declined shorten keeps kick only with */
+/* total plus rate, null or self sends kick only with no count, and no */
+/* counter is added. */
+/* Bounded LIFO takes head for K 8 with one tail in period 9 plus forced tail */
+/* at MAX, so per queue order stays fresh with no starve or preempt use. */
+/* Head uses the build gate with zero fallback to tail, so builds without */
+/* HEAD keep tail with no trap and old kernels keep FIFO fallback with no */
+/* preempt use. Total 2050 matches slot max with per CPU plus overflow. */
 
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -154,11 +205,6 @@ static __always_inline u64 flow_clamp_est(u64 v)
 	if (v > (u64)FLOW_EST_MAX_NS)
 		return (u64)FLOW_EST_MAX_NS;
 	return v;
-}
-/* Queue id of one CPU with range check by caller. */
-static __always_inline u64 flow_dsq_for_cpu(u32 cpu)
-{
-	return (u64)FLOW_DSQ_BASE + (u64)cpu;
 }
 /* Group of one CPU by id halves with extra to hog. */
 /* Halves is the fallback when the group table is not ready. */
@@ -174,22 +220,8 @@ static __always_inline u8 flow_group_of_cpu(u32 cpu,
 		return (u8)FLOW_GROUP_LIGHT;
 	return (u8)FLOW_GROUP_HOG;
 }
-/* Park id of one group with light as default. */
-static __always_inline u64 flow_park_for_group(u8 group)
-{
-	if (group == (u8)FLOW_GROUP_HOG)
-		return (u64)FLOW_DSQ_PARK_HOG;
-	return (u64)FLOW_DSQ_PARK;
-}
-/* Perf hint of one group with single policy at max. */
-static __always_inline u32 flow_perf_for_group(u8 group)
-{
-	if (group == (u8)FLOW_GROUP_HOG)
-		return (u32)FLOW_PERF_HOG;
-	return (u32)FLOW_PERF_LIGHT;
-}
 /* True when a stopping task should restore the idle hint. Bang-bang edge at */
-/* M1 with no EMA and no state growth. M2 keeps the predicate but maps the */
+/* M1 with no EMA or state growth. M2 keeps the predicate but maps the */
 /* value through the EMA with from_ema, so long idle still decays to zero. */
 /* Needs blocked, per CPU queue empty, and local empty, so runnable never */
 /* restores with any queued work held high. */
@@ -234,7 +266,7 @@ static __always_inline u64 flow_ema_climb(u64 ema,
 /* half-lives then scales the residual below one half with a 2nd-order Taylor */
 /* of 0.5 to the r power at r is rem over half. Fixed point at FP_ONE 256 */
 /* holds ln2 times 256 at 177 + quad times 256 at 61, so t is rem times 256 */
-/* over half in 0 to 255 with dec1 + inc2 in u64 order with no float and no */
+/* over half in 0 to 255 with dec1 + inc2 in u64 order with no float or */
 /* loop. Zero sleep keeps identity. Zero half keeps identity with no divide. */
 /* At or past 64 periods returns zero, so long idle still maps to zero. */
 static __always_inline u64 flow_ema_decay(u64 ema,
@@ -308,20 +340,14 @@ static __always_inline bool flow_burn_hot(u32 burn)
 {
 	return (u64)burn >= (u64)FLOW_DEMOTE_BURN_NS;
 }
-/* True when one burst reaches 4ms for demote. */
-/* Quiet case of the adaptive check with depth 0. */
-static __always_inline bool flow_burst_hot(u64 delta)
-{
-	return delta >= (u64)FLOW_DEMOTE_BURST_NS;
-}
 /* Burst allowance from light depth with flood backpressure. Depth sums */
 /* queued tasks in light per CPU queues capped at 4. Table is depth 0 to 1 to */
 /* 4ms, depth 2 to 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so */
-/* lone bursts move fast with no pressure. Mild halves to 2ms so flood bursts */
-/* move earlier but still above one slice with no flap on single slices. Deep */
-/* floors at 1ms, so per task worst case is the floor during flood. Halves */
-/* keeps the view matched to dispatch isolation with no BSS cost in stopping. */
-/* Strict iff ready is zero, best effort iff ready is one. */
+/* lone bursts move fast with no pressure. Mild halves to 2ms so flood */
+/* bursts move earlier but still above one slice with no flap on single */
+/* slices. Deep floors at 1ms, so per task worst case is the floor during */
+/* flood. Halves keeps the view matched to dispatch isolation with no BSS */
+/* cost in stopping. Strict iff ready is zero, best effort iff ready is one. */
 static __always_inline u64 flow_burst_allowance(u64 depth)
 {
 	if (depth >= 4)
@@ -471,67 +497,21 @@ static __always_inline u64 flow_frontier_idle(u64 waking_v)
 {
 	return waking_v;
 }
-/* Next peer for steal scan with rotating cursor. Masks rate and stand, so */
-/* one kick per slice keeps the scan order with no extra state. */
-static __always_inline u32 flow_steal_next(u32 cursor,
-	u32 nr_cpus)
-{
-	u32 cur;
-	if (nr_cpus == 0)
-		return 0;
-	cur = cursor & (u32)FLOW_CURSOR_MASK;
-	return (cur + 1) % nr_cpus;
-}
-/* Cursor peer without rate and stand. */
+/* Cursor peer without stand, top stays masked. */
 static __always_inline u32 flow_cursor_val(u32 cursor)
 {
 	return cursor & (u32)FLOW_CURSOR_MASK;
 }
 /* True when the stand latch is held in bit10. */
-/* Bits 0 to 9 hold peer, bit10 holds stand, top */
-/* holds rate, so rotation masks both flags. */
+/* Bits 0 to 9 hold peer, bit10 holds stand, so */
+/* peer reads mask the flag. */
 static __always_inline bool flow_stand_held(u32 cursor)
 {
 	return (cursor &
 	    (u32)FLOW_CURSOR_STAND_BIT) != 0;
 }
-/* Store peer, keep rate, and stand. Dispatch CAS keeps fresh flags, model is */
-/* sequential form, timing only. */
-static __always_inline u32 flow_cursor_store(u32 peer,
-	u32 old)
-{
-	return (peer & (u32)FLOW_CURSOR_MASK) |
-	    (old & ((u32)FLOW_CURSOR_RATE_BIT |
-	    (u32)FLOW_CURSOR_STAND_BIT));
-}
-/* Set the stand latch, keep peer, and rate. */
-static __always_inline u32 flow_stand_set(u32 cursor)
-{
-	return cursor | (u32)FLOW_CURSOR_STAND_BIT;
-}
-/* Clear the stand latch, keep peer, and rate. */
-static __always_inline u32 flow_stand_clear(u32 cursor)
-{
-	return cursor & ~(u32)FLOW_CURSOR_STAND_BIT;
-}
-/* True when the rate bit is clear for one kick. */
-/* Read only, so claim below does the atomic set. */
-static __always_inline bool flow_rate_clear(u32 cursor)
-{
-	return (cursor &
-	    (u32)FLOW_CURSOR_RATE_BIT) == 0;
-}
-/* Atomically set rate and report prior clear. */
-/* One winner per slice with no check then set. */
-static __always_inline bool flow_rate_claim(u32 *cursor)
-{
-	u32 old;
-	old = __sync_fetch_and_or(cursor,
-	    (u32)FLOW_CURSOR_RATE_BIT);
-	return flow_rate_clear(old);
-}
 /* Delay sample in 32us units from queued count. */
-/* One queued is 31 units, half slice arms at 16. */
+/* One queued is 31 units, 512us arms at 16. */
 /* Cap is 250 at 8ms with integer math only. */
 static __always_inline u8 flow_delay_from_queued(
 	u64 queued)
@@ -551,12 +531,6 @@ static __always_inline u8 flow_delay_decay(u8 old)
 	u32 o = (u32)old;
 	u32 d = o - o / 8U;
 	return (u8)d;
-}
-/* True when the delay window is armed at 16. */
-/* 16 is 512us in 32us units near half slice. */
-static __always_inline bool flow_delay_armed(u8 win)
-{
-	return (u32)win >= (u32)FLOW_DELAY_ARM;
 }
 /* True when delay is armed with hysteresis. */
 /* Arms at 16, then holds while win stays at or */
@@ -593,12 +567,160 @@ static __always_inline u8 flow_delay_close(u8 win,
 	u8 m = flow_delay_max(d, cur);
 	return m;
 }
+/* True when one idle kick is recent in 50us. */
+/* Zero last never counts as recent with wrap. */
+/* Diff wraps, so order holds across the wrap. */
+static __always_inline bool flow_kick_recent(u64 now,
+	u64 last)
+{
+	if (last == 0)
+		return false;
+	return now - last <
+	    (u64)FLOW_KICK_COALESCE_NS;
+}
+/* True when perf mode is on for S0 plus S1. */
+/* BSS flag holds zero for strict plus one for perf. */
+/* S0 keeps tier order with wider any allowed set, */
+/* S1 bypasses the kick group gate with no recount. */
+/* Mask always wins in both modes with no new knob. */
+/* Extern lives in the function body, so bindgen keeps */
+/* no host copy with BSS only in main. */
+static __always_inline bool flow_perf_enabled(void)
+{
+	extern volatile u8 flow_perf_mode;
+	return flow_perf_mode != 0;
+}
+/* Deadline with the low 16 bits cleared near 64us down. Clearing moves early */
+/* only, so order never moves late with at most 65535ns of earliness. */
+static __always_inline u64 flow_qdl_round_down(u64 dl)
+{
+	return dl & ~0xFFFFULL;
+}
+/* Probe of one deadline into quantised deadline, slot, error, and overflow. */
+/* Base is the enqueue frontier in vruntime, never ktime. Overdue keeps the */
+/* rounded deadline with slot zero and no overflow. Inside keeps the rounded */
+/* deadline with the slot from the rounded distance shifted by 16. Outside */
+/* pins to the tail at frontier plus horizon minus one with the last slot */
+/* and overflow set. Error holds deadline minus rounded deadline */
+/* in 0 to 65535. One pass keeps a single horizon test with no double read. */
+static __always_inline u64 flow_wheel_probe(u64 dl,
+	u64 frontier, u64 *slot, u64 *err, bool *over)
+{
+	u64 e;
+	bool overdue;
+	bool inside;
+	bool is_over;
+	u64 qdl;
+	u64 s;
+	e = dl & (u64)FLOW_WHEEL_QUANT_LO;
+	*err = e;
+	overdue = flow_time_before(dl, frontier);
+	inside = overdue ||
+	    ((dl - frontier) < (u64)FLOW_WHEEL_HORIZON_NS);
+	is_over = !inside;
+	*over = is_over;
+	if (is_over) {
+		u64 tail = frontier +
+		    (u64)FLOW_WHEEL_HORIZON_NS - 1ULL;
+		qdl = flow_qdl_round_down(tail);
+		*slot = (u64)FLOW_WHEEL_TOTAL - 1ULL;
+		return qdl;
+	}
+	qdl = flow_qdl_round_down(dl);
+	if (flow_time_before(qdl, frontier)) {
+		*slot = 0;
+		return qdl;
+	}
+	s = (qdl - frontier) >> 16ULL;
+	if (s >= (u64)FLOW_WHEEL_TOTAL)
+		s = (u64)FLOW_WHEEL_TOTAL - 1ULL;
+	*slot = s;
+	return qdl;
+}
+/* Slot id of one group overflow with light as default. Holds overflow base */
+/* plus group, so two tails keep queue order per group with no share. Bad */
+/* group falls to light with no trap. Slot only, never vtime, so per DSQ one */
+/* flavor holds with mask wins on drain. */
+static __always_inline u64 flow_slot_overflow_dsq(u8 group)
+{
+	if (group == (u8)FLOW_GROUP_HOG)
+		return (u64)FLOW_SLOT_OVERFLOW_BASE + 1ULL;
+	return (u64)FLOW_SLOT_OVERFLOW_BASE;
+}
+/* Slot id of one CPU group with light as default. Holds base plus CPU */
+/* times 2 plus group, so two per CPU keep light and hog apart with no */
+/* share. Bad group falls to light with no trap. Slot only, never vtime, */
+/* so per DSQ one flavor holds with mask wins on drain. */
+/* DSQ low bit is group, so base plus stride stay even. */
+/* Base even keeps light even, stride 2 keeps hog odd. */
+_Static_assert((FLOW_SLOT_BASE & 1) == 0,
+    "slot base even keeps DSQ low bit group");
+_Static_assert((FLOW_SLOT_PER_CPU & 1) == 0,
+    "slot stride even keeps DSQ low bit group");
+static __always_inline u64 flow_slot_cpu_dsq(u32 cpu,
+	u8 group)
+{
+	u64 g = group == (u8)FLOW_GROUP_HOG ? 1ULL : 0ULL;
+	return (u64)FLOW_SLOT_BASE + (u64)cpu * 2ULL + g;
+}
+/* True when one insert takes head with bounded LIFO at K 8. */
+/* Takes head for 8 of 9 with one tail plus one forced tail at MAX, so */
+/* fresh work wins fast with no starve or preempt use. Forced tails */
+/* at period plus MAX keep max gap 9 with 8 heads everywhere with wrap, */
+/* so the bound stays exact with one compare and no new state. Pure with */
+/* no BSS use, so tests mirror the period with no drift. */
+static __always_inline bool flow_lifo_take_head(u32 seq)
+{
+	if (seq == 0xffffffffU)
+		return false;
+	return (seq % (u32)FLOW_LIFO_PERIOD) !=
+	    (u32)FLOW_LIFO_K;
+}
+/* Index of one LIFO sequence with per CPU plus overflow at 2050. */
+/* Per CPU holds CPU times 2 plus group, overflow holds 2048 plus group, */
+/* so total 2050 matches slot max with no share. Bad group falls to light */
+/* with no trap. Pure with no state. */
+static __always_inline u32 flow_lifo_idx(bool over,
+	u32 cpu, u8 group)
+{
+	u32 g = group == (u8)FLOW_GROUP_HOG ? 1U : 0U;
+	if (over)
+		return 2048U + g;
+	return cpu * 2U + g;
+}
+/* Least donor depth for one steal with idle empty fast path. Holds 1 when */
+/* idle empty, else 2, so idle owners collect the last task with no strand. */
+static __always_inline u64 flow_steal_need(bool idle_empty)
+{
+	if (idle_empty)
+		return 1ULL;
+	return (u64)FLOW_STEAL_MIN_DEPTH;
+}
+/* Cap of one trip at D under the dispatch budget. Returns the min of budget */
+/* and 4, so one per CPU queue or overflow moves at most 4 with the shared */
+/* loop and no K loop. Mirrors the drain cap with the same test. */
+static __always_inline u32 flow_slot_cap(u32 budget)
+{
+	if (budget > (u32)FLOW_SLOT_D)
+		return (u32)FLOW_SLOT_D;
+	return budget;
+}
+/* Own cap of one dispatch at budget minus one. Holds 31 with budget 32, so */
+/* one slot stays for overflow, other CPU, and other overflow plus steal */
+/* with no strand on saturated own. Zero stays zero with no wrap. Mirrors */
+/* the BPF reserve. */
+static __always_inline u32 flow_slot_own_cap(u32 budget)
+{
+	if (budget == 0)
+		return 0;
+	return budget - 1U;
+}
 /* Granule in nanos quarter slice with 64us floor. Base is slice times 1024 */
 /* over weight quartered with floor at 64us, so heavy keeps short and light */
 /* keeps long with no trap on zero input. Short heavy is stricter, tempering */
 /* deadline lead. Net easiness is deadline math, not gran. Quarter bounds */
 /* theft near 25% of a slice. Floor covers IPI and switch cost, no thrash. */
-/* Uses woken weight only, see deserved. */
+/* Uses woken weight only, see deserved. Minimal with no wrap and no branch. */
 static __always_inline u64 flow_granule_for_weight(
 	u32 weight, u64 slice)
 {
@@ -618,54 +740,34 @@ static __always_inline u64 flow_granule_for_weight(
 		return (u64)FLOW_GRANULE_FLOOR_NS;
 	return gran;
 }
-/* True when woken deadline beats frontier, gran, and slack. Frontier is the */
-/* service floor, so beating it by granule proves earliness with no occupant */
-/* state. Slack is 32us bounded at half the 64us floor, so near misses ease */
-/* with no storm. Wrap safe via time before on the summed bound with no */
-/* branch. Granule uses woken weight only, occupant weight stays out after */
-/* the frontier compare fix. */
+/* True when woken deadline beats frontier plus gran plus slack. Frontier is */
+/* the service floor, so beating it by granule proves earliness with no */
+/* occupant state. Slack is 32us bounded at half the 64us floor, so near */
+/* misses ease with no storm. Wrap safe via time before on the summed bound */
+/* with no branch. Granule uses woken weight only, occupant weight stays out */
+/* after the frontier compare fix. Minimal with no new constant. */
 static __always_inline bool flow_deserved(u64 woken_dl,
 	u64 frontier, u64 granule)
 {
 	return flow_time_before(woken_dl,
 	    frontier + granule + (u64)FLOW_DESERVED_SLACK_NS);
 }
-/* True when all five preempt gates pass. Armed, deserved, same group, mask, */
-/* and rate clear with fail closed on any clear. Branch order is armed, */
-/* deserved, group, mask, and rate, rate last as the atomic claim. Each fail */
-/* counts total and its reason at 200B. Disarmed, rate, and isolation no */
-/* longer share one count. */
-static __always_inline bool flow_preempt_ok(bool armed,
-	bool deserved, bool rate_clear, bool same_group,
-	bool mask_ok)
+/* True when one queue holds at most one task for empty first. */
+/* Holds when queued is zero or one, else false, so deep */
+/* queues stay quiet with no storm and no time use. Minimal */
+/* compare with no wrap and no new constant. */
+static __always_inline bool flow_empty_ok(u64 q)
 {
-	return armed && deserved && rate_clear &&
-	    same_group && mask_ok;
+	return q <= 1ULL;
 }
-/* True when one idle kick is recent in 50us. */
-/* Zero last never counts as recent with wrap. */
-/* Diff wraps, so order holds across the wrap. */
-static __always_inline bool flow_kick_recent(u64 now,
-	u64 last)
+/* True when one wake earns the CPU by earliness or hog. */
+/* Holds when deserved holds or occupant holds hog regardless */
+/* of waker class, so hog occupants preempt with no time cap */
+/* past empty first, still bounded by empty plus same plus mask */
+/* plus rate. Minimal OR with no wrap and no new branch. */
+static __always_inline bool flow_deserved_or_hog(bool deserved,
+	bool occupant_hog)
 {
-	if (last == 0)
-		return false;
-	return now - last <
-	    (u64)FLOW_KICK_COALESCE_NS;
-}
-/* True when perf mode is on for S0 and S1. BSS flag holds zero for strict */
-/* and one for perf. Zero init keeps 4.2.21 paths bit identical. Probe force */
-/* joins here, so one predicate covers grouping in select and enqueue with */
-/* strict default bit for bit. Perf arms widen placement with natural hints */
-/* only, so the probe measures the grouping split with no hint split. S0 */
-/* keeps tier order with wider any allowed set, S1 bypasses the kick group */
-/* gate with no recount. Mask always wins in both modes with no new knob. */
-/* Extern lives in the function body, so bindgen keeps no host copy with BSS */
-/* only in main. */
-static __always_inline bool flow_perf_enabled(void)
-{
-	extern volatile u8 flow_perf_mode;
-	extern volatile u8 flow_probe_perf;
-	return flow_perf_mode != 0 || flow_probe_perf != 0;
+	return deserved || occupant_hog;
 }
 #endif

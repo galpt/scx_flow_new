@@ -8,7 +8,6 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 use crate::flow::*;
-use std::collections::VecDeque;
 
 #[test]
 fn groups_split_by_halves_with_extra_to_hog() {
@@ -33,20 +32,20 @@ fn groups_split_by_halves_with_extra_to_hog() {
 }
 
 #[test]
-fn parks_are_per_group_at_5000_plus_5001() {
-    assert_eq!(PARK_LIGHT, 0x5000);
-    assert_eq!(PARK_HOG, 0x5001);
-    assert_ne!(PARK_LIGHT, PARK_HOG);
-    assert_eq!(park_for_group(GROUP_LIGHT), 0x5000);
-    assert_eq!(park_for_group(GROUP_HOG), 0x5001);
-    assert_eq!(park_for_group(7), 0x5000);
+fn overflows_are_per_group_at_6800_plus_6801() {
+    assert_eq!(OVERFLOW_LIGHT, 0x6800);
+    assert_eq!(OVERFLOW_HOG, 0x6801);
+    assert_ne!(OVERFLOW_LIGHT, OVERFLOW_HOG);
+    assert_eq!(overflow_for_group(GROUP_LIGHT), 0x6800);
+    assert_eq!(overflow_for_group(GROUP_HOG), 0x6801);
+    assert_eq!(overflow_for_group(7), 0x6800);
     assert_eq!(
-        park_for_group(GROUP_LIGHT),
-        crate::bpf_intf::flow_consts_FLOW_DSQ_PARK as u64
+        overflow_for_group(GROUP_LIGHT),
+        crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
     );
     assert_eq!(
-        park_for_group(GROUP_HOG),
-        crate::bpf_intf::flow_consts_FLOW_DSQ_PARK_HOG as u64
+        overflow_for_group(GROUP_HOG),
+        crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
     );
 }
 
@@ -72,7 +71,7 @@ fn window_consts_match_spec() {
     assert_eq!(WAKE_SHORT_NS, 1_000_000);
     assert_eq!(HETERO_SPREAD_PCT, 10);
     assert_eq!(PINNED_INFLATE_NS, 8_000_000);
-    assert_eq!(WIN_NS, 64 * 500_000);
+    assert_eq!(WIN_NS, 32 * 1_000_000);
     assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 2_048_000_000);
     assert_eq!(DEMOTE_BURN_NS, 4 * PROMOTE_BURN_NS);
     assert_eq!(WIN_NS, crate::bpf_intf::flow_consts_FLOW_WIN_NS as u64);
@@ -183,57 +182,26 @@ fn burst_allowance_maps_depth_to_line() {
 }
 
 /*
- * Depth sums light queues only with cap at 4. Hog
- * queues stay out, so cross group flood never lifts
- * the light line. Missing entries count as zero.
+ * Windowed depths keep quiet plus flood parity with
+ * four reads. Quiet stays 4ms, flood still floors at
+ * 1ms. Cap holds at 4.
  */
 #[test]
-fn light_depth_sums_light_only_capped_at_4() {
-    assert_eq!(light_depth(&[], 0), 0);
-    assert_eq!(light_depth(&[0, 0, 0, 0], 4), 0);
-    assert_eq!(light_depth(&[1, 0, 0, 0], 4), 1);
-    assert_eq!(light_depth(&[0, 0, 5, 5], 4), 0);
-    assert_eq!(light_depth(&[1, 0, 10, 10], 4), 1);
-    assert_eq!(light_depth(&[1, 1, 0, 0], 4), 2);
-    assert_eq!(light_depth(&[2, 2, 0, 0], 4), 4);
-    assert_eq!(light_depth(&[10, 10, 10, 10], 4), 4);
-    assert_eq!(light_depth(&[1], 1), 1);
-    assert_eq!(light_depth(&[5, 5], 2), 4);
-}
-
-/*
- * Hog depth sums hog queues only with cap at 4. Light
- * queues stay out, so light flood never lifts the hog
- * view. Display only with no burst use.
- */
-#[test]
-fn hog_depth_sums_hog_only_capped_at_4() {
-    assert_eq!(hog_depth(&[], 0), 0);
-    assert_eq!(hog_depth(&[0, 0, 0, 0], 4), 0);
-    assert_eq!(hog_depth(&[5, 5, 0, 0], 4), 0);
-    assert_eq!(hog_depth(&[0, 0, 1, 0], 4), 1);
-    assert_eq!(hog_depth(&[10, 10, 1, 0], 4), 1);
-    assert_eq!(hog_depth(&[0, 0, 1, 1], 4), 2);
-    assert_eq!(hog_depth(&[0, 0, 2, 2], 4), 4);
-    assert_eq!(hog_depth(&[10, 10, 10, 10], 4), 4);
-    assert_eq!(hog_depth(&[1], 1), 0);
-    assert_eq!(hog_depth(&[5, 5], 2), 4);
-}
-
-/*
- * Both depths share one pass with cap at 4 each. The single scan matches the
- * BPF refresh with bounded cost. Light and hog stay separate with no cross
- * lift.
- */
-#[test]
-fn group_depths_share_one_pass_capped() {
-    assert_eq!(group_depths(&[], 0), (0, 0));
-    assert_eq!(group_depths(&[0, 0, 0, 0], 4), (0, 0));
-    assert_eq!(group_depths(&[1, 0, 0, 1], 4), (1, 1));
-    assert_eq!(group_depths(&[2, 2, 2, 2], 4), (4, 4));
-    assert_eq!(group_depths(&[10, 10, 10, 10], 4), (4, 4));
-    assert_eq!(group_depths(&[1, 1, 0, 0], 4), (2, 0));
-    assert_eq!(group_depths(&[0, 0, 1, 1], 4), (0, 2));
+fn window_depths_keep_quiet_plus_flood() {
+    assert_eq!(slot_window_depths(0, 0, 0, 0, GROUP_LIGHT), (0, 0));
+    assert_eq!(slot_window_depths(1, 0, 0, 0, GROUP_LIGHT), (1, 0));
+    assert_eq!(slot_window_depths(0, 0, 0, 0, GROUP_HOG), (0, 0));
+    // Flood fills window plus overflows to the cap.
+    assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_LIGHT), (4, 4));
+    assert_eq!(slot_window_depths(2, 2, 6, 6, GROUP_HOG), (4, 4));
+    // Allowance parity checks quiet 4ms and flood 1ms floor.
+    let (l, _) = slot_window_depths(0, 0, 0, 0, GROUP_LIGHT);
+    assert_eq!(burst_allowance(l), DEMOTE_BURST_NS);
+    let (lf, _) = slot_window_depths(2, 0, 2, 0, GROUP_LIGHT);
+    assert_eq!(burst_allowance(lf), DEMOTE_BURST_FLOOR_NS);
+    // Hog side mirrors with other plus overflow.
+    assert_eq!(slot_window_depths(0, 3, 0, 0, GROUP_LIGHT), (0, 3));
+    assert_eq!(slot_window_depths(0, 3, 0, 0, GROUP_HOG), (3, 0));
 }
 
 /*
@@ -434,7 +402,7 @@ fn hog_burst_breaks_streak_with_no_promote() {
         group: GROUP_HOG,
         win_start: 100_000_000,
         burn: 0,
-        low_runs: 60,
+        low_runs: 2,
         wake_hits: 0,
     };
     let (d, p) = classify_step(&mut st, 101_000_000, 4_000_000);
@@ -450,69 +418,6 @@ fn inflate_adds_8ms_with_wrap() {
     assert_eq!(inflate_deadline(0), 8_000_000);
     assert_eq!(inflate_deadline(u64::MAX - 1_000_000), 6_999_999);
     assert_eq!(inflate_deadline(1_000_000), 1_000_000 + PINNED_INFLATE_NS);
-}
-
-/*
- * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
- * recheck and peer mask only, so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort peer.
- */
-#[test]
-fn drain_keeps_strict_isolation_tier0_model_only() {
-    let light = |g: u8| GroupTask {
-        allowed: vec![true, true, true, true],
-        live: true,
-        fail: false,
-        group: g,
-    };
-    let mut q = VecDeque::from([light(GROUP_LIGHT), light(GROUP_HOG), light(GROUP_LIGHT)]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 2);
-    assert_eq!(skipped, 1);
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0].group, GROUP_HOG);
-    assert!(group_task_ok(0, GROUP_LIGHT, &light(GROUP_LIGHT)));
-    assert!(!group_task_ok(0, GROUP_LIGHT, &light(GROUP_HOG)));
-    assert!(!group_task_ok(0, GROUP_HOG, &light(GROUP_LIGHT)));
-    assert!(group_task_ok(1, GROUP_HOG, &light(GROUP_HOG)));
-}
-
-/*
- * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
- * recheck and peer mask only, so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort peer.
- */
-#[test]
-fn drain_skips_dead_plus_failed_with_no_cross_tier0_model_only() {
-    let dead = GroupTask {
-        allowed: vec![true, true],
-        live: false,
-        fail: false,
-        group: GROUP_LIGHT,
-    };
-    let failed = GroupTask {
-        allowed: vec![true, true],
-        live: true,
-        fail: true,
-        group: GROUP_LIGHT,
-    };
-    let cross = GroupTask {
-        allowed: vec![true, true],
-        live: true,
-        fail: false,
-        group: GROUP_HOG,
-    };
-    let good = GroupTask {
-        allowed: vec![true, true],
-        live: true,
-        fail: false,
-        group: GROUP_LIGHT,
-    };
-    let mut q = VecDeque::from([dead, failed, cross, good.clone()]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 1);
-    assert_eq!(skipped, 1);
-    assert_eq!(q.len(), 3);
 }
 
 #[test]
@@ -630,7 +535,7 @@ fn burn_gated_anti_game_breaks_wake_streak() {
     let mut hot = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
-        burn: 10_000_000,
+        burn: 200_000_000,
         low_runs: 0,
         wake_hits: 7,
     };
@@ -675,109 +580,6 @@ fn task_state_stays_48_with_wake_at_46() {
         crate::bpf_intf::flow_consts_FLOW_PROMOTE_WAKE_HITS as u64,
         8
     );
-}
-
-/*
- * Tier 0 model only for park and peer. BPF ships Tier 3 park only with no task
- * recheck by construction due to verifier jump at 1000001 on donor check, so
- * hetero entries may move cross iff ready is one with strict park iff ready is
- * zero and best effort peer.
- */
-#[test]
-fn park_per_task_recheck_keeps_only_thief_group_tier0_model_only() {
-    let light = |g: u8| GroupTask {
-        allowed: vec![true, true],
-        live: true,
-        fail: false,
-        group: g,
-    };
-    let mut q = VecDeque::from([light(GROUP_LIGHT), light(GROUP_HOG), light(GROUP_LIGHT)]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 2);
-    assert_eq!(skipped, 1);
-    assert_eq!(q.len(), 1);
-    let mut q2 = VecDeque::from([light(GROUP_HOG), light(GROUP_HOG)]);
-    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_LIGHT, 32);
-    assert_eq!(m2, 0);
-    assert_eq!(s2, 2);
-}
-
-/*
- * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
- * recheck and peer mask only, so a stale cross entry may move iff ready is one
- * with strict park iff ready is zero and best effort peer.
- */
-#[test]
-fn peer_per_task_recheck_skips_stale_cross_tier0_model_only() {
-    let mk = |g: u8, allow: bool| GroupTask {
-        allowed: vec![allow, true],
-        live: true,
-        fail: false,
-        group: g,
-    };
-    let mut q = VecDeque::from([mk(GROUP_HOG, true), mk(GROUP_LIGHT, true)]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 1);
-    assert_eq!(skipped, 1);
-    assert_eq!(q.len(), 1);
-    assert_eq!(q[0].group, GROUP_HOG);
-    assert!(group_task_ok(0, GROUP_LIGHT, &mk(GROUP_LIGHT, true)));
-    assert!(!group_task_ok(0, GROUP_LIGHT, &mk(GROUP_HOG, true)));
-}
-
-/*
- * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
- * recheck and peer mask only, so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort peer.
- */
-#[test]
-fn null_storage_defaults_to_light_tier0_model_only() {
-    let bad = GroupTask {
-        allowed: vec![true, true],
-        live: true,
-        fail: false,
-        group: 7,
-    };
-    assert!(group_task_ok(0, GROUP_LIGHT, &bad));
-    assert!(!group_task_ok(0, GROUP_HOG, &bad));
-    let mut q = VecDeque::from([bad.clone()]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 1);
-    assert_eq!(skipped, 0);
-    let mut q2 = VecDeque::from([bad]);
-    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_HOG, 32);
-    assert_eq!(m2, 0);
-    assert_eq!(s2, 1);
-}
-
-/*
- * Tier 0 model only. BPF ships Tier 3 park only by construction with no task
- * recheck and peer mask only, so hetero entries may move cross iff ready is one
- * with strict park iff ready is zero and best effort peer.
- */
-#[test]
-fn mask_fail_never_counts_as_group_skip_tier0_model_only() {
-    let cross_mask_fail = GroupTask {
-        allowed: vec![false, false],
-        live: true,
-        fail: false,
-        group: GROUP_HOG,
-    };
-    let mut q = VecDeque::from([cross_mask_fail]);
-    let (moved, skipped) = group_drain_model(&mut q, 0, GROUP_LIGHT, 32);
-    assert_eq!(moved, 0);
-    assert_eq!(skipped, 0);
-    assert_eq!(q.len(), 1);
-    let dead_cross = GroupTask {
-        allowed: vec![true, true],
-        live: false,
-        fail: false,
-        group: GROUP_HOG,
-    };
-    let mut q2 = VecDeque::from([dead_cross]);
-    let (m2, s2) = group_drain_model(&mut q2, 0, GROUP_LIGHT, 32);
-    assert_eq!(m2, 0);
-    assert_eq!(s2, 0);
 }
 
 #[test]
@@ -925,12 +727,12 @@ fn seed_groups_sets_ready_only_when_hetero() {
 }
 
 /*
- * Hetero keeps dispatch on halves while placement uses live. Strict iff ready
- * is zero, best effort iff ready is one with verifier jump and BSS bounds.
- * Locks the documented split with no live use in dispatch.
+ * Hetero keeps a live table apart from halves. Placement and dispatch read the
+ * live table when ready, halves only when not ready. Strict iff ready is zero,
+ * best effort iff ready is one. Locks the seed split with no stale use.
  */
 #[test]
-fn hetero_dispatch_uses_halves_placement_uses_live() {
+fn hetero_live_diverges_from_halves() {
     let caps = vec![1024, 1024, 512, 512];
     let freqs = vec![4000000, 4000000, 4000000, 4000000];
     let (table, ready) = seed_groups(&caps, &freqs, 4);
@@ -1235,7 +1037,7 @@ fn singleton_bypass_keeps_prior_exact() {
 
 /*
  * Topology seed with singletons matches prior seed. Table and ready stay
- * identical, so SMT off keeps state equivalence with no crash and no stall.
+ * identical, so SMT off keeps state equivalence with no crash or stall.
  */
 #[test]
 fn seed_topology_singleton_matches_prior() {
@@ -1347,7 +1149,7 @@ fn sibling_table_maps_next_with_empty_for_singleton() {
 
 /*
  * SMT off with 8 CPUs keeps halves. All singleton cores give the same table and
- * ready as prior, and the same live view with no division and no trap.
+ * ready as prior, and the same live view with no division or trap.
  */
 #[test]
 fn smt_off_8c_keeps_halves_with_no_trap() {
@@ -1447,16 +1249,16 @@ fn zero_plus_empty_plus_short_stay_safe() {
 }
 
 /*
- * Weight leaves groups unchanged with no routing use. Split, park, steal, and
- * classifier read the same with any nice, so only deadline and vruntime move
- * with weight.
+ * Weight leaves groups unchanged with no routing use. Split, overflow, drain,
+ * and classifier read the same with any nice, so only deadline and vruntime
+ * move with weight.
  */
 #[test]
 fn weight_leaves_groups_unchanged() {
     assert_eq!(group_of_cpu(0, 4), GROUP_LIGHT);
     assert_eq!(group_of_cpu(2, 4), GROUP_HOG);
-    assert_eq!(park_for_group(GROUP_LIGHT), PARK_LIGHT);
-    assert_eq!(park_for_group(GROUP_HOG), PARK_HOG);
+    assert_eq!(overflow_for_group(GROUP_LIGHT), OVERFLOW_LIGHT);
+    assert_eq!(overflow_for_group(GROUP_HOG), OVERFLOW_HOG);
     assert_eq!(perf_for_group(GROUP_LIGHT), 1024);
     assert_eq!(perf_for_group(GROUP_HOG), 1024);
     let mut st = GroupState::cold();
@@ -1466,8 +1268,7 @@ fn weight_leaves_groups_unchanged() {
     assert!(!p);
     assert_eq!(st.group, GROUP_LIGHT);
     assert_eq!(burst_allowance(0), DEMOTE_BURST_NS);
-    assert_eq!(light_depth(&[1, 0, 0, 0], 4), 1);
-    assert_eq!(hog_depth(&[0, 0, 1, 0], 4), 1);
+    assert_eq!(slot_window_depths(1, 0, 0, 0, GROUP_LIGHT), (1, 0));
 }
 
 /*
@@ -1736,39 +1537,50 @@ fn sibling_online_pairs_ring_by_id() {
 }
 
 /*
- * Least in group picks the smallest queued depth
- * with lowest id on ties by strict less only. Halves
- * view only with no live table use. Bound is 0 to nr
- * with no extra pass. Missing queued reads as zero.
- * Mirrors the BPF least scan at 4.2.19.
+ * Least in group picks the first allowed with
+ * lowest id on ties. The per CPU slot store keeps
+ * backlog per CPU, so per CPU depth spreads the
+ * pick with lowest id on ties. Halves view only
+ * with no live table use. Bound is 0 to nr with no
+ * extra pass. Missing entries read as zero. Mirrors
+ * the BPF first helper.
  */
 #[test]
 fn least_in_group_picks_least_with_lowest_id_tie() {
     let all = vec![true; 8];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[0, 0, 0, 0]), Some(0));
+    let empty: Vec<u64> = vec![];
     assert_eq!(
-        least_in_group(&all, GROUP_HOG, 8, &[0, 0, 0, 0, 0, 0, 0, 0]),
-        Some(4)
+        least_in_group(&all, GROUP_LIGHT, 8, &[0, 0], &empty),
+        Some(0)
     );
-    let q = vec![5, 1, 3, 0, 9, 9, 9, 9];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &q), Some(3));
-    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &q), Some(4));
-    let tie = vec![2, 2, 2, 2, 7, 7, 7, 7];
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &tie), Some(0));
-    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &tie), Some(4));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &[0, 0], &empty), Some(4));
+    let q = vec![5, 9];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &q, &empty), Some(0));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &q, &empty), Some(4));
+    let tie = vec![2, 7];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &tie, &empty), Some(0));
+    assert_eq!(least_in_group(&all, GROUP_HOG, 8, &tie, &empty), Some(4));
     let mut narrow = vec![false; 8];
     narrow[6] = true;
-    assert_eq!(least_in_group(&narrow, GROUP_LIGHT, 8, &q), None);
-    assert_eq!(least_in_group(&narrow, GROUP_HOG, 8, &q), Some(6));
-    assert_eq!(least_in_group(&[], GROUP_LIGHT, 0, &[]), None);
-    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[]), Some(0));
+    assert_eq!(least_in_group(&narrow, GROUP_LIGHT, 8, &q, &empty), None);
+    assert_eq!(least_in_group(&narrow, GROUP_HOG, 8, &q, &empty), Some(6));
+    assert_eq!(least_in_group(&[], GROUP_LIGHT, 0, &[], &empty), None);
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[], &empty), Some(0));
+    let per = vec![5, 0, 0, 0, 0, 0, 0, 0];
+    assert_eq!(least_in_group(&all, GROUP_LIGHT, 8, &[0, 0], &per), Some(1));
+    let per_hog = vec![0, 0, 0, 0, 0, 3, 0, 1];
+    assert_eq!(
+        least_in_group(&all, GROUP_HOG, 8, &[0, 0], &per_hog),
+        Some(4)
+    );
 }
 
 /*
- * Least in live group uses the table when ready else halves with the same least
- * and tie rule. Strict iff ready is zero, best effort iff ready is one with
- * live table in placement. Missing queued reads as zero with no trap. Mirrors
- * BPF select and enqueue fallback at 4.2.19.
+ * Least in live group uses the table when ready else halves with the same
+ * first and tie rule. Per CPU depth spreads the pick with lowest id
+ * on ties. Strict iff ready is zero, best effort iff ready is one
+ * with live table in placement. Missing entries read as zero with no
+ * trap. Mirrors BPF select and enqueue fallback.
  */
 #[test]
 fn least_in_group_live_uses_table_with_least() {
@@ -1778,40 +1590,46 @@ fn least_in_group_live_uses_table_with_least() {
     table[1] = GROUP_HOG;
     table[2] = GROUP_LIGHT;
     table[3] = GROUP_LIGHT;
-    let q = vec![10, 1, 5, 0];
+    let q = vec![10, 1];
+    let empty: Vec<u64> = vec![];
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q),
-        Some(3)
-    );
-    assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &q),
-        Some(1)
-    );
-    assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 0, &q),
-        Some(1)
-    );
-    assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 0, &q),
-        Some(3)
-    );
-    let tie = vec![4, 4, 4, 4];
-    assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &tie),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q, &empty),
         Some(2)
     );
     assert_eq!(
-        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &tie),
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &q, &empty),
         Some(0)
     );
     assert_eq!(
-        least_in_group_live(&[], GROUP_LIGHT, 0, &table, 1, &[]),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 0, &q, &empty),
+        Some(0)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 0, &q, &empty),
+        Some(2)
+    );
+    let tie = vec![4, 4];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &tie, &empty),
+        Some(2)
+    );
+    assert_eq!(
+        least_in_group_live(&all, GROUP_HOG, 4, &table, 1, &tie, &empty),
+        Some(0)
+    );
+    assert_eq!(
+        least_in_group_live(&[], GROUP_LIGHT, 0, &table, 1, &[], &empty),
         None
     );
     let empty_q: Vec<u64> = vec![];
     assert_eq!(
-        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &empty_q),
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &empty_q, &empty),
         Some(2)
+    );
+    let per = vec![0, 0, 5, 0];
+    assert_eq!(
+        least_in_group_live(&all, GROUP_LIGHT, 4, &table, 1, &q, &per),
+        Some(3)
     );
 }
 
@@ -1826,9 +1644,19 @@ fn least_keeps_bound_plus_halves_view() {
     let mut allowed = vec![false; 16];
     allowed[15] = true;
     let zero16 = [0u64; 16];
-    assert_eq!(least_in_group(&allowed, GROUP_LIGHT, 8, &zero16), None);
-    assert_eq!(least_in_group(&allowed, GROUP_HOG, 8, &zero16), None);
-    assert_eq!(least_in_group(&allowed, GROUP_HOG, 16, &zero16), Some(15));
+    let empty: Vec<u64> = vec![];
+    assert_eq!(
+        least_in_group(&allowed, GROUP_LIGHT, 8, &zero16, &empty),
+        None
+    );
+    assert_eq!(
+        least_in_group(&allowed, GROUP_HOG, 8, &zero16, &empty),
+        None
+    );
+    assert_eq!(
+        least_in_group(&allowed, GROUP_HOG, 16, &zero16, &empty),
+        Some(15)
+    );
     assert_eq!(group_of_cpu(0, 8), GROUP_LIGHT);
     assert_eq!(group_of_cpu(4, 8), GROUP_HOG);
     assert_eq!(group_of_cpu(0, 1), GROUP_LIGHT);
@@ -1836,14 +1664,14 @@ fn least_keeps_bound_plus_halves_view() {
     let zero8 = [0u64; 8];
     assert_eq!(first_in_group(&all8, GROUP_LIGHT, 8), Some(0));
     assert_eq!(
-        least_in_group(&all8, GROUP_LIGHT, 8, &zero8),
+        least_in_group(&all8, GROUP_LIGHT, 8, &zero8, &empty),
         first_in_group(&all8, GROUP_LIGHT, 8)
     );
 }
 
 /*
  * Running maps the stored EMA uniform both groups. Both groups share the same
- * map from the stored EMA with no per group hint, so cold zero maps to zero
+ * map from the stored EMA with no per group branch, so cold zero maps to zero
  * until the first climb. Init and no state holds max 1024. Locks the BPF header
  * and the Rust mirror with no stats change.
  */
@@ -1888,8 +1716,8 @@ fn idle_restore_needs_blocked_and_empty() {
 }
 
 /*
- * CPU perf EMA consts match the header at M2. Budget is 1ms, half-life is 24ms,
- * alpha is 3072 at 12x in FP8 with shift 8 and one 256. Names use the
+ * CPU perf EMA consts match the header at M2. Budget is 1ms, half-life is
+ * 24ms, alpha is 3072 at 12x in FP8 with shift 8 and one 256. Names use the
  * FLOW_CPUPERF prefix to guard FP clashes.
  */
 #[test]
@@ -2026,26 +1854,30 @@ fn cpuperf_elapsed_is_wrap_safe() {
 }
 
 /*
- * CPU state grows 48B to 56B with the active tail.
- * Active appends with no reorder, so old offsets
+ * CPU state grows 48B to 64B with active plus occupant tails.
+ * Active plus occupant append with no reorder, so old offsets
  * stay stable. Active feeds the energy probe with
- * full u64 wrap deltas in userspace. Stats keep
- * 200B with no new counter.
+ * full u64 wrap deltas in userspace. Occupant holds the
+ * running group with LIGHT fallback and post-empty read.
+ * Stats grow to 272B with LIFO tails, so tail offsets
+ * shift once with no new writes.
  */
 #[test]
-fn cpu_state_grows_to_56_with_active_tail() {
-    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 56);
+fn cpu_state_grows_to_64_with_occupant_tail() {
+    assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 64);
     let base = std::mem::MaybeUninit::<crate::bpf_intf::flow_cpu_state>::uninit();
     let ptr = base.as_ptr();
     let off_ema = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema) as usize - ptr as usize };
     let off_at = unsafe { std::ptr::addr_of!((*ptr).cpuperf_ema_at) as usize - ptr as usize };
     let off_active = unsafe { std::ptr::addr_of!((*ptr).active_ns) as usize - ptr as usize };
+    let off_occ = unsafe { std::ptr::addr_of!((*ptr).occupant_group) as usize - ptr as usize };
     assert_eq!(off_ema, 32);
     assert_eq!(off_at, 40);
     assert_eq!(off_active, 48);
+    assert_eq!(off_occ, 56);
     assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     assert_eq!(
         std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-        200
+        272
     );
 }

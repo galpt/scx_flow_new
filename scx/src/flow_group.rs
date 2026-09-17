@@ -17,12 +17,12 @@ pub const NGROUPS: u64 = 2;
 pub const GROUP_LIGHT: u8 = 0;
 /* Hog group id for burn. */
 pub const GROUP_HOG: u8 = 1;
-/* Park id of the light group. */
+/* Overflow id of the light group. */
 #[cfg(test)]
-pub const PARK_LIGHT: u64 = 0x5000;
-/* Park id of the hog group. */
+pub const OVERFLOW_LIGHT: u64 = 0x6800;
+/* Overflow id of the hog group. */
 #[cfg(test)]
-pub const PARK_HOG: u64 = 0x5001;
+pub const OVERFLOW_HOG: u64 = 0x6801;
 /* Window length in nanos at 32ms. */
 #[cfg(test)]
 pub const WIN_NS: u64 = 32_000_000;
@@ -42,7 +42,7 @@ pub const DEMOTE_BURST_FLOOR_NS: u64 = 1_000_000;
 /* Window burn in nanos below 4ms for promote. */
 #[cfg(test)]
 pub const PROMOTE_BURN_NS: u64 = 4_000_000;
-/* Low windows needed for one promote near 2s. */
+/* Low windows needed for one promote at 64 near 2s. */
 #[cfg(test)]
 pub const PROMOTE_WINS: u8 = 64;
 /* Extra deadline in nanos at 8ms for pinned hog. */
@@ -969,15 +969,15 @@ pub fn sibling_table_online(cores_id: &[Vec<u32>], online: &[u32]) -> [u16; GROU
 }
 
 /*
- * Park id of one group with light as default. Hog
- * uses 0x5001. Any other value uses 0x5000.
+ * Overflow id of one group with light as default. Hog
+ * uses 0x6801. Any other value uses 0x6800.
  */
 #[cfg(test)]
-pub fn park_for_group(group: u8) -> u64 {
+pub fn overflow_for_group(group: u8) -> u64 {
     if group == GROUP_HOG {
-        PARK_HOG
+        OVERFLOW_HOG
     } else {
-        PARK_LIGHT
+        OVERFLOW_LIGHT
     }
 }
 
@@ -1153,11 +1153,12 @@ pub fn burst_hot(delta: u64) -> bool {
 
 /*
  * Allowance from light depth with flood backpressure. Depth sums queued tasks
- * in light per CPU queues capped at 4. Table is depth 0 to 1 to 4ms, depth 2 to
- * 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so solo bursts still move
- * fast alone. Mild pressure steps down to 2ms so rising flood reacts sooner yet
- * stays clear of one slice chatter. Deep flood pins at 1ms, so per task worst
- * case is one slice during flood. Recomputed per stop with no new task field,
+ * in light per CPU queues capped at 4. Table is depth 0 to 1 to 4ms, depth 2
+ * to 3 to 2ms, depth 4 and above to 1ms. Quiet keeps 4ms so solo bursts
+ * still move fast alone. Mild pressure steps down to 2ms so rising flood
+ * reacts sooner yet stays clear of one slice chatter. Deep flood pins at 1ms,
+ * so per task worst case is one slice during flood. Recomputed per stop with
+ * no new task field,
  * so task stays at 48B. Halves matches dispatch view with no table cost in the
  * stop path. Strict iff ready is zero, best effort iff ready is one with
  * placement on the live table.
@@ -1185,85 +1186,28 @@ pub fn burst_hot_at(delta: u64, allow: u64) -> bool {
 }
 
 /*
- * Light depth from per CPU queued counts capped at 4.
- * Sums queued tasks over light CPUs in halves order
- * with early stop at 4. Halves matches the BPF depth
- * with no table use. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero, so short slices stay
- * quiet with no trap.
+ * Both depths from the per CPU window counts capped
+ * at 4. Window holds own per CPU plus other per CPU
+ * plus both overflows with four reads and no full
+ * scan, so stopping pays window cost with no flood
+ * miss. Quiet keeps 4ms and flood fills the window
+ * plus overflows to the floor. Mirrors the BPF
+ * windowed refresh with four reads.
  */
 #[cfg(test)]
-pub fn light_depth(queued: &[u64], nr: usize) -> u64 {
-    let mut depth = 0u64;
-    for cpu in 0..nr {
-        if group_of_cpu(cpu as u32, nr) != GROUP_LIGHT {
-            continue;
-        }
-        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
-        if depth >= 4 {
-            depth = 4;
-            break;
-        }
-    }
-    depth
-}
-
-/*
- * Hog depth from per CPU queued counts capped at 4.
- * Sums queued tasks over hog CPUs in halves order
- * with early stop at 4. Halves matches the BPF view
- * with no table use. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero, so short slices stay
- * quiet with no trap. Display only with no burst use.
- */
-#[cfg(test)]
-pub fn hog_depth(queued: &[u64], nr: usize) -> u64 {
-    let mut depth = 0u64;
-    for cpu in 0..nr {
-        if group_of_cpu(cpu as u32, nr) != GROUP_HOG {
-            continue;
-        }
-        depth = depth.saturating_add(queued.get(cpu).copied().unwrap_or(0));
-        if depth >= 4 {
-            depth = 4;
-            break;
-        }
-    }
-    depth
-}
-
-/*
- * Both depths from per CPU queued counts capped at 4.
- * Single pass over halves order with early stop when
- * both hit 4. Mirrors the BPF refresh with one pass
- * and bounded cost. Strict iff ready is zero, best
- * effort iff ready is one with placement on live.
- * Missing entries count as zero.
- */
-#[cfg(test)]
-pub fn group_depths(queued: &[u64], nr: usize) -> (u64, u64) {
-    let mut light = 0u64;
-    let mut hog = 0u64;
-    for cpu in 0..nr {
-        let n = queued.get(cpu).copied().unwrap_or(0);
-        if group_of_cpu(cpu as u32, nr) == GROUP_LIGHT {
-            light = light.saturating_add(n);
-            if light >= 4 {
-                light = 4;
-            }
-        } else {
-            hog = hog.saturating_add(n);
-            if hog >= 4 {
-                hog = 4;
-            }
-        }
-        if light >= 4 && hog >= 4 {
-            break;
-        }
-    }
-    (light, hog)
+pub fn slot_window_depths(
+    own: u64,
+    other: u64,
+    light_over: u64,
+    hog_over: u64,
+    group: u8,
+) -> (u64, u64) {
+    let (light, hog) = if group == GROUP_HOG {
+        (other + light_over, own + hog_over)
+    } else {
+        (own + light_over, other + hog_over)
+    };
+    (light.min(4), hog.min(4))
 }
 
 /*
@@ -1383,14 +1327,15 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
  * One classifier step with light depth for tests. Mirrors the BPF stopping path
  * with burn and wake. Adds the burst to burn, then checks the allowance for the
  * depth, then wake fast promote, then window end. Allowance is 4ms at depth 0
- * to 1, 2ms at depth 2 to 3, 1ms at depth 4 and above. Eight short blocks below
- * 1ms with burn below 4ms move hog to light at once. A burst at the allowance
- * clears wake hits. A short with burn at or past 4ms clears wake hits. A 16ms
- * window moves light to hog at the window end. A hot window at or past 16ms
- * clears wake hits. A low window below 4ms moves the streak forward and keeps
- * wake hits. A middle window at the end clears wake hits with low runs and no
- * move. A window in progress keeps wake hits. A hog needs 64 low wins near 2s
- * or 8 short hits to return to light. Allowance is recomputed per stop with no
+ * to 1, 2ms at depth 2 to 3, 1ms at depth 4 and above. Eight short blocks
+ * below 1ms with burn below 4ms move hog to light at once. A burst at the
+ * allowance clears wake hits. A short with burn at or past 4ms clears wake
+ * hits. A 16ms window moves light to hog at the window end. A hot window at
+ * or past 16ms clears wake hits. A low window below 4ms moves the streak
+ * forward and keeps wake hits. A middle window at the end clears wake hits
+ * with low runs and no move. A window in progress keeps wake hits. A hog needs
+ * 64 low wins near 2s or 8 short hits to return to light. Allowance is
+ * recomputed per stop with no
  * new task field, so task stays at 48B. Returns true for demote and true for
  * promote when each move runs.
  */
@@ -1481,102 +1426,6 @@ pub fn classify_step_depth(st: &mut GroupState, now: u64, delta: u64, depth: u64
 }
 
 /*
- * Group task for dispatch models. The mask names
- * allowed CPUs. The live flag marks a trusted pid
- * lookup. The fail flag models a failed move. Group
- * holds 0 for light and 1 for hog.
- */
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupTask {
-    /* Allowed CPUs. Index is the CPU. */
-    pub allowed: Vec<bool>,
-    /* False models a NULL pid lookup. */
-    pub live: bool,
-    /* True models a failed queue move. */
-    pub fail: bool,
-    /* Group id. 0 is light. 1 is hog. */
-    pub group: u8,
-}
-
-/*
- * True when one group task may move to the thief. Needs a live task with no
- * move failure, the CPU in the mask, and the same group. Tier 0 model only. BPF
- * ships Tier 3 park only by construction with no task recheck due to verifier
- * jump at 1000001 on donor check, so a stale cross entry may move iff ready is
- * one with strict park iff ready is zero and best effort peer across groups.
- * Pinned single tasks with one allowed CPU may cross with an inflated deadline,
- * so the caller checks that path before this strict check. Exiting tasks use
- * the same rule with no extra path.
- */
-#[cfg(test)]
-pub fn group_task_ok(thief: i32, thief_group: u8, task: &GroupTask) -> bool {
-    if !task.live || task.fail {
-        return false;
-    }
-    let g = if task.group == GROUP_HOG {
-        GROUP_HOG
-    } else {
-        GROUP_LIGHT
-    };
-    if g != thief_group {
-        return false;
-    }
-    crate::flow_select::may_run_on(thief, &task.allowed)
-}
-
-/*
- * Drain up to budget group tasks for one CPU. Tier 0 model only. BPF ships Tier
- * 3 park only by construction with no task recheck due to verifier jump at
- * 1000001 on donor check, so a stale cross entry may move iff ready is one with
- * strict park iff ready is zero and best effort peer across groups. The scan
- * keeps order and moves each task that passes the strict group check. Dead,
- * foreign, failed, and cross group heads stay, so one head never blocks later
- * work. Returns moved and skipped where skipped counts cross group heads on
- * mask pass. The model keeps both drains and merged skip. BPF Tier 3 uses park
- * only by construction with halves due to verifier jump at 1000001 with peer
- * mask only.
- */
-#[cfg(test)]
-pub fn group_drain_model(
-    queue: &mut std::collections::VecDeque<GroupTask>,
-    cpu: i32,
-    thief_group: u8,
-    budget: u32,
-) -> (u32, u32) {
-    let mut moved = 0;
-    let mut skipped = 0;
-    let mut kept = std::collections::VecDeque::new();
-    for task in queue.drain(..) {
-        let g = if task.group == GROUP_HOG {
-            GROUP_HOG
-        } else {
-            GROUP_LIGHT
-        };
-        let same = g == thief_group;
-        let ok = moved < budget
-            && task.live
-            && !task.fail
-            && same
-            && crate::flow_select::may_run_on(cpu, &task.allowed);
-        if ok {
-            moved += 1;
-        } else {
-            if task.live
-                && !task.fail
-                && !same
-                && crate::flow_select::may_run_on(cpu, &task.allowed)
-            {
-                skipped += 1;
-            }
-            kept.push_back(task);
-        }
-    }
-    *queue = kept;
-    (moved, skipped)
-}
-
-/*
  * First allowed CPU in one group for tests. Scans
  * in id order and returns the first live CPU that
  * allows the task. Halves is the fallback. Returns
@@ -1621,16 +1470,22 @@ pub fn first_in_group_live(
 }
 
 /*
- * Least queued allowed CPU in one group for tests. Scans 0 to nr in id order
- * with halves, so the bound matches the BPF first helper. Needs group, mask,
- * and queued depth. Picks the smallest queued depth with lowest id on ties by
- * strict less only, so equal depths keep the first id. Missing queued entries
- * read as zero, so short slices stay quiet with no trap. Returns none when no
- * allowed CPU lives in the group. Mirrors the BPF least scan with halves view
- * and frozen constants.
+ * Least queued allowed CPU in one group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Mirrors the BPF first
+ * helper with frozen constants.
  */
 #[cfg(test)]
-pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) -> Option<u32> {
+pub fn least_in_group(
+    allowed: &[bool],
+    group: u8,
+    nr: usize,
+    overflow: &[u64],
+    per_cpu: &[u64],
+) -> Option<u32> {
+    let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
@@ -1640,7 +1495,7 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) ->
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
-        let q = queued.get(cpu).copied().unwrap_or(0);
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);
@@ -1657,13 +1512,12 @@ pub fn least_in_group(allowed: &[bool], group: u8, nr: usize, queued: &[u64]) ->
 }
 
 /*
- * Least queued allowed CPU in one live group for tests. Scans 0 to nr in id
- * order with the table when ready, else halves, so the bound matches the BPF
- * first helper used by select and enqueue. Needs live group, mask, and queued
- * depth. Picks the smallest queued depth with lowest id on ties by strict less
- * only. Missing queued entries read as zero with no trap. Returns none when no
- * allowed CPU lives in the group. Placement keeps live, dispatch keeps halves,
- * constants frozen. Mirrors the BPF least scan.
+ * Least queued allowed CPU in one live group for tests. Depth reads each
+ * candidate per CPU queue plus the group overflow tail, so per CPU
+ * backlog spreads the pick with lowest id on ties by strict less
+ * only. Missing entries read as zero with no trap. Returns none
+ * when no allowed CPU lives in the group. Placement keeps live
+ * with frozen constants. Mirrors the BPF first helper.
  */
 #[cfg(test)]
 pub fn least_in_group_live(
@@ -1672,8 +1526,10 @@ pub fn least_in_group_live(
     nr: usize,
     table: &[u8],
     ready: u8,
-    queued: &[u64],
+    overflow: &[u64],
+    per_cpu: &[u64],
 ) -> Option<u32> {
+    let oq = overflow.get(group as usize).copied().unwrap_or(0);
     let mut best: Option<u32> = None;
     let mut best_q: u64 = 0;
     for cpu in 0..nr {
@@ -1683,7 +1539,7 @@ pub fn least_in_group_live(
         if allowed.get(cpu).copied().unwrap_or(false) != true {
             continue;
         }
-        let q = queued.get(cpu).copied().unwrap_or(0);
+        let q = per_cpu.get(cpu).copied().unwrap_or(0).wrapping_add(oq);
         match best {
             None => {
                 best = Some(cpu as u32);

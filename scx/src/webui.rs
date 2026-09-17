@@ -2,9 +2,9 @@
 /*
  * Loopback dashboard
  *
- * Serves the embedded page and the live snapshot as JSON. Prefers the loopback TCP port and
- * falls back to a unix socket when the sandbox blocks TCP. No auth is used and the loopback
- * address is the trust boundary.
+ * Serves the embedded page and the live snapshot as JSON. Prefers the loopback
+ * TCP port and falls back to a unix socket when the sandbox blocks TCP. No
+ * auth is used and the loopback address is the trust boundary.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -275,20 +275,12 @@ mod tests {
     }
 
     /* One fixture per energy mode for the page. */
-    fn energy_fixture(state: &str, accepted: u64, headline: f64) -> WebMetrics {
+    fn energy_fixture(state: &str, watts: f64) -> WebMetrics {
         WebMetrics {
             energy: crate::stats::EnergyMetrics {
                 state: state.to_string(),
-                has_headline: accepted >= 3,
-                low_confidence: (3..=4).contains(&accepted),
-                headline_pct: headline,
-                accepted_pairs: accepted,
-                rejected_pairs: 1,
-                daily_pct: headline,
-                daily_kwh: -0.024,
-                yearly_pct: headline,
-                yearly_kwh: -8.76,
-                since_running_kwh: -0.001,
+                since_running_kwh: 0.001,
+                live_watts: watts,
                 countdown_s: 12,
                 trace: format!("state {state} test trace"),
             },
@@ -298,59 +290,44 @@ mod tests {
 
     /* Merged carries all five energy modes to the page. */
     #[test]
-    fn merged_carries_all_four_energy_modes() {
-        for (state, accepted, headline) in [
-            ("unavailable", 0, 0.0),
-            ("baseline", 0, 0.0),
-            ("collecting", 5, -1.5),
-            ("waiting", 1, 0.0),
-            ("backoff", 2, 0.0),
+    fn merged_carries_all_five_energy_modes() {
+        for (state, watts) in [
+            ("unavailable", 0.0),
+            ("baseline", 42.0),
+            ("collecting", 50.0),
+            ("waiting", 7.0),
+            ("backoff", 30.0),
         ] {
-            let snap = energy_fixture(state, accepted, headline);
+            let snap = energy_fixture(state, watts);
             let v = merged(&snap);
             assert_eq!(v.as_object().map(|o| o.len()), Some(11));
             let e = v.get("energy").expect("energy key");
             assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
+            assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
             assert_eq!(
-                e.get("accepted_pairs").and_then(|n| n.as_u64()),
-                Some(accepted)
-            );
-            assert_eq!(
-                e.get("headline_pct").and_then(|n| n.as_f64()),
-                Some(headline)
+                e.get("since_running_kwh").and_then(|n| n.as_f64()),
+                Some(0.001)
             );
             assert!(e.get("trace").and_then(|s| s.as_str()).is_some());
+            assert!(e.get("countdown_s").is_some());
+            assert!(e.get("accepted_pairs").is_none());
+            assert!(e.get("rejected_pairs").is_none());
+            assert!(e.get("headline_pct").is_none());
+            assert!(e.get("has_headline").is_none());
             let back: WebMetrics = serde_json::from_value(v).unwrap();
             assert_eq!(back.energy.state, state);
-            assert_eq!(back.energy.accepted_pairs, accepted);
+            assert_eq!(back.energy.live_watts, watts);
         }
-        let coll = energy_fixture("collecting", 5, -1.5);
-        assert!(merged(&coll)["energy"]["has_headline"].as_bool().unwrap());
-        assert!(!merged(&coll)["energy"]["low_confidence"].as_bool().unwrap());
-        let early = energy_fixture("collecting", 3, -1.5);
-        assert!(
-            merged(&early)["energy"]["low_confidence"]
-                .as_bool()
-                .unwrap()
-        );
     }
 
-    /* Baseline keeps prior headline sums for the page. */
+    /* Baseline carries the meter with live watts. */
     #[test]
-    fn merged_carries_baseline_with_headline() {
+    fn merged_carries_baseline_with_meter() {
         let snap = WebMetrics {
             energy: crate::stats::EnergyMetrics {
                 state: "baseline".to_string(),
-                has_headline: true,
-                low_confidence: false,
-                headline_pct: -1.5,
-                accepted_pairs: 5,
-                rejected_pairs: 2,
-                daily_pct: -1.5,
-                daily_kwh: -0.024,
-                yearly_pct: -1.5,
-                yearly_kwh: -8.76,
-                since_running_kwh: -0.001,
+                since_running_kwh: 0.001,
+                live_watts: 42.0,
                 countdown_s: 0,
                 trace: "state baseline test trace".to_string(),
             },
@@ -359,13 +336,14 @@ mod tests {
         let v = merged(&snap);
         let e = v.get("energy").expect("energy key");
         assert_eq!(e.get("state").and_then(|s| s.as_str()), Some("baseline"));
-        assert_eq!(e.get("has_headline").and_then(|b| b.as_bool()), Some(true));
-        assert_eq!(e.get("accepted_pairs").and_then(|n| n.as_u64()), Some(5));
-        assert_eq!(e.get("headline_pct").and_then(|n| n.as_f64()), Some(-1.5));
+        assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(42.0));
+        assert_eq!(
+            e.get("since_running_kwh").and_then(|n| n.as_f64()),
+            Some(0.001)
+        );
         let back: WebMetrics = serde_json::from_value(v).unwrap();
         assert_eq!(back.energy.state, "baseline");
-        assert!(back.energy.has_headline);
-        assert_eq!(back.energy.accepted_pairs, 5);
+        assert_eq!(back.energy.live_watts, 42.0);
     }
 
     /* Old snapshots without energy still decode unavailable. */
@@ -374,8 +352,8 @@ mod tests {
         let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.2.24\"}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.energy.state, "unavailable");
-        assert!(!m.energy.has_headline);
-        assert_eq!(m.energy.accepted_pairs, 0);
+        assert_eq!(m.energy.since_running_kwh, 0.0);
+        assert_eq!(m.energy.live_watts, 0.0);
         let v = merged(&m);
         assert_eq!(
             v.get("energy")
@@ -385,31 +363,27 @@ mod tests {
         );
     }
 
-    /* Waiting keeps pairs and eleven keys for the page. */
+    /* Waiting carries the meter and eleven keys for the page. */
     #[test]
-    fn merged_carries_waiting_with_pairs() {
-        for (state, accepted, headline) in [
-            ("unavailable", 0, 0.0),
-            ("baseline", 0, 0.0),
-            ("collecting", 5, -1.5),
-            ("waiting", 1, 0.0),
-            ("backoff", 2, 0.0),
+    fn merged_carries_waiting_with_meter() {
+        for (state, watts) in [
+            ("unavailable", 0.0),
+            ("baseline", 42.0),
+            ("collecting", 50.0),
+            ("waiting", 7.0),
+            ("backoff", 30.0),
         ] {
-            let snap = energy_fixture(state, accepted, headline);
+            let snap = energy_fixture(state, watts);
             let v = merged(&snap);
             assert_eq!(v.as_object().map(|o| o.len()), Some(11));
             let e = v.get("energy").expect("energy key");
             assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
-            assert_eq!(
-                e.get("accepted_pairs").and_then(|n| n.as_u64()),
-                Some(accepted)
-            );
+            assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
             let back: WebMetrics = serde_json::from_value(v).unwrap();
             assert_eq!(back.energy.state, state);
         }
-        let wait = energy_fixture("waiting", 1, 0.0);
+        let wait = energy_fixture("waiting", 7.0);
         assert_eq!(wait.energy.state, "waiting");
-        assert!(!wait.energy.has_headline);
         assert_eq!(merged(&wait)["energy"]["state"], "waiting");
     }
 
@@ -439,6 +413,13 @@ mod tests {
         assert_eq!(m.stats.preempt_skipped_mask, 0);
         assert_eq!(m.stats.preempt_skipped_rate, 0);
         assert_eq!(m.stats.kick_coalesced, 0);
+        assert_eq!(m.stats.wheel_overflow, 0);
+        assert_eq!(m.stats.token_boosts, 0);
+        assert_eq!(m.stats.slot_kicks, 0);
+        assert_eq!(m.stats.token_cas_fails, 0);
+        assert_eq!(m.stats.slot_moves, 0);
+        assert_eq!(m.stats.slot_defer, 0);
+        assert_eq!(m.stats.steal_xmoves, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -472,7 +453,7 @@ mod tests {
                 requeues: 1,
                 completions: 2,
                 park_moves: 1,
-                steal_moves: 0,
+                steal_moves: 2,
                 kicks: 4,
                 edf_enqueued: 8,
                 edf_clamped: 1,
@@ -490,6 +471,13 @@ mod tests {
                 preempt_skipped_group: 1,
                 preempt_skipped_mask: 1,
                 preempt_skipped_rate: 2,
+                wheel_overflow: 1,
+                token_boosts: 2,
+                slot_kicks: 2,
+                token_cas_fails: 0,
+                slot_moves: 40,
+                slot_defer: 3,
+                steal_xmoves: 1,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -505,7 +493,7 @@ mod tests {
                 active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.36".to_string(),
+            version: "4.2.37".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             light_depth: 1,
@@ -533,6 +521,13 @@ mod tests {
         assert!(txt.contains("preempt_skipped_mask"));
         assert!(txt.contains("preempt_skipped_rate"));
         assert!(txt.contains("kick_coalesced"));
+        assert!(txt.contains("wheel_overflow"));
+        assert!(txt.contains("token_boosts"));
+        assert!(txt.contains("slot_kicks"));
+        assert!(txt.contains("token_cas_fails"));
+        assert!(txt.contains("slot_moves"));
+        assert!(txt.contains("slot_defer"));
+        assert!(txt.contains("steal_xmoves"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("light_depth"));
@@ -540,6 +535,11 @@ mod tests {
         assert!(txt.contains("perf_mode"));
         assert!(txt.contains("governor"));
         assert!(txt.contains("energy"));
+        assert!(txt.contains("since_running_kwh"));
+        assert!(txt.contains("live_watts"));
+        assert!(!txt.contains("accepted_pairs"));
+        assert!(!txt.contains("rejected_pairs"));
+        assert!(!txt.contains("headline"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.edf_enqueued, 8);
@@ -558,6 +558,14 @@ mod tests {
         assert_eq!(back.stats.preempt_skipped_mask, 1);
         assert_eq!(back.stats.preempt_skipped_rate, 2);
         assert_eq!(back.stats.kick_coalesced, 2);
+        assert_eq!(back.stats.wheel_overflow, 1);
+        assert_eq!(back.stats.token_boosts, 2);
+        assert_eq!(back.stats.slot_kicks, 2);
+        assert_eq!(back.stats.token_cas_fails, 0);
+        assert_eq!(back.stats.slot_moves, 40);
+        assert_eq!(back.stats.slot_defer, 3);
+        assert_eq!(back.stats.steal_moves, 2);
+        assert_eq!(back.stats.steal_xmoves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].group, 1);
         assert_eq!(back.per_cpu[0].running_nice, -5);
@@ -565,11 +573,7 @@ mod tests {
         assert_eq!(back.per_cpu[0].delay_win, 16);
         assert!(back.per_cpu[0].delay_armed);
         assert_eq!(back.per_cpu[0].active_ns, 9_000);
-        assert_eq!(
-            back.per_cpu[0].active_delta(&crate::stats::PerCpuMetrics::default()),
-            9_000
-        );
-        assert_eq!(back.version, "4.2.36");
+        assert_eq!(back.version, "4.2.37");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.light_depth, 1);
         assert_eq!(back.hog_depth, 2);
@@ -577,7 +581,7 @@ mod tests {
         assert_eq!(back.perf_mode, 1);
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
-        assert!(!back.energy.has_headline);
+        assert_eq!(back.energy.since_running_kwh, 0.0);
         let v = merged(&snap);
         assert_eq!(v.get("perf_mode").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(
@@ -618,6 +622,29 @@ mod tests {
         assert!(html.contains("id=\"pskip-r\""));
     }
 
+    /* Dashboard shows the slot cells. */
+    #[test]
+    fn dashboard_shows_slot_cells() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"slot-moves\""));
+        assert!(html.contains("id=\"slot-defer\""));
+        assert!(html.contains("id=\"slot-kicks\""));
+        assert!(html.contains("id=\"slot-rate\""));
+        assert!(html.contains("slot_moves"));
+        assert!(html.contains("slot_defer"));
+        assert!(html.contains("slot_kicks"));
+    }
+
+    /* Dashboard shows the cross steal cell. */
+    #[test]
+    fn dashboard_shows_steal_xmoves_cell() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"steal-xmoves\""));
+        assert!(html.contains("steal_xmoves"));
+        assert!(html.contains("id=\"steal\""));
+        assert!(html.contains("steal_moves"));
+    }
+
     /* Dashboard shows the strict and perf mode cell. */
     #[test]
     fn dashboard_shows_mode_cell() {
@@ -627,24 +654,58 @@ mod tests {
         assert!(html.contains("governor"));
     }
 
-    /* Dashboard shows the energy section above groups. */
+    /* Dashboard shows the calm meter-only energy section. */
     #[test]
     fn dashboard_shows_energy_section() {
         let html = include_str!("../ui/index.html");
-        assert!(html.contains("id=\"energy-daily\""));
-        assert!(html.contains("id=\"energy-daily-kwh\""));
-        assert!(html.contains("id=\"energy-yearly\""));
-        assert!(html.contains("id=\"energy-yearly-kwh\""));
         assert!(html.contains("id=\"energy-since\""));
-        assert!(html.contains("id=\"energy-pairs\""));
-        assert!(html.contains("id=\"energy-trace\""));
+        assert!(html.contains("id=\"energy-watts\""));
         assert!(html.contains("id=\"energy-note\""));
-        assert!(html.contains("projection"));
-        assert!(html.contains("estimate"));
+        assert!(html.contains("Consumed since launch"));
+        assert!(html.contains("Live watts"));
+        assert!(html.contains("Section shows energy consumed since launch"));
+        assert!(html.contains("Note numbers for manual compare"));
+        assert!(html.contains("Placement follows the governor only"));
         assert!(html.contains("unavailable"));
-        assert!(html.contains("baseline"));
         assert!(html.contains("data.energy"));
-        let energy_at = html.find("id=\"energy-daily\"").unwrap();
+        assert!(html.contains("since_running_kwh"));
+        assert!(html.contains("live_watts"));
+        assert!(html.contains("energy-meter"));
+        assert!(html.contains("energy-label"));
+        assert!(!html.contains("id=\"energy-state\""));
+        assert!(!html.contains("id=\"energy-countdown\""));
+        assert!(!html.contains("id=\"energy-trace\""));
+        assert!(!html.contains("energy-legend"));
+        assert!(!html.contains("legend-row"));
+        assert!(!html.contains("legend-sym"));
+        assert!(!html.contains("trace-row"));
+        assert!(!html.contains("trace-key"));
+        assert!(!html.contains("trace-val"));
+        assert!(!html.contains("trace-meter"));
+        assert!(!html.contains("renderTrace"));
+        assert!(!html.contains("traceClass"));
+        assert!(!html.contains("fmtCountdown"));
+        assert!(!html.contains("countdown_s"));
+        assert!(!html.contains("energy.trace"));
+        assert!(!html.contains("Countdown:</span>"));
+        assert!(!html.contains("State:</span>"));
+        assert!(!html.contains("Waiting for load"));
+        assert!(!html.contains("Cooling down"));
+        assert!(!html.contains("Paused while the governor"));
+        assert!(!html.contains("No package counter found"));
+        assert!(!html.contains("'waiting'"));
+        assert!(!html.contains("'collecting'"));
+        assert!(!html.contains("'baseline'"));
+        assert!(!html.contains("'backoff'"));
+        assert!(!html.contains("E_used"));
+        assert!(!html.contains("E_saved"));
+        assert!(!html.contains("energy-pairs"));
+        assert!(!html.contains("energy-daily"));
+        assert!(!html.contains("energy-yearly"));
+        assert!(!html.contains("rejected_pairs"));
+        assert!(!html.contains("accepted_pairs"));
+        assert!(!html.contains("headline"));
+        let energy_at = html.find("id=\"energy-since\"").unwrap();
         let groups_at = html.find("<!-- Groups").unwrap();
         assert!(energy_at < groups_at);
         assert_eq!(html.matches("setInterval").count(), 1);

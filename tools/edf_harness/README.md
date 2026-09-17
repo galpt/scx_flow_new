@@ -105,6 +105,8 @@ means plus build plus seeds. Topology plus variance
 ship with each run in `topology.txt` plus the stats
 CSV.
 
+### Table
+
 | target_u | n | mean_completion ± ci95 | mean_exact | mean_effective | governor | build | seeds |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0.5 | 2 | 1.0000 ± 0.0000 | 0.5425 | 0.4957 | performance | 4.2.4 | 1,2 |
@@ -119,6 +121,8 @@ CSV.
 | 1.0 | 2 | 0.9782 ± 0.0081 | 1.0804 | 0.9493 | performance | 4.2.5 | 1,2 |
 | 1.2 | 2 | 0.6571 ± 0.0030 | 1.2985 | 0.6400 | performance | 4.2.5 | 1,2 |
 | 1.5 | 2 | 0.5482 ± 0.0013 | 1.6228 | 0.5327 | performance | 4.2.5 | 1,2 |
+
+### Readout
 
 At target use at or below 0.95 both builds complete
 all jobs with a measured rate of 100 percent. At 1.0
