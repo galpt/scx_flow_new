@@ -184,7 +184,7 @@ static __always_inline u64 flow_refresh_pressure(s32 cpu)
 /* or past 4ms clears wake hits. A hot window at or past 16ms clears wake */
 /* hits. A middle window at the end clears wake hits with low runs. A low */
 /* window below 4ms keeps wake hits. A window in progress keeps wake hits. */
-/* Slow path with 3 low wins stays intact. Stopping only, never dispatch. */
+/* Slow path with 64 low wins stays intact. Stopping only, never dispatch. */
 static __always_inline void flow_classify(
 	struct flow_task_ctx *tctx, u64 now,
 	u64 delta, s32 cpu)

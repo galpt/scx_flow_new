@@ -1233,7 +1233,7 @@ pub fn wake_short(delta: u64) -> bool {
 /*
  * True when wake hits reach 8 for fast promote.
  * Eight qualifying short blocks move hog to light
- * at once with no wait for 3 wins.
+ * at once with no wait for 64 wins.
  */
 #[cfg(test)]
 pub fn wake_ready(hits: u16) -> bool {
