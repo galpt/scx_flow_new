@@ -61,7 +61,7 @@ pub fn delay_decay(old: u8) -> u8 {
 /*
  * True when the delay window is armed at 16. 16 is
  * 512us in 32us units with absolute use. Display
- * only since 4.2.41 with no gate use, see dots.
+ * only with no gate use, see dots.
  */
 pub fn delay_armed(win: u8) -> bool {
     (win as u64) >= DELAY_ARM
@@ -74,7 +74,7 @@ pub fn delay_armed(win: u8) -> bool {
  * across idle with no decay sans traffic. Delay
  * shows stale when idle, see dashboard. Next
  * running decays at 1/8 per window. Display only
- * since 4.2.41 with no gate use, see dots.
+ * with no gate use, see dots.
  */
 pub fn delay_armed_latched(win: u8, held: bool) -> bool {
     if delay_armed(win) {

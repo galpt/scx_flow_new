@@ -10,8 +10,10 @@
 use crate::flow_slot::*;
 
 /*
- * Period holds 8 heads with one tail at K 8. Seq 8, 17, and 26 stay tail,
- * all others stay head. Wrap at u32 MAX keeps the same modulo with no trap.
+ * Period holds 8 heads with one tail at K 8 plus one forced tail at MAX.
+ * Seq 8, 17, and 26 stay tail, all others stay head except MAX stays tail.
+ * Forced tails at period plus MAX keep max gap 9 with 8 heads everywhere
+ * with wrap, so the bound stays exact with no drift.
  */
 #[test]
 fn lifo_period_holds_k_8_with_wrap() {
@@ -28,25 +30,29 @@ fn lifo_period_holds_k_8_with_wrap() {
     assert!(lifo_take_head(16));
     assert!(lifo_take_head(18));
     let max = u32::MAX;
-    assert_eq!(lifo_take_head(max), max % 9 != 8);
     assert_eq!(max % 9, 3);
-    assert!(lifo_take_head(max));
+    assert!(!lifo_take_head(max));
+    assert!(lifo_take_head(max.wrapping_sub(1)));
+    assert!(!lifo_take_head(max.wrapping_sub(4)));
     let wrapped = max.wrapping_add(1);
     assert_eq!(wrapped, 0);
     assert!(lifo_take_head(wrapped));
     let wrap_tail = 8u32.wrapping_sub(9).wrapping_add(9);
     assert_eq!(wrap_tail, 8);
     assert!(!lifo_take_head(wrap_tail));
+    assert_eq!((1u64 << 32) % 9, 4);
     for off in 0..18u32 {
         let seq = max.wrapping_add(off);
-        assert_eq!(lifo_take_head(seq), seq % 9 != 8);
+        let want = seq != u32::MAX && seq % 9 != 8;
+        assert_eq!(lifo_take_head(seq), want);
     }
 }
 
 /*
- * Bound breach hits once per 9 with no more than K heads in a row. Nine
- * straight takes hold 8 heads and one tail, so the bound keeps one FIFO
- * tail per period with no starve.
+ * Bound holds one tail per 9 with no more than 8 heads in a row. Nine
+ * straight takes hold 8 heads and one tail, so the bound keeps one slot
+ * tail per period with no starve. Forced tails at period plus MAX keep max
+ * gap 9 with 8 heads everywhere with wrap.
  */
 #[test]
 fn lifo_bound_breach_hits_once_per_period() {
@@ -80,12 +86,12 @@ fn lifo_bound_breach_hits_once_per_period() {
         }
         assert!(worst <= 8);
     }
-    {
-        let base = u32::MAX;
+    for off in 0..27u32 {
+        let base = u32::MAX.wrapping_sub(26).wrapping_add(off);
         let mut run = 0u32;
         let mut worst = 0u32;
-        for off in 0..27u32 {
-            let seq = base.wrapping_add(off);
+        for k in 0..27u32 {
+            let seq = base.wrapping_add(k);
             if lifo_take_head(seq) {
                 run += 1;
                 if run > worst {
@@ -95,7 +101,7 @@ fn lifo_bound_breach_hits_once_per_period() {
                 run = 0;
             }
         }
-        assert!(worst <= 9);
+        assert!(worst <= 8);
     }
 }
 
@@ -129,10 +135,11 @@ fn lifo_idx_maps_per_cpu_plus_overflow() {
 }
 
 /*
- * Victim drains within K plus ceil depth over D with bounded LIFO. Head
- * inserts push front, tail inserts push back behind the victim, so at most
- * K heads delay the victim. Drains move at most D per pass, so the bound
- * holds for all depths with no starve.
+ * Victim drains within K plus ceil depth over D with bounded LIFO. Victim
+ * sits at the tail behind depth, inserts run before drains with head to
+ * front and tail past the victim, so at most 8 heads delay the victim.
+ * Drains move at most D per pass, so the bound holds for all depths with
+ * no starve.
  */
 #[test]
 fn lifo_starvation_bound_holds() {
@@ -140,30 +147,16 @@ fn lifo_starvation_bound_holds() {
     for depth in [0usize, 1, 4, 8, 9, 16, 32] {
         let bound = 8 + depth.div_ceil(4);
         let mut q: VecDeque<u32> = VecDeque::new();
-        q.push_back(9999);
         for i in 0..depth as u32 {
             q.push_back(i);
         }
+        q.push_back(9999);
         let mut seq = 0u32;
         let mut steps = 0u32;
         let mut victim_done = false;
         let mut guard = 0u32;
         while !victim_done && guard < 100 {
             guard += 1;
-            let mut moved = 0u32;
-            while moved < 4 && !q.is_empty() {
-                let v = q.pop_front().unwrap();
-                moved += 1;
-                steps += 0;
-                if v == 9999 {
-                    victim_done = true;
-                    break;
-                }
-            }
-            if victim_done {
-                break;
-            }
-            steps += 1;
             for _ in 0..2 {
                 let head = lifo_take_head(seq);
                 seq = seq.wrapping_add(1);
@@ -173,12 +166,25 @@ fn lifo_starvation_bound_holds() {
                     q.push_back(6000 + seq);
                 }
             }
+            let mut moved = 0u32;
+            while moved < 4 && !q.is_empty() {
+                let v = q.pop_front().unwrap();
+                moved += 1;
+                if v == 9999 {
+                    victim_done = true;
+                    break;
+                }
+            }
+            if victim_done {
+                break;
+            }
+            steps += 1;
             if steps > bound as u32 + 10 {
                 break;
             }
         }
         assert!(victim_done);
-        assert!(steps <= bound as u32 + 2);
+        assert!(steps <= bound as u32);
     }
 }
 

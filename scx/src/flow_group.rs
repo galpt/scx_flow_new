@@ -42,9 +42,9 @@ pub const DEMOTE_BURST_FLOOR_NS: u64 = 1_000_000;
 /* Window burn in nanos below 4ms for promote. */
 #[cfg(test)]
 pub const PROMOTE_BURN_NS: u64 = 4_000_000;
-/* Low windows needed for one promote near 2s. */
+/* Low windows needed for one promote at 64 near 2s. */
 #[cfg(test)]
-pub const PROMOTE_WINS: u8 = 3;
+pub const PROMOTE_WINS: u8 = 64;
 /* Extra deadline in nanos at 8ms for pinned hog. */
 #[cfg(test)]
 pub const PINNED_INFLATE_NS: u64 = 8_000_000;
@@ -1213,7 +1213,7 @@ pub fn slot_window_depths(
 /*
  * True when window burn stays below 4ms for
  * promote. Only low windows move the streak
- * forward toward 3 wins near 2s.
+ * forward toward 64 wins near 2s.
  */
 #[cfg(test)]
 pub fn burn_low(burn: u32) -> bool {
@@ -1334,7 +1334,7 @@ pub fn classify_step(st: &mut GroupState, now: u64, delta: u64) -> (bool, bool) 
  * or past 16ms clears wake hits. A low window below 4ms moves the streak
  * forward and keeps wake hits. A middle window at the end clears wake hits
  * with low runs and no move. A window in progress keeps wake hits. A hog needs
- * 3 low wins near 2s or 8 short hits to return to light. Allowance is
+ * 64 low wins near 2s or 8 short hits to return to light. Allowance is
  * recomputed per stop with no
  * new task field, so task stays at 48B. Returns true for demote and true for
  * promote when each move runs.

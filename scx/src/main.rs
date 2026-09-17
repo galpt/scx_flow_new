@@ -302,6 +302,7 @@ impl<'a> Scheduler<'a> {
             pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
             wover={} tboost={} \
             skicks={} tcas={} smoves={} sdefer={} stealx={} \
+            lheads={} lbound={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -333,6 +334,8 @@ impl<'a> Scheduler<'a> {
             m.slot_moves,
             m.slot_defer,
             m.steal_xmoves,
+            m.lifo_heads,
+            m.lifo_bound_hits,
             runtime,
             oncpu,
         );

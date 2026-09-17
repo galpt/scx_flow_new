@@ -2,7 +2,7 @@
 /*
  * Slot store unit tests
  *
- * Covers the per CPU FIFO slot helpers with probe, ids, steal, defer, and
+ * Covers the per CPU slot helpers with probe, ids, steal, defer, and
  * kick checks. Run with cargo test -p scx_flow flow_tests_slot.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

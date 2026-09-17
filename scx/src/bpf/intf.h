@@ -43,7 +43,7 @@ enum flow_consts {
 	FLOW_DEMOTE_BURST_MID_NS = (2ULL * 1000ULL * 1000ULL),
 	FLOW_DEMOTE_BURST_FLOOR_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_PROMOTE_BURN_NS = (4ULL * 1000ULL * 1000ULL),
-	FLOW_PROMOTE_WINS = 3ULL,
+	FLOW_PROMOTE_WINS = 64ULL,
 	FLOW_PROMOTE_WAKE_HITS = 8ULL,
 	FLOW_WAKE_SHORT_NS = (1ULL * 1000ULL * 1000ULL),
 	FLOW_HETERO_SPREAD_PCT = 10ULL,
@@ -136,20 +136,19 @@ struct flow_cpu_state {
 /* Counters at 272B with group, coalesce, overflow, token, slot. Total keeps */
 /* the sum for compat. Busy uses the bound gate with empty first plus */
 /* deserved or hog plus same plus mask plus rate, so busy kicks count */
-/* under kicks live since 4.2.41 and busy no kicks count under total */
-/* plus deserved plus group plus mask plus rate live since 4.2.41 with */
-/* armed retired frozen for compat and empty plus pinned total only with */
-/* no other reason write. Mask stays defensive, expect ~0 with outer */
-/* check. Coalesced counts q2 idle skips in 50us. */
-/* Overflow counts tail pins past the horizon, boosts counts token spends, */
-/* and cas fails counts lost token races. Armed stays frozen for compat, */
-/* so tail offsets shift once with no new writes. Slot moves counts all */
-/* FIFO tasks moved via slot drains, park moves counts the overflow subset, */
-/* steal moves counts all peer moves, steal x moves counts the cross */
+/* under kicks and busy no kicks count under total plus deserved plus */
+/* group plus mask plus rate with armed retired frozen for compat and empty */
+/* plus pinned total only with no other reason write. Mask stays defensive, */
+/* expect near zero with outer check. Coalesced counts q2 idle skips in */
+/* 50us. Overflow counts tail pins past the horizon, boosts counts token */
+/* spends, and cas fails counts lost token races. Armed stays frozen for */
+/* compat, so tail offsets shift once with no new writes. Slot moves counts */
+/* all slot tasks moved via slot drains, park moves counts the overflow */
+/* subset, steal moves counts all peer moves, steal x moves counts the cross */
 /* subset with post hoc LSB compare and unconditional adds, slot kicks */
-/* counts safety net kicks, slot defer counts capped drains with work */
-/* left, lifo heads counts head inserts at K 8, bound hits counts tail, */
-/* all append only at the tail with BSS zero. */
+/* counts safety net kicks, slot defer counts capped drains with work left, */
+/* LIFO heads counts head inserts at K 8, bound hits counts tail, all append */
+/* only at the tail with BSS zero. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -192,10 +191,11 @@ struct flow_sched_stats {
 /* declined plus null or self. A declined shorten keeps kick only with */
 /* total plus rate, null or self sends kick only with no count, and no */
 /* counter is added. */
-/* Bounded LIFO takes head for K 8 with one tail in period 9, so per queue */
-/* order stays fresh with no starve and no preempt use. Head needs the weak */
-/* enum with zero fallback to tail on old kernels, so old kernels keep FIFO */
-/* with no trap. Total 2050 matches slot max with per CPU plus overflow. */
+/* Bounded LIFO takes head for K 8 with one tail in period 9 plus forced tail */
+/* at MAX, so per queue order stays fresh with no starve or preempt use. */
+/* Head uses the build gate with zero fallback to tail, so builds without */
+/* HEAD keep tail with no trap and old kernels keep FIFO fallback with no */
+/* preempt use. Total 2050 matches slot max with per CPU plus overflow. */
 
 /* Clamp estimate to the estimate range. */
 static __always_inline u64 flow_clamp_est(u64 v)
@@ -221,7 +221,7 @@ static __always_inline u8 flow_group_of_cpu(u32 cpu,
 	return (u8)FLOW_GROUP_HOG;
 }
 /* True when a stopping task should restore the idle hint. Bang-bang edge at */
-/* M1 with no EMA and no state growth. M2 keeps the predicate but maps the */
+/* M1 with no EMA or state growth. M2 keeps the predicate but maps the */
 /* value through the EMA with from_ema, so long idle still decays to zero. */
 /* Needs blocked, per CPU queue empty, and local empty, so runnable never */
 /* restores with any queued work held high. */
@@ -266,7 +266,7 @@ static __always_inline u64 flow_ema_climb(u64 ema,
 /* half-lives then scales the residual below one half with a 2nd-order Taylor */
 /* of 0.5 to the r power at r is rem over half. Fixed point at FP_ONE 256 */
 /* holds ln2 times 256 at 177 + quad times 256 at 61, so t is rem times 256 */
-/* over half in 0 to 255 with dec1 + inc2 in u64 order with no float and no */
+/* over half in 0 to 255 with dec1 + inc2 in u64 order with no float or */
 /* loop. Zero sleep keeps identity. Zero half keeps identity with no divide. */
 /* At or past 64 periods returns zero, so long idle still maps to zero. */
 static __always_inline u64 flow_ema_decay(u64 ema,
@@ -579,7 +579,7 @@ static __always_inline bool flow_kick_recent(u64 now,
 	    (u64)FLOW_KICK_COALESCE_NS;
 }
 /* True when perf mode is on for S0 and S1. BSS flag holds zero for strict */
-/* and one for perf. Zero init keeps 4.2.21 paths bit identical. Probe force */
+/* and one for perf. Zero init keeps strict paths bit identical. Probe force */
 /* joins here, so one predicate covers grouping in select and enqueue with */
 /* strict default bit for bit. Perf arms widen placement with natural hints */
 /* only, so the probe measures the grouping split with no hint split. S0 */
@@ -641,9 +641,9 @@ static __always_inline u64 flow_wheel_probe(u64 dl,
 	*slot = s;
 	return qdl;
 }
-/* FIFO id of one group overflow with light as default. Holds overflow base */
-/* plus group, so two tails keep arrival order per group with no share. Bad */
-/* group falls to light with no trap. FIFO only, never vtime, so per DSQ one */
+/* Slot id of one group overflow with light as default. Holds overflow base */
+/* plus group, so two tails keep queue order per group with no share. Bad */
+/* group falls to light with no trap. Slot only, never vtime, so per DSQ one */
 /* flavor holds with mask wins on drain. */
 static __always_inline u64 flow_slot_overflow_dsq(u8 group)
 {
@@ -651,9 +651,9 @@ static __always_inline u64 flow_slot_overflow_dsq(u8 group)
 		return (u64)FLOW_SLOT_OVERFLOW_BASE + 1ULL;
 	return (u64)FLOW_SLOT_OVERFLOW_BASE;
 }
-/* FIFO id of one CPU group with light as default. Holds base plus CPU */
+/* Slot id of one CPU group with light as default. Holds base plus CPU */
 /* times 2 plus group, so two per CPU keep light and hog apart with no */
-/* share. Bad group falls to light with no trap. FIFO only, never vtime, */
+/* share. Bad group falls to light with no trap. Slot only, never vtime, */
 /* so per DSQ one flavor holds with mask wins on drain. */
 /* DSQ low bit is group, so base plus stride stay even. */
 /* Base even keeps light even, stride 2 keeps hog odd. */
@@ -668,11 +668,15 @@ static __always_inline u64 flow_slot_cpu_dsq(u32 cpu,
 	return (u64)FLOW_SLOT_BASE + (u64)cpu * 2ULL + g;
 }
 /* True when one insert takes head with bounded LIFO at K 8. */
-/* Takes head for 8 of 9 with one tail, so fresh work wins fast with no */
-/* starve and no preempt use. Pure with no state, so tests mirror the */
-/* period with no BSS use. */
+/* Takes head for 8 of 9 with one tail plus one forced tail at MAX, so */
+/* fresh work wins fast with no starve or preempt use. Forced tails */
+/* at period plus MAX keep max gap 9 with 8 heads everywhere with wrap, */
+/* so the bound stays exact with one compare and no new state. Pure with */
+/* no BSS use, so tests mirror the period with no drift. */
 static __always_inline bool flow_lifo_take_head(u32 seq)
 {
+	if (seq == 0xffffffffU)
+		return false;
 	return (seq % (u32)FLOW_LIFO_PERIOD) !=
 	    (u32)FLOW_LIFO_K;
 }

@@ -27,7 +27,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /*
- * Counters at 272B with bound gate live since 4.2.41.
+ * Counters at 272B with bound gate and live kick detail.
  * Kicks plus deserved plus group plus mask plus rate
  * stay live with armed retired frozen for compat.
  */
@@ -86,7 +86,7 @@ pub struct Metrics {
     #[stat(desc = "Hog to light moves by wake hits")]
     #[serde(default)]
     pub group_wake_promote: u64,
-    #[stat(desc = "Live since 4.2.41, busy preempt kicks")]
+    #[stat(desc = "Busy preempt kicks")]
     #[serde(default)]
     pub preempt_kicks: u64,
     #[stat(desc = "Total busy non-kicks without reason")]
@@ -98,16 +98,16 @@ pub struct Metrics {
     #[stat(desc = "Frozen for compat, always zero")]
     #[serde(default)]
     pub preempt_skipped_armed: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for undeserved")]
+    #[stat(desc = "Busy no-kicks for undeserved")]
     #[serde(default)]
     pub preempt_skipped_deserved: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for cross group")]
+    #[stat(desc = "Busy no-kicks for cross group")]
     #[serde(default)]
     pub preempt_skipped_group: u64,
-    #[stat(desc = "Live since 4.2.41, defensive mask, expect ~0")]
+    #[stat(desc = "Defensive mask with near zero")]
     #[serde(default)]
     pub preempt_skipped_mask: u64,
-    #[stat(desc = "Live since 4.2.41, busy no-kicks for rate held")]
+    #[stat(desc = "Busy no-kicks for rate held")]
     #[serde(default)]
     pub preempt_skipped_rate: u64,
     #[stat(desc = "Tail pins past the horizon")]
@@ -122,7 +122,7 @@ pub struct Metrics {
     #[stat(desc = "Lost token races")]
     #[serde(default)]
     pub token_cas_fails: u64,
-    #[stat(desc = "FIFO tasks moved via slots")]
+    #[stat(desc = "Slot tasks moved via slots")]
     #[serde(default)]
     pub slot_moves: u64,
     #[stat(desc = "Capped drains with work left")]
@@ -131,10 +131,10 @@ pub struct Metrics {
     #[stat(desc = "Moves from a cross group peer queue")]
     #[serde(default)]
     pub steal_xmoves: u64,
-    #[stat(desc = "Head inserts at K 8")]
+    #[stat(desc = "LIFO head inserts at K 8")]
     #[serde(default)]
     pub lifo_heads: u64,
-    #[stat(desc = "Tail inserts for bound")]
+    #[stat(desc = "LIFO tail inserts for bound")]
     #[serde(default)]
     pub lifo_bound_hits: u64,
 }

@@ -21,7 +21,7 @@ deadlines. Pinned tasks rest in the group overflow
 tail with no per CPU use, so every owner dispatch
 visits them in the window. A probe maps the deadline
 to a near slot near 64us or pins past the horizon to
-the tail, so arrival order holds inside each queue. The deadline adds
+the tail, so queue order holds inside each queue. The deadline adds
 clamped virtual time and a scaled estimate at live
 weight from nice. Exiting tasks run at once on the
 task CPU via LOCAL_ON with no order wait. The task
@@ -70,7 +70,7 @@ lowest id on ties. Perf widens each miss to any
 allowed, see governor mode. An idle core cannot
 stack, so locality is free. Every other case keeps
 current behavior. Pinned tasks stay local. Empty masks
-rest in the task group overflow tail in arrival order.
+rest in the task group overflow tail in queue order.
 Placement scans up to nr CPUs, bounded at nr<=1024,
 outside the queue-store O(1) claim. Frequency cards stay display only
 and never shape placement. Pinned subsets stay in
@@ -284,7 +284,8 @@ quiet and hog occupants show kicks past deserved.
   restart with no live transition.
 - Slice moved 20ms to 1ms with bounded LIFO at K 8 and stats 256B to 272B
   in 4.2.46, so upgrading from 4.2.42 needs a scheduler restart with no
-  live transition.
+  live transition. Release 4.2.46 forks the 4.2.42 line and does not
+  contain the 4.2.43 to 4.2.45 admission cap, histogram, or probe split.
 - Unknown frequency stays unknown with no effect on
   placement. Frequency cards are display only.
 - Single-thread and single-CPU hosts run the same path

@@ -1444,7 +1444,7 @@ fn facade_matches_weight_helpers() {
 /*
  * Tiered least fallback picks the first allowed in
  * the group with lowest id on ties. Earlier tiers still
- * win. The per CPU FIFO store keeps backlog per CPU,
+ * win. The per CPU slot store keeps backlog per CPU,
  * so per CPU depth spreads the pick with lowest id
  * on ties. Earlier tiers still win when they hit, so
  * the least step only covers the old first fallback.
@@ -1531,7 +1531,7 @@ fn tiered_least_fallback_picks_least() {
 
 /*
  * Pick in group least prefers the selected CPU when allowed and in group, else
- * the least queued in the group. The per CPU FIFO store keeps backlog
+ * the least queued in the group. The per CPU slot store keeps backlog
  * per CPU, so per CPU depth spreads the pick. No allowed CPU in
  * the group yields none for overflow use. Mirrors BPF enqueue pick with live
  * view and frozen bounds.

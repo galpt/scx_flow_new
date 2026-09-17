@@ -200,9 +200,9 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 }
 
 /*
- * Full select model. Mirrors the BPF order of any idle, previous, current, and
- * first. Returns none for overflow use when no CPU allows. Frequency, LLC, and CPU
- * cards stay display only and never feed this choice.
+ * Full select model. Mirrors the BPF order of any idle, previous, current,
+ * and first. Returns none for overflow use when no CPU allows. Frequency,
+ * LLC, and CPU cards stay display only and never feed this choice.
  */
 #[cfg(test)]
 pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
@@ -534,7 +534,7 @@ pub fn pick_in_group_least(
 
 /*
  * Least queued allowed CPU in any group for S0 perf.
- * The per CPU FIFO store keeps backlog per CPU, so depth
+ * The per CPU slot store keeps backlog per CPU, so depth
  * reads each candidate per CPU queue plus its group
  * overflow tail. Picks the smallest depth with lowest
  * id on ties by strict less only, so equal depths keep

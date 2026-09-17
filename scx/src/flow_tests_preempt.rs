@@ -505,7 +505,7 @@ fn skip_reason_matches_preempt_ok() {
 
 /*
  * Deep queues stay quiet past one queued with no
- * storm. Delay dots stay display only since 4.2.41,
+ * storm. Delay dots stay display only with no gate,
  * so armed never gates. Rate holds one kick per
  * slice in the bound gate order.
  */

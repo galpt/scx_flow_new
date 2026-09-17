@@ -16,7 +16,7 @@ deadline equal to period and execution uniform 2 to
 16ms with no scheduler use. Weight stays
 1024. The scheduler never kills. The harness
 counts a miss when wall completion passes release plus
-deadline. The slice in the scheduler is fixed at 20ms
+deadline. The slice in the scheduler is fixed at 1ms
 with no knob. The probe wakes each 10ms and
 records wake delay as a light baseline with no realtime
 use. The control flag marks baseline runs for A and B

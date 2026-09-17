@@ -130,7 +130,7 @@ static __always_inline u64 flow_slot_insert(
 			hflag = (u64)SCX_ENQ_HEAD;
 #endif
 		scx_bpf_dsq_insert(p, sdsq, slice, hflag);
-		if (head)
+		if (hflag != 0)
 			__sync_fetch_and_add(&flow_stats.lifo_heads,
 			    1);
 		else
@@ -157,9 +157,10 @@ static __always_inline u64 flow_slot_insert(
 		else
 			sdsq = flow_slot_cpu_dsq((u32)cpu, group);
 		/* Bounded LIFO claims one period slot with a single atomic add, */
-		/* so per queue order stays fresh with no starve and no scan. */
+		/* so per queue order stays fresh with no starve or scan. */
 		/* Head wins fast, tail keeps the bound with no preempt use. */
-		/* Zero fallback keeps tail on old kernels with no trap. */
+		/* Build gate keeps tail without HEAD with no trap, so old */
+		/* kernels keep FIFO fallback with no preempt use. */
 		if (to_over)
 			lidx = flow_lifo_idx(true, 0, group);
 		else
@@ -173,7 +174,7 @@ static __always_inline u64 flow_slot_insert(
 			hflag = (u64)SCX_ENQ_HEAD;
 #endif
 		scx_bpf_dsq_insert(p, sdsq, slice, hflag);
-		if (head)
+		if (hflag != 0)
 			__sync_fetch_and_add(&flow_stats.lifo_heads,
 			    1);
 		else
@@ -373,7 +374,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(
 			    &flow_stats.token_boosts, 1);
 		/* No live allowed CPU after fallback, so no kick is sent. The */
-		/* overflow tail holds the task in arrival order, so the next */
+		/* overflow tail holds the task in queue order, so the next */
 		/* steal or drain pass collects it when the mask allows. A */
 		/* target scan would need a loop with storm risk, so no kick */
 		/* is sent. */

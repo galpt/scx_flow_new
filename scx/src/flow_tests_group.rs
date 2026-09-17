@@ -66,13 +66,13 @@ fn window_consts_match_spec() {
     assert_eq!(DEMOTE_BURST_MID_NS, 2_000_000);
     assert_eq!(DEMOTE_BURST_FLOOR_NS, 1_000_000);
     assert_eq!(PROMOTE_BURN_NS, 4_000_000);
-    assert_eq!(PROMOTE_WINS, 3);
+    assert_eq!(PROMOTE_WINS, 64);
     assert_eq!(PROMOTE_WAKE_HITS, 8);
     assert_eq!(WAKE_SHORT_NS, 1_000_000);
     assert_eq!(HETERO_SPREAD_PCT, 10);
     assert_eq!(PINNED_INFLATE_NS, 8_000_000);
-    assert_eq!(WIN_NS, 64 * 500_000);
-    assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 96_000_000);
+    assert_eq!(WIN_NS, 32 * 1_000_000);
+    assert_eq!((PROMOTE_WINS as u64) * WIN_NS, 2_048_000_000);
     assert_eq!(DEMOTE_BURN_NS, 4 * PROMOTE_BURN_NS);
     assert_eq!(WIN_NS, crate::bpf_intf::flow_consts_FLOW_WIN_NS as u64);
     assert_eq!(
@@ -351,7 +351,7 @@ fn window_burn_demotes_at_16ms() {
 }
 
 #[test]
-fn hog_needs_3_low_wins_near_2s() {
+fn hog_needs_64_low_wins_near_2s() {
     let mut st = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
@@ -360,14 +360,14 @@ fn hog_needs_3_low_wins_near_2s() {
         wake_hits: 0,
     };
     let mut now = st.win_start;
-    for i in 0..2 {
+    for i in 0..63 {
         now += WIN_NS + 1;
         let (d, p) = classify_step(&mut st, now, 2_000_000);
         assert!(!d);
         assert!(!p, "promote early at {i}");
         assert_eq!(st.group, GROUP_HOG);
     }
-    assert_eq!(st.low_runs, 2);
+    assert_eq!(st.low_runs, 63);
     now += WIN_NS + 1;
     let (d, p) = classify_step(&mut st, now, 2_000_000);
     assert!(!d);
@@ -548,7 +548,7 @@ fn burn_gated_anti_game_breaks_wake_streak() {
 }
 
 #[test]
-fn slow_3_win_path_stays_intact_with_wake() {
+fn slow_64_win_path_stays_intact_with_wake() {
     let mut st = GroupState {
         group: GROUP_HOG,
         win_start: 100_000_000,
@@ -557,7 +557,7 @@ fn slow_3_win_path_stays_intact_with_wake() {
         wake_hits: 0,
     };
     let mut now = st.win_start;
-    for _ in 0..3 {
+    for _ in 0..64 {
         now += WIN_NS + 1;
         let _ = classify_step(&mut st, now, 2_000_000);
     }
@@ -1037,7 +1037,7 @@ fn singleton_bypass_keeps_prior_exact() {
 
 /*
  * Topology seed with singletons matches prior seed. Table and ready stay
- * identical, so SMT off keeps state equivalence with no crash and no stall.
+ * identical, so SMT off keeps state equivalence with no crash or stall.
  */
 #[test]
 fn seed_topology_singleton_matches_prior() {
@@ -1149,7 +1149,7 @@ fn sibling_table_maps_next_with_empty_for_singleton() {
 
 /*
  * SMT off with 8 CPUs keeps halves. All singleton cores give the same table and
- * ready as prior, and the same live view with no division and no trap.
+ * ready as prior, and the same live view with no division or trap.
  */
 #[test]
 fn smt_off_8c_keeps_halves_with_no_trap() {
@@ -1538,7 +1538,7 @@ fn sibling_online_pairs_ring_by_id() {
 
 /*
  * Least in group picks the first allowed with
- * lowest id on ties. The per CPU FIFO store keeps
+ * lowest id on ties. The per CPU slot store keeps
  * backlog per CPU, so per CPU depth spreads the
  * pick with lowest id on ties. Halves view only
  * with no live table use. Bound is 0 to nr with no
@@ -1859,7 +1859,7 @@ fn cpuperf_elapsed_is_wrap_safe() {
  * stay stable. Active feeds the energy probe with
  * full u64 wrap deltas in userspace. Occupant holds the
  * running group with LIGHT fallback and post-empty read.
- * Stats grow to 272B with lifo tails, so tail offsets
+ * Stats grow to 272B with LIFO tails, so tail offsets
  * shift once with no new writes.
  */
 #[test]
