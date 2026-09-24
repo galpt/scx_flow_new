@@ -48,13 +48,11 @@ pub fn frontier_idle_guarded(old: u64, waking_v: u64) -> u64 {
 }
 
 /// Frontier step for a stop.
-/// A runnable stop or queued work keeps the max. An idle block resets to
-/// the waking virtual time with no zero use.
+/// BPF keeps one max with no queue read. Placement and dispatch never read
+/// the frontier, so the queued and runnable flags stay for the model only.
+/// The step mirrors the BPF max with summed depth passed as queued.
 #[cfg(test)]
 pub fn frontier_step(old: u64, new_v: u64, runnable: bool, queued: u64) -> u64 {
-    if !runnable && queued == 0 {
-        frontier_idle_guarded(old, new_v)
-    } else {
-        frontier_max(old, new_v)
-    }
+    let _ = (runnable, queued);
+    frontier_max(old, new_v)
 }

@@ -55,28 +55,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_clear_running(cpu);
 	flow_on_cpu_dec();
-	/* Idle CPUs reset the frontier to the waking time with no zero. */
-	/* Queued work keeps the max so time never moves backward. */
+	/* Frontier keeps the max virtual time with no queue read. */
+	/* Placement and dispatch never read it, so one max keeps the view. */
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		if (st) {
-			u64 nv = tctx->vruntime;
-			u64 dsq_nr =
-			    scx_bpf_dsq_nr_queued(
-			    flow_slot_cpu_dsq((u32)cpu));
-			dsq_nr += scx_bpf_dsq_nr_queued(
-			    flow_slot_overflow_dsq());
-			if (!runnable && dsq_nr == 0 &&
-			    scx_bpf_dsq_nr_queued(
-			    (u64)SCX_DSQ_LOCAL_ON |
-			    (u64)cpu) == 0) {
-				if (nv != 0)
-					st->frontier =
-					    flow_frontier_idle(nv);
-			} else {
-				st->frontier = flow_frontier_max(
-				    st->frontier, nv);
-			}
+			st->frontier = flow_frontier_max(
+			    st->frontier, tctx->vruntime);
 		}
 	}
 	if (runnable) {

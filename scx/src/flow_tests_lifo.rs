@@ -7,17 +7,21 @@
 
 use crate::flow_slot::*;
 
-/// Period holds 8 heads with one tail at K 8 plus one forced tail at MAX.
+/// Period holds 3 heads with six tails at K 3 plus one forced tail at MAX.
 #[test]
-fn lifo_period_holds_k_8_with_wrap() {
+fn lifo_period_holds_k_3_with_wrap() {
     for seq in 0..27u32 {
-        let want = seq % 9 != 8;
+        let want = seq % 9 < 3;
         assert_eq!(lifo_take_head(seq), want);
     }
+    assert!(!lifo_take_head(3));
+    assert!(!lifo_take_head(4));
     assert!(!lifo_take_head(8));
+    assert!(!lifo_take_head(12));
     assert!(!lifo_take_head(17));
-    assert!(!lifo_take_head(26));
     assert!(lifo_take_head(0));
+    assert!(lifo_take_head(1));
+    assert!(lifo_take_head(2));
     assert!(lifo_take_head(9));
     let max = u32::MAX;
     assert!(!lifo_take_head(max));
@@ -27,12 +31,12 @@ fn lifo_period_holds_k_8_with_wrap() {
     assert!(lifo_take_head(wrapped));
     for off in 0..18u32 {
         let seq = max.wrapping_add(off);
-        let want = seq != u32::MAX && seq % 9 != 8;
+        let want = seq != u32::MAX && seq % 9 < 3;
         assert_eq!(lifo_take_head(seq), want);
     }
 }
 
-/// Bound holds one tail per 9 with no more than 8 heads in a row.
+/// Bound holds six tails per 9 with no more than 3 heads in a row.
 #[test]
 fn lifo_bound_breach_holds_once_per_period() {
     for base in [0u32, 1, 9, 100, 1000, u32::MAX - 20] {
@@ -46,8 +50,11 @@ fn lifo_bound_breach_holds_once_per_period() {
                 tails += 1;
             }
         }
-        assert_eq!(heads, 8);
-        assert_eq!(tails, 1);
+        // Windows clear of MAX hold 3 heads with 6 tails. Windows with
+        // MAX hold one extra forced tail, so allow 2 to 3 heads here.
+        // The chosen bases all clear MAX, so expect the exact split.
+        assert_eq!(heads, 3);
+        assert_eq!(tails, 6);
     }
     for base in [0u32, 7, 8, 9] {
         let mut run = 0u32;
@@ -63,7 +70,7 @@ fn lifo_bound_breach_holds_once_per_period() {
                 run = 0;
             }
         }
-        assert!(worst <= 8);
+        assert!(worst <= 3);
     }
 }
 
@@ -87,7 +94,7 @@ fn lifo_idx_maps_per_cpu_plus_overflow() {
 /// Mirrors hold K, period, 1025, slice 1M, stats 112, and config 1000us.
 #[test]
 fn lifo_mirrors_hold() {
-    assert_eq!(LIFO_K, 8);
+    assert_eq!(LIFO_K, 3);
     assert_eq!(LIFO_PERIOD, 9);
     assert_eq!(LIFO_K, crate::bpf_intf::flow_consts_FLOW_LIFO_K as u64);
     assert_eq!(

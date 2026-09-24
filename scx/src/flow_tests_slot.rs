@@ -49,16 +49,17 @@ fn insert_dsq_rests_pinned_in_overflow() {
     assert_eq!(insert_dsq(0, false, 8), slot_cpu_dsq(0));
 }
 
-/// Trip cap holds at D with own reserve at budget minus one.
+/// Trip cap holds at D with own cap at 12 under budget 32.
 #[test]
 fn slot_cap_holds_at_d() {
     assert_eq!(slot_cap(32), SLOT_D);
     assert_eq!(slot_cap(2), 2);
     assert_eq!(slot_cap(0), 0);
     assert_eq!(slot_own_cap(32), SLOT_OWN_CAP);
-    assert_eq!(slot_own_cap(32), 31);
+    assert_eq!(slot_own_cap(32), 12);
     assert_eq!(slot_own_cap(0), 0);
-    assert_eq!(slot_own_cap(1), 0);
+    assert_eq!(slot_own_cap(1), 1);
+    assert_eq!(slot_own_cap(100), 12);
 }
 
 fn live_task(cpu: usize, nr: usize) -> PendingTask {
@@ -122,6 +123,21 @@ fn slot_drain_keeps_mask_wins() {
     let moved = slot_drain_model(&mut q, 0, SLOT_BUDGET, 0);
     assert_eq!(moved, 1);
     assert_eq!(q.len(), 1);
+}
+
+/// Drain stops after 4 misses with no full scan.
+#[test]
+fn slot_drain_stops_at_miss_cap() {
+    let mut q: VecDeque<PendingTask> = (0..5)
+        .map(|_| PendingTask {
+            live: false,
+            ..live_task(0, 2)
+        })
+        .chain(std::iter::once(live_task(0, 2)))
+        .collect();
+    let moved = slot_drain_model(&mut q, 0, SLOT_BUDGET, 0);
+    assert_eq!(moved, 0);
+    assert_eq!(q.len(), 6);
 }
 
 /// Steal need holds 1 when idle empty else 2.

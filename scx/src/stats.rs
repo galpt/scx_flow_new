@@ -62,7 +62,7 @@ pub struct Metrics {
     #[stat(desc = "Slot tasks moved via slots")]
     #[serde(default)]
     pub slot_moves: u64,
-    #[stat(desc = "LIFO head inserts at K 8")]
+    #[stat(desc = "LIFO head inserts at K 3")]
     #[serde(default)]
     pub lifo_heads: u64,
     #[stat(desc = "LIFO tail inserts for bound")]

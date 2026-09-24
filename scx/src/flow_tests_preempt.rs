@@ -3,21 +3,22 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Covers the 1ms busy rate window and the steal cursor step.
+//! Covers the 2ms busy rate window and the steal cursor step.
 
 use crate::flow_preempt::*;
 use crate::flow_select::*;
 
 /// Zero last always wins with wrap, later kicks need one full window.
 #[test]
-fn rate_window_holds_1ms() {
-    assert!(rate_ok(1_000_000, 0));
+fn rate_window_holds_2ms() {
+    assert!(rate_ok(2_000_000, 0));
     assert!(rate_ok(0, 0));
-    assert!(rate_ok(1_000_000, 1_000_000 - 1_000_000));
-    assert!(!rate_ok(1_500_000, 1_000_000));
-    assert!(rate_ok(2_000_000, 1_000_000));
-    assert!(rate_ok(2_000_001, 1_000_000));
-    assert_eq!(RATE_WINDOW_NS, 1_000_000);
+    assert!(rate_ok(2_000_000, 2_000_000 - 2_000_000));
+    assert!(!rate_ok(2_500_000, 1_000_000));
+    assert!(!rate_ok(3_000_000, 1_000_001));
+    assert!(rate_ok(3_000_000, 1_000_000));
+    assert!(rate_ok(3_000_001, 1_000_000));
+    assert_eq!(RATE_WINDOW_NS, 2_000_000);
 }
 
 /// Steal start steps one with wrap and rests on small hosts.
@@ -60,6 +61,8 @@ fn select_model_holds_order() {
     let busy = vec![false, false, false, false];
     assert_eq!(select_cpu_model(3, 1, &allowed, &busy), Some(3));
     assert_eq!(select_cpu_model(9, 9, &allowed, &busy), Some(0));
+    // No idle with invalid prev falls to first, not to cur.
+    assert_eq!(select_cpu_model(9, 2, &allowed, &busy), Some(0));
     let none = vec![false, false, false, false];
     assert_eq!(select_cpu_model(0, 1, &none, &busy), None);
 }

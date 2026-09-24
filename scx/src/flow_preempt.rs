@@ -5,9 +5,9 @@
 
 //! Holds the busy kick rate helpers shared by tests and docs.
 
-/// Busy kick window in nanos at 1ms.
+/// Busy kick window in nanos at 2ms.
 #[cfg(test)]
-pub const RATE_WINDOW_NS: u64 = 1_000_000;
+pub const RATE_WINDOW_NS: u64 = 2_000_000;
 
 /// True when one busy kick may run.
 /// Zero last always wins with wrap, so the first kick never waits.

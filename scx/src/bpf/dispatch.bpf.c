@@ -5,9 +5,9 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Shared drain with DSQ and budget only. */
-/* Moves mask allowed tasks to local with a miss cap at 8. */
+/* Moves mask allowed tasks to local with a miss cap at 4. */
 /* One bad head never blocks later work with no full scan. */
-static __always_inline u32 flow_drain_one(s32 cpu,
+static __noinline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base)
 {
 	struct task_struct *p;
@@ -17,7 +17,7 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		if (moved + base >= budget)
 			break;
-		if (miss >= 8U)
+		if (miss >= 4U)
 			break;
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
@@ -56,7 +56,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	own = flow_slot_cpu_dsq((u32)cpu);
 	over = flow_slot_overflow_dsq();
 	own_cap = flow_slot_own_cap(budget);
-	/* Own queue first with one slot left for overflow and steal. */
+	/* Own queue first with room left for overflow and steal. */
 	if (scx_bpf_dsq_nr_queued(own) != 0) {
 		lim = moved + own_cap;
 		if (lim > budget)
@@ -65,6 +65,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		moved += got;
 	}
 	/* Overflow next with a cap at 4 and mask wins. */
+	/* Shares the miss cap at 4 with no head stall. */
 	if (moved < budget && scx_bpf_dsq_nr_queued(over) != 0) {
 		lim = moved + flow_slot_cap(budget);
 		if (lim > budget)

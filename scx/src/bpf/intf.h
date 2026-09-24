@@ -38,7 +38,7 @@ enum flow_consts {
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
 	FLOW_OPS_TIMEOUT_MS = 30000ULL,
 	FLOW_WEIGHT = 1024ULL,
-	FLOW_LIFO_K = 8ULL,
+	FLOW_LIFO_K = 3ULL,
 	FLOW_LIFO_PERIOD = 9ULL,
 };
 /* Per task state at 16B with start time and virtual time. */
@@ -109,14 +109,15 @@ static __always_inline u64 flow_slot_cpu_dsq(u32 cpu)
 {
 	return (u64)FLOW_SLOT_BASE + (u64)cpu;
 }
-/* True when one insert takes head with bounded LIFO at K 8. */
-/* Takes head for 8 of 9 with one tail plus one forced tail at max. */
-/* Fresh work wins fast while the tail keeps the starve bound at 9. */
+/* True when one insert takes head with bounded LIFO at K 3. */
+/* Takes head for 3 of 9 with six tails per period plus forced tail at max. */
+/* At most 3 consecutive heads per queue with overflow and steal keeping one slot per pass. */
+/* This is a consecutive insert bound with no wait time bound. */
 static __always_inline bool flow_lifo_take_head(u32 seq)
 {
 	if (seq == 0xffffffffU)
 		return false;
-	return (seq % (u32)FLOW_LIFO_PERIOD) !=
+	return (seq % (u32)FLOW_LIFO_PERIOD) <
 	    (u32)FLOW_LIFO_K;
 }
 /* Index of one LIFO sequence with per CPU plus overflow at 1025. */
@@ -144,12 +145,12 @@ static __always_inline u32 flow_slot_cap(u32 budget)
 		return (u32)FLOW_SLOT_D;
 	return budget;
 }
-/* Own cap of one dispatch at budget minus one. */
-/* Holds 31 with budget 32 so overflow and steal keep one slot. */
+/* Own cap of one dispatch at 12 under budget 32. */
+/* Holds 12 with budget 32 so overflow and steal keep room. */
 static __always_inline u32 flow_slot_own_cap(u32 budget)
 {
-	if (budget == 0)
-		return 0;
-	return budget - 1U;
+	if (budget > 12U)
+		return 12U;
+	return budget;
 }
 #endif

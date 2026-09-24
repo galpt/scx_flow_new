@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! One queue per CPU plus one overflow tail with bounded LIFO at K 8.
+//! One queue per CPU plus one overflow tail with bounded LIFO at K 3.
 
 /// Tasks moved by one slot trip at most. Fixed at 4 with no knob.
 pub const SLOT_D: u32 = 4;
@@ -18,13 +18,13 @@ pub const SLOT_OVERFLOW: u64 = 0x6800;
 /// Max DSQs at 1024 CPUs. Holds 1024 per CPU plus one overflow.
 #[cfg(test)]
 pub const SLOT_MAX_DSQS: u64 = 1025;
-/// Own queue cap at budget minus one. Fixed at 31 with no knob.
+/// Own queue cap at 12 under budget 32. Fixed at 12 with no knob.
 #[cfg(test)]
-pub const SLOT_OWN_CAP: u32 = 31;
-/// Head inserts in one LIFO period at 8 with one tail.
+pub const SLOT_OWN_CAP: u32 = 12;
+/// Head inserts in one LIFO period at 3 with six tails.
 #[cfg(test)]
-pub const LIFO_K: u64 = 8;
-/// Inserts in one LIFO period at 9 with 8 heads.
+pub const LIFO_K: u64 = 3;
+/// Inserts in one LIFO period at 9 with 3 heads.
 #[cfg(test)]
 pub const LIFO_PERIOD: u64 = 9;
 /// LIFO sequences at 1025 with per CPU plus overflow.
@@ -86,17 +86,18 @@ pub fn slot_cap(budget: u32) -> u32 {
     budget.min(SLOT_D)
 }
 
-/// Own queue cap at budget minus one.
-/// Holds 31 with budget 32, so overflow and steal keep one slot.
+/// Own queue cap at 12 under budget 32.
+/// Holds 12 with budget 32, so overflow and steal keep room.
 #[cfg(test)]
 pub fn slot_own_cap(budget: u32) -> u32 {
-    budget.saturating_sub(1)
+    budget.min(12)
 }
 
 /// Drain up to a cap from one slot queue for one CPU.
-/// The scan visits every queued task in queue order and moves each live
-/// task with the CPU in the mask. Dead, foreign, and failed tasks are
-/// skipped with progress, so one bad head never blocks later work.
+/// The scan visits queued tasks in queue order and moves each live
+/// task with the CPU in the mask. Dead, foreign, and failed tasks count
+/// one miss each with a miss cap at 4, so one bad head never blocks later
+/// work. The walk stops at cap plus base with no full scan.
 /// Returns the count moved.
 #[cfg(test)]
 pub fn slot_drain_model(
@@ -106,15 +107,21 @@ pub fn slot_drain_model(
     base: u32,
 ) -> u32 {
     let mut moved = 0;
+    let mut miss = 0u32;
     let mut kept = std::collections::VecDeque::new();
-    for task in queue.drain(..) {
-        let ok = moved + base < cap
-            && task.live
-            && !task.fail
-            && crate::flow_select::may_run_on(cpu, &task.allowed);
+    let mut rest = std::collections::VecDeque::new();
+    std::mem::swap(queue, &mut rest);
+    for task in rest.drain(..) {
+        if moved + base >= cap || miss >= 4 {
+            kept.push_back(task);
+            continue;
+        }
+        let ok = task.live && !task.fail && crate::flow_select::may_run_on(cpu, &task.allowed);
         if ok {
             moved += 1;
+            miss = 0;
         } else {
+            miss += 1;
             kept.push_back(task);
         }
     }
@@ -165,15 +172,16 @@ pub fn steal_first_donor(start: u32, nr: usize, need: u64, depths: &[u64]) -> Op
     None
 }
 
-/// True when one insert takes head with bounded LIFO at K 8.
-/// Takes head for 8 of 9 with one tail plus one forced tail at MAX.
-/// Fresh work wins fast while the tail keeps the starve bound at 9.
+/// True when one insert takes head with bounded LIFO at K 3.
+/// Takes head for 3 of 9 with six tails plus one forced tail at MAX.
+/// At most 3 consecutive heads per queue with overflow and steal keeping one slot per pass.
+/// This is a consecutive insert bound with no wait time bound.
 #[cfg(test)]
 pub fn lifo_take_head(seq: u32) -> bool {
     if seq == u32::MAX {
         return false;
     }
-    (seq as u64 % LIFO_PERIOD) != LIFO_K
+    (seq as u64 % LIFO_PERIOD) < LIFO_K
 }
 
 /// Index of one LIFO sequence with per CPU plus overflow at 1025.

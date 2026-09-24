@@ -14,7 +14,7 @@ static __always_inline bool flow_task_pinned(
 		return true;
 	return false;
 }
-/* Insert one task with bounded LIFO at K 8 into one queue. */
+/* Insert one task with bounded LIFO at K 3 into one queue. */
 /* Pinned tasks rest in the overflow tail with no per CPU use. */
 /* Migratable tasks keep the per CPU queue with no fallback scan. */
 static __always_inline u64 flow_slot_insert(
@@ -109,7 +109,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 	flow_slot_insert(p, cpu, slice, pinned);
 	/* Idle targets kick at once with no rate window. */
-	/* Busy targets kick at most once per 1ms with soft preempt. */
+	/* Busy targets kick at most once per 2ms with soft preempt. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u64 now;
@@ -129,7 +129,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		now = flow_now();
 		last = flow_rate_at[(u32)cpu & 1023U];
-		if (last != 0 && now - last < 1000000ULL) {
+		if (last != 0 && now - last < 2000000ULL) {
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
 			return;

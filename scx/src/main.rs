@@ -399,7 +399,7 @@ mod tests {
             crate::flow_slot::LIFO_PERIOD,
             crate::bpf_intf::flow_consts_FLOW_LIFO_PERIOD as u64
         );
-        assert_eq!(crate::flow_slot::LIFO_K, 8);
+        assert_eq!(crate::flow_slot::LIFO_K, 3);
         assert_eq!(crate::flow_slot::LIFO_PERIOD, 9);
         assert_eq!(crate::flow_slot::LIFO_NSEQ, 1025);
     }

@@ -72,6 +72,7 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
 /// Full select model for tests.
 /// Mirrors the BPF order of waker idle, any idle, previous, then first.
 /// Returns none for overflow use when no CPU allows.
+/// Approximate when the caller passes summed depth as queued.
 #[cfg(test)]
 pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
     if may_run_on(cur, allowed) && idle.get(cur as usize).copied().unwrap_or(false) {
@@ -82,9 +83,6 @@ pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) ->
     }
     if may_run_on(prev, allowed) {
         return Some(prev as u32);
-    }
-    if may_run_on(cur, allowed) {
-        return Some(cur as u32);
     }
     for (cpu, &ok) in allowed.iter().enumerate() {
         if ok {
