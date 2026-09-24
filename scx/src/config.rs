@@ -1,46 +1,41 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Validated scheduling constants
- *
- * Holds the validated scheduling constants with defaults that match the
- * shared BPF header. Validation keeps bad values from reaching the BPF
- * object. The slice is fixed at 1ms with no knob.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Validated scheduling constants for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+//! Holds the validated constants with defaults that match intf.h.
+
 use crate::flow::DISPATCH_BATCH;
-use crate::flow::EST_MAX_NS;
-use crate::flow::EST_MIN_NS;
 use crate::flow::SLICE_NS;
 use crate::flow::SLOT_BUDGET;
 use crate::flow::SLOT_D;
 use anyhow::Result;
 use anyhow::bail;
 
-/* Default fixed slice in nanos. */
+/// Default fixed slice in nanos.
 const DEF_SLICE_NS: u64 = SLICE_NS;
-/* Default tasks moved in one dispatch pass. */
+/// Default tasks moved in one dispatch pass.
 const DEF_BATCH: u32 = DISPATCH_BATCH;
-/* Default tasks moved by one slot trip. */
+/// Default tasks moved by one slot trip.
 const DEF_SLOT_D: u32 = SLOT_D;
-/* Default tasks moved by one slot dispatch pass. */
+/// Default tasks moved by one slot dispatch pass.
 const DEF_SLOT_BUDGET: u32 = SLOT_BUDGET;
 
-/* Validated scheduling constants. */
+/// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /* Fixed slice in nanos. */
+    /// Fixed slice in nanos.
     pub slice_ns: u64,
-    /* Fixed tasks moved in one dispatch pass. */
+    /// Fixed tasks moved in one dispatch pass.
     pub dispatch_batch: u32,
-    /* Fixed tasks moved by one slot trip. */
+    /// Fixed tasks moved by one slot trip.
     pub slot_d: u32,
-    /* Fixed tasks moved by one slot dispatch pass. */
+    /// Fixed tasks moved by one slot dispatch pass.
     pub slot_budget: u32,
 }
 
 impl Default for Config {
-    /* Compile time defaults from the shared header. */
+    /// Compile time defaults from the shared header.
     fn default() -> Self {
         Self {
             slice_ns: DEF_SLICE_NS,
@@ -52,28 +47,17 @@ impl Default for Config {
 }
 
 impl Config {
-    /*
-     * Validate the constants against the bounds the BPF
-     * side relies on. An invalid value is a programming
-     * fault, not a runtime state. The slice stays fixed
-     * at 1ms and the batch stays fixed at 32, so one
-     * slice pairs with one budget with no knob. The slot
-     * trip stays fixed at 4 and the slot budget stays
-     * fixed at 32, so one dispatch owns four trips with
-     * no knob.
-     */
+    /// Validate the constants against the bounds the BPF side relies on.
+    /// An invalid value is a programming fault, not a runtime state.
+    /// The slice stays fixed at 1ms and the batch stays fixed at 32.
+    /// The slot trip stays fixed at 4 and the slot budget stays fixed
+    /// at 32.
     pub fn validate(&self) -> Result<()> {
         if self.slice_ns != SLICE_NS {
             bail!("slice bad {}", self.slice_ns);
         }
         if self.slice_ns != 1_000_000 {
             bail!("slice bad {}", self.slice_ns);
-        }
-        if EST_MIN_NS != 1 {
-            bail!("est floor bad {}", EST_MIN_NS);
-        }
-        if EST_MAX_NS != 1_000_000_000 {
-            bail!("est ceiling bad {}", EST_MAX_NS);
         }
         if self.dispatch_batch != DISPATCH_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
@@ -96,10 +80,8 @@ impl Config {
         Ok(())
     }
 
-    /*
-     * One line summary of the constants for the start
-     * log. Values print in microseconds for brevity.
-     */
+    /// One line summary of the constants for the start log.
+    /// Values print in microseconds for brevity.
     pub fn describe(&self) -> String {
         format!(
             "slice={}us batch={}",
@@ -109,11 +91,8 @@ impl Config {
     }
 }
 
-/*
- * Builder for Config used only by tests. Production
- * uses Config default directly. Each setter is optional
- * and missing fields fall back to the defaults.
- */
+/// Builder for Config used only by tests.
+/// Production uses Config default directly.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBuilder {
@@ -125,27 +104,27 @@ pub struct ConfigBuilder {
 
 #[cfg(test)]
 impl ConfigBuilder {
-    /* Set the fixed slice. */
+    /// Set the fixed slice.
     pub fn slice_ns(mut self, v: u64) -> Self {
         self.slice_ns = Some(v);
         self
     }
-    /* Set the fixed dispatch batch. Only 32 passes. */
+    /// Set the fixed dispatch batch. Only 32 passes.
     pub fn dispatch_batch(mut self, v: u32) -> Self {
         self.dispatch_batch = Some(v);
         self
     }
-    /* Set the fixed slot trip. Only 4 passes. */
+    /// Set the fixed slot trip. Only 4 passes.
     pub fn slot_d(mut self, v: u32) -> Self {
         self.slot_d = Some(v);
         self
     }
-    /* Set the fixed slot budget. Only 32 passes. */
+    /// Set the fixed slot budget. Only 32 passes.
     pub fn slot_budget(mut self, v: u32) -> Self {
         self.slot_budget = Some(v);
         self
     }
-    /* Assemble and validate the result. */
+    /// Assemble and validate the result.
     pub fn build(self) -> Result<Config> {
         let d = Config::default();
         let slice = self.slice_ns.unwrap_or(d.slice_ns);
@@ -237,10 +216,7 @@ mod tests {
     }
 
     #[test]
-    /*
-     * Summary holds the fixed slice at 1000us with no knob.
-     * Slice plus batch stay stable for the start log.
-     */
+    /// Summary holds the fixed slice at 1000us with no knob.
     fn describe_is_stable() {
         let s = Config::default().describe();
         assert!(s.contains("slice=1000us"));
@@ -248,20 +224,17 @@ mod tests {
     }
 
     #[test]
-    /*
-     * Defaults match the shared header with the fixed slice at 1ms.
-     * Kick coalesce stays at 50us with no slice use, see flow_select.
-     */
+    /// Defaults match the shared header with one queue per CPU.
     fn defaults_match_intf_h() {
         assert_eq!(
             Config::default().slice_ns,
             crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
         );
         assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_SLOT_MAX_DSQS as u64, 1025);
         assert_eq!(
-            crate::flow_select::KICK_COALESCE_NS,
-            crate::bpf_intf::flow_consts_FLOW_KICK_COALESCE_NS as u64
+            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW as u64,
+            0x6800
         );
-        assert_eq!(crate::flow_select::KICK_COALESCE_NS, 50_000);
     }
 }
