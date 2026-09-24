@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Loopback dashboard
- *
- * Serves the embedded page and the live snapshot as JSON. Prefers the loopback
- * TCP port and falls back to a unix socket when the sandbox blocks TCP. No
- * auth is used and the loopback address is the trust boundary.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Loopback dashboard for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+//! Serves the embedded page and the live snapshot as JSON on loopback.
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
@@ -57,19 +53,14 @@ fn jt(v: &Value) -> String {
 }
 
 /* Merged dashboard object for one snapshot. */
-/* Full log with version, timestamp, topology, depths, and allowance. */
-/* It also carries mode, governor, energy, stats, and per-CPU. Same */
-/* object serves stats polling and snapshot download on loopback with */
-/* no new exposure. */
+/* Full log with version, timestamp, topology, governor, energy, stats, */
+/* and per-CPU. Same object serves stats polling and snapshot download */
+/* on loopback with no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
         "timestamp_ns": snap.timestamp_ns,
         "topology": snap.topology.clone(),
-        "light_depth": snap.light_depth,
-        "hog_depth": snap.hog_depth,
-        "burst_allowance_ns": snap.burst_allowance_ns,
-        "perf_mode": snap.perf_mode,
         "governor": snap.governor.clone(),
         "energy": jv(&snap.energy),
         "stats": jv(&snap.stats),
@@ -259,13 +250,9 @@ mod tests {
         assert!(v.get("version").is_some());
         assert!(v.get("timestamp_ns").is_some());
         assert!(v.get("topology").is_some());
-        assert!(v.get("light_depth").is_some());
-        assert!(v.get("hog_depth").is_some());
-        assert!(v.get("burst_allowance_ns").is_some());
-        assert!(v.get("perf_mode").is_some());
         assert!(v.get("governor").is_some());
         assert!(v.get("energy").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(11));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(7));
         assert_eq!(
             v.get("energy")
                 .and_then(|e| e.get("state"))
@@ -300,7 +287,7 @@ mod tests {
         ] {
             let snap = energy_fixture(state, watts);
             let v = merged(&snap);
-            assert_eq!(v.as_object().map(|o| o.len()), Some(11));
+            assert_eq!(v.as_object().map(|o| o.len()), Some(7));
             let e = v.get("energy").expect("energy key");
             assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
             assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
@@ -375,7 +362,7 @@ mod tests {
         ] {
             let snap = energy_fixture(state, watts);
             let v = merged(&snap);
-            assert_eq!(v.as_object().map(|o| o.len()), Some(11));
+            assert_eq!(v.as_object().map(|o| o.len()), Some(7));
             let e = v.get("energy").expect("energy key");
             assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
             assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
@@ -397,48 +384,21 @@ mod tests {
             \"kicks\":0,\"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.stats.edf_enqueued, 0);
-        assert_eq!(m.stats.edf_clamped, 0);
-        assert_eq!(m.stats.edf_ordered, 0);
-        assert_eq!(m.stats.group_demote, 0);
-        assert_eq!(m.stats.group_promote, 0);
-        assert_eq!(m.stats.group_wake_promote, 0);
-        assert_eq!(m.stats.pinned_hog_inflated, 0);
-        assert_eq!(m.stats.group_steal_skipped, 0);
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
-        assert_eq!(m.stats.preempt_skipped_armed, 0);
-        assert_eq!(m.stats.preempt_skipped_deserved, 0);
-        assert_eq!(m.stats.preempt_skipped_group, 0);
-        assert_eq!(m.stats.preempt_skipped_mask, 0);
-        assert_eq!(m.stats.preempt_skipped_rate, 0);
-        assert_eq!(m.stats.kick_coalesced, 0);
-        assert_eq!(m.stats.wheel_overflow, 0);
-        assert_eq!(m.stats.token_boosts, 0);
-        assert_eq!(m.stats.slot_kicks, 0);
-        assert_eq!(m.stats.token_cas_fails, 0);
         assert_eq!(m.stats.slot_moves, 0);
-        assert_eq!(m.stats.slot_defer, 0);
-        assert_eq!(m.stats.steal_xmoves, 0);
+        assert_eq!(m.stats.lifo_heads, 0);
+        assert_eq!(m.stats.lifo_bound_hits, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
-        assert_eq!(m.light_depth, 0);
-        assert_eq!(m.hog_depth, 0);
-        assert_eq!(m.burst_allowance_ns, 0);
-        assert_eq!(m.perf_mode, 0);
         assert_eq!(m.governor, "");
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
         assert_eq!(m2.per_cpu[0].slice_ns, 0);
-        assert_eq!(m2.per_cpu[0].group, 0);
-        assert_eq!(m2.per_cpu[0].running_nice, 0);
-        assert_eq!(m2.per_cpu[0].running_weight, 0);
-        assert_eq!(m2.per_cpu[0].delay_win, 0);
-        assert!(!m2.per_cpu[0].delay_armed);
-        assert_eq!(m2.per_cpu[0].active_ns, 0);
+        assert_eq!(m2.per_cpu[0].running_pid, 0);
         let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
         let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
         assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
@@ -455,171 +415,82 @@ mod tests {
                 park_moves: 1,
                 steal_moves: 2,
                 kicks: 4,
-                edf_enqueued: 8,
-                edf_clamped: 1,
-                edf_ordered: 8,
-                group_demote: 1,
-                group_promote: 2,
-                group_wake_promote: 1,
-                pinned_hog_inflated: 2,
-                group_steal_skipped: 5,
                 preempt_kicks: 6,
                 preempt_skipped: 7,
-                kick_coalesced: 2,
-                preempt_skipped_armed: 1,
-                preempt_skipped_deserved: 2,
-                preempt_skipped_group: 1,
-                preempt_skipped_mask: 1,
-                preempt_skipped_rate: 2,
-                wheel_overflow: 1,
-                token_boosts: 2,
-                slot_kicks: 2,
-                token_cas_fails: 0,
                 slot_moves: 40,
-                slot_defer: 3,
-                steal_xmoves: 1,
+                lifo_heads: 30,
+                lifo_bound_hits: 4,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
-                group: 1,
                 slice_ns: 1_000_000,
-                running_est_ns: 1_000_000,
                 running_pid: 7,
-                running_nice: -5,
-                running_weight: 1218,
-                delay_win: 16,
-                delay_armed: true,
-                active_ns: 9_000,
                 ..Default::default()
             }],
-            version: "4.2.37".to_string(),
+            version: "4.3.0".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
-            light_depth: 1,
-            hog_depth: 2,
-            burst_allowance_ns: 2_000_000,
-            perf_mode: 1,
             governor: "performance (epp:performance)".to_string(),
             energy: crate::stats::EnergyMetrics::default(),
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("slice_ns"));
-        assert!(txt.contains("group"));
-        assert!(txt.contains("running_nice"));
-        assert!(txt.contains("running_weight"));
-        assert!(txt.contains("delay_win"));
-        assert!(txt.contains("delay_armed"));
-        assert!(txt.contains("active_ns"));
-        assert!(txt.contains("group_demote"));
-        assert!(txt.contains("group_wake_promote"));
+        assert!(txt.contains("running_pid"));
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
-        assert!(txt.contains("preempt_skipped_armed"));
-        assert!(txt.contains("preempt_skipped_deserved"));
-        assert!(txt.contains("preempt_skipped_group"));
-        assert!(txt.contains("preempt_skipped_mask"));
-        assert!(txt.contains("preempt_skipped_rate"));
-        assert!(txt.contains("kick_coalesced"));
-        assert!(txt.contains("wheel_overflow"));
-        assert!(txt.contains("token_boosts"));
-        assert!(txt.contains("slot_kicks"));
-        assert!(txt.contains("token_cas_fails"));
         assert!(txt.contains("slot_moves"));
-        assert!(txt.contains("slot_defer"));
-        assert!(txt.contains("steal_xmoves"));
+        assert!(txt.contains("lifo_heads"));
+        assert!(txt.contains("lifo_bound_hits"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
-        assert!(txt.contains("light_depth"));
-        assert!(txt.contains("burst_allowance_ns"));
-        assert!(txt.contains("perf_mode"));
         assert!(txt.contains("governor"));
         assert!(txt.contains("energy"));
         assert!(txt.contains("since_running_kwh"));
         assert!(txt.contains("live_watts"));
+        assert!(!txt.contains("group_demote"));
+        assert!(!txt.contains("light_depth"));
+        assert!(!txt.contains("perf_mode"));
         assert!(!txt.contains("accepted_pairs"));
         assert!(!txt.contains("rejected_pairs"));
         assert!(!txt.contains("headline"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
-        assert_eq!(back.stats.edf_enqueued, 8);
-        assert_eq!(back.stats.edf_clamped, 1);
-        assert_eq!(back.stats.edf_ordered, 8);
-        assert_eq!(back.stats.group_demote, 1);
-        assert_eq!(back.stats.group_promote, 2);
-        assert_eq!(back.stats.group_wake_promote, 1);
-        assert_eq!(back.stats.pinned_hog_inflated, 2);
-        assert_eq!(back.stats.group_steal_skipped, 5);
         assert_eq!(back.stats.preempt_kicks, 6);
         assert_eq!(back.stats.preempt_skipped, 7);
-        assert_eq!(back.stats.preempt_skipped_armed, 1);
-        assert_eq!(back.stats.preempt_skipped_deserved, 2);
-        assert_eq!(back.stats.preempt_skipped_group, 1);
-        assert_eq!(back.stats.preempt_skipped_mask, 1);
-        assert_eq!(back.stats.preempt_skipped_rate, 2);
-        assert_eq!(back.stats.kick_coalesced, 2);
-        assert_eq!(back.stats.wheel_overflow, 1);
-        assert_eq!(back.stats.token_boosts, 2);
-        assert_eq!(back.stats.slot_kicks, 2);
-        assert_eq!(back.stats.token_cas_fails, 0);
         assert_eq!(back.stats.slot_moves, 40);
-        assert_eq!(back.stats.slot_defer, 3);
+        assert_eq!(back.stats.lifo_heads, 30);
+        assert_eq!(back.stats.lifo_bound_hits, 4);
         assert_eq!(back.stats.steal_moves, 2);
-        assert_eq!(back.stats.steal_xmoves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
-        assert_eq!(back.per_cpu[0].group, 1);
-        assert_eq!(back.per_cpu[0].running_nice, -5);
-        assert_eq!(back.per_cpu[0].running_weight, 1218);
-        assert_eq!(back.per_cpu[0].delay_win, 16);
-        assert!(back.per_cpu[0].delay_armed);
-        assert_eq!(back.per_cpu[0].active_ns, 9_000);
-        assert_eq!(back.version, "4.2.37");
+        assert_eq!(back.per_cpu[0].running_pid, 7);
+        assert_eq!(back.version, "4.3.0");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
-        assert_eq!(back.light_depth, 1);
-        assert_eq!(back.hog_depth, 2);
-        assert_eq!(back.burst_allowance_ns, 2_000_000);
-        assert_eq!(back.perf_mode, 1);
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
         assert_eq!(back.energy.since_running_kwh, 0.0);
         let v = merged(&snap);
-        assert_eq!(v.get("perf_mode").and_then(|x| x.as_u64()), Some(1));
         assert_eq!(
             v.get("governor").and_then(|x| x.as_str()),
             Some("performance (epp:performance)")
         );
     }
 
-    /* Dashboard shows stale next to delay when idle. */
+    /* Dashboard shows the stale slice word on idle cards. */
     #[test]
     fn dashboard_shows_stale_when_idle() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("(idle ? ' stale' : '')"));
     }
 
-    /* Dashboard shows the coalesced cells. */
+    /* Dashboard shows the preempt cells. */
     #[test]
-    fn dashboard_shows_coalesced_cells() {
+    fn dashboard_shows_preempt_cells() {
         let html = include_str!("../ui/index.html");
-        assert!(html.contains("id=\"kcoal\""));
-        assert!(html.contains("id=\"coalesce-rate\""));
-        assert!(html.contains("kick_coalesced"));
-    }
-
-    /* Dashboard shows the five split skip cells. */
-    #[test]
-    fn dashboard_shows_split_skip_cells() {
-        let html = include_str!("../ui/index.html");
-        assert!(html.contains("preempt_skipped_armed"));
-        assert!(html.contains("preempt_skipped_deserved"));
-        assert!(html.contains("preempt_skipped_group"));
-        assert!(html.contains("preempt_skipped_mask"));
-        assert!(html.contains("preempt_skipped_rate"));
-        assert!(html.contains("id=\"pskip-a\""));
-        assert!(html.contains("id=\"pskip-d\""));
-        assert!(html.contains("id=\"pskip-g\""));
-        assert!(html.contains("id=\"pskip-m\""));
-        assert!(html.contains("id=\"pskip-r\""));
+        assert!(html.contains("id=\"pkick\""));
+        assert!(html.contains("id=\"pskip\""));
+        assert!(html.contains("preempt_kicks"));
+        assert!(html.contains("preempt_skipped"));
     }
 
     /* Dashboard shows the slot cells. */
@@ -627,31 +498,28 @@ mod tests {
     fn dashboard_shows_slot_cells() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"slot-moves\""));
-        assert!(html.contains("id=\"slot-defer\""));
-        assert!(html.contains("id=\"slot-kicks\""));
-        assert!(html.contains("id=\"slot-rate\""));
+        assert!(html.contains("id=\"lifo-heads\""));
+        assert!(html.contains("id=\"lifo-bound\""));
         assert!(html.contains("slot_moves"));
-        assert!(html.contains("slot_defer"));
-        assert!(html.contains("slot_kicks"));
+        assert!(html.contains("lifo_heads"));
+        assert!(html.contains("lifo_bound_hits"));
     }
 
-    /* Dashboard shows the cross steal cell. */
+    /* Dashboard shows the steal cell. */
     #[test]
-    fn dashboard_shows_steal_xmoves_cell() {
+    fn dashboard_shows_steal_cell() {
         let html = include_str!("../ui/index.html");
-        assert!(html.contains("id=\"steal-xmoves\""));
-        assert!(html.contains("steal_xmoves"));
         assert!(html.contains("id=\"steal\""));
         assert!(html.contains("steal_moves"));
     }
 
-    /* Dashboard shows the strict and perf mode cell. */
+    /* Dashboard shows the governor mode cell. */
     #[test]
     fn dashboard_shows_mode_cell() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"mode-badge\""));
-        assert!(html.contains("perf_mode"));
         assert!(html.contains("governor"));
+        assert!(!html.contains("perf_mode"));
     }
 
     /* Dashboard shows the calm meter-only energy section. */
@@ -706,8 +574,8 @@ mod tests {
         assert!(!html.contains("accepted_pairs"));
         assert!(!html.contains("headline"));
         let energy_at = html.find("id=\"energy-since\"").unwrap();
-        let groups_at = html.find("<!-- Groups").unwrap();
-        assert!(energy_at < groups_at);
+        let system_at = html.find("id=\"on-cpu\"").unwrap();
+        assert!(energy_at < system_at);
         assert_eq!(html.matches("setInterval").count(), 1);
         assert!(!html.contains("localStorage"));
     }

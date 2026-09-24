@@ -1,13 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Snapshot reads
- *
- * Builds the metrics view and the dashboard view from the BPF maps and the
- * static cards. Gauges only with no deltas. Frequency, LLC, and CPU cards stay
- * display only and never shape placement.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Snapshot reads for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+//! Builds the metrics view and the dashboard view from the BPF maps.
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
@@ -397,29 +393,9 @@ impl<'a> Scheduler<'a> {
             steal_moves: s.steal_moves,
             kicks: s.kicks,
             enq_no_tctx: s.enq_no_tctx,
-            edf_enqueued: s.edf_enqueued,
-            edf_clamped: s.edf_clamped,
-            edf_ordered: s.edf_ordered,
-            group_demote: s.group_demote,
-            group_promote: s.group_promote,
-            pinned_hog_inflated: s.pinned_hog_inflated,
-            group_steal_skipped: s.group_steal_skipped,
-            group_wake_promote: s.group_wake_promote,
             preempt_kicks: s.preempt_kicks,
             preempt_skipped: s.preempt_skipped,
-            kick_coalesced: s.kick_coalesced,
-            preempt_skipped_armed: s.preempt_skipped_armed,
-            preempt_skipped_deserved: s.preempt_skipped_deserved,
-            preempt_skipped_group: s.preempt_skipped_group,
-            preempt_skipped_mask: s.preempt_skipped_mask,
-            preempt_skipped_rate: s.preempt_skipped_rate,
-            wheel_overflow: s.wheel_overflow,
-            token_boosts: s.token_boosts,
-            slot_kicks: s.slot_kicks,
-            token_cas_fails: s.token_cas_fails,
             slot_moves: s.slot_moves,
-            slot_defer: s.slot_defer,
-            steal_xmoves: s.steal_xmoves,
             lifo_heads: s.lifo_heads,
             lifo_bound_hits: s.lifo_bound_hits,
         }
@@ -427,24 +403,13 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Read one CPU state without heap use. Failed lookups yield an idle view
-     * with fixed slice and zero EMA. Slice stays fixed at 1ms. Zero EMA
-     * matches BSS and init with no trap.
+     * with zero pid and cursor. Slice stays fixed at 1ms.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {
             frontier: 0,
-            running_est: 0,
             running_pid: 0,
             cursor: 0,
-            running_nice: 0,
-            running_weight: 1024,
-            delay_win: 0,
-            delay_cur: 0,
-            delay_cnt: 0,
-            cpuperf_ema: 0,
-            cpuperf_ema_at: 0,
-            active_ns: 0,
-            occupant_group: 0,
         };
         if cpu >= crate::MAX_CPUS {
             return idle;
@@ -468,24 +433,16 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Dashboard snapshot. Merges the static cards with live state by online
-     * rank. Gauges only, no deltas. Frequency, LLC, and CPU cards stay display
-     * only and never feed placement or division. Slice stays fixed at 1ms.
-     * Group follows the live table when ready, else halves fallback with no
-     * trap. Offline stays out, so per CPU count matches online count. Version,
-     * timestamp, topology, depths, allowance, mode, and governor join the
-     * counters. The set covers one screenshot and one JSON log. Governor
-     * polls online only on the 1s tick with a transition only BSS write, so
-     * strict stays quiet.
+     * rank. Gauges only, no deltas. Frequency, LLC, and SMT stay display
+     * only. Slice stays fixed at 1ms. Offline stays out, so per CPU count
+     * matches online count. Version, timestamp, topology, and governor join
+     * the counters. Governor polls online only on the 1s tick for display
+     * with no BPF write.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
-        let (nr_raw, light_depth, hog_depth, burst_allowance_ns) = {
+        let nr_raw = {
             let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
-            (
-                bss.nr_cpu_ids as usize,
-                bss.flow_light_depth,
-                bss.flow_hog_depth,
-                bss.flow_burst_allowance_ns,
-            )
+            bss.nr_cpu_ids as usize
         };
         let nr = nr_raw.min(crate::MAX_CPUS);
         let online = if self.online_cpus.is_empty() {
@@ -510,24 +467,7 @@ impl<'a> Scheduler<'a> {
             .is_none_or(|t| now.duration_since(t).as_secs() >= 1);
         if gov_old {
             let governors = crate::topology::collect_governors(&online);
-            let mode: u8 = if crate::topology::perf_unanimous(&governors) {
-                1
-            } else {
-                0
-            };
-            let gov = crate::topology::display_governor(&governors);
-            self.governor = gov;
-            if mode != self.perf_mode {
-                self.perf_mode = mode;
-                if let Some(bss) = self.skel.maps.bss_data.as_mut() {
-                    bss.flow_perf_mode = mode;
-                }
-                log::info!(
-                    "governor: {} with perf_mode {}",
-                    self.governor,
-                    self.perf_mode
-                );
-            }
+            self.governor = crate::topology::display_governor(&governors);
             self.governor_read_at = Some(now);
         }
         let mut per_cpu = Vec::with_capacity(online.len());
@@ -541,17 +481,9 @@ impl<'a> Scheduler<'a> {
                 .unwrap_or_default();
             e.id = id;
             e.cur_freq_khz = self.cur_freq_khz.get(rank).copied().unwrap_or(0);
-            e.group = crate::flow::group_live(id, nr, &self.group_table, self.group_ready);
             let st = self.read_cpu(cpu);
-            e.running_est_ns = st.running_est;
             e.running_pid = st.running_pid;
-            e.running_nice = st.running_nice as i32;
-            e.running_weight = st.running_weight as u32;
-            e.delay_win = st.delay_win;
-            e.delay_armed =
-                crate::flow::delay_armed_latched(st.delay_win, crate::flow::stand_held(st.cursor));
             e.slice_ns = crate::flow::SLICE_NS;
-            e.active_ns = st.active_ns;
             per_cpu.push(e);
         }
         let topology = if self.cpu_static.is_empty() {
@@ -575,7 +507,8 @@ impl<'a> Scheduler<'a> {
                 .unwrap_or(1.0);
             let delta_uj = self.rapl.as_mut().and_then(|r| r.sample());
             let present = self.rapl.is_some();
-            let perf_gov = self.perf_mode == 1;
+            let governors = crate::topology::collect_governors(&online);
+            let perf_gov = crate::topology::perf_unanimous(&governors);
             let mut known = self.online_cpus.clone();
             known.sort_unstable();
             let mut fresh = crate::topology::online_cpus();
@@ -603,10 +536,6 @@ impl<'a> Scheduler<'a> {
             version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_ns,
             topology,
-            light_depth,
-            hog_depth,
-            burst_allowance_ns,
-            perf_mode: self.perf_mode,
             governor: self.governor.clone(),
             energy: self.energy.clone(),
         }
