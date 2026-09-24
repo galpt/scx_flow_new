@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Reexports the slice, virtual time, preempt, select, and slot helpers.
+//! Reexports the slice, virtual time, and slot helpers.
 
 pub use crate::flow_edf::*;
 pub use crate::flow_slice::*;

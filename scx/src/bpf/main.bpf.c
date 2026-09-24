@@ -239,7 +239,8 @@ SCX_OPS_DEFINE(flow_ops,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |
 					  SCX_OPS_ENQ_EXITING |
-					  SCX_OPS_ENQ_MIGRATION_DISABLED,
+					  SCX_OPS_ENQ_MIGRATION_DISABLED |
+					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
 	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");
