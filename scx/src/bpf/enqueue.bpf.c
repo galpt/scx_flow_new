@@ -137,9 +137,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		flow_rate_at[(u32)cpu & 1023U] = now;
 		/* Shorten the occupant slice to zero so the kick sticks. */
 		/* A null or self occupant keeps kick only with no shorten. */
+		/* Use the compat helper, it falls back to cpu_rq on old kernels. */
 		{
 			struct task_struct *occupant =
-			    scx_bpf_cpu_curr(cpu);
+			    __COMPAT_scx_bpf_cpu_curr(cpu);
 			if (occupant && occupant != p)
 				scx_bpf_task_set_slice(occupant, 0);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
