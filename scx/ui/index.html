@@ -121,14 +121,17 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    /* Slice wraps so the idle stale word never
+     * clips in the narrow card. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
       margin-top: 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      overflow-wrap: anywhere;
     }
     /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. */
@@ -502,8 +505,10 @@
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
-        var sliceLabel = '<div class="core-slice">slice ' +
-          fmtSlice(slice) + (idle ? ' stale' : '') + '</div>';
+        var sliceText = 'slice ' + fmtSlice(slice) +
+          (idle ? ' stale' : '');
+        var sliceLabel = '<div class="core-slice" title="' +
+          sliceText + '">' + sliceText + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
