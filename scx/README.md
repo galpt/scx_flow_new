@@ -158,9 +158,8 @@ plus `stress-ng` on the same host and governor, and watch
 `preempt_kicks`, and `preempt_skipped` via `--monitor` and
 the dashboard alongside probe delay. Release `4.4.0`
 restarts from `4.3.x` with no live transition. See
-`tools/edf_harness/README.md`, `src/flow_slice.rs`,
-`src/flow_admit.rs`, `src/flow_preempt.rs`, and
-`src/flow_select.rs`.
+`src/flow_slice.rs`, `src/flow_admit.rs`,
+`src/flow_preempt.rs`, and `src/flow_select.rs`.
 
 ## Typical Use Cases
 
@@ -187,7 +186,7 @@ scheduling behavior. Reporting only is `--stats`,
 ## Web UI
 
 The dashboard serves loopback port `50005` with a unix
-socket fallback at `/tmp/scx_flow.sock` and no
+socket fallback (path in `src/webui.rs`) and no
 authentication, since loopback is the trust boundary.
 It shows move rates, preempt rates, admission gauges,
 per CPU running pids with dynamic slice and minimum, and a
