@@ -344,7 +344,8 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		occ_cls = octx->cls;
+		/* Occ class is the trusted copy above with no re-read. */
+		/* The pointer is released, so only the copy stays live. */
 		if (occ_cls != (u32)FLOW_CLS_INTERACTIVE &&
 		    occ_cls != (u32)FLOW_CLS_BATCH)
 			occ_cls = (u32)FLOW_CLS_BATCH;
