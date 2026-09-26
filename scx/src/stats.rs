@@ -21,7 +21,7 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with inserts, moves, kicks, and LIFO detail.
+/// Counters with admission, ledger, preempt, and steal detail.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -32,7 +32,7 @@ pub struct Metrics {
     #[stat(desc = "Uptime since attach in nanoseconds")]
     #[serde(default)]
     pub uptime_ns: u64,
-    #[stat(desc = "Fresh joins with a new estimate")]
+    #[stat(desc = "Fresh joins past probation anchor")]
     #[serde(default)]
     pub inserts: u64,
     #[stat(desc = "Runnable slice ends with requeue")]
@@ -44,7 +44,7 @@ pub struct Metrics {
     #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub park_moves: u64,
-    #[stat(desc = "Moves from a peer queue")]
+    #[stat(desc = "Moves from a peer deadline queue")]
     #[serde(default)]
     pub steal_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
@@ -56,24 +56,43 @@ pub struct Metrics {
     #[stat(desc = "Busy preempt kicks")]
     #[serde(default)]
     pub preempt_kicks: u64,
-    #[stat(desc = "Busy non-kicks held by the rate window")]
+    #[stat(desc = "Busy non-kicks held by class or rate")]
     #[serde(default)]
     pub preempt_skipped: u64,
-    #[stat(desc = "Slot tasks moved via slots")]
+    #[stat(desc = "Queue tasks moved via dispatch")]
     #[serde(default)]
     pub slot_moves: u64,
-    #[stat(desc = "LIFO head inserts at K 3")]
+    #[stat(desc = "Fast lane inserts")]
     #[serde(default)]
-    pub lifo_heads: u64,
-    #[stat(desc = "LIFO tail inserts for bound")]
+    pub fast_admits: u64,
+    #[stat(desc = "Fast lane denials at depth 4")]
     #[serde(default)]
-    pub lifo_bound_hits: u64,
+    pub fast_bounds: u64,
+    #[stat(desc = "Deadline queue inserts")]
+    #[serde(default)]
+    pub vtime_admits: u64,
+    #[stat(desc = "Fast lane denials by duty or policy")]
+    #[serde(default)]
+    pub duty_gates: u64,
+    #[stat(desc = "Arrivals held back by probation")]
+    #[serde(default)]
+    pub prob_holds: u64,
+    #[stat(desc = "PI elevations of lock holder proxies")]
+    #[serde(default)]
+    pub elev_moves: u64,
+    #[stat(desc = "Weight scaled penalties on stolen tasks")]
+    #[serde(default)]
+    pub steal_penalties: u64,
+    #[stat(desc = "Moves from the kernel global queue")]
+    #[serde(default)]
+    pub global_moves: u64,
 }
 
 /// One card of the per-CPU grid.
 /// Static fields come from topology once at attach.
-/// Dynamic fields come from the per-CPU map on each poll.
+/// Dynamic fields come from the per-CPU maps on each poll.
 /// Frequency, LLC, and SMT stay display only and never shape placement.
+/// Energy stays display only and never shapes placement either.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
     /// CPU id.
@@ -94,9 +113,12 @@ pub struct PerCpuMetrics {
     /// Pid now on the CPU. Zero when idle.
     #[serde(default)]
     pub running_pid: u32,
-    /// Current fixed slice in nanos.
+    /// Newest dynamic slice in nanos.
     #[serde(default, alias = "tq_ns")]
     pub slice_ns: u64,
+    /// High water virtual time in nanos for the anchor view.
+    #[serde(default)]
+    pub min_vruntime: u64,
 }
 
 /// Default state text of the energy object.
@@ -176,7 +198,9 @@ impl Metrics {
             kick={} noctx={} \
             pkick={} pskip={} \
             smoves={} \
-            lheads={} lbound={}",
+            fast={} fbound={} \
+            vtime={} dgate={} \
+            phold={} elev={} spen={} global={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -191,8 +215,14 @@ impl Metrics {
             self.preempt_kicks,
             self.preempt_skipped,
             self.slot_moves,
-            self.lifo_heads,
-            self.lifo_bound_hits,
+            self.fast_admits,
+            self.fast_bounds,
+            self.vtime_admits,
+            self.duty_gates,
+            self.prob_holds,
+            self.elev_moves,
+            self.steal_penalties,
+            self.global_moves,
         )?;
         Ok(())
     }
@@ -214,8 +244,14 @@ impl Metrics {
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
             slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
-            lifo_heads: self.lifo_heads.wrapping_sub(rhs.lifo_heads),
-            lifo_bound_hits: self.lifo_bound_hits.wrapping_sub(rhs.lifo_bound_hits),
+            fast_admits: self.fast_admits.wrapping_sub(rhs.fast_admits),
+            fast_bounds: self.fast_bounds.wrapping_sub(rhs.fast_bounds),
+            vtime_admits: self.vtime_admits.wrapping_sub(rhs.vtime_admits),
+            duty_gates: self.duty_gates.wrapping_sub(rhs.duty_gates),
+            prob_holds: self.prob_holds.wrapping_sub(rhs.prob_holds),
+            elev_moves: self.elev_moves.wrapping_sub(rhs.elev_moves),
+            steal_penalties: self.steal_penalties.wrapping_sub(rhs.steal_penalties),
+            global_moves: self.global_moves.wrapping_sub(rhs.global_moves),
         }
     }
 }

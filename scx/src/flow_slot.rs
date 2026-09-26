@@ -1,55 +1,65 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Slot store helpers for the flow scheduler.
+//! Queue store helpers for the flow scheduler.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! One queue per CPU plus one overflow tail with bounded LIFO at K 3.
+//! One shallow FIFO plus one deadline queue per CPU with a shared tail.
 
-/// Tasks moved by one slot trip at most. Fixed at 4 with no knob.
+/// Tasks moved by one fast trip at most. Fixed at 4 with no knob.
 pub const SLOT_D: u32 = 4;
 /// Tasks moved by one dispatch pass at most. Fixed at 32 with no knob.
 pub const SLOT_BUDGET: u32 = 32;
-/// Base id of the per CPU queues.
+/// Base id of the per CPU fast queues.
 #[cfg(test)]
-pub const SLOT_BASE: u64 = 0x6000;
+pub const FAST_BASE: u64 = 0x6000;
+/// Base id of the per CPU deadline queues.
+#[cfg(test)]
+pub const VTIME_BASE: u64 = 0x6800;
 /// Id of the overflow tail shared by every CPU.
 #[cfg(test)]
-pub const SLOT_OVERFLOW: u64 = 0x6800;
-/// Max DSQs at 1024 CPUs. Holds 1024 per CPU plus one overflow.
+pub const SLOT_OVERFLOW: u64 = 0x7000;
+/// Max DSQs at 1024 CPUs. Holds two per CPU plus one overflow.
 #[cfg(test)]
-pub const SLOT_MAX_DSQS: u64 = 1025;
-/// Own queue cap at 12 under budget 32. Fixed at 12 with no knob.
+pub const SLOT_MAX_DSQS: u64 = 2049;
+/// Own deadline queue cap at 12 under budget 32. Fixed with no knob.
 #[cfg(test)]
 pub const SLOT_OWN_CAP: u32 = 12;
-/// Head inserts in one LIFO period at 3 with six tails.
+/// Shared tail cap at 4 under the dispatch budget. Fixed with no knob.
 #[cfg(test)]
-pub const LIFO_K: u64 = 3;
-/// Inserts in one LIFO period at 9 with 3 heads.
+pub const SLOT_OVER_CAP: u32 = 4;
+/// Gated starvation cap at 4 under the dispatch budget. Fixed with no knob.
 #[cfg(test)]
-pub const LIFO_PERIOD: u64 = 9;
-/// LIFO sequences at 1025 with per CPU plus overflow.
+pub const SLOT_GATED_CAP: u32 = 4;
+/// Miss cap of one drain trip at 4. Fixed with no knob.
 #[cfg(test)]
-pub const LIFO_NSEQ: u64 = 1025;
+pub const SLOT_MISS_CAP: u32 = 4;
 
-/// Slot id of one CPU queue from base plus id.
-/// One queue per CPU keeps enqueue and dispatch O(1).
+/// Fast queue id of one CPU from base plus id.
+/// One shallow queue per CPU keeps sleepy wakeups local.
 #[cfg(test)]
-pub fn slot_cpu_dsq(cpu: u32) -> u64 {
-    SLOT_BASE + cpu as u64
+pub fn fast_dsq(cpu: u32) -> u64 {
+    FAST_BASE + cpu as u64
 }
 
-/// Slot id of the overflow tail shared by every CPU.
+/// Deadline queue id of one CPU from base plus id.
+/// One ordered queue per CPU keeps steady work fair.
+#[cfg(test)]
+pub fn vtime_dsq(cpu: u32) -> u64 {
+    VTIME_BASE + cpu as u64
+}
+
+/// Id of the overflow tail shared by every CPU.
 /// Pinned and homeless tasks rest here with mask wins on drain.
 #[cfg(test)]
 pub fn slot_overflow_dsq() -> u64 {
     SLOT_OVERFLOW
 }
 
-/// Count of DSQs for one host with per CPU plus overflow.
-/// Holds nr plus one, so eight CPUs need nine queues.
+/// Count of DSQs for one host with two per CPU plus overflow.
+/// Holds twice nr plus one, so eight CPUs need seventeen queues.
 #[cfg(test)]
 pub fn slot_nr_dsqs(nr: u64) -> u64 {
-    nr + 1
+    nr * 2 + 1
 }
 
 /// DSQ id for one insert with pinned overflow.
@@ -69,31 +79,38 @@ pub fn insert_dsq(cpu: i32, pinned: bool, nr: usize) -> u64 {
     if (cpu as u64) >= 1024 {
         return slot_overflow_dsq();
     }
-    slot_cpu_dsq(cpu as u32)
+    fast_dsq(cpu as u32)
 }
 
 /// Local queue ids for one dispatch in drain order.
-/// Holds the own queue then the overflow tail with no share.
+/// Holds the fast queue, the deadline queue, then the overflow tail.
 #[cfg(test)]
-pub fn local_trip_dsqs(cpu: u32) -> [u64; 2] {
-    [slot_cpu_dsq(cpu), slot_overflow_dsq()]
+pub fn local_trip_dsqs(cpu: u32) -> [u64; 3] {
+    [fast_dsq(cpu), vtime_dsq(cpu), slot_overflow_dsq()]
 }
 
-/// Cap of one trip at D under the dispatch budget.
+/// Cap of one fast trip at depth under the dispatch budget.
 /// Returns the min of budget and 4.
 #[cfg(test)]
 pub fn slot_cap(budget: u32) -> u32 {
     budget.min(SLOT_D)
 }
 
-/// Own queue cap at 12 under budget 32.
+/// Own deadline queue cap at 12 under budget 32.
 /// Holds 12 with budget 32, so overflow and steal keep room.
 #[cfg(test)]
 pub fn slot_own_cap(budget: u32) -> u32 {
-    budget.min(12)
+    budget.min(SLOT_OWN_CAP)
 }
 
-/// Drain up to a cap from one slot queue for one CPU.
+/// Shared tail cap at 4 under the dispatch budget.
+/// Returns the min of budget and 4 with no head stall.
+#[cfg(test)]
+pub fn tail_cap(budget: u32) -> u32 {
+    budget.min(SLOT_OVER_CAP)
+}
+
+/// Drain up to a cap from one queue for one CPU.
 /// The scan visits queued tasks in queue order and moves each live
 /// task with the CPU in the mask. Dead, foreign, and failed tasks count
 /// one miss each with a miss cap at 4, so one bad head never blocks later
@@ -106,15 +123,56 @@ pub fn slot_drain_model(
     cap: u32,
     base: u32,
 ) -> u32 {
+    slot_drain_inner(queue, cpu, cap, base, None, u64::MAX)
+}
+
+/// Starvation drain for the gated passes with a 1.5ms floor.
+/// Young tasks count one miss each, so old tasks behind them surface.
+/// Tasks without a wait stamp miss past with no move.
+#[cfg(test)]
+pub fn slot_drain_starved_model(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+    now: u64,
+) -> u32 {
+    slot_drain_inner(
+        queue,
+        cpu,
+        cap,
+        base,
+        Some(now),
+        crate::flow_admit::STARVE_NS,
+    )
+}
+
+#[cfg(test)]
+fn slot_drain_inner(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+    now: Option<u64>,
+    floor_ns: u64,
+) -> u32 {
     let mut moved = 0;
     let mut miss = 0u32;
     let mut kept = std::collections::VecDeque::new();
     let mut rest = std::collections::VecDeque::new();
     std::mem::swap(queue, &mut rest);
     for task in rest.drain(..) {
-        if moved + base >= cap || miss >= 4 {
+        if moved + base >= cap || miss >= SLOT_MISS_CAP {
             kept.push_back(task);
             continue;
+        }
+        if let Some(t) = now {
+            let old = task.wait_at != 0 && t >= task.wait_at && t - task.wait_at > floor_ns;
+            if !old {
+                miss += 1;
+                kept.push_back(task);
+                continue;
+            }
         }
         let ok = task.live && !task.fail && crate::flow_select::may_run_on(cpu, &task.allowed);
         if ok {
@@ -130,10 +188,10 @@ pub fn slot_drain_model(
 }
 
 /// True when one local window holds work.
-/// Window holds the own queue plus the overflow tail.
+/// Window holds the fast queue plus the deadline queue.
 #[cfg(test)]
-pub fn window_has_work(own: bool, over: bool) -> bool {
-    own || over
+pub fn window_has_work(fast: bool, vtime: bool) -> bool {
+    fast || vtime
 }
 
 /// Least donor depth for one steal with idle empty fast path.
@@ -147,9 +205,10 @@ pub fn steal_need(idle_empty: bool) -> u64 {
     }
 }
 
-/// First donor DSQ id from one scan window with keep first.
+/// First donor deadline queue id from one scan window with keep first.
 /// Visits bound peers from start with wrap and keeps the first peer with
-/// queued at or past need. Returns the DSQ id on hit and none on miss.
+/// queued at or past need. Fast queues never take part, so stolen work
+/// always comes from deadline queues. Returns the DSQ id on hit.
 #[cfg(test)]
 pub fn steal_first_donor(start: u32, nr: usize, need: u64, depths: &[u64]) -> Option<u64> {
     if nr <= 1 {
@@ -167,26 +226,114 @@ pub fn steal_first_donor(start: u32, nr: usize, need: u64, depths: &[u64]) -> Op
         if q < need {
             continue;
         }
-        return Some(slot_cpu_dsq(peer));
+        return Some(vtime_dsq(peer));
     }
     None
 }
 
-/// True when one insert takes head with bounded LIFO at K 3.
-/// Takes head for 3 of 9 with six tails plus one forced tail at MAX.
-/// At most 3 consecutive heads per queue with overflow and steal keeping one slot per pass.
-/// This is a consecutive insert bound with no wait time bound.
 #[cfg(test)]
-pub fn lifo_take_head(seq: u32) -> bool {
-    if seq == u32::MAX {
-        return false;
-    }
-    (seq as u64 % LIFO_PERIOD) < LIFO_K
-}
+mod tests {
+    use super::*;
 
-/// Index of one LIFO sequence with per CPU plus overflow at 1025.
-/// Per CPU holds the id and overflow holds 1024 with no share.
-#[cfg(test)]
-pub fn lifo_idx(over: bool, cpu: u32) -> u32 {
-    if over { 1024 } else { cpu }
+    const OVERFLOW_BELOW_LOCAL_ON: bool = SLOT_OVERFLOW < 0xc000000000000000;
+    const QUEUE_COUNT_FITS: bool = SLOT_MAX_DSQS == 2049;
+
+    #[test]
+    fn ids_stay_below_local_on() {
+        const { assert!(OVERFLOW_BELOW_LOCAL_ON) }
+        const { assert!(QUEUE_COUNT_FITS) }
+        assert!(fast_dsq(1023) < 0xc000000000000000);
+        assert!(vtime_dsq(1023) < 0xc000000000000000);
+        assert_eq!(slot_nr_dsqs(8), 17);
+        assert_eq!(slot_overflow_dsq(), SLOT_OVERFLOW);
+    }
+
+    #[test]
+    fn insert_targets_fast_or_overflow() {
+        assert_eq!(insert_dsq(3, false, 8), FAST_BASE + 3);
+        assert_eq!(insert_dsq(3, true, 8), SLOT_OVERFLOW);
+        assert_eq!(insert_dsq(-1, false, 8), SLOT_OVERFLOW);
+        assert_eq!(insert_dsq(9, false, 8), SLOT_OVERFLOW);
+        assert_eq!(
+            local_trip_dsqs(2),
+            [FAST_BASE + 2, VTIME_BASE + 2, SLOT_OVERFLOW]
+        );
+    }
+
+    #[test]
+    fn caps_hold_budget_discipline() {
+        assert_eq!(slot_cap(32), 4);
+        assert_eq!(slot_cap(2), 2);
+        assert_eq!(slot_own_cap(32), 12);
+        assert_eq!(slot_own_cap(5), 5);
+        assert_eq!(tail_cap(32), 4);
+        assert_eq!(tail_cap(1), 1);
+        assert_eq!(SLOT_GATED_CAP, 4);
+        assert_eq!(SLOT_MISS_CAP, 4);
+        assert_eq!(SLOT_OVER_CAP, 4);
+        assert_eq!(SLOT_OWN_CAP, 12);
+    }
+
+    #[test]
+    fn window_and_need_match_dispatch() {
+        assert!(window_has_work(true, false));
+        assert!(window_has_work(false, true));
+        assert!(!window_has_work(false, false));
+        assert_eq!(steal_need(true), 1);
+        assert_eq!(steal_need(false), 2);
+    }
+
+    #[test]
+    fn drain_moves_allowed_with_miss_cap() {
+        let mut q = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![false],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+        ]);
+        assert_eq!(slot_drain_model(&mut q, 0, 4, 0), 1);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn starved_drain_skips_young_tasks() {
+        let now = 10_000_000u64;
+        let mut q = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: now - 100,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: now - 5_000_000,
+            },
+        ]);
+        assert_eq!(slot_drain_starved_model(&mut q, 0, 4, 0, now), 1);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn steal_never_touches_fast_queues() {
+        let depths = vec![9u64; 4];
+        let got = steal_first_donor(0, 4, 2, &depths).unwrap();
+        assert_eq!(got, VTIME_BASE);
+        assert_ne!(got, FAST_BASE);
+        assert!(steal_first_donor(0, 1, 1, &depths).is_none());
+    }
 }

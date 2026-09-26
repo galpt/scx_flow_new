@@ -44,10 +44,40 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             llc_id: cpu.llc_id as u32,
             smt,
             running_pid: 0,
-            slice_ns: crate::flow::SLICE_NS,
+            slice_ns: crate::flow_slice::QMIN_NS,
+            min_vruntime: 0,
         });
     }
     out.sort_by_key(|e| e.id);
+    out
+}
+
+/// Sibling and domain rows for the BPF topology view.
+/// Each row holds the CPU, the thread sibling or all ones when unknown,
+/// and the cache domain. Failures yield an empty list, so the scheduler
+/// keeps running with cursor order steal.
+pub fn topo_rows() -> Vec<(u32, u32, u32)> {
+    let topo = match Topology::new() {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("topology failed, steal keeps cursor order: {e}");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for (id, cpu) in topo.all_cpus.iter() {
+        if *id >= MAX_CPUS {
+            continue;
+        }
+        let mut sib = 0xffffffffu32;
+        for (oid, o) in topo.all_cpus.iter() {
+            if *oid != *id && o.core_id == cpu.core_id && (*oid as u32) < sib {
+                sib = *oid as u32;
+            }
+        }
+        out.push((*id as u32, sib, cpu.llc_id as u32));
+    }
+    out.sort_by_key(|e| e.0);
     out
 }
 
@@ -333,7 +363,7 @@ pub fn filter_allowed(
 
 /// Synthetic card for tests.
 /// Builds one display only card with the given id and frequency.
-/// Slice stays fixed at 1ms.
+/// Slice starts at the 250us minimum.
 #[cfg(test)]
 pub fn synthetic_card(
     id: u32,
@@ -348,7 +378,8 @@ pub fn synthetic_card(
         llc_id,
         smt,
         running_pid: 0,
-        slice_ns: crate::flow::SLICE_NS,
+        slice_ns: crate::flow_slice::QMIN_NS,
+        min_vruntime: 0,
     }
 }
 

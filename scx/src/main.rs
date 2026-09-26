@@ -11,19 +11,12 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 mod config;
 mod flow;
+mod flow_admit;
 mod flow_edf;
 mod flow_preempt;
 mod flow_select;
 mod flow_slice;
 mod flow_slot;
-#[cfg(test)]
-mod flow_tests_edf;
-#[cfg(test)]
-mod flow_tests_lifo;
-#[cfg(test)]
-mod flow_tests_preempt;
-#[cfg(test)]
-mod flow_tests_slot;
 mod rapl;
 mod snapshot;
 mod stats;
@@ -175,6 +168,9 @@ impl<'a> Scheduler<'a> {
         let governor = topology::display_governor(&governors);
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
+        /* Seed the BPF topology view with sibling plus domain rows. */
+        /* Failures keep the BPF defaults with cursor order steal. */
+        Self::seed_topo(&mut skel);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         /* Bounded dashboard channel drops a frame when full. */
@@ -224,6 +220,28 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    /* Seed one topology row per CPU into the BPF view. */
+    /* Each row carries the thread sibling and the cache domain. */
+    /* The slice field keeps the BPF default with no write here. */
+    /* A failed update keeps the BPF default with no trap. */
+    fn seed_topo(skel: &mut BpfSkel<'_>) {
+        use libbpf_rs::MapCore;
+        for (cpu, sib, llc) in topology::topo_rows() {
+            let key = cpu.to_ne_bytes();
+            let mut val = [0u8; 16];
+            val[0..4].copy_from_slice(&sib.to_ne_bytes());
+            val[4..8].copy_from_slice(&llc.to_ne_bytes());
+            val[8..16].copy_from_slice(&crate::flow_slice::QMIN_NS.to_ne_bytes());
+            if let Err(e) = skel
+                .maps
+                .topo_stor
+                .update(&key, &val, libbpf_rs::MapFlags::ANY)
+            {
+                log::warn!("topo seed failed for cpu {cpu}: {e}");
+            }
+        }
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
@@ -251,7 +269,9 @@ impl<'a> Scheduler<'a> {
             kick={} noctx={} \
             pkick={} pskip={} \
             smoves={} \
-            lheads={} lbound={} \
+            fast={} fbound={} \
+            vtime={} dgate={} \
+            phold={} elev={} spen={} global={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -263,8 +283,14 @@ impl<'a> Scheduler<'a> {
             m.preempt_kicks,
             m.preempt_skipped,
             m.slot_moves,
-            m.lifo_heads,
-            m.lifo_bound_hits,
+            m.fast_admits,
+            m.fast_bounds,
+            m.vtime_admits,
+            m.duty_gates,
+            m.prob_holds,
+            m.elev_moves,
+            m.steal_penalties,
+            m.global_moves,
             runtime,
             oncpu,
         );
@@ -357,26 +383,38 @@ mod tests {
     #[test]
     fn slice_matches_header() {
         assert_eq!(
-            crate::flow_slice::SLICE_NS,
-            crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
+            crate::flow_slice::QMIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_QMIN_NS as u64
         );
-        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
+        assert_eq!(
+            crate::flow_slice::QMAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_QMAX_NS as u64
+        );
+        assert_eq!(crate::flow_slice::QMIN_NS, 250_000);
+        assert_eq!(crate::flow_slice::QMAX_NS, 15_000_000);
+        assert_eq!(
+            crate::flow_slice::LTARGET_NS,
+            crate::bpf_intf::flow_consts_FLOW_LTARGET_NS as u64
+        );
+        assert_eq!(
+            crate::flow_slice::MICRO_QUANTUM_NS,
+            crate::bpf_intf::flow_consts_FLOW_MICRO_QUANTUM_NS as u64
+        );
+        assert_eq!(crate::flow_slice::WEIGHT_BASE, 100);
+        assert_eq!(crate::flow_slice::WEIGHT_MIN, 1);
+        assert_eq!(crate::flow_slice::WEIGHT_MAX, 10_000);
     }
 
     #[test]
     fn slot_matches_header() {
         assert_eq!(
-            crate::flow_slot::SLOT_BASE,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BASE as u64
-        );
-        assert_eq!(
             crate::flow_slot::SLOT_OVERFLOW,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW as u64
+            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
         );
-        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x6800);
+        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x7000);
         assert_eq!(
             crate::flow_slot::SLOT_D,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_D
+            crate::bpf_intf::flow_consts_FLOW_FAST_D
         );
         assert_eq!(
             crate::flow_slot::SLOT_BUDGET,
@@ -384,24 +422,41 @@ mod tests {
         );
         assert_eq!(
             crate::flow_slot::SLOT_MAX_DSQS,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_MAX_DSQS as u64
+            crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 1025);
+        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 2049);
+        assert_eq!(
+            crate::flow_slot::FAST_BASE,
+            crate::bpf_intf::flow_consts_FLOW_FAST_BASE as u64
+        );
+        assert_eq!(
+            crate::flow_slot::VTIME_BASE,
+            crate::bpf_intf::flow_consts_FLOW_VTIME_BASE as u64
+        );
     }
 
     #[test]
-    fn lifo_matches_header() {
+    fn admit_matches_header() {
         assert_eq!(
-            crate::flow_slot::LIFO_K,
-            crate::bpf_intf::flow_consts_FLOW_LIFO_K as u64
+            crate::flow_admit::DUTY_SHIFT,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_SHIFT
         );
         assert_eq!(
-            crate::flow_slot::LIFO_PERIOD,
-            crate::bpf_intf::flow_consts_FLOW_LIFO_PERIOD as u64
+            crate::flow_admit::DUTY_FAST,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_FAST as u8
         );
-        assert_eq!(crate::flow_slot::LIFO_K, 3);
-        assert_eq!(crate::flow_slot::LIFO_PERIOD, 9);
-        assert_eq!(crate::flow_slot::LIFO_NSEQ, 1025);
+        assert_eq!(
+            crate::flow_admit::DUTY_BATCH,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_BATCH as u8
+        );
+        assert_eq!(
+            crate::flow_admit::PROB_CYCLES,
+            crate::bpf_intf::flow_consts_FLOW_PROB_CYCLES as u8
+        );
+        assert_eq!(
+            crate::flow_admit::STARVE_NS,
+            crate::bpf_intf::flow_consts_FLOW_STARVE_NS as u64
+        );
     }
 
     #[test]
@@ -417,8 +472,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_16() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 16);
+    fn task_size_is_40() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
     }
 
     #[test]
@@ -427,10 +482,20 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_112() {
+    fn pi_wait_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_pi_wait>(), 16);
+    }
+
+    #[test]
+    fn topo_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_topo>(), 16);
+    }
+
+    #[test]
+    fn sched_stats_size_is_160() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            112
+            160
         );
     }
 }

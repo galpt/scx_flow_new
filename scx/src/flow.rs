@@ -3,8 +3,9 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Reexports the slice, virtual time, and slot helpers.
+//! Reexports the slice, admission, deadline, and queue helpers.
 
+pub use crate::flow_admit::*;
 pub use crate::flow_edf::*;
 pub use crate::flow_slice::*;
 pub use crate::flow_slot::*;
