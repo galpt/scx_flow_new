@@ -85,8 +85,8 @@ allowed, else the selected CPU, else the first allowed CPU.
 Pinned means migration disabled or one CPU allowed. Empty
 masks rest in the global queue. Frequency cards stay display
 only and never shape placement. No frequency write runs in
-`4.4.0`, and the governor stays free. A running-only boost
-stays out, so responsiveness wins with no knob writes.
+this scheduler, and the governor stays free. A running-only
+boost stays out, so responsiveness wins with no knob writes.
 See `src/bpf/select_cpu.bpf.c`
 and `src/bpf/enqueue.bpf.c`.
 
@@ -156,8 +156,8 @@ SMT and cache preference. Run `schbench` plus `cyclictest`
 plus `stress-ng` on the same host and governor, and watch
 `fast_admits`, `vtime_admits`, `duty_gates`, `prob_holds`,
 `preempt_kicks`, and `preempt_skipped` via `--monitor` and
-the dashboard alongside probe delay. Release `4.4.0`
-restarts from `4.3.x` with no live transition. See
+the dashboard alongside probe delay. This scheduler
+restarts from prior releases with no live transition. See
 `src/flow_slice.rs`, `src/flow_admit.rs`,
 `src/flow_preempt.rs`, and `src/flow_select.rs`.
 
@@ -232,7 +232,7 @@ baseline with no realtime use.
   stealable, and homeless tasks fail closed to the global
   queue with mask wins on drain. Snapshot covers online
   only with per CPU count matching online count.
-- Release `4.4.0` needs a scheduler restart from `4.3.x`
+- This scheduler needs a restart from prior releases
   with no live transition. Queues are fast at `0x6000` plus
   id with depth `4`, deadline at `0x6800` plus id, and
   overflow at `0x7000`. Task state is `40B`, CPU state is
