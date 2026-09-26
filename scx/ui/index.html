@@ -121,17 +121,41 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Slice wraps so the idle stale word never
-     * clips in the narrow card. */
+    /* Slice stays single line with ellipsis. The stale
+     * pill keeps its own KEEP-stale slot below so idle
+     * and live cards share one height with no shift. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
       font-family: var(--font-mono);
       margin-top: 0;
-      white-space: normal;
-      overflow: visible;
-      text-overflow: clip;
-      overflow-wrap: anywhere;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-feature-settings: "tnum";
+      font-variant-numeric: tabular-nums;
+    }
+    /* Reserved stale slot. Fixed height with flex, pill
+     * toggles by visibility only so space stays reserved
+     * with zero layout shift. KEEP-stale: keep slot. */
+    .core-card .core-stale {
+      min-height: 1.35em;
+      display: flex;
+      align-items: center;
+      margin-top: 1px;
+    }
+    /* Idle stale pill. Mono dashed pill, hidden live via
+     * visibility with space kept. KEEP-stale. */
+    .stale-pill {
+      font-family: var(--font-mono);
+      font-size: 0.5625rem;
+      font-weight: 600;
+      border: 1px dashed var(--border-hover);
+      border-radius: 999px;
+      padding: 0 6px;
+      line-height: 1.5;
+      white-space: nowrap;
+      color: var(--text-muted);
     }
     /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. */
@@ -492,8 +516,9 @@
 
     /* Per-CPU cards with dynamic slice, minimum, and pid. They show
      * freq, SMT, LLC, slice, and the anchor minimum. Freq unknown stays
-     * plain with no zero print. Idle cards show dashes with a stale
-     * slice word, explicit. */
+     * plain with no zero print. Slice stays single line with full text
+     * in the title. Idle keeps a stale pill in a reserved KEEP-stale
+     * slot with visibility only, so live and idle share height. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -530,10 +555,16 @@
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
-        var sliceText = 'slice ' + fmtSlice(slice) +
+        var sliceText = 'slice ' + fmtSlice(slice);
+        var fullSlice = sliceText +
           (idle ? ' stale' : '');
         var sliceLabel = '<div class="core-slice" title="' +
-          sliceText + '">' + sliceText + '</div>';
+          fullSlice + '">' + sliceText + '</div>';
+        var staleLabel = '<div class="core-stale">' +
+          '<span class="stale-pill" title="Last slice CPU idle" ' +
+          'style="visibility:' +
+          (idle ? 'visible' : 'hidden') +
+          '">stale</span></div>';
         var minV = cpu.min_vruntime || 0;
         var minLabel = '<div class="core-llc">min ' +
           fmtSlice(minV) + '</div>';
@@ -545,7 +576,7 @@
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + sliceLabel + minLabel +
+          pidLabel + sliceLabel + staleLabel + minLabel +
           '</div>';
       }).join('');
     }
@@ -700,9 +731,10 @@
       renderCoreCards(data);
     }
 
-    /* Full snapshot download as a timestamped file. */
+    /* Full snapshot download as a versioned file. */
     /* Pure blob save with no new network surface and */
-    /* the same loopback snapshot route. */
+    /* the same loopback snapshot route. The file keeps */
+    /* version plus timestamp for shared diagnosis. */
     function downloadSnapshot() {
       fetch('/api/snapshot', { cache: 'no-store' })
         .then(function(r) { return r.json(); })
@@ -712,10 +744,13 @@
             { type: 'application/json' });
           var url = URL.createObjectURL(blob);
           var a = document.createElement('a');
+          var ver = (data && data.version) || 'unknown';
+          var ts = (data && data.timestamp_ns) || 0;
           var stamp = new Date().toISOString()
             .replace(/[:.]/g, '-').slice(0, 19);
+          var tag = ts ? ver + '_' + ts : ver + '_' + stamp;
           a.href = url;
-          a.download = 'scx_flow_' + stamp + '.json';
+          a.download = 'scx_flow_' + tag + '.json';
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);

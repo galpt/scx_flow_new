@@ -496,11 +496,32 @@ mod tests {
         );
     }
 
-    /* Dashboard shows the stale slice word on idle cards. */
+    /* Dashboard keeps the stale pill slot with no shift. KEEP-stale. */
     #[test]
     fn dashboard_shows_stale_when_idle() {
         let html = include_str!("../ui/index.html");
+        assert!(html.contains("stale-pill"));
+        assert!(html.contains(".core-stale"));
+        assert!(html.contains("visibility"));
+        assert!(html.contains("visible"));
+        assert!(html.contains("hidden"));
+        assert!(html.contains("Last slice CPU idle"));
+        assert!(html.contains("min-height: 1.35em"));
         assert!(html.contains("(idle ? ' stale' : '')"));
+        assert!(html.contains("text-overflow: ellipsis"));
+        assert!(html.contains("tabular-nums"));
+    }
+
+    /* Download keeps version plus timestamp in the file name. */
+    #[test]
+    fn dashboard_download_names_versioned_file() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("downloadSnapshot"));
+        assert!(html.contains("JSON.stringify(data, null, 2)"));
+        assert!(html.contains("data.version"));
+        assert!(html.contains("data.timestamp_ns"));
+        assert!(html.contains("scx_flow_"));
+        assert!(html.contains("/api/snapshot"));
     }
 
     /* Dashboard shows the preempt cells. */
