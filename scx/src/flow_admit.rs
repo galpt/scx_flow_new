@@ -65,16 +65,24 @@ pub fn prob_make(count: u8, vol: bool) -> u8 {
 }
 
 /// True when one arrival may use the fast lane.
-/// Needs a normal policy past probation with low duty or a voluntary wake.
+/// Needs a normal policy past probation with low duty, a voluntary
+/// wake, or a preempt flagged arrival under half duty. Mirrors the
+/// BPF lane check with no probe and no divide.
 #[cfg(test)]
-pub fn fast_eligible(policy_normal: bool, prob: u8, duty: u8, wakeup_vol: bool) -> bool {
+pub fn fast_eligible(
+    policy_normal: bool,
+    prob: u8,
+    duty: u8,
+    wakeup_vol: bool,
+    preempt: bool,
+) -> bool {
     if !policy_normal {
         return false;
     }
     if prob_count(prob) != 0 {
         return false;
     }
-    duty < DUTY_FAST || wakeup_vol
+    duty < DUTY_FAST || wakeup_vol || (preempt && duty < DUTY_BATCH)
 }
 
 /// Next probation byte after one sleep wake arrival.
@@ -119,18 +127,31 @@ mod tests {
     #[test]
     fn probation_needs_two_low_wakes() {
         let fresh = prob_make(PROB_CYCLES, true);
-        assert!(!fast_eligible(true, fresh, 0, true));
+        assert!(!fast_eligible(true, fresh, 0, true, false));
         let one = prob_tick(fresh, true, 0);
         assert_eq!(prob_count(one), 1);
         let done = prob_tick(one, true, 0);
-        assert!(fast_eligible(true, done, 0, true));
+        assert!(fast_eligible(true, done, 0, true, false));
     }
 
     #[test]
     fn high_duty_blocks_without_voluntary_wake() {
         let done = prob_make(0, false);
-        assert!(!fast_eligible(true, done, 200, false));
-        assert!(fast_eligible(true, done, 200, true));
-        assert!(!fast_eligible(false, done, 0, true));
+        assert!(!fast_eligible(true, done, 200, false, false));
+        assert!(fast_eligible(true, done, 200, true, false));
+        assert!(!fast_eligible(false, done, 0, true, false));
+    }
+
+    #[test]
+    fn preempt_lane_opens_under_half_duty() {
+        let done = prob_make(0, false);
+        assert!(fast_eligible(true, done, 100, false, true));
+        assert!(fast_eligible(true, done, DUTY_BATCH - 1, false, true));
+        assert!(!fast_eligible(true, done, 100, false, false));
+        assert!(!fast_eligible(true, done, DUTY_BATCH, false, true));
+        assert!(!fast_eligible(true, done, 200, false, true));
+        assert!(!fast_eligible(false, done, 0, false, true));
+        let fresh = prob_make(PROB_CYCLES, true);
+        assert!(!fast_eligible(true, fresh, 0, false, true));
     }
 }

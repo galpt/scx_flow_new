@@ -8,6 +8,10 @@
 //! Live means below the attach snapshot with no kernel online read.
 //! An offlined CPU needs a restart with no live rebalance, and its
 //! fast FIFO strands while its deadline work stays stealable.
+//!
+//! Full drain order lives in BPF dispatch. Mirrors cover the
+//! per-tier predicates with tests walking sibling, window, then
+//! gated order.
 
 /// Compile time CPU bound. Mirrors the BPF header.
 #[cfg(test)]
@@ -304,6 +308,22 @@ mod tests {
         assert_eq!(sib_donor(0, 0, 4, 1, &depths), None);
         assert_eq!(sib_donor(9, 0, 4, 1, &depths), None);
         assert_eq!(sib_donor(2, 0, 4, 2, &depths), None);
+    }
+
+    #[test]
+    fn steal_tiers_hold_sibling_then_window_then_gated() {
+        let depths = vec![0u64, 3, 0, 0];
+        assert_eq!(sib_donor(1, 0, 4, 2, &depths), Some(1));
+        let got = crate::flow_slot::steal_first_donor(0, 4, 2, &depths).unwrap();
+        assert_eq!(got, crate::flow_slot::VTIME_BASE + 1);
+        let shallow = vec![0u64, 1, 0, 0];
+        assert!(crate::flow_slot::steal_first_donor(0, 4, 2, &shallow).is_none());
+        let now = 10_000_000u64;
+        assert!(gated_donor_ok(2));
+        assert!(starved(now - 5_000_000, now));
+        assert!(!gated_donor_ok(1));
+        assert!(!starved(now - 100, now));
+        assert!(!starved(0, now));
     }
 
     #[test]
