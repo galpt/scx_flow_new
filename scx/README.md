@@ -201,11 +201,13 @@ baseline with no realtime use.
 ## Limitations
 
 - CPU live means below the `nr` snapshot at attach with no
-  kernel online read. A CPU hotplug needs a restart. Unknown
-  CPUs fail closed to overflow with mask wins on drain.
-  Offline queues drain via overflow plus steal on the next
-  pass until restart. Snapshot covers online only with per
-  CPU count matching online count.
+  kernel online read. A CPU hotplug needs a restart, and no
+  live rebalance runs. Select may still target an offlined
+  CPU, and its fast FIFO strands until restart since steal
+  never visits fast queues. Its deadline work stays
+  stealable, and homeless tasks fail closed to the global
+  queue with mask wins on drain. Snapshot covers online
+  only with per CPU count matching online count.
 - Release `4.4.0` needs a scheduler restart from `4.3.x`
   with no live transition. Queues are fast at `0x6000` plus
   id with depth `4`, deadline at `0x6800` plus id, and

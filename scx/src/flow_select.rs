@@ -4,6 +4,10 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the placement and steal helpers shared by tests and docs.
+//!
+//! Live means below the attach snapshot with no kernel online read.
+//! An offlined CPU needs a restart with no live rebalance, and its
+//! fast FIFO strands while its deadline work stays stealable.
 
 /// Compile time CPU bound. Mirrors the BPF header.
 #[cfg(test)]
