@@ -18,6 +18,9 @@ pub const VTIME_BASE: u64 = 0x6800;
 /// Id of the overflow tail shared by every CPU.
 #[cfg(test)]
 pub const SLOT_OVERFLOW: u64 = 0x7000;
+/// Id of the kernel global queue for homeless tasks.
+#[cfg(test)]
+pub const SLOT_GLOBAL: u64 = 0;
 /// Max DSQs at 1024 CPUs. Holds two per CPU plus one overflow.
 #[cfg(test)]
 pub const SLOT_MAX_DSQS: u64 = 2049;
@@ -55,6 +58,14 @@ pub fn slot_overflow_dsq() -> u64 {
     SLOT_OVERFLOW
 }
 
+/// Id of the kernel global queue for homeless tasks.
+/// Tasks without state or without a live CPU rest here with mask
+/// wins on drain, and the drain counts the global moves.
+#[cfg(test)]
+pub fn slot_global_dsq() -> u64 {
+    SLOT_GLOBAL
+}
+
 /// Count of DSQs for one host with two per CPU plus overflow.
 /// Holds twice nr plus one, so eight CPUs need seventeen queues.
 #[cfg(test)]
@@ -64,20 +75,21 @@ pub fn slot_nr_dsqs(nr: u64) -> u64 {
 
 /// DSQ id for one insert with pinned overflow.
 /// Pinned tasks rest in the overflow tail with no per CPU use.
-/// Dead CPUs rest in overflow with fail closed.
+/// Homeless tasks rest in the kernel global queue with fail closed.
+/// Dead CPUs rest in global with fail closed.
 #[cfg(test)]
 pub fn insert_dsq(cpu: i32, pinned: bool, nr: usize) -> u64 {
     if pinned {
         return slot_overflow_dsq();
     }
     if cpu < 0 {
-        return slot_overflow_dsq();
+        return slot_global_dsq();
     }
     if (cpu as usize) >= nr {
-        return slot_overflow_dsq();
+        return slot_global_dsq();
     }
     if (cpu as u64) >= 1024 {
-        return slot_overflow_dsq();
+        return slot_global_dsq();
     }
     fast_dsq(cpu as u32)
 }
@@ -252,8 +264,9 @@ mod tests {
     fn insert_targets_fast_or_overflow() {
         assert_eq!(insert_dsq(3, false, 8), FAST_BASE + 3);
         assert_eq!(insert_dsq(3, true, 8), SLOT_OVERFLOW);
-        assert_eq!(insert_dsq(-1, false, 8), SLOT_OVERFLOW);
-        assert_eq!(insert_dsq(9, false, 8), SLOT_OVERFLOW);
+        assert_eq!(insert_dsq(-1, false, 8), SLOT_GLOBAL);
+        assert_eq!(insert_dsq(9, false, 8), SLOT_GLOBAL);
+        assert_eq!(slot_global_dsq(), 0);
         assert_eq!(
             local_trip_dsqs(2),
             [FAST_BASE + 2, VTIME_BASE + 2, SLOT_OVERFLOW]

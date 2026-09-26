@@ -285,7 +285,7 @@ static __always_inline u64 flow_vtime_dsq(u32 cpu)
 	return (u64)FLOW_VTIME_BASE + (u64)cpu;
 }
 /* Id of the overflow tail shared by every CPU. */
-/* Pinned and homeless tasks rest here with mask wins on drain. */
+/* Pinned and foreign tasks rest here with mask wins on drain. */
 static __always_inline u64 flow_overflow_dsq(void)
 {
 	return (u64)FLOW_OVERFLOW;

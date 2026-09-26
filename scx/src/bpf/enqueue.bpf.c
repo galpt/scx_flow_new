@@ -70,11 +70,19 @@ static __always_inline void flow_vtime_insert(
 	__sync_fetch_and_add(&flow_stats.vtime_admits, 1);
 }
 /* Insert one task into the shared overflow tail. */
-/* Pinned and homeless tasks rest here with mask wins on drain. */
+/* Pinned and foreign tasks rest here with mask wins on drain. */
 static __always_inline void flow_over_insert(
 	struct task_struct *p, u64 slice)
 {
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(), slice, 0);
+}
+/* Insert one homeless task into the kernel global queue. */
+/* Tasks without state or without a live CPU rest here with */
+/* mask wins on drain, and the drain counts the global moves. */
+static __always_inline void flow_global_insert(
+	struct task_struct *p, u64 slice)
+{
+	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL, slice, 0);
 }
 /* Correlate one wakeup with the waiter record for PI. */
 /* A short block means the waker likely held a lock while the occupant */
@@ -169,11 +177,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	pinned = flow_task_pinned(p);
 	policy = p->policy;
 	now = flow_now();
-	/* Tasks without state keep the overflow tail with no kick. */
+	/* Tasks without state keep the kernel global queue with no kick. */
 	/* The next dispatch pass collects them with mask wins. */
 	if (!tctx) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
-		flow_over_insert(p, (u64)FLOW_QMIN_NS);
+		flow_global_insert(p, (u64)FLOW_QMIN_NS);
 		return;
 	}
 	w = flow_weight_clamp(p->scx.weight);
@@ -208,7 +216,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	cpu = flow_pick_target(p, sel, false);
 	if (!flow_cpu_ok(p, cpu)) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
-		flow_over_insert(p, flow_dyn_slice(w, 1ULL));
+		flow_global_insert(p, flow_dyn_slice(w, 1ULL));
 		return;
 	}
 	if (tctx->vruntime == 0 && tctx->run_at == 0 &&
