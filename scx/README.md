@@ -1,35 +1,75 @@
 # scx_flow
 
-scx_flow is our own slot scheduler for Linux, written
+scx_flow is our own deadline scheduler for Linux, written
 in Rust with a BPF core, that runs inside
 [`sched_ext`](https://github.com/sched-ext/scx/tree/main).
-It keeps one bounded LIFO queue per CPU plus one overflow
-tail, with a fixed slice at 1ms. It is deliberately knob-free.
-Queue order is bounded LIFO at K 3 with no virtual time use.
+It keeps one shallow FIFO plus one deadline queue per CPU,
+one shared overflow tail, and the kernel global queue. Slices
+are dynamic from weight and pressure with no knob. Only
+`SCHED_OTHER` tasks may use the fast lane.
 
 ## Overview
 
-### Order
+### Queues
 
-Tasks wait in per CPU queues at base `0x6000` plus id with
-one shared overflow tail at `0x6800`. Max `1025` DSQs at
-`1024` CPUs. Inserts take head for `3` of `9` with six tails
-per period plus one forced tail at `MAX`. At most `3`
-consecutive head inserts per queue. Overflow and steal keep
-at least one slot per pass. This is a consecutive insert
-bound with no wait time bound. One atomic add claims one
-period slot with no scan, so enqueue stays `O(1)`. Head use
-is user DSQ only. Pinned tasks rest in the overflow tail with
-no per CPU use, so every owner dispatch visits them in the
-window. Exiting tasks run at once on the task CPU via
-`LOCAL_ON` with no queue wait. The task CPU wins over the
-enqueuer. Empty masks rest in the overflow tail in queue order.
+Tasks rest in a per CPU fast FIFO at base `0x6000` plus id
+with depth `4`, a per CPU deadline queue at `0x6800` plus id,
+one shared overflow tail at `0x7000`, and the kernel global
+queue. Max `2049` DSQs at `1024` CPUs. Every id stays below
+`LOCAL_ON`, and init fails loudly past the bound. Pinned and
+foreign tasks rest in overflow with mask wins on drain.
+Exiting tasks run at once on the task CPU via `LOCAL_ON`.
 See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
 
-### Fixed slice
+### Dynamic slices
 
-The slice is fixed at 1ms with no knob. Fresh tasks join
-with the slice, so the start stays neutral.
+Slices span `250us` to `15ms` with a `5ms` target and a
+`500us` micro quantum. The bound is the larger of the target
+and depth times the minimum, shared by weight over pressure,
+then clamped to the bounds. Base weight `100` holds the
+target alone, range `1` to `10000`. Pressure sizes the slice
+from queued depth on both local queues. See `src/bpf/intf.h`
+and `src/flow_slice.rs`.
+
+### Admission
+
+Duty tracks intensity with alpha `1/8` over each stop. Sleep
+decays it, short bursts climb gently with a `1.5ms` allowance,
+and long runs climb hard. Only duty under `15` percent, or a
+voluntary wake, may use the fast lane past two probation
+wakes. Fresh tasks anchor at the minimum minus lag cap and
+never take the fast lane early. See `src/bpf/enqueue.bpf.c`
+and `src/flow_admit.rs`.
+
+### Ledger
+
+Every segment charges weight scaled time to virtual time, fast
+lane or not. Each CPU keeps a high water minimum that never
+moves back. Entries clamp to the larger of task time and
+minimum minus lag cap, where lag is `5ms` times base over
+weight. The deadline is the clamped time, carried as DSQ
+vtime. Steals add a scaled `500us` penalty with no knob to
+turn it off. See `src/bpf/lifecycle.bpf.c`.
+
+### Preemption
+
+Interactive tasks preempt batch owners prompt at a `100us`
+floor, one kick per `2ms` window per CPU. Interactive pairs
+yield at the micro quantum end with no kick. Batch pairs kick
+only past slice exhaust with a deadline gap over one quantum.
+Batch never preempts interactive, and pinned arrivals never
+preempt a busy CPU. No timer kick runs, so the floor is a
+slice shorten plus kick approximation. See
+`src/bpf/enqueue.bpf.c` and `src/flow_preempt.rs`.
+
+### Priority help
+
+Voluntary sleep records a waiter per CPU. A wake inside `1ms`
+elevates the running occupant once with a `500us` slice
+override and a fast head insert at its next enqueue. Release
+or expiry demotes with no rearm. The owner is unobservable
+without extra kfuncs, so the running occupant is the proxy.
+See `src/bpf/lifecycle.bpf.c` and `src/bpf/enqueue.bpf.c`.
 
 ### Placement
 
@@ -44,72 +84,70 @@ and `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
 
-Order is own queue at `12`, overflow at `4`, then one peer
-steal with a single move toward budget `32`. All trips skip
+Order is own fast at `4`, own deadline at `12`, one peer
+steal with a single move, global plus overflow at `4`, then a
+gated starvation pass, toward budget `32`. All trips skip
 empty with one read, so idle pays no empty scan. One shared
 drain moves mask allowed tasks to local with a miss cap at
 `4`, so one bad head never blocks later work with no full
-scan. Overflow shares the same miss cap with no head stall.
-The steal scan visits bound `8` peers from start with wrap
-plus live check and keeps the first donor at need, which is
-`1` when idle with no moves and no window work, else `2`.
-The cursor steps by `8` with wrap so passes spread with no
-hotspot. Single CPU hosts skip the pass. Pinned tasks rest
-in overflow, so trips visit them each pass. All trips share
-one `__noinline` drain with mask wins and move to local, so
-order stays bounded LIFO at K `3`. See `src/bpf/dispatch.bpf.c`,
-`src/bpf/intf.h`, and `src/flow_slot.rs`.
+scan. See `src/bpf/dispatch.bpf.c`, `src/bpf/intf.h`, and
+`src/flow_slot.rs`.
+
+### Steal
+
+Steal never visits a peer fast queue, so sleepy tasks stay
+local. The SMT sibling wins first, then the same cache
+domain over bound `8` with a prandom salt and a cursor step
+of `8`. Need is `1` when idle and empty else `2`. The gated
+cross domain pass moves only tasks waiting past `1.5ms` from
+donors holding at least two. Single CPU hosts skip the pass.
+See `src/bpf/dispatch.bpf.c` and `src/flow_select.rs`.
 
 ### Kicks
 
-Idle targets are always kicked with a mask check regardless
-of queue depth, so no idle CPU with queued work sleeps
-unkicked. Busy targets kick at most once per `2ms` window
-with soft preempt. Pinned tasks never preempt a busy CPU.
-A null or self occupant keeps kick only with no shorten,
-else the occupant slice shortens to zero so the kick sticks.
-Fallback overflow with no live CPU sends no kick and the next
-drain pass collects it with mask wins. Exiting uses an idle
-kick on the task CPU with no depth and no preempt. See
-`src/bpf/intf.h`, `src/bpf/main.bpf.c`, and
+Idle targets kick at once with the idle flag cleared first,
+so no idle CPU with queued work sleeps unkicked. Busy kicks
+follow the class rules with the rate window. A null or self
+occupant keeps kick only with no shorten. Fallback overflow
+with no live CPU sends no kick and the next drain pass
+collects it with mask wins. Exiting uses an idle kick on the
+task CPU. See `src/bpf/intf.h`, `src/bpf/main.bpf.c`, and
 `src/bpf/enqueue.bpf.c`.
 
 ### Accounting
 
 Running sets the running pid and counts on CPU. Stopping
-charges one segment to total runtime, clears the running pid,
-and counts requeue or completion. Virtual time and frontier
-keep one max with no queue read. Placement, dispatch, and
-kicks never read them, so they stay accounting only with no
-scheduling use. Disable and exit charge a leftover segment at
+charges one scaled segment to total runtime and the ledger,
+steps duty, keeps the minimum high water, and counts requeue
+or completion. Disable and exit charge a leftover segment at
 most once when stopping never ran. Release clears a stale
-running view with no charge. See `src/bpf/lifecycle.bpf.c`
-and `src/bpf/main.bpf.c`.
+running view with no charge and drops the waiter window. See
+`src/bpf/lifecycle.bpf.c` and `src/bpf/main.bpf.c`.
 
 ### Counters
 
-Counters stay at `112B` with `14` u64 fields. Fields are
+Counters stay at `160B` with `20` u64 fields. Fields are
 `on_cpu`, `total_runtime`, `inserts`, `requeues`,
 `completions`, `park_moves`, `steal_moves`, `kicks`,
 `enq_no_tctx`, `preempt_kicks`, `preempt_skipped`,
-`slot_moves`, `lifo_heads`, and `lifo_bound_hits`. The
-dashboard JSON carries the same fields with per CPU
-`running_pid` and fixed `slice_ns`. Upgrading from `4.2.46`
-changes queue ids, LIFO, caps, rate, and JSON, so it needs
-a scheduler restart with no live transition. See `src/stats.rs`
-and `src/snapshot.rs`.
+`slot_moves`, `fast_admits`, `fast_bounds`, `vtime_admits`,
+`duty_gates`, `prob_holds`, `elev_moves`, `steal_penalties`,
+and `global_moves`. The dashboard JSON carries the same
+fields with per CPU `running_pid`, dynamic `slice_ns`, and
+`min_vruntime`. Old JSON still decodes with defaults. See
+`src/stats.rs` and `src/snapshot.rs`.
 
 ## Typical Use Cases
 
-- Latency-sensitive applications. Near arrivals land at head
-  with capped trip drains, so wakeups rarely wait behind
-  long work at one head.
-- General desktop use. The session stays responsive
-  while long bursts serve with a fixed slice without blocking
+- Latency-sensitive applications. Sleepy wakeups land in a
+  shallow local FIFO with capped drains, so they rarely wait
+  behind long work.
+- General desktop use. The session stays responsive while
+  long bursts serve with weight sized slices without blocking
   short arrivals.
-- Mixed batch workloads. Long jobs keep throughput
-  with bounded LIFO at K `3` while short arrivals keep draining
-  through trips plus steal.
+- Mixed batch workloads. Long jobs keep throughput through
+  deadline order plus steal while short arrivals keep the
+  fast lane.
 
 ## Production Ready?
 
@@ -126,10 +164,10 @@ scheduling behavior. Reporting only is `--stats`,
 The dashboard serves loopback port `50005` with a unix
 socket fallback at `/tmp/scx_flow.sock` and no
 authentication, since loopback is the trust boundary.
-It shows move rates, preempt rates, slot moves,
-per CPU running pids with fixed slice, and a button
-to download the full snapshot as JSON.
-`--no-webui` disables it.
+It shows move rates, preempt rates, admission gauges,
+per CPU running pids with dynamic slice and minimum, and a
+button to download the full snapshot as JSON. Energy stays
+display only. `--no-webui` disables it.
 
 ## Code map
 
@@ -140,11 +178,10 @@ to download the full snapshot as JSON.
 - Drains: `src/bpf/dispatch.bpf.c`
 - Lifecycle: `src/bpf/lifecycle.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
-  `src/flow_select.rs`, `src/flow_preempt.rs`, `src/flow_slot.rs`
+  `src/flow_admit.rs`, `src/flow_select.rs`,
+  `src/flow_preempt.rs`, `src/flow_slot.rs`
 - Facade: `src/flow.rs`
-- Tests: `src/flow_tests_edf.rs`,
-  `src/flow_tests_preempt.rs`,
-  `src/flow_tests_slot.rs`, `src/flow_tests_lifo.rs`
+- Tests: inline `tests` modules in each mirror
 - Constant validation: `src/config.rs`
 - Generated bindings and skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`
@@ -169,14 +206,17 @@ baseline with no realtime use.
   Offline queues drain via overflow plus steal on the next
   pass until restart. Snapshot covers online only with per
   CPU count matching online count.
-- Release `4.3.0` needs a scheduler restart from `4.2.46`
-  with no live transition. Queue ids are `0x6000` plus id
-  with overflow at `0x6800`. LIFO moved `K 8` to `K 3` with
-  `3` heads per `9`. Own cap moved `31` to `12` with miss
-  `8` to `4`. Busy rate moved `1ms` to `2ms`. Dashboard JSON
-  changed with the same `112B` and `14` counters.
+- Release `4.4.0` needs a scheduler restart from `4.3.x`
+  with no live transition. Queues are fast at `0x6000` plus
+  id with depth `4`, deadline at `0x6800` plus id, and
+  overflow at `0x7000`. Task state is `40B`, CPU state is
+  `16B`, and counters are `160B` with `20` fields. Busy rate
+  stays `2ms`. Dashboard JSON changed with the same field
+  names kept where live.
 - Unknown frequency stays unknown with no effect on
-  placement. Frequency cards are display only.
+  placement. Frequency, slice, minimum, and energy cards are
+  display only.
 - Single-thread and single-CPU hosts run the same path
   with no peer scan.
-- Needs a kernel with sched_ext enabled.
+- Needs a kernel with sched_ext enabled, `7.2` series and
+  up. Compat guards keep older kfuncs working where present.
