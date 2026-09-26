@@ -4,6 +4,10 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the busy kick rate and class rule helpers shared by tests and docs.
+//!
+//! The BPF busy path gates on the rate window before resolving the
+//! occupant, then serves class plus slice shorten from one trusted
+//! lookup under one RCU pass.
 
 /// Busy kick window in nanos at 2ms.
 #[cfg(test)]

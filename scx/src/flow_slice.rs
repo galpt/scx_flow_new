@@ -30,6 +30,9 @@ pub fn clamp_weight(w: u32) -> u32 {
 /// Dynamic slice from weight and queue pressure with no knob.
 /// L is the larger of the 5ms target and N times the 250us minimum.
 /// Fair is L times weight over N times base, clamped to the bounds.
+/// Callers pass the admitting lane depth plus one, so the fast lane
+/// sizes from fast pressure and the deadline lane from its own depth
+/// with one probe and one divide per enqueue.
 #[cfg(test)]
 pub fn dyn_slice(weight: u32, queued: u64) -> u64 {
     let w = clamp_weight(weight) as u64;

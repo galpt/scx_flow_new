@@ -226,36 +226,34 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    true);
 		goto kicked;
 	}
-	/* Pressure sizes the slice from queued depth on both queues. */
-	{
-		s32 qf = scx_bpf_dsq_nr_queued(
-		    flow_fast_dsq((u32)cpu));
-		s32 qv = scx_bpf_dsq_nr_queued(
-		    flow_vtime_dsq((u32)cpu));
-		u64 queued = 1ULL;
-		if (qf > 0)
-			queued += (u64)qf;
-		if (qv > 0)
-			queued += (u64)qv;
-		slice = flow_dyn_slice(w, queued);
-	}
-	tctx->slice_ns = (u32)slice;
-	tctx->wait_at = now;
-	tp = flow_topo((u32)cpu);
-	if (tp)
-		tp->last_slice = slice;
 	/* Fast lane needs a normal task past probation with low duty. */
 	/* A voluntary wake also opens it, and kernel urgency takes head. */
 	/* Idle and batch policies never enter, whatever the duty reads. */
-	if (flow_fast_lane_ok(policy) &&
+	/* A preempt flagged arrival under half duty also opens it. */
+	/* The check runs before any sizing, so a closed lane pays no */
+	/* probe and no divide on the wakeup path. */
+	bool fast_ok = flow_fast_lane_ok(policy) &&
 	    flow_prob_count(tctx->prob) == 0 &&
 	    (duty < (u8)FLOW_DUTY_FAST ||
 	    (wakeup && flow_prob_vol(tctx->prob)) ||
 	    ((enq_flags & (u64)SCX_ENQ_PREEMPT) != 0 &&
-	    duty < (u8)FLOW_DUTY_BATCH))) {
+	    duty < (u8)FLOW_DUTY_BATCH));
+	/* Fast arrivals size from the fast depth only with one probe. */
+	/* One divide serves the insert, and no deadline forms here, */
+	/* so the lag cap divide stays off the fast path. */
+	if (fast_ok) {
 		s32 depth = scx_bpf_dsq_nr_queued(
 		    flow_fast_dsq((u32)cpu));
 		if (depth < (s32)FLOW_FAST_D) {
+			u64 queued = 1ULL;
+			if (depth > 0)
+				queued += (u64)depth;
+			slice = flow_dyn_slice(w, queued);
+			tctx->slice_ns = (u32)slice;
+			tctx->wait_at = now;
+			tp = flow_topo((u32)cpu);
+			if (tp)
+				tp->last_slice = slice;
 			flow_fast_insert(p, cpu, slice, urgent);
 			goto kicked;
 		}
@@ -268,12 +266,24 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(
 			    &flow_stats.duty_gates, 1);
 	}
-	/* Steady tasks join the deadline queue at clamped virtual time. */
+	/* Steady tasks size from the deadline depth only with one probe. */
 	/* Fresh tasks anchor at minimum minus lag cap with wrap safety. */
 	{
+		s32 qv = scx_bpf_dsq_nr_queued(
+		    flow_vtime_dsq((u32)cpu));
 		struct flow_cpu_state *mst = flow_cpu((u32)cpu);
 		u64 min_v = mst ? mst->min_vruntime : 0;
-		u64 deadline = flow_clamp_entry(tctx->vruntime,
+		u64 queued = 1ULL;
+		u64 deadline;
+		if (qv > 0)
+			queued += (u64)qv;
+		slice = flow_dyn_slice(w, queued);
+		tctx->slice_ns = (u32)slice;
+		tctx->wait_at = now;
+		tp = flow_topo((u32)cpu);
+		if (tp)
+			tp->last_slice = slice;
+		deadline = flow_clamp_entry(tctx->vruntime,
 		    min_v, flow_lag_cap(w));
 		flow_vtime_insert(p, cpu, slice, deadline);
 	}
@@ -291,7 +301,6 @@ kicked:
 		u64 occ_vt;
 		u64 occ_ran;
 		u64 occ_slice;
-		bool have_occ;
 		if (!st)
 			return;
 		if (st->running_pid == 0) {
@@ -306,9 +315,22 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
+		/* One prompt kick per 2ms window per CPU. */
+		/* The window gates before any occupant lookup, so a hot */
+		/* window skips the task lookup plus the RCU pass on the */
+		/* wakeup path. The stamp still lands only on a real kick */
+		/* below. Entry time serves the window with no fresh read. */
+		last = flow_rate_at[(u32)cpu & 1023U];
+		if (last != 0 && now - last < (u64)FLOW_PREEMPT_RATE_NS) {
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
 		/* Use the compat helper, it falls back to cpu_rq on old kernels. */
 		/* The occupant may be untrusted there, so the class read */
-		/* goes through a trusted lookup with release on both paths. */
+		/* goes through one trusted lookup with release on each path. */
+		/* The same lookup serves the slice shorten below, so the */
+		/* busy path pays one task lookup plus one RCU pass. */
 		occupant = __COMPAT_scx_bpf_cpu_curr(cpu);
 		if (!occupant || occupant == p) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
@@ -317,41 +339,40 @@ kicked:
 			return;
 		}
 		occ_pid = occupant->pid;
-		occ_cls = (u32)FLOW_CLS_BATCH;
-		occ_vt = 0;
-		occ_ran = 0;
-		occ_slice = 0;
-		have_occ = false;
 		bpf_rcu_read_lock();
 		trusted = bpf_task_from_pid(occ_pid);
-		if (trusted) {
-			octx = flow_lookup(trusted);
-			if (octx) {
-				occ_cls = octx->cls;
-				occ_vt = octx->vruntime;
-				occ_slice = octx->slice_ns;
-				if (octx->on_cpu &&
-				    octx->run_at != 0 &&
-				    now >= octx->run_at)
-					occ_ran = now - octx->run_at;
-				have_occ = true;
-			}
-			bpf_task_release(trusted);
-		}
-		bpf_rcu_read_unlock();
-		if (!have_occ) {
+		if (!trusted) {
+			bpf_rcu_read_unlock();
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		/* Occ class is the trusted copy above with no re-read. */
-		/* The pointer is released, so only the copy stays live. */
+		octx = flow_lookup(trusted);
+		if (!octx) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		occ_cls = octx->cls;
+		occ_vt = octx->vruntime;
+		occ_slice = octx->slice_ns;
+		occ_ran = 0;
+		if (octx->on_cpu && octx->run_at != 0 &&
+		    now >= octx->run_at)
+			occ_ran = now - octx->run_at;
+		/* The copy above is trusted with no re-read. */
+		/* The reference stays held, so the shorten below reuses */
+		/* it with no second lookup and no second RCU pass. */
 		if (occ_cls != (u32)FLOW_CLS_INTERACTIVE &&
 		    occ_cls != (u32)FLOW_CLS_BATCH)
 			occ_cls = (u32)FLOW_CLS_BATCH;
 		/* Batch never preempts an interactive occupant. */
 		if (cls == (u32)FLOW_CLS_BATCH &&
 		    occ_cls == (u32)FLOW_CLS_INTERACTIVE) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
 			return;
@@ -359,6 +380,8 @@ kicked:
 		/* Interactive pairs yield at the micro quantum end. */
 		if (cls == (u32)FLOW_CLS_INTERACTIVE &&
 		    occ_cls == (u32)FLOW_CLS_INTERACTIVE) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
 			return;
@@ -367,6 +390,8 @@ kicked:
 		/* past one micro quantum before a prompt kick may run. */
 		if (cls == (u32)FLOW_CLS_BATCH) {
 			if (occ_slice == 0 || occ_ran < occ_slice) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped, 1);
 				return;
@@ -374,37 +399,26 @@ kicked:
 			if (!flow_time_before(tctx->vruntime +
 			    (u64)FLOW_MICRO_QUANTUM_NS,
 			    occ_vt)) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped, 1);
 				return;
 			}
 		}
-		/* One prompt kick per 2ms window per CPU. */
-		now = flow_now();
-		last = flow_rate_at[(u32)cpu & 1023U];
-		if (last != 0 && now - last < (u64)FLOW_PREEMPT_RATE_NS) {
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
-			return;
-		}
-		flow_rate_at[(u32)cpu & 1023U] = now;
 		/* Interactive over batch shortens to the 100us floor. */
 		/* Batch over batch shortens to zero at slice end. */
-		/* The slice write uses a trusted lookup, since the */
-		/* occupant read may be untrusted on old kernels. */
+		/* The slice write uses the held trusted reference. */
 		/* No timer kick runs here, so the floor is an */
 		/* approximation with kick timing, not a precise preempt. */
-		bpf_rcu_read_lock();
-		trusted = bpf_task_from_pid(occ_pid);
-		if (trusted) {
-			if (cls == (u32)FLOW_CLS_INTERACTIVE)
-				scx_bpf_task_set_slice(trusted,
-				    (u64)FLOW_PREEMPT_FLOOR_NS);
-			else
-				scx_bpf_task_set_slice(trusted, 0);
-			bpf_task_release(trusted);
-		}
+		if (cls == (u32)FLOW_CLS_INTERACTIVE)
+			scx_bpf_task_set_slice(trusted,
+			    (u64)FLOW_PREEMPT_FLOOR_NS);
+		else
+			scx_bpf_task_set_slice(trusted, 0);
+		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
+		flow_rate_at[(u32)cpu & 1023U] = now;
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 		__sync_fetch_and_add(&flow_stats.preempt_kicks, 1);
 	}
