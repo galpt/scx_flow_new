@@ -2,6 +2,12 @@
 /*
  * Select CPU op.
  *
+ * Placement keeps the waker CPU when idle and allowed, then any idle
+ * CPU, then the previous CPU, then the first allowed CPU. Pinned tasks
+ * stay where the mask allows with no scan, and the task mask always
+ * wins. Frequency and topology stay display only and never shape this
+ * path. See enqueue.bpf.c for the lane choice after select.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,

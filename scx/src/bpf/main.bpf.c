@@ -2,6 +2,12 @@
 /*
  * Flow scheduler BPF core.
  *
+ * Maps hold task ledgers, CPU minima, waiter records, and the topology
+ * view. Init creates two queues per CPU plus one overflow tail, and it
+ * fails loudly when an id reaches the local range. Ops split across
+ * select_cpu, enqueue, dispatch, and lifecycle files. Hotplug needs a
+ * restart, and the watchdog stays at 30 seconds.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
@@ -9,25 +15,36 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/* Per task state for the life of the task. */
+/* Per task ledger for the life of the task. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU state with frontier, running pid, and steal cursor. */
+/* Per CPU minimum with running pid and steal cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
+/* Per CPU waiter record for the PI approximation. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_pi_wait);
+} pi_stor SEC(".maps");
+/* Per CPU topology view with sibling plus domain plus slice. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_topo);
+} topo_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
-/* Per queue LIFO sequence at 1025 with BSS zero start. */
-/* Holds one u32 per CPU queue plus one overflow tail. */
-volatile u32 flow_lifo_seq[1025];
 /* Last busy kick time per CPU in nanos at 2ms. */
 /* Zero init so the first kick always runs with wrap. */
 volatile u64 flow_rate_at[1024];
@@ -58,6 +75,22 @@ static struct flow_cpu_state *flow_cpu(u32 cpu)
 	if (cpu >= (u32)FLOW_MAX_CPUS)
 		return NULL;
 	return bpf_map_lookup_elem(&cpu_state_stor, &key);
+}
+/* Waiter record or null when the id is past the bound. */
+static struct flow_pi_wait *flow_pi(u32 cpu)
+{
+	u32 key = cpu;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return NULL;
+	return bpf_map_lookup_elem(&pi_stor, &key);
+}
+/* Topology view or null when the id is past the bound. */
+static struct flow_topo *flow_topo(u32 cpu)
+{
+	u32 key = cpu;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return NULL;
+	return bpf_map_lookup_elem(&topo_stor, &key);
 }
 /* True when the id is a live CPU below nr and the bound. */
 /* Live means below the nr snapshot at init with no kernel online read. */
@@ -136,16 +169,21 @@ static __always_inline void flow_clear_running_if_owner(
 		return;
 	st->running_pid = 0;
 }
-/* Charge one leftover run segment at most once. */
-/* Stopping owns the normal charge and clears run at. */
-/* Disable and exit funnel here only when stopping never ran. */
+/* Charge one leftover run segment at most once with scaling. */
+/* Stopping owns the normal charge and stores stop time. */
+/* Disable and exit funnel here only for a running task. */
+/* The count flag pairs with stopping, so a release never double charges. */
 static __always_inline void flow_charge_leftover(s32 cpu,
-	struct flow_task_ctx *tctx)
+	struct task_struct *p, struct flow_task_ctx *tctx, u32 pid)
 {
 	u64 start;
 	u64 now;
 	u64 delta;
+	struct flow_cpu_state *st;
+	u32 w;
 	if (!tctx)
+		return;
+	if (!tctx->on_cpu)
 		return;
 	start = tctx->run_at;
 	if (start == 0)
@@ -154,13 +192,22 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
+	/* A stopped task holds stop time with no charge left. */
+	st = flow_cpu((u32)cpu);
+	if (!st || st->running_pid != pid)
+		return;
 	now = flow_now();
 	if (flow_time_before(now, start))
 		return;
 	delta = now - start;
 	tctx->run_at = 0;
-	tctx->vruntime += delta;
+	tctx->on_cpu = 0;
+	w = flow_weight_clamp(p->scx.weight);
+	tctx->vruntime += flow_scaled_delta(delta, w);
+	st->min_vruntime = flow_min_max(st->min_vruntime,
+	    tctx->vruntime);
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	flow_on_cpu_dec();
 }
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
@@ -183,6 +230,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	nr_cpu_ids = n;
 	bpf_for(cpu, 0, 1024) {
 		struct flow_cpu_state *st;
+		struct flow_pi_wait *pw;
+		struct flow_topo *tp;
 		u32 key;
 		if (cpu < 0)
 			continue;
@@ -192,33 +241,57 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			break;
 		key = (u32)cpu;
 		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
-		if (!st)
-			continue;
-		st->frontier = 0;
-		st->running_pid = 0;
-		st->cursor = (u32)cpu;
+		if (st) {
+			st->min_vruntime = 0;
+			st->running_pid = 0;
+			st->cursor = (u32)cpu;
+		}
+		pw = bpf_map_lookup_elem(&pi_stor, &key);
+		if (pw) {
+			pw->pid = 0;
+			pw->_pad = 0;
+			pw->at = 0;
+		}
+		tp = bpf_map_lookup_elem(&topo_stor, &key);
+		if (tp) {
+			tp->smt_sib = 0xffffffffU;
+			tp->llc = 0;
+			tp->last_slice = (u64)FLOW_QMIN_NS;
+		}
 	}
-	/* One queue per CPU plus one overflow tail with no share. */
-	/* Each CPU holds base plus id and overflow holds 0x6800. */
-	/* Max 1025 at 1024 CPUs with one bounded pass at init. */
+	/* One fast plus one deadline queue per CPU plus one overflow tail. */
+	/* Fast holds base plus id and deadline holds 0x6800 plus id. */
+	/* Max 2049 at 1024 CPUs with one bounded pass at init. */
 	bpf_for(cpu, 0, 1024) {
-		u64 dsq;
+		u64 fast;
+		u64 vtime;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= n)
 			break;
-		dsq = flow_slot_cpu_dsq((u32)cpu);
-		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
+		fast = flow_fast_dsq((u32)cpu);
+		vtime = flow_vtime_dsq((u32)cpu);
+		if (fast >= (u64)SCX_DSQ_LOCAL_ON ||
+		    vtime >= (u64)SCX_DSQ_LOCAL_ON) {
 			scx_bpf_error("dsq id over bound");
 			return -EINVAL;
 		}
-		ret = scx_bpf_create_dsq(dsq, -1);
+		ret = scx_bpf_create_dsq(fast, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("dsq create failed");
+			return ret;
+		}
+		ret = scx_bpf_create_dsq(vtime, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("dsq create failed");
 			return ret;
 		}
 	}
-	ret = scx_bpf_create_dsq(flow_slot_overflow_dsq(), -1);
+	if (flow_overflow_dsq() >= (u64)SCX_DSQ_LOCAL_ON) {
+		scx_bpf_error("dsq id over bound");
+		return -EINVAL;
+	}
+	ret = scx_bpf_create_dsq(flow_overflow_dsq(), -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
 		return ret;
