@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core
+ * Flow scheduler BPF core.
  *
- * Holds the task and CPU maps, the shared helpers, and the ops table. Defines
- * init and exit with per task and per CPU state for the flow scheduler.
+ * Maps hold task ledgers, CPU minima, waiter records, and the topology
+ * view. Init creates two queues per CPU plus one overflow tail, and it
+ * fails loudly when an id reaches the local range. Ops split across
+ * select_cpu, enqueue, dispatch, and lifecycle files. Hotplug needs a
+ * restart, and the watchdog stays at 30 seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -12,138 +15,52 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/* Per task state for the life of the task. */
+/* Per task ledger for the life of the task. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU state with frontier, running, and cursor. */
+/* Per CPU minimum with running pid and steal cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
+/* Per CPU waiter record for the PI approximation. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_pi_wait);
+} pi_stor SEC(".maps");
+/* Per CPU topology view with sibling plus domain plus slice. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_topo);
+} topo_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
-/* Live pressure gauges for the dashboard with no task cost. Light and hog */
-/* depths sum per CPU queued counts capped at 4. Allowance holds the burst */
-/* line for the light depth. Stopping refreshes all three with one pass, so */
-/* snapshot reads a consistent view with no dispatch cost. */
-volatile u64 flow_light_depth;
-volatile u64 flow_hog_depth;
-volatile u64 flow_burst_allowance_ns;
-/* Per CPU group table seeded by userspace at attach. */
-/* Seeded by online rank with write by id, offline stays */
-/* light inert, skewed forces ready one, dense full keeps */
-/* prior halves exactly. Snapshot covers online only. */
-/* Ready is zero until the table holds live groups. */
-/* Halves is the fallback while ready is zero. */
-volatile u8 flow_group_by_cpu[1024];
-volatile u8 flow_group_ready;
-/* Sibling partner seeded by userspace at attach. Seeded by online rank with */
-/* write by id, offline and singleton holds 0xffff inert. Dense full matches */
-/* prior. Each CPU holds the next CPU in the same core. 0xffff means */
-/* singleton with no sibling. Placement only with no dispatch use. */
-volatile u16 flow_sibling_by_cpu[1024];
-/* Last idle kick time per CPU in nanos at 50us. */
-/* Zero init, so first kick always runs with wrap. */
-/* Enqueue only with no slide on skip, see enqueue. */
-volatile u64 flow_kick_at[1024];
-/* Last busy kick time per CPU in nanos at 1ms. */
-/* Zero init, so first kick always runs with wrap. */
-/* Enqueue only with no slide on skip, see enqueue. */
+/* Last busy kick time per CPU in nanos at 2ms. */
+/* Zero init so the first kick always runs with wrap. */
 volatile u64 flow_rate_at[1024];
-/* Per queue LIFO sequence at 2050 with BSS zero start. */
-/* Holds one u32 per CPU queue plus two overflow tails, so per CPU holds */
-/* CPU times 2 plus group and overflow holds 2048 plus group with total 2050 */
-/* matching slot max. BSS zero starts at head with no init pass. */
-volatile u32 flow_lifo_seq[2050];
-/* Governor flag for S0 and S1 with zero init strict. Zero keeps strict paths */
-/* bit identical with group and mask isolation. One widens placement to any */
-/* allowed on in group miss with same tier order and bypasses the kick group */
-/* gate with no recount. Mask always wins in both modes with no CLI knob. */
-/* Userspace writes on governor transition only. Single flag with no per CPU */
-/* array. */
-volatile u8 flow_perf_mode;
-/* Per CPU token bucket with one word per CPU for 1024 CPUs. Each entry holds */
-/* 0 to 255 tokens for the sleeper boost with BSS zero empty. Wide word keeps */
-/* atomic compare and swap on 32 bits, since 8 bit atomics stay unsupported. */
-/* Stopping refills to full with no vruntime change. Enqueue spends one on a */
-/* boost with no order change. */
-volatile u32 flow_token_stor[1024];
-/* Per CPU sweep miss counter with one u16 per CPU for 1024 CPUs. Each entry */
-/* holds 0 to 256 zero-move sweeps since last progress with BSS zero start. */
-/* Plain load and store on the owning CPU only with no atomic, since dispatch */
-/* for one CPU owns its entry. Caps zero-move kick chains at 256, so */
-/* unmovable-only window work stops polling with no infinite loop while */
-/* movable work resets on move. */
-volatile u16 flow_slot_sweep_cnt[1024];
-/* Try one token spend with short circuit in gate order clamped, bound, */
-/* estimate, burn, error, and token. Single 1024 bound keeps the array safe */
-/* with fail closed on out of range. Single attempt compare and swap on the */
-/* wide word, so a lost race fails the boost with no spend and one cas fail */
-/* count. Values past max fail closed with no spend. Spend pairs with refill */
-/* on the stopping CPU, so a migrate spends on the enqueuer and refills on */
-/* the runner with per CPU drift expected. BSS zero starts empty with refill */
-/* to full on stop. */
-static __always_inline bool flow_token_try_spend(u32 cpu,
-	bool clamped, u64 est, u32 burn, u64 err)
-{
-	u32 cur;
-	u32 got;
-	if (!clamped)
-		return false;
-	if ((u32)cpu >= 1024)
-		return false;
-	if (est > (u64)FLOW_SLICE_NS)
-		return false;
-	if ((u64)burn >= (u64)FLOW_PROMOTE_BURN_NS)
-		return false;
-	if (err > (u64)FLOW_WHEEL_SLOT_NS)
-		return false;
-	cur = flow_token_stor[cpu];
-	if (cur == 0 || cur > (u32)FLOW_TOKEN_MAX)
-		return false;
-	got = __sync_val_compare_and_swap(
-	    &flow_token_stor[cpu], cur, cur - 1);
-	if (got != cur) {
-		__sync_fetch_and_add(&flow_stats.token_cas_fails,
-		    1);
-		return false;
-	}
-	return true;
-}
-/* Refill one CPU token to full with no other state change. Out of range */
-/* keeps no op with no trap. Stopping piggybacks here with no vruntime, */
-/* frontier, classify, or cpuperf change. Plain store on the wide word pairs */
-/* with the single attempt spend, so a concurrent spend fails with no spend */
-/* while refill wins to full with no skew. Mask keeps the index proven with */
-/* no change for live CPUs. */
-static __always_inline void flow_token_refill(u32 cpu)
-{
-	volatile u32 vcpu = cpu;
-	u32 idx = vcpu & 1023U;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		return;
-	if ((u64)cpu >= nr_cpu_ids)
-		return;
-	if ((u32)cpu >= 1024)
-		return;
-	flow_token_stor[idx] = (u32)FLOW_TOKEN_MAX;
-}
+/* Monotonic clock in nanos for run segments and rate windows. */
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
 }
+/* Task state without create for fast read paths. */
 static struct flow_task_ctx *flow_lookup(
 	struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 	    (struct task_struct *)p, 0, 0);
 }
+/* Task state with create for enqueue and enable paths. */
 static struct flow_task_ctx *flow_get(
 	struct task_struct *p)
 {
@@ -151,6 +68,7 @@ static struct flow_task_ctx *flow_get(
 	    (struct task_struct *)p, 0,
 	    BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
+/* CPU state or null when the id is past the bound. */
 static struct flow_cpu_state *flow_cpu(u32 cpu)
 {
 	u32 key = cpu;
@@ -158,6 +76,25 @@ static struct flow_cpu_state *flow_cpu(u32 cpu)
 		return NULL;
 	return bpf_map_lookup_elem(&cpu_state_stor, &key);
 }
+/* Waiter record or null when the id is past the bound. */
+static struct flow_pi_wait *flow_pi(u32 cpu)
+{
+	u32 key = cpu;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return NULL;
+	return bpf_map_lookup_elem(&pi_stor, &key);
+}
+/* Topology view or null when the id is past the bound. */
+static struct flow_topo *flow_topo(u32 cpu)
+{
+	u32 key = cpu;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return NULL;
+	return bpf_map_lookup_elem(&topo_stor, &key);
+}
+/* True when the id is a live CPU below nr and the bound. */
+/* Live means below the nr snapshot at init with no kernel online read. */
+/* Hotplug needs a restart with fail closed to overflow. */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	if ((u64)cpu >= nr_cpu_ids)
@@ -166,6 +103,10 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 		return false;
 	return true;
 }
+/* True when the CPU is live and inside the task mask. */
+/* Live is the init snapshot with no hotplug read, so an offlined CPU */
+/* past init still reads live here and needs a restart to drain. */
+/* Unknown CPUs fail closed to overflow with mask wins on drain. */
 static __always_inline bool flow_cpu_ok(
 	const struct task_struct *p, s32 cpu)
 {
@@ -177,17 +118,8 @@ static __always_inline bool flow_cpu_ok(
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
-/* Nice of one task from static prio minus 120. */
-/* Null maps to 0, so weight falls back to 1024. */
-static __always_inline s32 flow_nice_of(
-	const struct task_struct *p)
-{
-	s32 nice;
-	if (!p)
-		return 0;
-	nice = (s32)p->static_prio - 120;
-	return nice;
-}
+/* Drop the on CPU gauge by one with no wrap to zero. */
+/* Retries the compare and swap so concurrent stops pair. */
 static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
@@ -207,8 +139,7 @@ static __always_inline void flow_on_cpu_dec(void)
 			    &flow_stats.on_cpu, 0);
 	}
 }
-/* Clear running estimate, pid, nice, and occupant to 0, weight to 1024. */
-/* Plain stores with no cursor use, see enqueue rate window. */
+/* Clear the running pid with no other state change. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
@@ -219,14 +150,10 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
-	st->running_est = 0;
 	st->running_pid = 0;
-	st->running_nice = 0;
-	st->running_weight = 1024;
-	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 }
-/* Clear running only when the pid owns it, so a disable and an exit never */
-/* clears a new owner after a switch. */
+/* Clear the running pid only when the pid owns it. */
+/* A stale exit never clears a new owner after a switch. */
 static __always_inline void flow_clear_running_if_owner(
 	s32 cpu, u32 pid)
 {
@@ -240,26 +167,23 @@ static __always_inline void flow_clear_running_if_owner(
 		return;
 	if (st->running_pid != pid)
 		return;
-	st->running_est = 0;
 	st->running_pid = 0;
-	st->running_nice = 0;
-	st->running_weight = 1024;
-	st->occupant_group = (u8)FLOW_GROUP_LIGHT;
 }
-/* Charge one leftover run segment at most once. stopping owns the normal */
-/* charge and clears run at, so a later disable and exit sees zero with no */
-/* second charge. Disable and exit funnel here only when stopping never ran */
-/* for the segment. Release never charges, the task segment still ends */
-/* through stopping, disable, and exit. Check CPU, live, and clock before */
-/* clearing run at, so a rejected funnel keeps the segment for the second */
-/* funnel. Atomic add matches flow stats with no lost update. */
+/* Charge one leftover run segment at most once with scaling. */
+/* Stopping owns the normal charge and stores stop time. */
+/* Disable and exit funnel here only for a running task. */
+/* The count flag pairs with stopping, so a release never double charges. */
 static __always_inline void flow_charge_leftover(s32 cpu,
-	struct flow_task_ctx *tctx)
+	struct task_struct *p, struct flow_task_ctx *tctx, u32 pid)
 {
-	struct flow_cpu_state *st;
 	u64 start;
 	u64 now;
+	u64 delta;
+	struct flow_cpu_state *st;
+	u32 w;
 	if (!tctx)
+		return;
+	if (!tctx->on_cpu)
 		return;
 	start = tctx->run_at;
 	if (start == 0)
@@ -268,229 +192,22 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
+	/* A stopped task holds stop time with no charge left. */
+	st = flow_cpu((u32)cpu);
+	if (!st || st->running_pid != pid)
+		return;
 	now = flow_now();
 	if (flow_time_before(now, start))
 		return;
-	st = flow_cpu((u32)cpu);
-	if (!st)
-		return;
+	delta = now - start;
 	tctx->run_at = 0;
-	__sync_fetch_and_add(&st->active_ns, now - start);
-}
-/* Live group of one CPU from table and halves fallback. Reads the table */
-/* when ready holds groups, else halves. Table holds online rank with write */
-/* by id, offline inert. Bad values fall back to halves with no trap. The */
-/* index masks to 1023 through a volatile copy, so the read stays proven even */
-/* when the caller range checks live in another register. */
-static __always_inline u8 flow_group_live(u32 cpu,
-	u64 nr)
-{
-	u8 g;
-	volatile u32 vcpu = cpu;
-	u32 idx = vcpu & 1023U;
-	if (!flow_group_ready)
-		return flow_group_of_cpu(cpu, nr);
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		return flow_group_of_cpu(cpu, nr);
-	if ((u64)cpu >= nr)
-		return flow_group_of_cpu(cpu, nr);
-	g = flow_group_by_cpu[idx];
-	if (g == (u8)FLOW_GROUP_HOG)
-		return (u8)FLOW_GROUP_HOG;
-	if (g == (u8)FLOW_GROUP_LIGHT)
-		return (u8)FLOW_GROUP_LIGHT;
-	return flow_group_of_cpu(cpu, nr);
-}
-/* Least queued allowed CPU in one group. Per CPU store keeps backlog per */
-/* CPU, so depth reads each candidate per CPU queue with one read per */
-/* candidate. The scan keeps mask and group order with lowest id on ties */
-/* by strict less only. Missing reads zero with no trap. Placement only */
-/* scans up to nr CPUs, bounded nr<=1024, outside queue-store O(1) with */
-/* no dispatch use. Placement keeps live, constants frozen. */
-static __always_inline s32 flow_first_in_group(
-	const struct task_struct *p, u8 group)
-{
-	s32 best = -1;
-	u64 best_q = 0;
-	s32 cpu;
-	bpf_for(cpu, 0, 1024) {
-		u8 g;
-		u64 q;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= nr_cpu_ids)
-			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		g = flow_group_live((u32)cpu,
-		    nr_cpu_ids);
-		if (g != group)
-			continue;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr))
-			continue;
-		q = scx_bpf_dsq_nr_queued(
-		    flow_slot_cpu_dsq((u32)cpu, group));
-		if (best < 0 || q < best_q) {
-			best = cpu;
-			best_q = q;
-		}
-	}
-	return best;
-}
-/* True when one core holds no running task. Needs self and all siblings idle */
-/* by pid. Singletons read as free with no trap. Missing state fails closed */
-/* with no pick. */
-static __always_inline bool flow_core_free(u32 cpu)
-{
-	struct flow_cpu_state *st;
-	u16 nxt;
-	u32 cur;
-	s32 i;
-	if (!flow_cpu_live(cpu))
-		return false;
-	st = flow_cpu(cpu);
-	if (!st)
-		return false;
-	if (st->running_pid != 0)
-		return false;
-	if (cpu >= 1024)
-		return true;
-	nxt = flow_sibling_by_cpu[cpu];
-	if (nxt == (u16)0xffff)
-		return true;
-	if ((u32)nxt >= (u32)FLOW_MAX_CPUS)
-		return true;
-	if ((u64)nxt >= nr_cpu_ids)
-		return true;
-	if ((u32)nxt == cpu)
-		return true;
-	cur = (u32)nxt;
-	bpf_for(i, 0, 8) {
-		struct flow_cpu_state *sst;
-		u16 after;
-		if (!flow_cpu_live(cur))
-			return true;
-		sst = flow_cpu(cur);
-		if (!sst)
-			return false;
-		if (sst->running_pid != 0)
-			return false;
-		if (cur >= 1024)
-			return true;
-		after = flow_sibling_by_cpu[cur];
-		if (after == (u16)0xffff)
-			return true;
-		if ((u32)after >= (u32)FLOW_MAX_CPUS)
-			return true;
-		if ((u64)after >= nr_cpu_ids)
-			return true;
-		if ((u32)after == cpu)
-			return true;
-		if ((u32)after == cur)
-			return true;
-		cur = (u32)after;
-		if (cur == cpu)
-			return true;
-	}
-	return true;
-}
-/* First free core in one group in id order. Scans up to 1024 with early exit */
-/* on match. Needs group, mask, and free core by pid. No claim here, so a */
-/* miss wastes no idle claim. */
-static __always_inline s32 flow_free_in_group(
-	const struct task_struct *p, u8 group)
-{
-	s32 cpu;
-	bpf_for(cpu, 0, 1024) {
-		u8 g;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= nr_cpu_ids)
-			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		g = flow_group_live((u32)cpu,
-		    nr_cpu_ids);
-		if (g != group)
-			continue;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr))
-			continue;
-		if (!flow_core_free((u32)cpu))
-			continue;
-		return cpu;
-	}
-	return -1;
-}
-/* Least queued allowed CPU in any group for S0 perf. Per CPU store keeps */
-/* backlog per CPU, so depth reads each candidate per CPU queue plus its */
-/* group overflow tail. The scan keeps mask order with lowest id on ties */
-/* by strict less only, so equal depths keep the first id with no extra */
-/* pass. Placement scans up to nr CPUs, bounded nr<=1024, outside */
-/* queue-store O(1) with no dispatch use. Perf only on group miss, same rule */
-/* over the widened set. Mask always wins with no dispatch use. */
-static __always_inline s32 flow_first_allowed(
-	const struct task_struct *p)
-{
-	s32 best = -1;
-	u64 best_q = 0;
-	s32 cpu;
-	u64 oq[2];
-	oq[0] = scx_bpf_dsq_nr_queued(
-	    flow_slot_overflow_dsq(
-	    (u8)FLOW_GROUP_LIGHT));
-	oq[1] = scx_bpf_dsq_nr_queued(
-	    flow_slot_overflow_dsq(
-	    (u8)FLOW_GROUP_HOG));
-	bpf_for(cpu, 0, 1024) {
-		u64 q;
-		u64 pq;
-		u8 g;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= nr_cpu_ids)
-			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr))
-			continue;
-		g = flow_group_live((u32)cpu,
-		    nr_cpu_ids) & 1U;
-		pq = scx_bpf_dsq_nr_queued(
-		    flow_slot_cpu_dsq((u32)cpu, g));
-		q = pq + oq[g];
-		if (best < 0 || q < best_q) {
-			best = cpu;
-			best_q = q;
-		}
-	}
-	return best;
-}
-/* First free core in any group for S0 perf in id order. Scans up to 1024 */
-/* with early exit on match. Needs mask and free core by pid with no group */
-/* check. Perf only on in group miss with same order. Mask always wins with */
-/* no claim and no dispatch use. */
-static __always_inline s32 flow_free_any(
-	const struct task_struct *p)
-{
-	s32 cpu;
-	bpf_for(cpu, 0, 1024) {
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= nr_cpu_ids)
-			break;
-		if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-			break;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr))
-			continue;
-		if (!flow_core_free((u32)cpu))
-			continue;
-		return cpu;
-	}
-	return -1;
+	tctx->on_cpu = 0;
+	w = flow_weight_clamp(p->scx.weight);
+	tctx->vruntime += flow_scaled_delta(delta, w);
+	st->min_vruntime = flow_min_max(st->min_vruntime,
+	    tctx->vruntime);
+	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	flow_on_cpu_dec();
 }
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
@@ -511,12 +228,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	flow_light_depth = 0;
-	flow_hog_depth = 0;
-	flow_burst_allowance_ns =
-	    (u64)FLOW_DEMOTE_BURST_NS;
 	bpf_for(cpu, 0, 1024) {
 		struct flow_cpu_state *st;
+		struct flow_pi_wait *pw;
+		struct flow_topo *tp;
 		u32 key;
 		if (cpu < 0)
 			continue;
@@ -526,82 +241,60 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			break;
 		key = (u32)cpu;
 		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
-		if (!st)
-			continue;
-		st->frontier = 0;
-		st->running_est = 0;
-		st->running_pid = 0;
-		st->cursor = flow_cursor_val((u32)cpu);
-		st->running_nice = 0;
-		st->running_weight = 1024;
-		st->delay_win = 0;
-		st->delay_cur = 0;
-		st->delay_cnt = 0;
-		/* BSS zero already covers the EMA tail, so verify and keep explicit zero */
-		/* for the 32B to 48B growth with no trap. */
-		st->cpuperf_ema = 0;
-		st->cpuperf_ema_at = 0;
-		/* Active starts at zero with lifetime growth, so verify and keep explicit */
-		/* zero for the 48B to 56B growth with no trap. */
-		st->active_ns = 0;
-		/* Occupant starts at LIGHT with post-empty read, so verify and keep */
-		/* explicit zero for the 56B to 64B growth with no trap. */
-		st->occupant_group = (u8)FLOW_GROUP_LIGHT;
-		if (scx_bpf_cpuperf_set)
-			scx_bpf_cpuperf_set(cpu,
-			    (u32)FLOW_CPUPERF_LEVEL);
+		if (st) {
+			st->min_vruntime = 0;
+			st->running_pid = 0;
+			st->cursor = (u32)cpu;
+		}
+		pw = bpf_map_lookup_elem(&pi_stor, &key);
+		if (pw) {
+			pw->pid = 0;
+			pw->_pad = 0;
+			pw->at = 0;
+		}
+		tp = bpf_map_lookup_elem(&topo_stor, &key);
+		if (tp) {
+			tp->smt_sib = 0xffffffffU;
+			tp->llc = 0;
+			tp->last_slice = (u64)FLOW_QMIN_NS;
+		}
 	}
-	/* Per CPU queues at 2 times nr plus 2 overflow with bounded LIFO. One */
-	/* bounded pass creates all per CPU ids with a LOCAL_ON check per id, */
-	/* so init pays once with no dispatch cost. Each CPU holds base plus */
-	/* CPU times 2 plus group, overflows hold new base plus group, so groups */
-	/* stay apart with no share. Max 2050 at 1024 CPUs. Needs restart on */
-	/* upgrade with no live move. */
-	bpf_for(cpu, 0, 2048) {
-		u64 dsq;
-		u32 pc;
-		u8 gg;
+	/* One fast plus one deadline queue per CPU plus one overflow tail. */
+	/* Fast holds base plus id and deadline holds 0x6800 plus id. */
+	/* Max 2049 at 1024 CPUs with one bounded pass at init. */
+	bpf_for(cpu, 0, 1024) {
+		u64 fast;
+		u64 vtime;
 		if (cpu < 0)
 			continue;
-		if ((u64)cpu >= n * 2ULL)
+		if ((u64)cpu >= n)
 			break;
-		pc = (u32)(cpu >> 1);
-		gg = (u8)(cpu & 1);
-		dsq = flow_slot_cpu_dsq(pc, gg);
-		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
+		fast = flow_fast_dsq((u32)cpu);
+		vtime = flow_vtime_dsq((u32)cpu);
+		if (fast >= (u64)SCX_DSQ_LOCAL_ON ||
+		    vtime >= (u64)SCX_DSQ_LOCAL_ON) {
 			scx_bpf_error("dsq id over bound");
 			return -EINVAL;
 		}
-		ret = scx_bpf_create_dsq(dsq, -1);
+		ret = scx_bpf_create_dsq(fast, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("dsq create failed");
+			return ret;
+		}
+		ret = scx_bpf_create_dsq(vtime, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("dsq create failed");
 			return ret;
 		}
 	}
-	/* Group overflow tails at 2 with bounded LIFO. One bounded pass creates */
-	/* both overflow ids with a LOCAL_ON check per id, so groups stay apart */
-	/* with no share. Needs restart on upgrade with no live move. */
-	bpf_for(cpu, 0, 2) {
-		u64 dsq;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= 2ULL)
-			break;
-		if (cpu == 0)
-			dsq = flow_slot_overflow_dsq(
-			    (u8)FLOW_GROUP_LIGHT);
-		else
-			dsq = flow_slot_overflow_dsq(
-			    (u8)FLOW_GROUP_HOG);
-		if (dsq >= (u64)SCX_DSQ_LOCAL_ON) {
-			scx_bpf_error("dsq id over bound");
-			return -EINVAL;
-		}
-		ret = scx_bpf_create_dsq(dsq, -1);
-		if (ret < 0 && ret != -EEXIST) {
-			scx_bpf_error("dsq create failed");
-			return ret;
-		}
+	if (flow_overflow_dsq() >= (u64)SCX_DSQ_LOCAL_ON) {
+		scx_bpf_error("dsq id over bound");
+		return -EINVAL;
+	}
+	ret = scx_bpf_create_dsq(flow_overflow_dsq(), -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("dsq create failed");
+		return ret;
 	}
 	return 0;
 }
@@ -622,6 +315,10 @@ SCX_OPS_DEFINE(flow_ops,
 	       .cpu_release		= (void *)flow_cpu_release,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
+	       .flags			= SCX_OPS_ENQ_LAST |
+					  SCX_OPS_ENQ_EXITING |
+					  SCX_OPS_ENQ_MIGRATION_DISABLED |
+					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
 	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");

@@ -1,31 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Enqueue op
+ * Enqueue op.
  *
- * Picks the target CPU in group with overflow fallback and stamps deadline and
- * delay. Inserts bounded LIFO at K 8 into the per CPU queue or overflow with
- * probe only, pinned tasks rest in the group overflow tail. Keeps mask wins
- * with group aware placement and coalesced idle kicks.
+ * Arrivals map to real enqueue flags. WAKEUP marks a sleep wake with a
+ * probation tick and a PI correlate. REENQ marks slice exhaust with no
+ * tick. LAST keeps the local target with no redirect. PREEMPT marks
+ * urgency and joins the fast lane only when duty and probation allow.
+ * HEAD and IMMED mark kernel urgency and take the fast head when the
+ * lane allows, else the earliest deadline. Stopping with runnable set
+ * means preempted or exhausted, and without it means voluntary sleep.
+ * Only SCHED_OTHER tasks may use the fast lane. Pinned tasks and foreign
+ * policies rest in overflow. See intf.h for the shared helpers and
+ * dispatch.bpf.c for the matching drain order.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* New slice kfunc mirrors compat, so the kick win site gates on the new */
-/* symbol with a direct store fallback on older kernels. */
-bool scx_bpf_task_set_slice___new(struct task_struct *p,
-    u64 slice) __ksym __weak;
-/* New curr kfunc keeps the same gate, so old BTF skips the read with a */
-/* kick only fallback and no static kfunc use. */
-struct task_struct *scx_bpf_cpu_curr___new(s32 cpu) __ksym __weak;
-/* Group of one task with light as default. */
-static __always_inline u8 flow_task_group(
-	struct flow_task_ctx *tctx)
-{
-	if (!tctx)
-		return (u8)FLOW_GROUP_LIGHT;
-	if (tctx->group == (u8)FLOW_GROUP_HOG)
-		return (u8)FLOW_GROUP_HOG;
-	return (u8)FLOW_GROUP_LIGHT;
-}
 /* True when one task cannot move to another CPU. */
 static __always_inline bool flow_task_pinned(
 	const struct task_struct *p)
@@ -36,183 +25,141 @@ static __always_inline bool flow_task_pinned(
 		return true;
 	return false;
 }
-/* Target in one group from selected and least. Least picks lowest per CPU */
-/* queued depth with lowest id on ties. Strict keeps group only, perf */
-/* widens to any allowed on miss with same least rule over the widened */
-/* set. Mask always wins with no dispatch use. Placement only scans up */
-/* to nr CPUs, bounded at nr<=1024, outside the queue-store O(1). */
-static __always_inline s32 flow_pick_in_group(
-	const struct task_struct *p, s32 sel,
-	u8 group)
+/* Target CPU for one enqueue with trust in select. */
+/* Pinned tasks keep the task CPU when allowed, else select, else first. */
+/* Open tasks keep select when allowed, else the first allowed CPU. */
+static __always_inline s32 flow_pick_target(
+	struct task_struct *p, s32 sel, bool pinned)
 {
 	s32 first;
-	if (sel >= 0 && flow_cpu_ok(p, sel)) {
-		u8 g = flow_group_live((u32)sel,
-		    nr_cpu_ids);
-		if (g == group)
+	if (pinned) {
+		s32 here = scx_bpf_task_cpu(p);
+		if (flow_cpu_ok(p, here))
+			return here;
+		if (flow_cpu_ok(p, sel))
 			return sel;
-		if (flow_perf_enabled())
-			return sel;
-		__sync_fetch_and_add(
-		    &flow_stats.group_steal_skipped, 1);
-	}
-	first = flow_first_in_group(p, group);
-	if (first >= 0)
-		return first;
-	if (flow_perf_enabled()) {
-		first = flow_first_allowed(p);
-		if (first >= 0)
-			return first;
-	}
-	return -1;
-}
-static __always_inline u64 flow_ref_frontier(
-	const struct task_struct *p, s32 ref_cpu)
-{
-	struct flow_cpu_state *rst;
-	s32 first;
-	if (!flow_cpu_ok(p, ref_cpu)) {
 		first = (s32)bpf_cpumask_first(p->cpus_ptr);
 		if (flow_cpu_ok(p, first))
-			ref_cpu = first;
-		else
-			return 0;
+			return first;
+		return -1;
 	}
-	/* No second sign check, the fallback above */
-	/* already proves a live CPU with no dead branch. */
-	/* Out of range still fails closed via a null */
-	/* CPU state with no trap. */
-	rst = flow_cpu((u32)ref_cpu);
-	if (rst)
-		return rst->frontier;
-	return 0;
+	if (sel >= 0 && flow_cpu_ok(p, sel))
+		return sel;
+	first = (s32)bpf_cpumask_first(p->cpus_ptr);
+	if (flow_cpu_ok(p, first))
+		return first;
+	return -1;
 }
-/* Insert one task with bounded LIFO at K 8 into the per CPU store. Pinned */
-/* tasks rest in the group overflow tail with no per CPU use, so every owner */
-/* dispatch visits them in the window with mask wins. The caller shares the */
-/* pinned bit, so no second pinned test runs. The pinned fast path runs */
-/* ahead of the probe with a direct quant error, so one probe feeds only */
-/* migratable insert plus spend with no second pass. Migratable probes the */
-/* deadline in vruntime to map quantised deadline, slot, error, and overflow, */
-/* then inserts to the per CPU queue or the group overflow tail with the same */
-/* slice and head or tail flag out of the per queue period. Counts tail pins */
-/* past the horizon, counts head or bound hits, and reports the quant error */
-/* to share the token spend. Returns the queue id to share one target with */
-/* no reread, so idle and busy share one target. Bounded LIFO at K 8 only, */
-/* never vtime, never preempt, so per DSQ one flavor holds with mask wins */
-/* on drain. */
-static __always_inline u64 flow_slot_insert(
-	struct task_struct *p, s32 cpu, u8 group, u64 dl,
-	u64 frontier, u64 slice, u64 *err_out, bool pinned)
+/* Insert one task into the fast FIFO with head choice. */
+/* Elevated owners and kernel urgency take head, the rest take tail. */
+static __always_inline void flow_fast_insert(
+	struct task_struct *p, s32 cpu, u64 slice, bool head)
 {
-	u64 slot = 0;
-	u64 err = 0;
-	bool over = false;
-	u64 sdsq;
-	u64 qdl;
-	/* Pinned tasks rest in the group overflow tail */
-	/* with bounded LIFO order and no per CPU use, so */
-	/* every owner dispatch visits them in the window */
-	/* with mask wins. Strict keeps the group, so the */
-	/* owner group always holds the task with no widen. */
-	if (pinned) {
-		u32 lidx;
-		u32 seq;
-		bool head;
-		u64 hflag = 0;
-		sdsq = flow_slot_overflow_dsq(group);
-		lidx = flow_lifo_idx(true, 0, group);
-		seq = __sync_fetch_and_add(&flow_lifo_seq[lidx],
-		    1);
-		head = flow_lifo_take_head(seq);
-#ifdef HAVE_SCX_ENQ_HEAD
-		if (head)
-			hflag = (u64)SCX_ENQ_HEAD;
-#endif
-		scx_bpf_dsq_insert(p, sdsq, slice, hflag);
-		if (hflag != 0)
-			__sync_fetch_and_add(&flow_stats.lifo_heads,
-			    1);
-		else
-			__sync_fetch_and_add(
-			    &flow_stats.lifo_bound_hits, 1);
-		*err_out = dl & (u64)FLOW_WHEEL_QUANT_LO;
-		return sdsq;
+	u64 hflag = head ? (u64)SCX_ENQ_HEAD : 0;
+	scx_bpf_dsq_insert(p, flow_fast_dsq((u32)cpu), slice,
+	    hflag);
+	__sync_fetch_and_add(&flow_stats.fast_admits, 1);
+}
+/* Insert one task into the deadline queue with a clamped deadline. */
+/* The compat wrapper keeps 7.2 kernels working with no new kfunc. */
+static __always_inline void flow_vtime_insert(
+	struct task_struct *p, s32 cpu, u64 slice, u64 deadline)
+{
+	scx_bpf_dsq_insert_vtime(p, flow_vtime_dsq((u32)cpu),
+	    slice, deadline, 0);
+	__sync_fetch_and_add(&flow_stats.vtime_admits, 1);
+}
+/* Insert one task into the shared overflow tail. */
+/* Pinned and foreign tasks rest here with mask wins on drain. */
+static __always_inline void flow_over_insert(
+	struct task_struct *p, u64 slice)
+{
+	scx_bpf_dsq_insert(p, flow_overflow_dsq(), slice, 0);
+}
+/* Insert one homeless task into the kernel global queue. */
+/* Tasks without state or without a live CPU rest here with */
+/* mask wins on drain, and the drain counts the global moves. */
+static __always_inline void flow_global_insert(
+	struct task_struct *p, u64 slice)
+{
+	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL, slice, 0);
+}
+/* Correlate one wakeup with the waiter record for PI. */
+/* A short block means the waker likely held a lock while the occupant */
+/* ran, so the occupant earns one 500us override with a single boost. */
+/* No owner kfunc exists, so the running CPU occupant is the proxy. */
+/* The occupant pointer may be untrusted on old kernels, so class and */
+/* flag writes go through a trusted lookup with release on both paths. */
+static __always_inline void flow_pi_correlate(s32 cpu,
+	struct task_struct *p, u64 now)
+{
+	struct flow_pi_wait *pw;
+	struct task_struct *owner;
+	struct task_struct *trusted;
+	struct flow_task_ctx *octx;
+	u32 owner_pid;
+	bool boosted = false;
+	if (cpu < 0 || !flow_cpu_live((u32)cpu))
+		return;
+	pw = flow_pi((u32)cpu);
+	if (!pw || pw->pid == 0 || pw->pid != (u32)p->pid)
+		return;
+	if (now < pw->at || now - pw->at > (u64)FLOW_PI_WINDOW_NS)
+		return;
+	pw->pid = 0;
+	pw->at = 0;
+	owner = __COMPAT_scx_bpf_cpu_curr(cpu);
+	if (!owner || owner == p)
+		return;
+	owner_pid = owner->pid;
+	bpf_rcu_read_lock();
+	trusted = bpf_task_from_pid(owner_pid);
+	if (trusted) {
+		if (trusted != p) {
+			octx = flow_lookup(trusted);
+			if (octx && !octx->elevated) {
+				octx->elevated = 1;
+				octx->elev_at = (u32)now;
+				scx_bpf_task_set_slice(trusted,
+				    (u64)FLOW_PI_SLICE_NS);
+				boosted = true;
+			}
+		}
+		bpf_task_release(trusted);
 	}
-	qdl = flow_wheel_probe(dl, frontier, &slot,
-	    &err, &over);
-	(void)qdl;
-	{
-		bool to_over = false;
-		u32 lidx;
-		u32 seq;
-		bool head;
-		u64 hflag = 0;
-		if (slot >= (u64)FLOW_WHEEL_DIM)
-			to_over = true;
-		else if (cpu < 0 || !flow_cpu_live((u32)cpu))
-			to_over = true;
-		if (to_over)
-			sdsq = flow_slot_overflow_dsq(group);
-		else
-			sdsq = flow_slot_cpu_dsq((u32)cpu, group);
-		/* Bounded LIFO claims one period slot with a single atomic add, */
-		/* so per queue order stays fresh with no starve or scan. */
-		/* Head wins fast, tail keeps the bound with no preempt use. */
-		/* Build gate keeps tail without HEAD with no trap, so old */
-		/* kernels keep FIFO fallback with no preempt use. */
-		if (to_over)
-			lidx = flow_lifo_idx(true, 0, group);
-		else
-			lidx = flow_lifo_idx(false, (u32)cpu,
-			    group);
-		seq = __sync_fetch_and_add(&flow_lifo_seq[lidx],
-		    1);
-		head = flow_lifo_take_head(seq);
-#ifdef HAVE_SCX_ENQ_HEAD
-		if (head)
-			hflag = (u64)SCX_ENQ_HEAD;
-#endif
-		scx_bpf_dsq_insert(p, sdsq, slice, hflag);
-		if (hflag != 0)
-			__sync_fetch_and_add(&flow_stats.lifo_heads,
-			    1);
-		else
-			__sync_fetch_and_add(
-			    &flow_stats.lifo_bound_hits, 1);
-	}
-	if (over)
-		__sync_fetch_and_add(&flow_stats.wheel_overflow,
-		    1);
-	*err_out = err;
-	return sdsq;
+	bpf_rcu_read_unlock();
+	if (!boosted)
+		return;
+	__sync_fetch_and_add(&flow_stats.elev_moves, 1);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
 	struct flow_task_ctx *tctx;
-	struct flow_cpu_state *st;
+	struct flow_topo *tp;
 	s32 sel;
 	s32 cpu = -1;
-	bool is_requeue = false;
-	bool is_fresh = false;
 	bool pinned = false;
-	u8 group;
-	u64 est = 0;
-	u64 slice = (u64)FLOW_SLICE_NS;
-	/* Exiting tasks run at once on the task CPU via LOCAL_ON with no order */
-	/* wait, so short exits never stall in a queue behind other work. Task CPU */
-	/* wins over the enqueuer, so an exit enqueued elsewhere still runs where */
-	/* the task lives. Single insert and return with no double enqueue. Falls */
-	/* back when the task CPU is not allowed. Idle kick only with no coalesce */
-	/* and no preempt. */
+	int policy;
+	u32 w;
+	u8 duty;
+	u32 cls;
+	u64 now;
+	u64 slice;
+	bool wakeup;
+	bool urgent;
+	/* Exiting tasks run at once on the task CPU with no queue wait. */
 	if (p->flags & PF_EXITING) {
 		s32 tgt = scx_bpf_task_cpu(p);
+		u64 eslice = (u64)FLOW_QMIN_NS;
 		if (flow_cpu_ok(p, tgt)) {
 			struct flow_cpu_state *tst;
+			tctx = flow_lookup(p);
+			if (tctx && tctx->slice_ns != 0)
+				eslice = tctx->slice_ns;
 			scx_bpf_dsq_insert(p,
 			    (u64)SCX_DSQ_LOCAL_ON | (u64)tgt,
-			    slice, enq_flags);
+			    eslice, enq_flags);
 			tst = flow_cpu((u32)tgt);
 			if (tst && tst->running_pid == 0) {
 				scx_bpf_kick_cpu(tgt,
@@ -223,449 +170,264 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		}
 	}
-	if (enq_flags & SCX_ENQ_REENQ)
-		is_requeue = true;
+	/* Requeues count once at stopping for runnable stops. */
+	/* The flag needs no second count here on the hot path. */
 	tctx = flow_get(p);
 	sel = p->scx.selected_cpu;
 	pinned = flow_task_pinned(p);
+	policy = p->policy;
+	now = flow_now();
+	/* Tasks without state keep the kernel global queue with no kick. */
+	/* The next dispatch pass collects them with mask wins. */
 	if (!tctx) {
-		u64 frontier;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		u64 err = 0;
-		frontier = flow_ref_frontier(p, sel);
-		clamped = flow_clamp_vruntime(0, frontier,
-		    slice);
-		/* No task state, so weight stays 1024. */
-		scaled = flow_scale_by_weight(
-		    flow_clamp_est(slice),
-		    (u32)FLOW_WEIGHT);
-		dl = flow_deadline(clamped, scaled);
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != 0)
-			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		/* No task state, so the light group owns the insert with no */
-		/* token use and no kick. Overflow holds it with steal plus */
-		/* drain collect. A target scan would need a loop with storm */
-		/* risk, so no kick is sent and the next pass collects it. */
-		/* Shares the caller pinned bit with no test. */
-		flow_slot_insert(p, -1,
-		    (u8)FLOW_GROUP_LIGHT, dl, frontier,
-		    slice, &err, pinned);
+		flow_global_insert(p, (u64)FLOW_QMIN_NS);
 		return;
 	}
-	group = flow_task_group(tctx);
-	if (tctx->est_ns == 0)
-		is_fresh = true;
-	if (is_migration_disabled(p)) {
-		s32 here = scx_bpf_task_cpu(p);
-		if (flow_cpu_ok(p, here)) {
-			cpu = here;
-			group = flow_group_live((u32)here,
-			    nr_cpu_ids);
-			tctx->group = group;
-		} else {
-			cpu = flow_pick_in_group(p, sel,
-			    group);
-		}
-	} else if (p->nr_cpus_allowed == 1) {
-		s32 first;
-		first = (s32)bpf_cpumask_first(
-		    p->cpus_ptr);
-		if (flow_cpu_ok(p, first)) {
-			cpu = first;
-			group = flow_group_live((u32)first,
-			    nr_cpu_ids);
-			tctx->group = group;
-		} else {
-			cpu = -1;
-		}
-	} else {
-		s32 waker =
-		    (s32)bpf_get_smp_processor_id();
-		struct flow_cpu_state *wst =
-		    flow_cpu((u32)waker);
-		/* Waker CPU first, see select. Strict needs in */
-		/* group, perf takes any allowed idle with mask win. */
-		if (wst && wst->running_pid == 0 &&
-		    flow_cpu_ok(p, waker) &&
-		    (flow_group_live((u32)waker,
-		    nr_cpu_ids) == group || flow_perf_enabled()))
-			cpu = waker;
-		else
-			cpu = flow_pick_in_group(p, sel,
-			    group);
-		if (cpu < 0) {
-			s32 first;
-			first = (s32)bpf_cpumask_first(
-			    p->cpus_ptr);
-			if (flow_cpu_ok(p, first)) {
-				cpu = first;
-				group = flow_group_live(
-				    (u32)first,
-				    nr_cpu_ids);
-				tctx->group = group;
-			}
-		}
+	w = flow_weight_clamp(p->scx.weight);
+	duty = tctx->duty;
+	cls = flow_class_of(policy, duty);
+	tctx->cls = (u8)cls;
+	wakeup = (enq_flags & SCX_ENQ_WAKEUP) != 0;
+	urgent = (enq_flags & ((u64)SCX_ENQ_HEAD |
+	    (u64)SCX_ENQ_IMMED)) != 0;
+	/* Probation spends one wake per low duty sleep wake cycle. */
+	/* Two cycles under 15 percent graduate the task to the lane. */
+	if (flow_prob_count(tctx->prob) != 0 && wakeup &&
+	    flow_prob_vol(tctx->prob) &&
+	    duty < (u8)FLOW_DUTY_FAST) {
+		tctx->prob = flow_prob_make(
+		    flow_prob_count(tctx->prob) - 1U, true);
 	}
-	if (cpu < 0) {
-		u64 frontier;
-		u64 v;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		s32 nice;
-		u32 w;
-		u32 tok_cpu;
-		u64 err = 0;
-		bool was_c;
-		if (is_fresh)
-			est = slice;
-		else
-			est = flow_clamp_est(tctx->est_ns);
-		tctx->est_ns = est;
-		if (is_fresh) {
-			tctx->vruntime = 0;
-			__sync_fetch_and_add(&flow_stats.inserts,
-			    1);
-		} else if (is_requeue) {
-			__sync_fetch_and_add(&flow_stats.requeues,
-			    1);
-		}
-		v = tctx->vruntime;
-		frontier = flow_ref_frontier(p, sel);
-		nice = flow_nice_of(p);
-		w = flow_weight_of(nice);
-		clamped = flow_clamp_vruntime_w(v, frontier,
-		    slice, w);
-		scaled = flow_scale_by_weight(est, w);
-		dl = flow_deadline(clamped, scaled);
-		if (group == (u8)FLOW_GROUP_HOG &&
-		    pinned) {
-			dl = flow_inflate_deadline(dl);
-			__sync_fetch_and_add(
-			    &flow_stats.pinned_hog_inflated,
-			    1);
-		}
-		if (dl == (u64)-1)
-			dl = (u64)-2;
-		tctx->deadline = dl;
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != v)
-			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		was_c = clamped != v;
-		flow_slot_insert(p, -1, group, dl, frontier,
-		    slice, &err, pinned);
-		/* Token spend keeps the sleeper conjunct with the enqueuer */
-		/* owning the spend and no order change. */
-		tok_cpu = (u32)bpf_get_smp_processor_id();
-		if (flow_token_try_spend(tok_cpu, was_c,
-		    est, tctx->burn, err))
-			__sync_fetch_and_add(
-			    &flow_stats.token_boosts, 1);
-		/* No live allowed CPU after fallback, so no kick is sent. The */
-		/* overflow tail holds the task in queue order, so the next */
-		/* steal or drain pass collects it when the mask allows. A */
-		/* target scan would need a loop with storm risk, so no kick */
-		/* is sent. */
+	/* Expired elevations demote here with no second boost. */
+	if (tctx->elevated &&
+	    (u32)now - tctx->elev_at > (u32)FLOW_PI_SLICE_NS)
+		tctx->elevated = 0;
+	/* Pinned, foreign, and non normal tasks rest in overflow. */
+	/* Only SCHED_OTHER enters the lanes, idle and batch join the */
+	/* deadline queue, and realtime stays ordered with no fast use. */
+	if (pinned || (policy != (int)FLOW_POL_NORMAL &&
+	    policy != (int)FLOW_POL_BATCH &&
+	    policy != (int)FLOW_POL_IDLE)) {
+		cpu = flow_pick_target(p, sel, pinned);
+		flow_over_insert(p, flow_dyn_slice(w, 1ULL));
 		return;
 	}
-	if (is_fresh)
-		est = slice;
-	else
-		est = flow_clamp_est(tctx->est_ns);
-	tctx->est_ns = est;
-	if (is_fresh)
+	cpu = flow_pick_target(p, sel, false);
+	if (!flow_cpu_ok(p, cpu)) {
+		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
+		flow_global_insert(p, flow_dyn_slice(w, 1ULL));
+		return;
+	}
+	if (tctx->vruntime == 0 && tctx->run_at == 0 &&
+	    tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
-	else if (is_requeue)
-		__sync_fetch_and_add(&flow_stats.requeues, 1);
+	/* The waiter wakes here, so the occupant proxy earns one boost. */
+	if (wakeup)
+		flow_pi_correlate(cpu, p, now);
+	/* Elevated owners take the fast head with a 500us slice. */
+	/* One boost per owner ends at release or expiry with no rearm. */
+	if (tctx->elevated) {
+		tctx->slice_ns = (u32)FLOW_PI_SLICE_NS;
+		tctx->wait_at = now;
+		flow_fast_insert(p, cpu, (u64)FLOW_PI_SLICE_NS,
+		    true);
+		goto kicked;
+	}
+	/* Fast lane needs a normal task past probation with low duty. */
+	/* A voluntary wake also opens it, and kernel urgency takes head. */
+	/* Idle and batch policies never enter, whatever the duty reads. */
+	/* A preempt flagged arrival under half duty also opens it. */
+	/* The check runs before any sizing, so a closed lane pays no */
+	/* probe and no divide on the wakeup path. */
+	bool fast_ok = flow_fast_lane_ok(policy) &&
+	    flow_prob_count(tctx->prob) == 0 &&
+	    (duty < (u8)FLOW_DUTY_FAST ||
+	    (wakeup && flow_prob_vol(tctx->prob)) ||
+	    ((enq_flags & (u64)SCX_ENQ_PREEMPT) != 0 &&
+	    duty < (u8)FLOW_DUTY_BATCH));
+	/* Fast arrivals size from the fast depth only with one probe. */
+	/* One divide serves the insert, and no deadline forms here, */
+	/* so the lag cap divide stays off the fast path. */
+	if (fast_ok) {
+		s32 depth = scx_bpf_dsq_nr_queued(
+		    flow_fast_dsq((u32)cpu));
+		if (depth < (s32)FLOW_FAST_D) {
+			u64 queued = 1ULL;
+			if (depth > 0)
+				queued += (u64)depth;
+			slice = flow_dyn_slice(w, queued);
+			tctx->slice_ns = (u32)slice;
+			tctx->wait_at = now;
+			tp = flow_topo((u32)cpu);
+			if (tp)
+				tp->last_slice = slice;
+			flow_fast_insert(p, cpu, slice, urgent);
+			goto kicked;
+		}
+		__sync_fetch_and_add(&flow_stats.fast_bounds, 1);
+	} else {
+		if (flow_prob_count(tctx->prob) != 0)
+			__sync_fetch_and_add(
+			    &flow_stats.prob_holds, 1);
+		else
+			__sync_fetch_and_add(
+			    &flow_stats.duty_gates, 1);
+	}
+	/* Steady tasks size from the deadline depth only with one probe. */
+	/* Fresh tasks anchor at minimum minus lag cap with wrap safety. */
 	{
-		u64 frontier = 0;
-		u64 v = tctx->vruntime;
-		u64 clamped;
-		u64 scaled;
-		u64 dl;
-		u64 sdsq;
-		s32 nice;
-		u32 w;
-		u64 target = 0;
-		u64 ref_f = 0;
-		u64 err = 0;
-		bool was_c;
-		u32 tok_cpu;
-		st = flow_cpu((u32)cpu);
-		if (st)
-			target = st->frontier;
-		ref_f = flow_ref_frontier(p, sel);
-		/* Normal path only, no tctx and overflow keep their own probe. */
-		/* Corrected feeds clamp and deadline with max wrap safety. */
-		frontier = flow_frontier_max(ref_f, target);
-		nice = flow_nice_of(p);
-		w = flow_weight_of(nice);
-		clamped = flow_clamp_vruntime_w(v, frontier,
-		    slice, w);
-		scaled = flow_scale_by_weight(est, w);
-		dl = flow_deadline(clamped, scaled);
-		if (group == (u8)FLOW_GROUP_HOG &&
-		    pinned) {
-			dl = flow_inflate_deadline(dl);
-			__sync_fetch_and_add(
-			    &flow_stats.pinned_hog_inflated,
-			    1);
+		s32 qv = scx_bpf_dsq_nr_queued(
+		    flow_vtime_dsq((u32)cpu));
+		struct flow_cpu_state *mst = flow_cpu((u32)cpu);
+		u64 min_v = mst ? mst->min_vruntime : 0;
+		u64 queued = 1ULL;
+		u64 deadline;
+		if (qv > 0)
+			queued += (u64)qv;
+		slice = flow_dyn_slice(w, queued);
+		tctx->slice_ns = (u32)slice;
+		tctx->wait_at = now;
+		tp = flow_topo((u32)cpu);
+		if (tp)
+			tp->last_slice = slice;
+		deadline = flow_clamp_entry(tctx->vruntime,
+		    min_v, flow_lag_cap(w));
+		flow_vtime_insert(p, cpu, slice, deadline);
+	}
+kicked:
+	/* Idle targets kick at once with no rate window. */
+	/* The idle flag clears first so the kick sticks. */
+	{
+		struct flow_cpu_state *st = flow_cpu((u32)cpu);
+		struct task_struct *occupant;
+		struct task_struct *trusted;
+		struct flow_task_ctx *octx;
+		u64 last;
+		u32 occ_pid;
+		u32 occ_cls;
+		u64 occ_vt;
+		u64 occ_ran;
+		u64 occ_slice;
+		if (!st)
+			return;
+		if (st->running_pid == 0) {
+			scx_bpf_test_and_clear_cpu_idle(cpu);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			return;
 		}
-		if (dl == (u64)-1)
-			dl = (u64)-2;
-		tctx->vruntime = clamped;
-		tctx->deadline = dl;
-		__sync_fetch_and_add(&flow_stats.edf_enqueued,
-		    1);
-		if (clamped != v)
+		/* Pinned arrivals never preempt a busy CPU. */
+		if (pinned) {
 			__sync_fetch_and_add(
-			    &flow_stats.edf_clamped, 1);
-		__sync_fetch_and_add(&flow_stats.edf_ordered,
-		    1);
-		was_c = clamped != v;
-		sdsq = flow_slot_insert(p, cpu, group, dl,
-		    frontier, slice, &err, pinned);
-		/* Token spend keeps the sleeper conjunct with the enqueuer */
-		/* owning the spend and no order change. */
-		tok_cpu = (u32)bpf_get_smp_processor_id();
-		if (flow_token_try_spend(tok_cpu, was_c,
-		    est, tctx->burn, err))
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* One prompt kick per 2ms window per CPU. */
+		/* The window gates before any occupant lookup, so a hot */
+		/* window skips the task lookup plus the RCU pass on the */
+		/* wakeup path. The stamp still lands only on a real kick */
+		/* below. Entry time serves the window with no fresh read. */
+		last = flow_rate_at[(u32)cpu & 1023U];
+		if (last != 0 && now - last < (u64)FLOW_PREEMPT_RATE_NS) {
 			__sync_fetch_and_add(
-			    &flow_stats.token_boosts, 1);
-		/* Kick idle and busy bound preempt with delay. */
-		/* Idle fast path first with one queued read on */
-		/* the slot target. Q2 idle in 50us coalesces when */
-		/* not pinned. Q1 always kicks, deep always kicks */
-		/* with no quiet, so no idle CPU with queued work */
-		/* sleeps unkicked. No slide. */
-		/* Busy stamps max only, running owns count. */
-		/* Dual max drops one sample max, decay intact. */
-		/* Busy uses empty first plus deserved or hog plus same */
-		/* plus mask plus rate with no armed check, so shallow */
-		/* wakes preempt once per 1ms window with no storm. Empty */
-		/* needs at most one queued, deserved needs woken deadline */
-		/* past frontier plus granule plus slack or hog occupant */
-		/* with no time cap, same keeps group with perf bypass, */
-		/* mask keeps allowed, rate keeps one win per 1ms window. */
-		/* Pinned plus deep count total only, others count total */
-		/* plus reason. Kick uses PREEMPT with kicks count. */
-		/* No loop. Delay persists across idle, next running */
-		/* decays, delay shows stale idle. Kick at stays idle only, */
-		/* rate at stays busy only, see main. */
-		if (flow_cpu_ok(p, cpu)) {
-			u64 q;
-			u64 now;
-			u64 last;
-			u8 sample;
-			u8 win;
-			u8 cur;
-			u8 swin;
-			u8 scur;
-			u64 granule;
-			bool is_deserved;
-			bool occupant_hog;
-			bool same;
-			bool mask_ok;
-			if (!st)
-				return;
-			q = scx_bpf_dsq_nr_queued(sdsq);
-			if (st->running_pid == 0) {
-				if (q ==
-				    (u64)FLOW_STEAL_MIN_DEPTH &&
-				    !pinned &&
-				    (u32)cpu < 1024) {
-					now = flow_now();
-					last =
-					    flow_kick_at[
-					    (u32)cpu];
-					if (flow_kick_recent(
-					    now, last)) {
-						__sync_fetch_and_add(
-						    &flow_stats.kick_coalesced,
-						    1);
-						return;
-					}
-					scx_bpf_kick_cpu(cpu,
-					    SCX_KICK_IDLE);
-					__sync_fetch_and_add(
-					    &flow_stats.kicks,
-					    1);
-					flow_kick_at[
-					    (u32)cpu] = now;
-					return;
-				}
-				scx_bpf_kick_cpu(cpu,
-				    SCX_KICK_IDLE);
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* Use the compat helper, it falls back to cpu_rq on old kernels. */
+		/* The occupant may be untrusted there, so the class read */
+		/* goes through one trusted lookup with release on each path. */
+		/* The same lookup serves the slice shorten below, so the */
+		/* busy path pays one task lookup plus one RCU pass. */
+		occupant = __COMPAT_scx_bpf_cpu_curr(cpu);
+		if (!occupant || occupant == p) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_kicks, 1);
+			return;
+		}
+		occ_pid = occupant->pid;
+		bpf_rcu_read_lock();
+		trusted = bpf_task_from_pid(occ_pid);
+		if (!trusted) {
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		octx = flow_lookup(trusted);
+		if (!octx) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		occ_cls = octx->cls;
+		occ_vt = octx->vruntime;
+		occ_slice = octx->slice_ns;
+		occ_ran = 0;
+		if (octx->on_cpu && octx->run_at != 0 &&
+		    now >= octx->run_at)
+			occ_ran = now - octx->run_at;
+		/* The copy above is trusted with no re-read. */
+		/* The reference stays held, so the shorten below reuses */
+		/* it with no second lookup and no second RCU pass. */
+		if (occ_cls != (u32)FLOW_CLS_INTERACTIVE &&
+		    occ_cls != (u32)FLOW_CLS_BATCH)
+			occ_cls = (u32)FLOW_CLS_BATCH;
+		/* Batch never preempts an interactive occupant. */
+		if (cls == (u32)FLOW_CLS_BATCH &&
+		    occ_cls == (u32)FLOW_CLS_INTERACTIVE) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* Interactive pairs yield at the micro quantum end. */
+		if (cls == (u32)FLOW_CLS_INTERACTIVE &&
+		    occ_cls == (u32)FLOW_CLS_INTERACTIVE) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* Batch pairs need an exhausted slice plus a deadline gap */
+		/* past one micro quantum before a prompt kick may run. */
+		if (cls == (u32)FLOW_CLS_BATCH) {
+			if (occ_slice == 0 || occ_ran < occ_slice) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
 				__sync_fetch_and_add(
-				    &flow_stats.kicks, 1);
-				if ((u32)cpu < 1024)
-					flow_kick_at[
-					    (u32)cpu] =
-					    flow_now();
-				return;
-			}
-			sample = flow_delay_from_queued(q);
-			win = st->delay_win;
-			cur = st->delay_cur;
-			swin = flow_delay_max(win, sample);
-			scur = flow_delay_max(cur, sample);
-			st->delay_win = swin;
-			st->delay_cur = scur;
-			/* Stand clears, so the dots stay display with no gate use. */
-			__sync_fetch_and_and(&st->cursor,
-			    ~(u32)FLOW_CURSOR_STAND_BIT);
-			/* Pinned counts total only with no kick. */
-			if (pinned) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
+				    &flow_stats.preempt_skipped, 1);
 				return;
 			}
-			/* Empty first counts total only past one queued. */
-			if (!flow_empty_ok(q)) {
+			if (!flow_time_before(tctx->vruntime +
+			    (u64)FLOW_MICRO_QUANTUM_NS,
+			    occ_vt)) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
 				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				return;
-			}
-			/* Deserved or hog counts total plus deserved on miss. */
-			granule = flow_granule_for_weight(w,
-			    slice);
-			is_deserved = flow_deserved(dl,
-			    st->frontier, granule);
-			occupant_hog = st->occupant_group ==
-			    (u8)FLOW_GROUP_HOG;
-			if (!flow_deserved_or_hog(is_deserved,
-			    occupant_hog)) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_deserved,
-				    1);
-				return;
-			}
-			/* Same keeps group with perf bypass and no recount. */
-			same = group == flow_group_live((u32)cpu,
-			    nr_cpu_ids);
-			if (flow_perf_enabled())
-				same = true;
-			if (!same) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_group,
-				    1);
-				return;
-			}
-			/* Mask keeps allowed with total plus mask on miss. */
-			mask_ok = bpf_cpumask_test_cpu((u32)cpu,
-			    p->cpus_ptr);
-			if (!mask_ok) {
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_mask,
-				    1);
-				return;
-			}
-			/* Rate keeps one win per 1ms window with kicks count. */
-			/* Zero last always wins with wrap, see main. */
-			{
-				volatile u32 vcpu = (u32)cpu;
-				u32 idx = vcpu & 1023U;
-				if ((u32)cpu < 1024 &&
-				    flow_cpu_live((u32)cpu))
-					last = flow_rate_at[idx];
-				else
-					last = 0;
-				now = flow_now();
-				if (last != 0 &&
-				    now - last < 1000000ULL) {
-					__sync_fetch_and_add(
-					    &flow_stats.preempt_skipped,
-					    1);
-					__sync_fetch_and_add(
-					    &flow_stats.preempt_skipped_rate,
-					    1);
-					return;
-				}
-				if ((u32)cpu < 1024 &&
-				    flow_cpu_live((u32)cpu))
-					flow_rate_at[idx] = now;
-			}
-			/* Soft preempt shortens the occupant slice out of */
-			/* band to zero before the kick, so the kick sticks */
-			/* on the waker. Zero stores the live remainder in */
-			/* place with no insert, while the insert path keeps */
-			/* prev behind a slice non-zero guard, so only this */
-			/* direct write ever reaches zero. Full stick needs */
-			/* 7.2 with the slice kfunc, 6.18 and 7.1 keep a best */
-			/* effort direct store with the kick still sent. INF */
-			/* slice never arrives, since every insert stamps the */
-			/* uniform slice. A stale occupant shortens the same */
-			/* task after a move, so harm stays bounded to an */
-			/* early loss. The kick stays on the old CPU with a */
-			/* spurious kick possible, but no wakeup is lost */
-			/* since p queues there. Self never shortens, null or */
-			/* self sends kick only, and false from the kfunc */
-			/* keeps kick only with total plus rate, so stuck */
-			/* shortens match preempt_kicks one for one, kicks */
-			/* sent exceed it by declined plus null or self. */
-			{
-				struct task_struct *occupant = NULL;
-				bool stuck;
-				/* Old BTF lacks curr, so gate the read, */
-				/* null falls to kick only with no use. */
-				if (bpf_ksym_exists(
-				    scx_bpf_cpu_curr___new))
-					occupant =
-					    scx_bpf_cpu_curr___new(cpu);
-				if (!occupant || occupant == p) {
-					scx_bpf_kick_cpu(cpu,
-					    SCX_KICK_PREEMPT);
-					return;
-				}
-				if (bpf_ksym_exists(
-				    scx_bpf_task_set_slice___new))
-					stuck =
-					    scx_bpf_task_set_slice___new(
-					    occupant, 0);
-				else {
-					occupant->scx.slice = 0;
-					stuck = true;
-				}
-				if (stuck) {
-					scx_bpf_kick_cpu(cpu,
-					    SCX_KICK_PREEMPT);
-					__sync_fetch_and_add(
-					    &flow_stats.preempt_kicks,
-					    1);
-					return;
-				}
-				scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped,
-				    1);
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped_rate,
-				    1);
+				    &flow_stats.preempt_skipped, 1);
 				return;
 			}
 		}
+		/* Interactive over batch shortens to the 100us floor. */
+		/* Batch over batch shortens to zero at slice end. */
+		/* The slice write uses the held trusted reference. */
+		/* No timer kick runs here, so the floor is an */
+		/* approximation with kick timing, not a precise preempt. */
+		if (cls == (u32)FLOW_CLS_INTERACTIVE)
+			scx_bpf_task_set_slice(trusted,
+			    (u64)FLOW_PREEMPT_FLOOR_NS);
+		else
+			scx_bpf_task_set_slice(trusted, 0);
+		bpf_task_release(trusted);
+		bpf_rcu_read_unlock();
+		flow_rate_at[(u32)cpu & 1023U] = now;
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		__sync_fetch_and_add(&flow_stats.preempt_kicks, 1);
 	}
 }

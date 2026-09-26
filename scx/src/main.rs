@@ -1,34 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Flow scheduler front end
- *
- * Loads the BPF object, wires stats and the dashboard, and drives the run loop
- * until shutdown or exit. Snapshot reads live in snapshot.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Flow scheduler front end.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+//! Loads the BPF object, wires stats and the dashboard, then drives the loop.
+
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 mod config;
 mod flow;
+mod flow_admit;
 mod flow_edf;
-mod flow_group;
 mod flow_preempt;
 mod flow_select;
 mod flow_slice;
 mod flow_slot;
-#[cfg(test)]
-mod flow_tests_edf;
-#[cfg(test)]
-mod flow_tests_group;
-#[cfg(test)]
-mod flow_tests_lifo;
-#[cfg(test)]
-mod flow_tests_preempt;
-#[cfg(test)]
-mod flow_tests_slot;
 mod rapl;
 mod snapshot;
 mod stats;
@@ -51,7 +39,6 @@ use log::info;
 use scx_stats::prelude::*;
 use scx_utils::UserExitInfo;
 use scx_utils::build_id;
-use scx_utils::compat;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -109,8 +96,7 @@ struct Opts {
 /*
  * Scheduler owns the skeleton, the link, the stats
  * server and the dashboard channel. It drives the run
- * loop until shutdown or exit. Snapshot reads live in
- * the snapshot module.
+ * loop until shutdown or exit.
  */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
@@ -126,12 +112,6 @@ pub(crate) struct Scheduler<'a> {
     cur_freq_khz: Vec<u64>,
     freq_read_at: Option<std::time::Instant>,
     started_at: std::time::Instant,
-    /* Per CPU group table and ready flag. */
-    group_table: [u8; crate::flow_group::GROUP_TABLE_LEN],
-    /* Zero keeps halves fallback in snapshot. */
-    group_ready: u8,
-    /* Placement widen flag. Zero is strict, one is perf. */
-    perf_mode: u8,
     /* Governor display with EPP and platform suffix. */
     governor: String,
     /* Last governor poll for the 1s tick writer. */
@@ -161,21 +141,13 @@ impl<'a> Scheduler<'a> {
         let cfg = Config::default();
         cfg.validate()?;
         info!("Config: {}", cfg.describe());
-        /* Honor exiting tasks and waiting wakeups. */
-        let flags = *compat::SCX_OPS_ENQ_EXITING
-            | *compat::SCX_OPS_ENQ_LAST
-            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
-        skel.struct_ops.flow_ops_mut().flags = flags;
+        /* Ops flags live in the BPF object for kernel 7.2 and up. */
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
-        /* Static cards seed the start log and the cards. Live frequency and */
-        /* CPU cards stay display only and never shape placement. Max */
-        /* frequency, capacity, LLC, and siblings seed groups. */
+        /* Static cards seed the start log and the cards. Live frequency */
+        /* stays display only and never shapes placement. */
         let cards = topology::web_cpu_static();
         /* Online ids once at init in rank order. Snapshot reads online CPUs */
-        /* again each tick for hotplug. Rank based seed writes by id, offline */
-        /* stays light inert, skewed forces ready one, dense full keeps prior */
-        /* table and ready exactly. */
+        /* again each tick for hotplug. */
         let mut online = topology::online_cpus();
         if online.is_empty() {
             online = cards.iter().map(|c| c.id).collect();
@@ -191,26 +163,14 @@ impl<'a> Scheduler<'a> {
                 .unwrap_or(0)
                 .min(MAX_CPUS);
         }
-        let (group_table, group_ready) = topology::group_seed_online(&online, possible);
-        let (sibling_table, sibling_fallbacks) = topology::sibling_seed_online(&online);
-        /* Governor poll once at init over online only. */
-        /* Unanimous performance sets perf one, else zero. */
-        /* Display keeps the suffix with no BSS array. */
+        /* Governor poll once at init over online only for display. */
         let governors = topology::collect_governors(&online);
-        let perf_mode: u8 = if topology::perf_unanimous(&governors) {
-            1
-        } else {
-            0
-        };
         let governor = topology::display_governor(&governors);
-        if let Some(bss) = skel.maps.bss_data.as_mut() {
-            bss.flow_group_by_cpu = group_table;
-            bss.flow_group_ready = group_ready;
-            bss.flow_sibling_by_cpu = sibling_table;
-            bss.flow_perf_mode = perf_mode;
-        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
+        /* Seed the BPF topology view with sibling plus domain rows. */
+        /* Failures keep the BPF defaults with cursor order steal. */
+        Self::seed_topo(&mut skel);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         /* Bounded dashboard channel drops a frame when full. */
@@ -227,14 +187,8 @@ impl<'a> Scheduler<'a> {
         /* Static cards seed the start log and the cards. */
         /* Frequency stays display only here. */
         info!("Topology: {}", topology::describe_topology(&cards));
-        info!(
-            "online: {} cpus over possible {} with ready {}",
-            online.len(),
-            possible,
-            group_ready
-        );
-        info!("siblings: {} fallbacks to singleton", sibling_fallbacks);
-        info!("governor: {} with perf_mode {}", governor, perf_mode);
+        info!("online: {} cpus over possible {}", online.len(), possible,);
+        info!("governor: {}", governor);
         let rapl = crate::rapl::RaplReader::open_default();
         if rapl.is_some() {
             info!("RAPL package zone open for the energy probe");
@@ -253,9 +207,6 @@ impl<'a> Scheduler<'a> {
             cur_freq_khz: Vec::with_capacity(freq_cap),
             freq_read_at: None,
             started_at: std::time::Instant::now(),
-            group_table,
-            group_ready,
-            perf_mode,
             governor,
             governor_read_at: None,
             rapl,
@@ -267,6 +218,28 @@ impl<'a> Scheduler<'a> {
 
     fn exited(&self) -> bool {
         uei_exited!(&self.skel, uei)
+    }
+
+    /* Seed one topology row per CPU into the BPF view. */
+    /* Each row carries the thread sibling and the cache domain. */
+    /* The slice field keeps the BPF default with no write here. */
+    /* A failed update keeps the BPF default with no trap. */
+    fn seed_topo(skel: &mut BpfSkel<'_>) {
+        use libbpf_rs::MapCore;
+        for (cpu, sib, llc) in topology::topo_rows() {
+            let key = cpu.to_ne_bytes();
+            let mut val = [0u8; 16];
+            val[0..4].copy_from_slice(&sib.to_ne_bytes());
+            val[4..8].copy_from_slice(&llc.to_ne_bytes());
+            val[8..16].copy_from_slice(&crate::flow_slice::QMIN_NS.to_ne_bytes());
+            if let Err(e) = skel
+                .maps
+                .topo_stor
+                .update(&key, &val, libbpf_rs::MapFlags::ANY)
+            {
+                log::warn!("topo seed failed for cpu {cpu}: {e}");
+            }
+        }
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -293,13 +266,12 @@ impl<'a> Scheduler<'a> {
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
             "exit ins={} req={} done={} park={} steal={} \
-            kick={} noctx={} edfenq={} edfclamp={} edford={} \
-            demote={} promote={} wpromote={} pinfl={} gskip={} \
-            pkick={} pskip={} kcoal={} \
-            pskip_a={} pskip_d={} pskip_g={} pskip_m={} pskip_r={} \
-            wover={} tboost={} \
-            skicks={} tcas={} smoves={} sdefer={} stealx={} \
-            lheads={} lbound={} \
+            kick={} noctx={} \
+            pkick={} pskip={} \
+            smoves={} \
+            fast={} fbound={} \
+            vtime={} dgate={} \
+            phold={} elev={} spen={} global={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -308,31 +280,17 @@ impl<'a> Scheduler<'a> {
             m.steal_moves,
             m.kicks,
             m.enq_no_tctx,
-            m.edf_enqueued,
-            m.edf_clamped,
-            m.edf_ordered,
-            m.group_demote,
-            m.group_promote,
-            m.group_wake_promote,
-            m.pinned_hog_inflated,
-            m.group_steal_skipped,
             m.preempt_kicks,
             m.preempt_skipped,
-            m.kick_coalesced,
-            m.preempt_skipped_armed,
-            m.preempt_skipped_deserved,
-            m.preempt_skipped_group,
-            m.preempt_skipped_mask,
-            m.preempt_skipped_rate,
-            m.wheel_overflow,
-            m.token_boosts,
-            m.slot_kicks,
-            m.token_cas_fails,
             m.slot_moves,
-            m.slot_defer,
-            m.steal_xmoves,
-            m.lifo_heads,
-            m.lifo_bound_hits,
+            m.fast_admits,
+            m.fast_bounds,
+            m.vtime_admits,
+            m.duty_gates,
+            m.prob_holds,
+            m.elev_moves,
+            m.steal_penalties,
+            m.global_moves,
             runtime,
             oncpu,
         );
@@ -425,55 +383,80 @@ mod tests {
     #[test]
     fn slice_matches_header() {
         assert_eq!(
-            crate::flow_slice::SLICE_NS,
-            crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64
-        );
-        assert_eq!(crate::flow_slice::SLICE_NS, 1_000_000);
-        assert_eq!(
-            crate::flow_slice::EST_MIN_NS,
-            crate::bpf_intf::flow_consts_FLOW_EST_MIN_NS as u64
+            crate::flow_slice::QMIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_QMIN_NS as u64
         );
         assert_eq!(
-            crate::flow_slice::EST_MAX_NS,
-            crate::bpf_intf::flow_consts_FLOW_EST_MAX_NS as u64
+            crate::flow_slice::QMAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_QMAX_NS as u64
         );
+        assert_eq!(crate::flow_slice::QMIN_NS, 250_000);
+        assert_eq!(crate::flow_slice::QMAX_NS, 15_000_000);
+        assert_eq!(
+            crate::flow_slice::LTARGET_NS,
+            crate::bpf_intf::flow_consts_FLOW_LTARGET_NS as u64
+        );
+        assert_eq!(
+            crate::flow_slice::MICRO_QUANTUM_NS,
+            crate::bpf_intf::flow_consts_FLOW_MICRO_QUANTUM_NS as u64
+        );
+        assert_eq!(crate::flow_slice::WEIGHT_BASE, 100);
+        assert_eq!(crate::flow_slice::WEIGHT_MIN, 1);
+        assert_eq!(crate::flow_slice::WEIGHT_MAX, 10_000);
     }
 
     #[test]
     fn slot_matches_header() {
         assert_eq!(
-            crate::flow_slot::SLOT_BASE,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BASE as u64
+            crate::flow_slot::SLOT_OVERFLOW,
+            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
         );
-        assert_eq!(
-            crate::flow_slot::SLOT_OVERFLOW_BASE,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
-        );
+        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x7000);
         assert_eq!(
             crate::flow_slot::SLOT_D,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_D as u32
+            crate::bpf_intf::flow_consts_FLOW_FAST_D
         );
         assert_eq!(
             crate::flow_slot::SLOT_BUDGET,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET as u32
+            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET
         );
         assert_eq!(
-            crate::flow_group::OVERFLOW_LIGHT,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
+            crate::flow_slot::SLOT_MAX_DSQS,
+            crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
+        );
+        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 2049);
+        assert_eq!(
+            crate::flow_slot::FAST_BASE,
+            crate::bpf_intf::flow_consts_FLOW_FAST_BASE as u64
         );
         assert_eq!(
-            crate::flow_group::OVERFLOW_HOG,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
+            crate::flow_slot::VTIME_BASE,
+            crate::bpf_intf::flow_consts_FLOW_VTIME_BASE as u64
         );
     }
 
     #[test]
-    fn edf_matches_header() {
+    fn admit_matches_header() {
         assert_eq!(
-            crate::flow_slice::WEIGHT,
-            crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64
+            crate::flow_admit::DUTY_SHIFT,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_SHIFT
         );
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_WEIGHT as u64, 1024);
+        assert_eq!(
+            crate::flow_admit::DUTY_FAST,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_FAST as u8
+        );
+        assert_eq!(
+            crate::flow_admit::DUTY_BATCH,
+            crate::bpf_intf::flow_consts_FLOW_DUTY_BATCH as u8
+        );
+        assert_eq!(
+            crate::flow_admit::PROB_CYCLES,
+            crate::bpf_intf::flow_consts_FLOW_PROB_CYCLES as u8
+        );
+        assert_eq!(
+            crate::flow_admit::STARVE_NS,
+            crate::bpf_intf::flow_consts_FLOW_STARVE_NS as u64
+        );
     }
 
     #[test]
@@ -489,52 +472,30 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_48() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
+    fn task_size_is_40() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
     }
 
     #[test]
-    fn cpu_size_with_ema_active_and_occupant_is_64() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 64);
-        assert_eq!(
-            std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, active_ns),
-            48
-        );
-        assert_eq!(
-            std::mem::offset_of!(crate::bpf_intf::flow_cpu_state, occupant_group),
-            56
-        );
+    fn cpu_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 16);
     }
 
     #[test]
-    fn sched_stats_size_is_272() {
+    fn pi_wait_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_pi_wait>(), 16);
+    }
+
+    #[test]
+    fn topo_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_topo>(), 16);
+    }
+
+    #[test]
+    fn sched_stats_size_is_160() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            272
-        );
-    }
-
-    #[test]
-    fn groups_match_header() {
-        assert_eq!(
-            crate::flow_group::NGROUPS,
-            crate::bpf_intf::flow_consts_FLOW_NGROUPS as u64
-        );
-        assert_eq!(
-            crate::flow_group::GROUP_LIGHT as u64,
-            crate::bpf_intf::flow_consts_FLOW_GROUP_LIGHT as u64
-        );
-        assert_eq!(
-            crate::flow_group::GROUP_HOG as u64,
-            crate::bpf_intf::flow_consts_FLOW_GROUP_HOG as u64
-        );
-        assert_eq!(
-            crate::flow_group::OVERFLOW_LIGHT,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64
-        );
-        assert_eq!(
-            crate::flow_group::OVERFLOW_HOG,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_OVERFLOW_BASE as u64 + 1
+            160
         );
     }
 }

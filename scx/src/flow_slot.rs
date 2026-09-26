@@ -1,179 +1,213 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Slot store helpers
- *
- * Holds the per CPU bounded LIFO slot helpers that mirror the BPF header so
- * behavior stays the same on both sides of the boundary. Each CPU holds two
- * queues plus 2 overflow tails with bounded LIFO at K 8 and no knob. The
- * probe maps one deadline to near or overflow, pinned tasks rest in
- * overflow, dispatch drains own plus overflow plus peer steal with same
- * group first and perf only cross second, defer counts capped drains with
- * work left, and the kick chain keeps idle owners moving.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Queue store helpers for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-/* Tasks moved by one slot trip at most. Fixed at 4 with no knob. */
+//! One shallow FIFO plus one deadline queue per CPU with a shared tail.
+
+/// Tasks moved by one fast trip at most. Fixed at 4 with no knob.
 pub const SLOT_D: u32 = 4;
-/* Tasks moved by one dispatch pass at most. Fixed at 32 with no knob. */
+/// Tasks moved by one dispatch pass at most. Fixed at 32 with no knob.
 pub const SLOT_BUDGET: u32 = 32;
-/* Own queue cap at budget minus one. Fixed at 31 with no knob. */
+/// Base id of the per CPU fast queues.
 #[cfg(test)]
-pub const SLOT_OWN_CAP: u32 = 31;
-/* Zero-move sweep bound. Fixed at 256 with no knob. */
+pub const FAST_BASE: u64 = 0x6000;
+/// Base id of the per CPU deadline queues.
 #[cfg(test)]
-pub const SWEEP_MAX: u16 = 256;
-/* Base id of the per CPU queues. */
+pub const VTIME_BASE: u64 = 0x6800;
+/// Id of the overflow tail shared by every CPU.
 #[cfg(test)]
-pub const SLOT_BASE: u64 = 0x6000;
-/* Base id of the group overflow tails. Relocated to 0x6800 with no share. */
+pub const SLOT_OVERFLOW: u64 = 0x7000;
+/// Id of the kernel global queue for homeless tasks.
 #[cfg(test)]
-pub const SLOT_OVERFLOW_BASE: u64 = 0x6800;
-/* Overflow tails, one per group. */
+pub const SLOT_GLOBAL: u64 = 0;
+/// Max DSQs at 1024 CPUs. Holds two per CPU plus one overflow.
 #[cfg(test)]
-pub const SLOT_OVERFLOW_N: u64 = 2;
-/* Queues per CPU. One light plus one hog with no share. */
+pub const SLOT_MAX_DSQS: u64 = 2049;
+/// Own deadline queue cap at 12 under budget 32. Fixed with no knob.
 #[cfg(test)]
-pub const SLOT_PER_CPU: u64 = 2;
-/* Max DSQs at 1024 CPUs. Holds 2 times 1024 plus 2 with no share. */
+pub const SLOT_OWN_CAP: u32 = 12;
+/// Shared tail cap at 4 under the dispatch budget. Fixed with no knob.
 #[cfg(test)]
-pub const SLOT_MAX_DSQS: u64 = 2050;
-/* Slot width in nanos near 64us. */
+pub const SLOT_OVER_CAP: u32 = 4;
+/// Gated starvation cap at 4 under the dispatch budget. Fixed with no knob.
 #[cfg(test)]
-pub const WHEEL_SLOT_NS: u64 = 64_000;
-/* Near slots covered by per CPU insert. */
+pub const SLOT_GATED_CAP: u32 = 4;
+/// Miss cap of one drain trip at 4. Fixed with no knob.
 #[cfg(test)]
-pub const WHEEL_DIM: u64 = 256;
-/* Slots covered by the probe. */
-#[cfg(test)]
-pub const WHEEL_TOTAL: u64 = 65536;
-/* Horizon in nanos near 4.19s in vruntime. */
-#[cfg(test)]
-pub const WHEEL_HORIZON_NS: u64 = 64_000 * 65536;
-/* Low 16 bits cleared by the quantise step. */
-#[cfg(test)]
-pub const WHEEL_QUANT_LO: u64 = 0xFFFF;
-/* Tokens held per CPU for the sleeper boost. */
-#[cfg(test)]
-pub const TOKEN_MAX: u32 = 255;
-/* Head inserts in one LIFO period at 8 with one tail. */
-#[cfg(test)]
-pub const LIFO_K: u64 = 8;
-/* Inserts in one LIFO period at 9 with 8 heads. */
-#[cfg(test)]
-pub const LIFO_PERIOD: u64 = 9;
-/* LIFO sequences at 2050 with per CPU plus overflow. */
-#[cfg(test)]
-pub const LIFO_NSEQ: u64 = 2050;
+pub const SLOT_MISS_CAP: u32 = 4;
 
-/*
- * Deadline with the low 16 bits cleared near 64us
- * down. Clearing moves early only, so order never
- * moves late with at most 65535ns of earliness.
- */
+/// Fast queue id of one CPU from base plus id.
+/// One shallow queue per CPU keeps sleepy wakeups local.
 #[cfg(test)]
-pub fn qdl_round_down(dl: u64) -> u64 {
-    dl & !WHEEL_QUANT_LO
+pub fn fast_dsq(cpu: u32) -> u64 {
+    FAST_BASE + cpu as u64
 }
 
-/*
- * Probe of one deadline into quantised deadline,
- * slot, error, and overflow. Overdue keeps the
- * rounded deadline with slot zero and no overflow.
- * Inside keeps the rounded deadline with the slot
- * from the rounded distance shifted by 16. Outside
- * pins to the tail with the last slot and overflow
- * set. Error holds deadline minus rounded deadline
- * in 0 to 65535. Mirrors the BPF probe with one
- * horizon test and no double read.
- */
+/// Deadline queue id of one CPU from base plus id.
+/// One ordered queue per CPU keeps steady work fair.
 #[cfg(test)]
-pub fn wheel_probe(dl: u64, frontier: u64) -> (u64, u64, u64, bool) {
-    let err = dl & WHEEL_QUANT_LO;
-    let overdue = crate::flow_edf::time_before(dl, frontier);
-    let inside = overdue || dl.wrapping_sub(frontier) < WHEEL_HORIZON_NS;
-    if !inside {
-        let tail = frontier.wrapping_add(WHEEL_HORIZON_NS).wrapping_sub(1);
-        return (qdl_round_down(tail), WHEEL_TOTAL - 1, err, true);
-    }
-    let qdl = qdl_round_down(dl);
-    if crate::flow_edf::time_before(qdl, frontier) {
-        return (qdl, 0, err, false);
-    }
-    let mut s = qdl.wrapping_sub(frontier) >> 16;
-    if s >= WHEEL_TOTAL {
-        s = WHEEL_TOTAL - 1;
-    }
-    (qdl, s, err, false)
+pub fn vtime_dsq(cpu: u32) -> u64 {
+    VTIME_BASE + cpu as u64
 }
 
-/*
- * True when one sleeper may spend one token for a
- * boost. Needs a clamped lag with a live token, an
- * estimate at or below one slice, burn below 4ms,
- * and quant error at or below 64us, so the boost
- * stays bounded with no late move. Mirrors the BPF
- * conjunct in gate order.
- */
+/// Id of the overflow tail shared by every CPU.
+/// Pinned and homeless tasks rest here with mask wins on drain.
 #[cfg(test)]
-pub fn token_eligible(clamped: bool, tok: u32, est: u64, burn: u32, err: u64) -> bool {
-    clamped
-        && tok != 0
-        && est <= crate::flow_slice::SLICE_NS
-        && (burn as u64) < crate::flow_group::PROMOTE_BURN_NS
-        && err <= WHEEL_SLOT_NS
+pub fn slot_overflow_dsq() -> u64 {
+    SLOT_OVERFLOW
 }
 
-/*
- * Slot id of one group overflow with light as
- * default. Holds overflow base plus group, so two
- * tails keep queue order per group with no share.
- * Bad group falls to light with no trap. Slot only,
- * never vtime.
- */
+/// Id of the kernel global queue for homeless tasks.
+/// Tasks without state or without a live CPU rest here with mask
+/// wins on drain, and the drain counts the global moves.
 #[cfg(test)]
-pub fn slot_overflow_dsq(group: u8) -> u64 {
-    if group == crate::flow_group::GROUP_HOG {
-        SLOT_OVERFLOW_BASE + 1
-    } else {
-        SLOT_OVERFLOW_BASE
-    }
+pub fn slot_global_dsq() -> u64 {
+    SLOT_GLOBAL
 }
 
-/*
- * Slot id of one CPU group with light as default.
- * Holds base plus CPU times two plus group, so two
- * per CPU keep light and hog apart with no share.
- * Bad group falls to light with no trap. Slot only,
- * never vtime. Mirrors the BPF per CPU helper.
- */
-#[cfg(test)]
-pub fn slot_cpu_dsq(cpu: u32, group: u8) -> u64 {
-    let g = if group == crate::flow_group::GROUP_HOG {
-        1
-    } else {
-        0
-    };
-    SLOT_BASE + cpu as u64 * 2 + g
-}
-
-/*
- * Count of DSQs for one host with per CPU plus
- * overflow. Holds two times nr plus two, so eight
- * CPUs need eighteen queues with 2050 max at 1024
- * CPUs and no share. Mirrors the BPF count helper.
- */
+/// Count of DSQs for one host with two per CPU plus overflow.
+/// Holds twice nr plus one, so eight CPUs need seventeen queues.
 #[cfg(test)]
 pub fn slot_nr_dsqs(nr: u64) -> u64 {
-    nr * 2 + 2
+    nr * 2 + 1
 }
 
-/*
- * Least donor depth for one steal with idle empty
- * fast path. Holds one when idle empty, else two,
- * so idle owners collect the last task with no
- * strand. Mirrors the BPF steal need helper.
- */
+/// DSQ id for one insert with pinned overflow.
+/// Pinned tasks rest in the overflow tail with no per CPU use.
+/// Homeless tasks rest in the kernel global queue with fail closed.
+/// Dead CPUs rest in global with fail closed.
+#[cfg(test)]
+pub fn insert_dsq(cpu: i32, pinned: bool, nr: usize) -> u64 {
+    if pinned {
+        return slot_overflow_dsq();
+    }
+    if cpu < 0 {
+        return slot_global_dsq();
+    }
+    if (cpu as usize) >= nr {
+        return slot_global_dsq();
+    }
+    if (cpu as u64) >= 1024 {
+        return slot_global_dsq();
+    }
+    fast_dsq(cpu as u32)
+}
+
+/// Local queue ids for one dispatch in drain order.
+/// Holds the fast queue, the deadline queue, then the overflow tail.
+#[cfg(test)]
+pub fn local_trip_dsqs(cpu: u32) -> [u64; 3] {
+    [fast_dsq(cpu), vtime_dsq(cpu), slot_overflow_dsq()]
+}
+
+/// Cap of one fast trip at depth under the dispatch budget.
+/// Returns the min of budget and 4.
+#[cfg(test)]
+pub fn slot_cap(budget: u32) -> u32 {
+    budget.min(SLOT_D)
+}
+
+/// Own deadline queue cap at 12 under budget 32.
+/// Holds 12 with budget 32, so overflow and steal keep room.
+#[cfg(test)]
+pub fn slot_own_cap(budget: u32) -> u32 {
+    budget.min(SLOT_OWN_CAP)
+}
+
+/// Shared tail cap at 4 under the dispatch budget.
+/// Returns the min of budget and 4 with no head stall.
+#[cfg(test)]
+pub fn tail_cap(budget: u32) -> u32 {
+    budget.min(SLOT_OVER_CAP)
+}
+
+/// Drain up to a cap from one queue for one CPU.
+/// The scan visits queued tasks in queue order and moves each live
+/// task with the CPU in the mask. Dead, foreign, and failed tasks count
+/// one miss each with a miss cap at 4, so one bad head never blocks later
+/// work. The walk stops at cap plus base with no full scan.
+/// Returns the count moved.
+#[cfg(test)]
+pub fn slot_drain_model(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+) -> u32 {
+    slot_drain_inner(queue, cpu, cap, base, None, u64::MAX)
+}
+
+/// Starvation drain for the gated passes with a 1.5ms floor.
+/// Young tasks count one miss each, so old tasks behind them surface.
+/// Tasks without a wait stamp miss past with no move.
+#[cfg(test)]
+pub fn slot_drain_starved_model(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+    now: u64,
+) -> u32 {
+    slot_drain_inner(
+        queue,
+        cpu,
+        cap,
+        base,
+        Some(now),
+        crate::flow_admit::STARVE_NS,
+    )
+}
+
+#[cfg(test)]
+fn slot_drain_inner(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+    now: Option<u64>,
+    floor_ns: u64,
+) -> u32 {
+    let mut moved = 0;
+    let mut miss = 0u32;
+    let mut kept = std::collections::VecDeque::new();
+    let mut rest = std::collections::VecDeque::new();
+    std::mem::swap(queue, &mut rest);
+    for task in rest.drain(..) {
+        if moved + base >= cap || miss >= SLOT_MISS_CAP {
+            kept.push_back(task);
+            continue;
+        }
+        if let Some(t) = now {
+            let old = task.wait_at != 0 && t >= task.wait_at && t - task.wait_at > floor_ns;
+            if !old {
+                miss += 1;
+                kept.push_back(task);
+                continue;
+            }
+        }
+        let ok = task.live && !task.fail && crate::flow_select::may_run_on(cpu, &task.allowed);
+        if ok {
+            moved += 1;
+            miss = 0;
+        } else {
+            miss += 1;
+            kept.push_back(task);
+        }
+    }
+    *queue = kept;
+    moved
+}
+
+/// True when one local window holds work.
+/// Window holds the fast queue plus the deadline queue.
+#[cfg(test)]
+pub fn window_has_work(fast: bool, vtime: bool) -> bool {
+    fast || vtime
+}
+
+/// Least donor depth for one steal with idle empty fast path.
+/// Holds one when idle empty, else two.
 #[cfg(test)]
 pub fn steal_need(idle_empty: bool) -> u64 {
     if idle_empty {
@@ -183,198 +217,12 @@ pub fn steal_need(idle_empty: bool) -> u64 {
     }
 }
 
-/*
- * DSQ id for one per CPU insert with pinned
- * overflow. Pinned tasks rest in the group overflow
- * tail with no per CPU use, so every owner dispatch
- * visits them in the window with mask wins. Migratable
- * tasks keep the per CPU queue or the horizon tail.
- * Dead CPUs rest in overflow with fail closed, so
- * negative plus past live plus past 1024 all pin
- * to the tail with no trap. Mirrors the BPF per
- * CPU branch with the same group fallback.
- */
+/// First donor deadline queue id from one scan window with keep first.
+/// Visits bound peers from start with wrap and keeps the first peer with
+/// queued at or past need. Fast queues never take part, so stolen work
+/// always comes from deadline queues. Returns the DSQ id on hit.
 #[cfg(test)]
-pub fn insert_cpu_dsq(cpu: i32, group: u8, slot: u64, pinned: bool, nr: usize) -> u64 {
-    if pinned {
-        return slot_overflow_dsq(group);
-    }
-    if slot >= WHEEL_DIM {
-        return slot_overflow_dsq(group);
-    }
-    if cpu < 0 {
-        return slot_overflow_dsq(group);
-    }
-    if (cpu as usize) >= nr {
-        return slot_overflow_dsq(group);
-    }
-    if (cpu as u64) >= 1024 {
-        return slot_overflow_dsq(group);
-    }
-    slot_cpu_dsq(cpu as u32, group)
-}
-
-/*
- * Four local queue ids for one dispatch. Holds own
- * per CPU own group, own overflow, other per CPU,
- * and other overflow in drain order with no share.
- * Mirrors the BPF local trip ids with no drain use.
- */
-#[cfg(test)]
-pub fn local_trip_dsqs(cpu: u32, group: u8) -> [u64; 4] {
-    let other = if group == crate::flow_group::GROUP_HOG {
-        crate::flow_group::GROUP_LIGHT
-    } else {
-        crate::flow_group::GROUP_HOG
-    };
-    [
-        slot_cpu_dsq(cpu, group),
-        slot_overflow_dsq(group),
-        slot_cpu_dsq(cpu, other),
-        slot_overflow_dsq(other),
-    ]
-}
-
-/*
- * Cap of one trip at D under the dispatch budget.
- * Returns the min of budget and 4, so one per CPU
- * queue or overflow moves at most 4 with the shared
- * loop and no K loop. Mirrors the BPF drain cap.
- */
-#[cfg(test)]
-pub fn slot_cap(budget: u32) -> u32 {
-    budget.min(SLOT_D)
-}
-
-/*
- * Own queue cap at budget minus one. Holds 31 with
- * budget 32, so one slot stays for overflow, other
- * CPU, other overflow, plus steal with no strand on
- * a hot own queue. Zero stays zero. Mirrors the BPF
- * own cap reserve.
- */
-#[cfg(test)]
-pub fn slot_own_cap(budget: u32) -> u32 {
-    budget.saturating_sub(1)
-}
-
-/*
- * Drain up to a cap from one slot queue for one CPU.
- * The scan visits every queued task in queue order
- * and moves each live task with the CPU in the mask
- * and with no move failure. Dead, foreign, and failed
- * tasks are skipped with progress, so one bad head
- * never blocks later work. Base carries moved so far
- * with the cap kept whole, so the stop reads one sum
- * like the BPF shared body. Returns the count moved.
- * A zero return means no movable work was present.
- */
-#[cfg(test)]
-pub fn slot_drain_model(
-    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
-    cpu: i32,
-    cap: u32,
-    base: u32,
-) -> u32 {
-    let mut moved = 0;
-    let mut kept = std::collections::VecDeque::new();
-    for task in queue.drain(..) {
-        let ok = moved + base < cap
-            && task.live
-            && !task.fail
-            && crate::flow_select::may_run_on(cpu, &task.allowed);
-        if ok {
-            moved += 1;
-        } else {
-            kept.push_back(task);
-        }
-    }
-    *queue = kept;
-    moved
-}
-
-/*
- * True when one dispatch counts a defer. Needs moves
- * at or past D with work left in the window, so a
- * saturated queue reports back pressure with one
- * count. Mirrors the BPF defer gate with no drain
- * use.
- */
-#[cfg(test)]
-pub fn defer_ok(moved: u32, window_left: bool) -> bool {
-    moved >= SLOT_D && window_left
-}
-
-/*
- * Kick step for one dispatch with the sweep count.
- * A zero-move dispatch with window work kicks until
- * the sweep bound at 256, so unmovable-only window
- * work stops polling with no infinite loop. Any move
- * resets the sweep with no extra pass. Moves with
- * window ride the next natural dispatch with no kick,
- * since the loop already visited every task and the
- * CPU runs the moved work before the next pass. Steady
- * state stays quiet with kicks per dispatch well below
- * one. Returns whether to kick and the next sweep
- * count. Mirrors the BPF safety net with zero-move
- * window only.
- */
-#[cfg(test)]
-pub fn kick_step(moved: u32, window_left: bool, sweep: u16) -> (bool, u16) {
-    if moved == 0 && window_left && sweep < SWEEP_MAX {
-        return (true, sweep + 1);
-    }
-    if moved > 0 {
-        return (false, 0);
-    }
-    (false, sweep)
-}
-
-/*
- * True when one local window holds work. Window holds
- * own per CPU plus own overflow plus other per CPU
- * plus other overflow, so trips drain it with no peer
- * need. Mirrors the BPF window gate with four reads.
- */
-#[cfg(test)]
-pub fn window_has_work(own: bool, own_over: bool, other: bool, other_over: bool) -> bool {
-    own || own_over || other || other_over
-}
-
-/*
- * Fold counts from one shared steal drain with post hoc mark.
- * Adds got to steal moves for all peer moves and got times
- * mark to steal x moves for the cross subset with two
- * unconditional adds, so zero keeps count still with no
- * branch on cross. Mirrors the BPF fold with LSB compare
- * after the drain and single move with lim at moved plus
- * one. Returns the pair of adds in steal moves order then
- * steal x moves order. See src/bpf/dispatch.bpf.c for the
- * drain use.
- */
-#[cfg(test)]
-pub fn steal_fold_counts(got: u32, steal_dsq: u64, sgroup: u8) -> (u64, u64) {
-    let x = crate::flow_select::steal_cross_x(steal_dsq, sgroup);
-    (got as u64, (got as u64) * x)
-}
-
-/*
- * First donor DSQ id from one scan window with keep first.
- * Visits bound peers from start with wrap and keeps the
- * first peer with queued at or past need, so shallow donors
- * skip early with no iterator. Mirrors the BPF keep first
- * scan with live check and need. Returns the DSQ id on hit
- * and none on miss with no drain use. See
- * src/bpf/dispatch.bpf.c for the scan use.
- */
-#[cfg(test)]
-pub fn steal_first_donor(
-    start: u32,
-    nr: usize,
-    group: u8,
-    need: u64,
-    depths: &[u64],
-) -> Option<u64> {
+pub fn steal_first_donor(start: u32, nr: usize, need: u64, depths: &[u64]) -> Option<u64> {
     if nr <= 1 {
         return None;
     }
@@ -390,79 +238,115 @@ pub fn steal_first_donor(
         if q < need {
             continue;
         }
-        return Some(slot_cpu_dsq(peer, group));
+        return Some(vtime_dsq(peer));
     }
     None
 }
 
-/*
- * Pick from two scan windows with strict and perf models.
- * Scans same group first and returns the same donor on hit
- * with no cross use, so strict stays same group only with
- * zero cross. Scans other group second from start plus 8
- * on same group miss when perf holds, so perf adds cross
- * cover with no extra drain. Single CPU hosts skip the
- * whole pass with one check. Mirrors the BPF fold with one
- * shared drain and single move. Returns the DSQ id with
- * cross flag on hit and none on miss. See
- * src/bpf/dispatch.bpf.c for the drain use.
- */
 #[cfg(test)]
-pub fn steal_pick_fold(
-    start: u32,
-    nr: usize,
-    sgroup: u8,
-    ogroup: u8,
-    need: u64,
-    same_depths: &[u64],
-    cross_depths: &[u64],
-    perf: bool,
-) -> Option<(u64, bool)> {
-    if nr <= 1 {
-        return None;
-    }
-    if let Some(dsq) = steal_first_donor(start, nr, sgroup, need, same_depths) {
-        return Some((dsq, false));
-    }
-    if !perf {
-        return None;
-    }
-    let cross_start = start.wrapping_add(8);
-    if let Some(dsq) = steal_first_donor(cross_start, nr, ogroup, need, cross_depths) {
-        return Some((dsq, true));
-    }
-    None
-}
+mod tests {
+    use super::*;
 
-/*
- * True when one insert takes head with bounded LIFO at K 8. Takes head for 8
- * of 9 with one tail plus one forced tail at MAX, so fresh work wins fast
- * with no starve or preempt use. Forced tails at period plus MAX keep
- * max gap 9 with 8 heads everywhere with wrap, so the bound stays exact
- * with one compare and no new state. Pure with no BSS use, so BPF and
- * tests share the period with no drift. Mirrors the BPF take head with
- * the same modulo plus MAX.
- */
-#[cfg(test)]
-pub fn lifo_take_head(seq: u32) -> bool {
-    if seq == u32::MAX {
-        return false;
-    }
-    (seq as u64 % LIFO_PERIOD) != LIFO_K
-}
+    const OVERFLOW_BELOW_LOCAL_ON: bool = SLOT_OVERFLOW < 0xc000000000000000;
+    const QUEUE_COUNT_FITS: bool = SLOT_MAX_DSQS == 2049;
 
-/*
- * Index of one LIFO sequence with per CPU plus overflow at 2050. Per CPU
- * holds CPU times 2 plus group, overflow holds 2048 plus group, so total
- * 2050 matches slot max with no share. Bad group falls to light with no
- * trap. Pure with no state. Mirrors the BPF index with the same map.
- */
-#[cfg(test)]
-pub fn lifo_idx(over: bool, cpu: u32, group: u8) -> u32 {
-    let g = if group == crate::flow_group::GROUP_HOG {
-        1
-    } else {
-        0
-    };
-    if over { 2048 + g } else { cpu * 2 + g }
+    #[test]
+    fn ids_stay_below_local_on() {
+        const { assert!(OVERFLOW_BELOW_LOCAL_ON) }
+        const { assert!(QUEUE_COUNT_FITS) }
+        assert!(fast_dsq(1023) < 0xc000000000000000);
+        assert!(vtime_dsq(1023) < 0xc000000000000000);
+        assert_eq!(slot_nr_dsqs(8), 17);
+        assert_eq!(slot_overflow_dsq(), SLOT_OVERFLOW);
+    }
+
+    #[test]
+    fn insert_targets_fast_or_overflow() {
+        assert_eq!(insert_dsq(3, false, 8), FAST_BASE + 3);
+        assert_eq!(insert_dsq(3, true, 8), SLOT_OVERFLOW);
+        assert_eq!(insert_dsq(-1, false, 8), SLOT_GLOBAL);
+        assert_eq!(insert_dsq(9, false, 8), SLOT_GLOBAL);
+        assert_eq!(slot_global_dsq(), 0);
+        assert_eq!(
+            local_trip_dsqs(2),
+            [FAST_BASE + 2, VTIME_BASE + 2, SLOT_OVERFLOW]
+        );
+    }
+
+    #[test]
+    fn caps_hold_budget_discipline() {
+        assert_eq!(slot_cap(32), 4);
+        assert_eq!(slot_cap(2), 2);
+        assert_eq!(slot_own_cap(32), 12);
+        assert_eq!(slot_own_cap(5), 5);
+        assert_eq!(tail_cap(32), 4);
+        assert_eq!(tail_cap(1), 1);
+        assert_eq!(SLOT_GATED_CAP, 4);
+        assert_eq!(SLOT_MISS_CAP, 4);
+        assert_eq!(SLOT_OVER_CAP, 4);
+        assert_eq!(SLOT_OWN_CAP, 12);
+    }
+
+    #[test]
+    fn window_and_need_match_dispatch() {
+        assert!(window_has_work(true, false));
+        assert!(window_has_work(false, true));
+        assert!(!window_has_work(false, false));
+        assert_eq!(steal_need(true), 1);
+        assert_eq!(steal_need(false), 2);
+    }
+
+    #[test]
+    fn drain_moves_allowed_with_miss_cap() {
+        let mut q = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![false],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+        ]);
+        assert_eq!(slot_drain_model(&mut q, 0, 4, 0), 1);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn starved_drain_skips_young_tasks() {
+        let now = 10_000_000u64;
+        let mut q = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: now - 100,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: now - 5_000_000,
+            },
+        ]);
+        assert_eq!(slot_drain_starved_model(&mut q, 0, 4, 0, now), 1);
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn steal_never_touches_fast_queues() {
+        let depths = vec![9u64; 4];
+        let got = steal_first_donor(0, 4, 2, &depths).unwrap();
+        assert_eq!(got, VTIME_BASE);
+        assert_ne!(got, FAST_BASE);
+        assert!(steal_first_donor(0, 1, 1, &depths).is_none());
+    }
 }

@@ -1,139 +1,101 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Slice and estimate helpers
- *
- * Holds the slice and estimate helpers that mirror the BPF header so behavior
- * stays the same on both sides of the boundary. The slice is fixed at 1ms with
- * no knob. Frequency, LLC, and CPU cards stay display only and never shape
- * placement.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
- */
+//! Dynamic slice helpers for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-/* Lower bound of a per task estimate in nanos. */
-pub const EST_MIN_NS: u64 = 1;
-/* Upper bound of a per task estimate in nanos. */
-pub const EST_MAX_NS: u64 = 1_000_000_000;
-/* Fixed slice in nanos at 1ms. */
-pub const SLICE_NS: u64 = 1_000_000;
-/* Running repack holds weight in u16. */
-const _: () = assert!(2048 <= u16::MAX as u64);
-/* Running repack holds nice minus 20 to 19 in s16. */
-const _: () = assert!(-20 >= i16::MIN as i32 && 19 <= i16::MAX as i32);
-/* Fixed weight used for virtual time scaling. */
-#[cfg(test)]
-pub const WEIGHT: u64 = 1024;
-/* Least nice held in the table. */
-#[cfg(test)]
-pub const NICE_MIN: i32 = -20;
-/* Greatest nice held in the table. */
-#[cfg(test)]
-pub const NICE_MAX: i32 = 19;
-/* Total spread K for the weight table. */
-#[cfg(test)]
-pub const WEIGHT_K: u64 = 8;
+//! Holds the knob-free slice bounds shared by BPF and userspace.
 
-/*
- * Weight of each nice level from minus 20 to plus 19. Index is nice + 20 with
- * center 1024 at nice 0. Ends are 2048 at minus 20 and 256 at 19, so total
- * spread K is 8 with boost 2x and penalty 4x. Made as 1024 times 2 to minus
- * nice over 20 below 1, else 1024 times 4 to minus nice over 19, rounded. The
- * maker is docs only, the table mirrors the BPF rodata for tests.
- */
-#[cfg(test)]
-pub const WEIGHT_TABLE: [u16; 40] = [
-    2048, 1978, 1911, 1846, 1783, 1722, 1663, 1607, 1552, 1499, 1448, 1399, 1351, 1305, 1261, 1218,
-    1176, 1136, 1097, 1060, 1024, 952, 885, 823, 765, 711, 661, 614, 571, 531, 494, 459, 427, 397,
-    369, 343, 319, 296, 275, 256,
-];
+/// Least slice in nanos at 250us.
+pub const QMIN_NS: u64 = 250_000;
+/// Largest slice in nanos at 15ms.
+pub const QMAX_NS: u64 = 15_000_000;
+/// Latency target in nanos at 5ms.
+pub const LTARGET_NS: u64 = 5_000_000;
+/// Micro quantum in nanos at 500us.
+pub const MICRO_QUANTUM_NS: u64 = 500_000;
+/// Base weight with a neutral share.
+pub const WEIGHT_BASE: u32 = 100;
+/// Least weight admitted.
+pub const WEIGHT_MIN: u32 = 1;
+/// Largest weight admitted.
+pub const WEIGHT_MAX: u32 = 10_000;
 
-/*
- * Clamp a per task estimate to the estimate range.
- * The floor keeps the value positive. The ceiling
- * keeps a single long run from shaping later choice.
- */
+/// Clamp one weight into 1 to 10000.
+/// Zero or oversize weights fail closed to the nearer bound.
 #[cfg(test)]
-pub fn clamp_est(v: u64) -> u64 {
-    v.clamp(EST_MIN_NS, EST_MAX_NS)
+pub fn clamp_weight(w: u32) -> u32 {
+    w.clamp(WEIGHT_MIN, WEIGHT_MAX)
 }
 
-/*
- * Scale an estimate by live weight for virtual time.
- * Weight 1024 keeps the value unchanged and other
- * weights scale it inversely.
- */
+/// Dynamic slice from weight and queue pressure with no knob.
+/// L is the larger of the 5ms target and N times the 250us minimum.
+/// Fair is L times weight over N times base, clamped to the bounds.
+/// Callers pass the admitting lane depth plus one, so the fast lane
+/// sizes from fast pressure and the deadline lane from its own depth
+/// with one probe and one divide per enqueue.
 #[cfg(test)]
-pub fn scale_by_weight(est: u64, weight: u32) -> u64 {
-    if weight == 0 {
-        return est;
+pub fn dyn_slice(weight: u32, queued: u64) -> u64 {
+    let w = clamp_weight(weight) as u64;
+    let mut n = queued.max(1);
+    if n > 1024 {
+        n = 1024;
     }
-    if weight == 1024 {
-        return est;
+    let mut l = LTARGET_NS;
+    if n * QMIN_NS > l {
+        l = n * QMIN_NS;
     }
-    ((est as u128 * 1024) / weight as u128) as u64
+    let fair = l * w / (n * WEIGHT_BASE as u64);
+    fair.clamp(QMIN_NS, QMAX_NS)
 }
 
-/*
- * Nice of one static prio minus 120. The value passes
- * through with no clamp, so out of range stays out of
- * range for the weight fallback with no trap.
- */
+/// Scaled charge of one run segment for the ledger.
+/// Heavy weights accrue less virtual time per nanosecond.
 #[cfg(test)]
-pub fn nice_of(static_prio: i32) -> i32 {
-    static_prio - 120
+pub fn scaled_delta(delta: u64, weight: u32) -> u64 {
+    delta * WEIGHT_BASE as u64 / clamp_weight(weight) as u64
 }
 
-/*
- * Weight of one nice level from the table. Out of range
- * maps to 1024 with no trap, so unknown tasks stay
- * neutral. Nice 0 skips the table with no load.
- */
 #[cfg(test)]
-pub fn weight_of(nice: i32) -> u32 {
-    if nice == 0 {
-        return 1024;
-    }
-    if nice < NICE_MIN || nice > NICE_MAX {
-        return 1024;
-    }
-    let idx = (nice + 20) as usize;
-    WEIGHT_TABLE[idx] as u32
-}
+mod tests {
+    use super::*;
 
-/*
- * Weight of one static prio through nice. Combines the
- * two steps, so callers pass the prio once with the same
- * fallback to 1024.
- */
-#[cfg(test)]
-pub fn weight_of_prio(static_prio: i32) -> u32 {
-    weight_of(nice_of(static_prio))
-}
+    #[test]
+    fn base_weight_holds_target_alone() {
+        assert_eq!(dyn_slice(100, 1), 5_000_000);
+    }
 
-/*
- * Cap of one weight in nanos with K bounds. Base is
- * slice times 1024 over weight, held in slice over 8 to
- * slice times 8, so extremes stay bounded with no trap.
- */
-#[cfg(test)]
-pub fn cap_for_weight(weight: u32, slice: u64) -> u64 {
-    if weight == 0 {
-        return slice;
+    #[test]
+    fn light_weight_clamps_to_minimum() {
+        assert_eq!(dyn_slice(1, 1), QMIN_NS);
     }
-    if weight == 1024 {
-        return slice;
+
+    #[test]
+    fn heavy_weight_clamps_to_maximum() {
+        assert_eq!(dyn_slice(10_000, 1), QMAX_NS);
     }
-    if slice == 0 {
-        return 0;
+
+    #[test]
+    fn pressure_grows_latency_bound() {
+        assert_eq!(dyn_slice(400, 4), 5_000_000);
+        assert_eq!(dyn_slice(100, 40), QMIN_NS);
     }
-    let cap = ((slice as u128 * 1024) / weight as u128) as u64;
-    let lo = slice / 8;
-    let hi = slice * 8;
-    if cap < lo {
-        return lo;
+
+    #[test]
+    fn heavy_pressure_clamps_fair_share() {
+        assert_eq!(dyn_slice(100, 200), QMIN_NS);
     }
-    if cap > hi {
-        return hi;
+
+    #[test]
+    fn zero_weight_and_queue_fail_closed() {
+        assert_eq!(dyn_slice(0, 0), QMIN_NS);
+        assert_eq!(clamp_weight(0), 1);
+        assert_eq!(clamp_weight(99_999), 10_000);
     }
-    cap
+
+    #[test]
+    fn scaled_charge_favors_heavy_weights() {
+        assert_eq!(scaled_delta(1_000_000, 100), 1_000_000);
+        assert_eq!(scaled_delta(1_000_000, 1000), 100_000);
+        assert_eq!(scaled_delta(1_000_000, 1), 100_000_000);
+    }
 }

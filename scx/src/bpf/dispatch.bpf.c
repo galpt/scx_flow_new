@@ -1,35 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Dispatch op
+ * Dispatch op.
  *
- * Drains per CPU queues with overflow plus peer steal and a kick
- * safety net. One shared drain body feeds every trip with mask wins and move
- * to local, so only DSQ id selection branches. Own per CPU own group runs
- * at 31, own overflow at 4, own CPU other group at 4, other overflow at 4,
- * then same group peer steal visits bound same group peers first with single
- * move toward budget 32 and perf only cross second on same group miss with
- * one shared drain. Sweep covers zero move window only at 256 with reset on
- * move. Pinned tasks
- * rest in overflow, so trips visit them every pass. All trips share one
- * drain body with mask wins and move to local, so per queue order stays
- * bounded LIFO at K 8 with FIFO fallback on old kernels.
+ * Each pass drains in fixed order. The own fast FIFO moves first with a
+ * depth of four, then the own deadline queue with twelve, then one peer
+ * steal, then the kernel global plus the shared overflow tail, and last
+ * a gated starvation pass over overflow. Steal never visits a peer fast
+ * queue, so sleepy tasks stay local. The SMT sibling wins first, then
+ * the same cache domain, then a gated cross domain move of a task that
+ * waited past 1.5ms. Stolen tasks pay a weight scaled 500us penalty in
+ * virtual time with no knob to turn it off. See intf.h for the caps and
+ * enqueue.bpf.c for the matching lane choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Shared drain with DSQ and budget only. Own, overflow, other CPU, other */
-/* overflow, and peer use one for_each with mask wins and move to local, so */
-/* only DSQ id selection branches outside with no duplicated loop body. */
-/* Inlined into the trip loop, so the verifier merges states at the loop */
-/* back edge with one body analysis instead of per-site repeats. Base */
-/* carries moved so far with budget kept whole, so the break reads one wide */
-/* sum with no narrow remainder beside it and states merge. Callers */
-/* precompute DSQ and capped live already proven at dispatch top. No stats */
-/* inside, so the caller aggregates moves once per dispatch with no per */
-/* queue atomics. Miss caps the walk at 8 straight mask fails, so all mask */
-/* miss walks stay bounded with no full scan and per queue cost stays */
-/* capped with no extra wide sum beside the budget check. */
-static __always_inline u32 flow_drain_one(s32 cpu,
-	u64 dsq, u32 budget, u32 base)
+/* Shared drain with DSQ and budget only. */
+/* Moves mask allowed tasks to local with a miss cap at 4. */
+/* One bad head never blocks later work with no full scan. */
+static __noinline u32 flow_drain_one(s32 cpu,
+	u64 dsq, u32 budget, u32 base, bool penalty)
 {
 	struct task_struct *p;
 	u32 moved = 0;
@@ -38,11 +27,66 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		if (moved + base >= budget)
 			break;
-		if (miss >= 8U)
+		if (miss >= (u32)FLOW_MISS_CAP)
 			break;
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
+		if (bpf_cpumask_test_cpu((u32)cpu,
+		    p->cpus_ptr) &&
+		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			if (penalty &&
+			    (u64)FLOW_STEAL_PENALTY_ON != 0) {
+				struct flow_task_ctx *tctx =
+				    flow_lookup(p);
+				if (tctx) {
+					u32 w = flow_weight_clamp(
+					    p->scx.weight);
+					tctx->vruntime +=
+					    flow_steal_penalty(w);
+					__sync_fetch_and_add(
+					    &flow_stats.steal_penalties,
+					    1);
+				}
+			}
+			bpf_task_release(p);
+			moved++;
+			miss = 0;
+		} else {
+			bpf_task_release(p);
+			miss++;
+		}
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
+/* Starvation drain for the gated passes with a 1.5ms floor. */
+/* Young tasks count one miss each, so old tasks behind them surface. */
+static __noinline u32 flow_drain_starved(s32 cpu,
+	u64 dsq, u32 budget, u32 base, u64 now)
+{
+	struct task_struct *p;
+	u32 moved = 0;
+	u32 miss = 0;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, dsq, 0) {
+		struct flow_task_ctx *tctx;
+		if (moved + base >= budget)
+			break;
+		if (miss >= (u32)FLOW_MISS_CAP)
+			break;
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			continue;
+		tctx = flow_lookup(p);
+		if (!tctx || tctx->wait_at == 0 ||
+		    now < tctx->wait_at ||
+		    now - tctx->wait_at <= (u64)FLOW_STARVE_NS) {
+			bpf_task_release(p);
+			miss++;
+			continue;
+		}
 		if (bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr) &&
 		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
@@ -58,228 +102,208 @@ static __always_inline u32 flow_drain_one(s32 cpu,
 	bpf_rcu_read_unlock();
 	return moved;
 }
+/* One peer steal over bound 8 peers with SMT first. */
+/* The sibling wins when deep enough, then the same cache domain, */
+/* then one gated cross domain move of starved work only. Fast queues */
+/* never take part, so stolen work always comes from deadline queues. */
+static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
+	u32 base, bool local_empty)
+{
+	struct flow_cpu_state *st = flow_cpu((u32)cpu);
+	struct flow_topo *tp = flow_topo((u32)cpu);
+	u32 start;
+	u32 salt = 0;
+	u64 need;
+	u64 steal_dsq = 0;
+	bool have = false;
+	bool idle;
+	bool win_left;
+	u32 off;
+	u32 lim;
+	u32 got;
+	if (!st)
+		return 0;
+	if (nr_cpu_ids <= 1)
+		return 0;
+	idle = st->running_pid == 0;
+	win_left = !local_empty;
+	/* Prandom salt spreads passes with no lockstep hotspot. */
+	salt = bpf_get_prandom_u32() % (u32)nr_cpu_ids;
+	start = (st->cursor + 1U + salt) % (u32)nr_cpu_ids;
+	need = flow_steal_need(idle && base == 0 && !win_left);
+	/* SMT sibling first with one live check and no scan. */
+	if (tp && tp->smt_sib != 0xffffffffU) {
+		u32 sib = tp->smt_sib;
+		if (sib != (u32)cpu && flow_cpu_live(sib) &&
+		    scx_bpf_dsq_nr_queued(flow_vtime_dsq(sib)) >=
+		    (s32)need) {
+			steal_dsq = flow_vtime_dsq(sib);
+			have = true;
+		}
+	}
+	/* Same cache domain next over the bound 8 window. */
+	if (!have) {
+		u32 want = tp ? tp->llc : 0;
+		bpf_for(off, 0, FLOW_STEAL_BOUND) {
+			u32 peer;
+			struct flow_topo *ptp;
+			u64 pdsq;
+			if (have)
+				continue;
+			peer = (start + off) % (u32)nr_cpu_ids;
+			if (peer == (u32)cpu)
+				continue;
+			if (!flow_cpu_live(peer))
+				continue;
+			ptp = flow_topo(peer);
+			if (ptp && tp && ptp->llc != want)
+				continue;
+			pdsq = flow_vtime_dsq(peer);
+			if (scx_bpf_dsq_nr_queued(pdsq) <
+			    (s32)need)
+				continue;
+			steal_dsq = pdsq;
+			have = true;
+		}
+	}
+	/* Gated cross domain only with an empty local window. */
+	/* Donors hold at least two, and only starved tasks move. */
+	if (!have && local_empty && base == 0) {
+		u64 now = flow_now();
+		bpf_for(off, 0, FLOW_STEAL_BOUND) {
+			u32 peer;
+			u64 pdsq;
+			if (have)
+				continue;
+			peer = (start + off) % (u32)nr_cpu_ids;
+			if (peer == (u32)cpu)
+				continue;
+			if (!flow_cpu_live(peer))
+				continue;
+			pdsq = flow_vtime_dsq(peer);
+			if (scx_bpf_dsq_nr_queued(pdsq) < 2)
+				continue;
+			lim = base + 1U;
+			if (lim > budget)
+				lim = budget;
+			got = flow_drain_starved(cpu, pdsq, lim,
+			    base, now);
+			if (got != 0) {
+				__sync_fetch_and_add(
+				    &flow_stats.steal_moves,
+				    (u64)got);
+				st->cursor = (start + 8U) %
+				    (u32)nr_cpu_ids;
+				return got;
+			}
+		}
+		st->cursor = (start + 8U) % (u32)nr_cpu_ids;
+		return 0;
+	}
+	if (!have) {
+		st->cursor = (start + 8U) % (u32)nr_cpu_ids;
+		return 0;
+	}
+	lim = base + 1U;
+	if (lim > budget)
+		lim = budget;
+	got = flow_drain_one(cpu, steal_dsq, lim, base, true);
+	if (got != 0)
+		__sync_fetch_and_add(&flow_stats.steal_moves,
+		    (u64)got);
+	st->cursor = (start + 8U) % (u32)nr_cpu_ids;
+	return got;
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
 	u32 budget = (u32)FLOW_SLOT_BUDGET;
 	u32 moved = 0;
 	u32 over_moved = 0;
-	u32 scap;
-	u32 own_cap;
-	u8 sgroup = 0;
-	u8 ogroup = 0;
-	u64 own = 0;
-	u64 own_over = 0;
-	u64 other_cpu = 0;
-	u64 other_over = 0;
-	u32 off;
+	u32 global_moved = 0;
+	u64 own_fast;
+	u64 own_vtime;
+	u64 over;
+	u32 lim;
+	u32 got;
+	bool local_empty;
 	(void)prev;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
-	sgroup = flow_group_live((u32)cpu,
-	    nr_cpu_ids);
-	ogroup = sgroup ^ 1U;
-	own = flow_slot_cpu_dsq((u32)cpu, sgroup);
-	own_over = flow_slot_overflow_dsq(sgroup);
-	other_cpu = flow_slot_cpu_dsq((u32)cpu, ogroup);
-	other_over = flow_slot_overflow_dsq(ogroup);
-	scap = flow_slot_cap(budget);
-	own_cap = flow_slot_own_cap(budget);
-	/* Local trips at 4 with one body. Own runs at 31 with one slot left, */
-	/* all trips skip empty with one read and no iterator, so idle pays no */
-	/* empty scan. Bound 4 sits under the steal bound with one body analysis */
-	/* at the loop back edge. */
-	bpf_for(off, 0, 4) {
-		u64 dsq;
-		u32 cap;
-		u32 lim;
-		u32 got;
-		if (off == 0) {
-			dsq = own;
-			cap = own_cap;
-		} else if (off == 1) {
-			dsq = own_over;
-			cap = scap;
-		} else if (off == 2) {
-			dsq = other_cpu;
-			cap = scap;
-		} else {
-			dsq = other_over;
-			cap = scap;
-		}
-		if (scx_bpf_dsq_nr_queued(dsq) == 0)
-			continue;
-		lim = moved + cap;
+	own_fast = flow_fast_dsq((u32)cpu);
+	own_vtime = flow_vtime_dsq((u32)cpu);
+	over = flow_overflow_dsq();
+	/* Own fast FIFO first with room left for the rest. */
+	/* Depth stays at 4 with insertion order and no class filter. */
+	if (scx_bpf_dsq_nr_queued(own_fast) != 0) {
+		lim = moved + flow_fast_cap(budget);
 		if (lim > budget)
 			lim = budget;
-		got = flow_drain_one(cpu, dsq, lim, moved);
+		got = flow_drain_one(cpu, own_fast, lim, moved,
+		    false);
 		moved += got;
-		if (off == 1 || off == 3)
+	}
+	/* Own deadline queue next with a cap at 12 and mask wins. */
+	/* Insertion order tracks deadlines under monotonic virtual time. */
+	if (moved < budget &&
+	    scx_bpf_dsq_nr_queued(own_vtime) != 0) {
+		lim = moved + flow_own_cap(budget);
+		if (lim > budget)
+			lim = budget;
+		got = flow_drain_one(cpu, own_vtime, lim, moved,
+		    false);
+		moved += got;
+	}
+	local_empty = scx_bpf_dsq_nr_queued(own_fast) == 0 &&
+	    scx_bpf_dsq_nr_queued(own_vtime) == 0;
+	/* One steal trip over bound 8 peers with a single move. */
+	/* Need is 1 when idle and empty else 2 so busy owners keep one. */
+	if (moved < budget && nr_cpu_ids > 1) {
+		got = flow_steal_one(cpu, budget, moved,
+		    local_empty);
+		moved += got;
+	}
+	/* Kernel global plus overflow next with a shared cap at 4. */
+	if (moved < budget &&
+	    (scx_bpf_dsq_nr_queued((u64)SCX_DSQ_GLOBAL) != 0 ||
+	    scx_bpf_dsq_nr_queued(over) != 0)) {
+		lim = moved + flow_tail_cap(budget);
+		if (lim > budget)
+			lim = budget;
+		if (scx_bpf_dsq_nr_queued((u64)SCX_DSQ_GLOBAL) != 0) {
+			got = flow_drain_one(cpu,
+			    (u64)SCX_DSQ_GLOBAL, lim, moved, false);
+			moved += got;
+			global_moved += got;
+		}
+		if (moved < lim &&
+		    scx_bpf_dsq_nr_queued(over) != 0) {
+			got = flow_drain_one(cpu, over, lim, moved,
+			    false);
+			moved += got;
 			over_moved += got;
-	}
-	/* Peer steal rotates from a cursor start with single move toward budget 32. */
-	/* Start reads the masked cursor plus one with wrap once per dispatch, so */
-	/* repeated passes spread across peers with no hot spot. Donor scan reads */
-	/* bound same group peers from start with one read each and no iterator, so */
-	/* shallow donors skip early. Need is 1 when idle empty, else 2, so idle */
-	/* owners collect the last task with no strand while busy owners leave one. */
-	/* Peers wrap with modulo plus live check, so high CPUs reach low peers with */
-	/* no dead read. Self visit stays allowed with no extra branch, so small */
-	/* hosts keep full cover with no dead pass. Same group scans first, so */
-	/* groups keep cache apart in strict with no cross scan. Perf only cross */
-	/* second scans bound other group peers from start plus 8 on same group */
-	/* miss with same need and keep first, so perf adds cover with no extra */
-	/* drain. Fold counts all peer moves in steal moves with post hoc LSB */
-	/* compare in steal_xmoves with unconditional adds and zero keeps count */
-	/* still, so no branch on cross with one shared drain. Single move keeps */
-	/* tail smooth with no burst theft, so one peer task per pass is enough */
-	/* with local trips owning the window. Cursor steps by 8 */
-
-	/* with a bounded compare and swap in 4 tries that keeps stand */
-	/* and drops on race, so contended owners skip the step with no stall. */
-	/* When host size divides 8, step 8 is identity with no advance, */
-	/* harmless as the bound 8 scan covers all peers while donor priority */
-	/* goes stale. Window reads four local queues once after local trips */
-	/* with no global scan, so need plus defer plus sweep share one window */
-	/* with no extra reads. Scans keep */
-	/* the first donor with work, then one shared drain moves a single task */
-	/* with mask wins, so one bad head never blocks later work. Single CPU */
-	/* hosts skip the whole pass with one check. See intf.h for need plus */
-	/* cursor helpers. */
-	{
-		bool win_left;
-		struct flow_cpu_state *st;
-		bool idle = false;
-		u64 need = 2ULL;
-		win_left = scx_bpf_dsq_nr_queued(own) != 0 ||
-		    scx_bpf_dsq_nr_queued(own_over) != 0 ||
-		    scx_bpf_dsq_nr_queued(other_cpu) != 0 ||
-		    scx_bpf_dsq_nr_queued(other_over) != 0;
-		st = flow_cpu((u32)cpu);
-		if (st && st->running_pid == 0)
-			idle = true;
-		if (idle && moved == 0 && !win_left)
-			need = flow_steal_need(true);
-		else
-			need = flow_steal_need(false);
-		if (moved < budget && nr_cpu_ids > 1 && st) {
-			u32 start;
-			u32 cas;
-			u64 steal_dsq = 0;
-			bool have = false;
-			start = (flow_cursor_val(st->cursor) +
-			    1U) % (u32)nr_cpu_ids;
-			bpf_for(off, 0, FLOW_STEAL_BOUND) {
-				u32 peer;
-				u64 pdsq;
-				u64 q;
-				if (have)
-					continue;
-				peer = (start + off) %
-				    (u32)nr_cpu_ids;
-				if (!flow_cpu_live(peer))
-					continue;
-				pdsq = flow_slot_cpu_dsq(peer, sgroup);
-				q = scx_bpf_dsq_nr_queued(pdsq);
-				if (q < need)
-					continue;
-				steal_dsq = pdsq;
-				have = true;
-			}
-			if (flow_perf_enabled() && !have &&
-			    moved < budget && nr_cpu_ids > 1) {
-				bpf_for(off, 0, FLOW_STEAL_BOUND) {
-					u32 peer;
-					u64 pdsq;
-					u64 q;
-					if (have)
-						continue;
-					peer = (start + 8U + off) %
-					    (u32)nr_cpu_ids;
-					if (!flow_cpu_live(peer))
-						continue;
-					pdsq = flow_slot_cpu_dsq(peer,
-					    ogroup);
-					q = scx_bpf_dsq_nr_queued(pdsq);
-					if (q < need)
-						continue;
-					steal_dsq = pdsq;
-					have = true;
-				}
-			}
-			if (have) {
-				u32 lim = moved + 1U;
-				u32 got;
-				if (lim > budget)
-					lim = budget;
-				got = flow_drain_one(cpu, steal_dsq, lim,
-				    moved);
-				moved += got;
-				/* Fold counts all peer moves with no branch, */
-				/* so same plus cross share one drain with one */
-				/* state. Cross subset folds via post hoc LSB */
-				/* compare with unconditional adds and zero */
-				/* keeps count still. See intf.h for DSQ LSB. */
-				{
-					u64 x = ((steal_dsq & 1ULL) ^
-					    ((u64)sgroup & 1ULL)) & 1ULL;
-					__sync_fetch_and_add(
-					    &flow_stats.steal_moves,
-					    (u64)got);
-					__sync_fetch_and_add(
-					    &flow_stats.steal_xmoves,
-					    (u64)got * x);
-				}
-			}
-			bpf_for(cas, 0, 4) {
-				u32 cur;
-				u32 masked;
-				u32 nxt_peer;
-				u32 nxt;
-				u32 got;
-				cur = st->cursor;
-				masked = flow_cursor_val(cur);
-				nxt_peer = (masked + 8U) %
-				    (u32)nr_cpu_ids;
-				nxt = (nxt_peer &
-				    (u32)FLOW_CURSOR_MASK) |
-				    (cur & (u32)FLOW_CURSOR_STAND_BIT);
-				got = __sync_val_compare_and_swap(
-				    &st->cursor, cur, nxt);
-				if (got == cur)
-					break;
-			}
-		}
-		if (moved != 0)
-			__sync_fetch_and_add(&flow_stats.slot_moves,
-			    (u64)moved);
-		if (over_moved != 0)
-			__sync_fetch_and_add(&flow_stats.park_moves,
-			    (u64)over_moved);
-		if (moved >= (u32)FLOW_SLOT_D && win_left)
-			__sync_fetch_and_add(&flow_stats.slot_defer,
-			    1);
-		{
-			volatile u32 vcpu3 = (u32)cpu;
-			u32 sidx3 = vcpu3 & 1023U;
-			u16 sweep = flow_slot_sweep_cnt[sidx3];
-			bool kick = false;
-			if (moved == 0 && win_left &&
-			    sweep < (u16)FLOW_SLOT_SWEEP_MAX) {
-				kick = true;
-				flow_slot_sweep_cnt[sidx3] =
-				    sweep + 1;
-			}
-			if (moved > 0)
-				flow_slot_sweep_cnt[sidx3] = 0;
-			if (kick) {
-				scx_bpf_kick_cpu(cpu,
-				    SCX_KICK_IDLE);
-				__sync_fetch_and_add(
-				    &flow_stats.slot_kicks, 1);
-			}
 		}
 	}
+	/* Gated cross domain backstop over overflow when idle local. */
+	/* Young tasks miss past, so old tasks behind them still surface. */
+	if (moved == 0) {
+		lim = flow_tail_cap(budget);
+		if (lim > budget)
+			lim = budget;
+		got = flow_drain_starved(cpu, over, lim, 0,
+		    flow_now());
+		moved += got;
+		over_moved += got;
+	}
+	if (moved != 0)
+		__sync_fetch_and_add(&flow_stats.slot_moves,
+		    (u64)moved);
+	if (over_moved != 0)
+		__sync_fetch_and_add(&flow_stats.park_moves,
+		    (u64)over_moved);
+	if (global_moved != 0)
+		__sync_fetch_and_add(&flow_stats.global_moves,
+		    (u64)global_moved);
 }

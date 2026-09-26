@@ -6,7 +6,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow` at `4.2.46`
+- `scx/Cargo.toml` package `scx_flow` at `4.4.0`
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/` maps, placement, and dispatch
 - `scx/src/main.rs` frontend and run loop
@@ -23,14 +23,19 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Copy `scx` into a workspace checkout and build there.
 Scheduler behavior is documented in `scx/README.md`.
 The installer pins upstream
-`7cec98c51376a9d38b05a1e39e30cf7e5909cf16`.
+`6752d59a4297d8918e8fd4d7237b50e2fceb1d14`.
 
 ```bash
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 /usr/local/bin/scx_flow --version
 ```
 
-Expect version `4.2.46`, state `enabled`, ops with `flow`.
+Expect version `4.4.0`, state `enabled`, ops with `flow`.
+
+Breaking change from `4.3.x` needs a scheduler restart
+with no live transition. Queue ids, lanes, slices, duty,
+preempt classes, steal order, and dashboard JSON all changed,
+see `scx/README.md`.
 
 ## Checks
 
