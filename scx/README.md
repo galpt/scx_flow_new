@@ -6,7 +6,7 @@ in Rust with a BPF core, that runs inside
 It keeps one shallow FIFO plus one deadline queue per CPU,
 one shared overflow tail, and the kernel global queue. Slices
 are dynamic from weight and pressure with no knob. Only
-`SCHED_OTHER` tasks may use the fast lane.
+`SCHED_OTHER` tasks enter the fast lane.
 
 ## Overview
 
@@ -39,7 +39,7 @@ skips the deadline probe and the lag cap divide. See
 Duty tracks intensity with alpha `1/8` over each stop. Sleep
 decays it, short bursts climb gently with a `1.5ms` allowance,
 and long runs climb hard. Only duty under `15` percent, or a
-voluntary wake, may use the fast lane past two probation
+voluntary wake, enters the fast lane past two probation
 wakes. Fresh tasks anchor at the minimum minus lag cap and
 never take the fast lane early. See `src/bpf/enqueue.bpf.c`
 and `src/flow_admit.rs`.
@@ -86,9 +86,8 @@ Pinned means migration disabled or one CPU allowed. Empty
 masks rest in the global queue. Frequency cards stay display
 only and never shape placement. No frequency write runs in
 `4.4.0`, and the governor stays free. A running-only boost
-contract stays deferred: it needs the study plus hot path
-budget proof, and responsiveness wins over knob writes
-until then. See `src/bpf/select_cpu.bpf.c`
+stays out, so responsiveness wins with no knob writes.
+See `src/bpf/select_cpu.bpf.c`
 and `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
@@ -147,20 +146,21 @@ fields with per CPU `running_pid`, dynamic `slice_ns`, and
 `min_vruntime`. Old JSON still decodes with defaults. See
 `src/stats.rs` and `src/snapshot.rs`.
 
-### A and B validation
+### Behavior and measurement
 
-The deadline queue is an ordered DSQ with `O(log n)`
-insert, so tail claims need measurement, not code reading.
-The A/B signals are `fast_admits`, `vtime_admits`,
-`duty_gates`, `prob_holds`, `preempt_kicks`, and
-`preempt_skipped` via `--monitor` and the dashboard.
-Request tail comes from the harness probe delay plus
-`schbench` percentiles on the same host, governor, and
-seeds. Take at least 3 repeats per build before calling a
-change neutral or better. The wakeup path stays lean with
-per-lane sizing, rate first kicks, and one trusted occupant
-lookup, so instrumentation never taxes it. See
-`tools/edf_harness/README.md`.
+Short wakes serve from the per CPU fast FIFO under duty
+admission, long work serves in deadline order with dynamic
+weight sized slices, interactive owners preempt batch owners
+under a rate window, and idle CPUs steal deadline work with
+SMT and cache preference. Run `schbench` plus `cyclictest`
+plus `stress-ng` on the same host and governor, and watch
+`fast_admits`, `vtime_admits`, `duty_gates`, `prob_holds`,
+`preempt_kicks`, and `preempt_skipped` via `--monitor` and
+the dashboard alongside probe delay. Release `4.4.0`
+restarts from `4.3.x` with no live transition. See
+`tools/edf_harness/README.md`, `src/flow_slice.rs`,
+`src/flow_admit.rs`, `src/flow_preempt.rs`, and
+`src/flow_select.rs`.
 
 ## Typical Use Cases
 
@@ -227,8 +227,8 @@ baseline with no realtime use.
 
 - CPU live means below the `nr` snapshot at attach with no
   kernel online read. A CPU hotplug needs a restart, and no
-  live rebalance runs. Select may still target an offlined
-  CPU, and its fast FIFO strands until restart since steal
+  live rebalance runs. Select still targets an offlined
+  CPU at times, and its fast FIFO strands until restart since steal
   never visits fast queues. Its deadline work stays
   stealable, and homeless tasks fail closed to the global
   queue with mask wins on drain. Snapshot covers online
@@ -240,8 +240,8 @@ baseline with no realtime use.
   `16B`, and counters are `160B` with `20` fields. Busy rate
   stays `2ms`. Dashboard JSON changed with the same field
   names kept where live.
-- Unknown frequency stays unknown with no effect on
-  placement. Frequency, slice, minimum, and energy cards are
+- Missing frequency reads leave placement unchanged with no
+  effect on scheduling. Frequency, slice, minimum, and energy cards are
   display only.
 - Single-thread and single-CPU hosts run the same path
   with no peer scan.
