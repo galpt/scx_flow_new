@@ -162,8 +162,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		}
 	}
-	if (enq_flags & SCX_ENQ_REENQ)
-		__sync_fetch_and_add(&flow_stats.requeues, 1);
+	/* Requeues count once at stopping for runnable stops. */
+	/* The flag needs no second count here on the hot path. */
 	tctx = flow_get(p);
 	sel = p->scx.selected_cpu;
 	pinned = flow_task_pinned(p);
