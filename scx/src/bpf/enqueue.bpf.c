@@ -80,12 +80,17 @@ static __always_inline void flow_over_insert(
 /* A short block means the waker likely held a lock while the occupant */
 /* ran, so the occupant earns one 500us override with a single boost. */
 /* No owner kfunc exists, so the running CPU occupant is the proxy. */
+/* The occupant pointer may be untrusted on old kernels, so class and */
+/* flag writes go through a trusted lookup with release on both paths. */
 static __always_inline void flow_pi_correlate(s32 cpu,
 	struct task_struct *p, u64 now)
 {
 	struct flow_pi_wait *pw;
 	struct task_struct *owner;
+	struct task_struct *trusted;
 	struct flow_task_ctx *octx;
+	u32 owner_pid;
+	bool boosted = false;
 	if (cpu < 0 || !flow_cpu_live((u32)cpu))
 		return;
 	pw = flow_pi((u32)cpu);
@@ -98,12 +103,25 @@ static __always_inline void flow_pi_correlate(s32 cpu,
 	owner = __COMPAT_scx_bpf_cpu_curr(cpu);
 	if (!owner || owner == p)
 		return;
-	octx = flow_lookup(owner);
-	if (!octx || octx->elevated)
+	owner_pid = owner->pid;
+	bpf_rcu_read_lock();
+	trusted = bpf_task_from_pid(owner_pid);
+	if (trusted) {
+		if (trusted != p) {
+			octx = flow_lookup(trusted);
+			if (octx && !octx->elevated) {
+				octx->elevated = 1;
+				octx->elev_at = (u32)now;
+				scx_bpf_task_set_slice(trusted,
+				    (u64)FLOW_PI_SLICE_NS);
+				boosted = true;
+			}
+		}
+		bpf_task_release(trusted);
+	}
+	bpf_rcu_read_unlock();
+	if (!boosted)
 		return;
-	octx->elevated = 1;
-	octx->elev_at = (u32)now;
-	scx_bpf_task_set_slice(owner, (u64)FLOW_PI_SLICE_NS);
 	__sync_fetch_and_add(&flow_stats.elev_moves, 1);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
@@ -265,9 +283,15 @@ kicked:
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		struct task_struct *occupant;
+		struct task_struct *trusted;
 		struct flow_task_ctx *octx;
 		u64 last;
+		u32 occ_pid;
 		u32 occ_cls;
+		u64 occ_vt;
+		u64 occ_ran;
+		u64 occ_slice;
+		bool have_occ;
 		if (!st)
 			return;
 		if (st->running_pid == 0) {
@@ -283,6 +307,8 @@ kicked:
 			return;
 		}
 		/* Use the compat helper, it falls back to cpu_rq on old kernels. */
+		/* The occupant may be untrusted there, so the class read */
+		/* goes through a trusted lookup with release on both paths. */
 		occupant = __COMPAT_scx_bpf_cpu_curr(cpu);
 		if (!occupant || occupant == p) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
@@ -290,8 +316,30 @@ kicked:
 			    &flow_stats.preempt_kicks, 1);
 			return;
 		}
-		octx = flow_lookup(occupant);
-		if (!octx) {
+		occ_pid = occupant->pid;
+		occ_cls = (u32)FLOW_CLS_BATCH;
+		occ_vt = 0;
+		occ_ran = 0;
+		occ_slice = 0;
+		have_occ = false;
+		bpf_rcu_read_lock();
+		trusted = bpf_task_from_pid(occ_pid);
+		if (trusted) {
+			octx = flow_lookup(trusted);
+			if (octx) {
+				occ_cls = octx->cls;
+				occ_vt = octx->vruntime;
+				occ_slice = octx->slice_ns;
+				if (octx->on_cpu &&
+				    octx->run_at != 0 &&
+				    now >= octx->run_at)
+					occ_ran = now - octx->run_at;
+				have_occ = true;
+			}
+			bpf_task_release(trusted);
+		}
+		bpf_rcu_read_unlock();
+		if (!have_occ) {
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
 			return;
@@ -317,19 +365,14 @@ kicked:
 		/* Batch pairs need an exhausted slice plus a deadline gap */
 		/* past one micro quantum before a prompt kick may run. */
 		if (cls == (u32)FLOW_CLS_BATCH) {
-			u64 ran = 0;
-			u64 oslice = octx->slice_ns;
-			if (octx->on_cpu && octx->run_at != 0 &&
-			    now >= octx->run_at)
-				ran = now - octx->run_at;
-			if (oslice == 0 || ran < oslice) {
+			if (occ_slice == 0 || occ_ran < occ_slice) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped, 1);
 				return;
 			}
 			if (!flow_time_before(tctx->vruntime +
 			    (u64)FLOW_MICRO_QUANTUM_NS,
-			    octx->vruntime)) {
+			    occ_vt)) {
 				__sync_fetch_and_add(
 				    &flow_stats.preempt_skipped, 1);
 				return;
@@ -346,13 +389,21 @@ kicked:
 		flow_rate_at[(u32)cpu & 1023U] = now;
 		/* Interactive over batch shortens to the 100us floor. */
 		/* Batch over batch shortens to zero at slice end. */
+		/* The slice write uses a trusted lookup, since the */
+		/* occupant read may be untrusted on old kernels. */
 		/* No timer kick runs here, so the floor is an */
 		/* approximation with kick timing, not a precise preempt. */
-		if (cls == (u32)FLOW_CLS_INTERACTIVE)
-			scx_bpf_task_set_slice(occupant,
-			    (u64)FLOW_PREEMPT_FLOOR_NS);
-		else
-			scx_bpf_task_set_slice(occupant, 0);
+		bpf_rcu_read_lock();
+		trusted = bpf_task_from_pid(occ_pid);
+		if (trusted) {
+			if (cls == (u32)FLOW_CLS_INTERACTIVE)
+				scx_bpf_task_set_slice(trusted,
+				    (u64)FLOW_PREEMPT_FLOOR_NS);
+			else
+				scx_bpf_task_set_slice(trusted, 0);
+			bpf_task_release(trusted);
+		}
+		bpf_rcu_read_unlock();
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 		__sync_fetch_and_add(&flow_stats.preempt_kicks, 1);
 	}
