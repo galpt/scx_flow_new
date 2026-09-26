@@ -18,7 +18,9 @@ one shared overflow tail at `0x7000`, and the kernel global
 queue. Max `2049` DSQs at `1024` CPUs. Every id stays below
 `LOCAL_ON`, and init fails loudly past the bound. Pinned and
 foreign tasks rest in overflow with mask wins on drain.
-Exiting tasks run at once on the task CPU via `LOCAL_ON`.
+Homeless tasks rest in the global queue with mask wins on
+drain, and the drain counts the global moves. Exiting tasks
+run at once on the task CPU via `LOCAL_ON`.
 See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
 
 ### Dynamic slices
@@ -27,9 +29,10 @@ Slices span `250us` to `15ms` with a `5ms` target and a
 `500us` micro quantum. The bound is the larger of the target
 and depth times the minimum, shared by weight over pressure,
 then clamped to the bounds. Base weight `100` holds the
-target alone, range `1` to `10000`. Pressure sizes the slice
-from queued depth on both local queues. See `src/bpf/intf.h`
-and `src/flow_slice.rs`.
+target alone, range `1` to `10000`. Each lane sizes from its
+own queued depth plus one with one probe, so the fast lane
+skips the deadline probe and the lag cap divide. See
+`src/bpf/intf.h` and `src/flow_slice.rs`.
 
 ### Admission
 
@@ -54,12 +57,14 @@ turn it off. See `src/bpf/lifecycle.bpf.c`.
 ### Preemption
 
 Interactive tasks preempt batch owners prompt at a `100us`
-floor, one kick per `2ms` window per CPU. Interactive pairs
-yield at the micro quantum end with no kick. Batch pairs kick
-only past slice exhaust with a deadline gap over one quantum.
-Batch never preempts interactive, and pinned arrivals never
-preempt a busy CPU. No timer kick runs, so the floor is a
-slice shorten plus kick approximation. See
+floor, one kick per `2ms` window per CPU. The window gates
+before occupant resolution, and one trusted lookup serves
+class plus slice shorten under one RCU pass. Interactive
+pairs yield at the micro quantum end with no kick. Batch
+pairs kick only past slice exhaust with a deadline gap over
+one quantum. Batch never preempts interactive, and pinned
+arrivals never preempt a busy CPU. No timer kick runs, so
+the floor is a slice shorten plus kick approximation. See
 `src/bpf/enqueue.bpf.c` and `src/flow_preempt.rs`.
 
 ### Priority help
@@ -78,8 +83,12 @@ Order is waker CPU when idle and allowed, any idle via
 task mask always wins. Pinned tasks keep the task CPU when
 allowed, else the selected CPU, else the first allowed CPU.
 Pinned means migration disabled or one CPU allowed. Empty
-masks rest in the overflow tail. Frequency cards stay display
-only and never shape placement. See `src/bpf/select_cpu.bpf.c`
+masks rest in the global queue. Frequency cards stay display
+only and never shape placement. No frequency write runs in
+`4.4.0`, and the governor stays free. A running-only boost
+contract stays deferred: it needs the study plus hot path
+budget proof, and responsiveness wins over knob writes
+until then. See `src/bpf/select_cpu.bpf.c`
 and `src/bpf/enqueue.bpf.c`.
 
 ### Dispatch
@@ -108,7 +117,7 @@ See `src/bpf/dispatch.bpf.c` and `src/flow_select.rs`.
 Idle targets kick at once with the idle flag cleared first,
 so no idle CPU with queued work sleeps unkicked. Busy kicks
 follow the class rules with the rate window. A null or self
-occupant keeps kick only with no shorten. Fallback overflow
+occupant keeps kick only with no shorten. Fallback global
 with no live CPU sends no kick and the next drain pass
 collects it with mask wins. Exiting uses an idle kick on the
 task CPU. See `src/bpf/intf.h`, `src/bpf/main.bpf.c`, and
@@ -118,10 +127,11 @@ task CPU. See `src/bpf/intf.h`, `src/bpf/main.bpf.c`, and
 
 Running sets the running pid and counts on CPU. Stopping
 charges one scaled segment to total runtime and the ledger,
-steps duty, keeps the minimum high water, and counts requeue
-or completion. Disable and exit charge a leftover segment at
-most once when stopping never ran. Release clears a stale
-running view with no charge and drops the waiter window. See
+steps duty, keeps the minimum high water, and counts one
+requeue per runnable stop else one completion. Disable and
+exit charge a leftover segment at most once when stopping
+never ran. Release clears a stale running view with no
+charge and drops the waiter window. See
 `src/bpf/lifecycle.bpf.c` and `src/bpf/main.bpf.c`.
 
 ### Counters
@@ -136,6 +146,21 @@ and `global_moves`. The dashboard JSON carries the same
 fields with per CPU `running_pid`, dynamic `slice_ns`, and
 `min_vruntime`. Old JSON still decodes with defaults. See
 `src/stats.rs` and `src/snapshot.rs`.
+
+### A and B validation
+
+The deadline queue is an ordered DSQ with `O(log n)`
+insert, so tail claims need measurement, not code reading.
+The A/B signals are `fast_admits`, `vtime_admits`,
+`duty_gates`, `prob_holds`, `preempt_kicks`, and
+`preempt_skipped` via `--monitor` and the dashboard.
+Request tail comes from the harness probe delay plus
+`schbench` percentiles on the same host, governor, and
+seeds. Take at least 3 repeats per build before calling a
+change neutral or better. The wakeup path stays lean with
+per-lane sizing, rate first kicks, and one trusted occupant
+lookup, so instrumentation never taxes it. See
+`tools/edf_harness/README.md`.
 
 ## Typical Use Cases
 
