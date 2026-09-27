@@ -33,8 +33,7 @@ sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 Expect the current version, state `enabled`, ops with `flow`.
 
 This scheduler needs a restart from prior releases
-with no live transition. Queue ids, lanes, slices, duty,
-preempt classes, steal order, and dashboard JSON follow
+with no live transition. Queue ids, quantum, steal order, and dashboard JSON follow
 this scheduler, see `scx/README.md`.
 
 ## Checks

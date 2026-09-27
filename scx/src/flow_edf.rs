@@ -1,20 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Virtual time helpers for the flow scheduler.
+//! Deadline helpers for the flow scheduler.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the wrap safe virtual time helpers shared by tests and docs.
-//! The BPF ledger lives in lifecycle.bpf.c with the clamp at insert
-//! in enqueue.bpf.c, and this file mirrors the min predicates.
+//! Holds the wrap safe deadline helpers shared by tests and docs.
+//! The BPF deadline lives in enqueue.bpf.c with the step in
+//! intf.h, and this file mirrors the order predicates.
 
 /// Bound of moved tasks in one pass.
 pub const DISPATCH_BATCH: u32 = 32;
-/// Latency target in nanos at 5ms for the lag cap.
-#[cfg(test)]
-pub const LAG_BASE_NS: u64 = 5_000_000;
-/// Base weight with a neutral share.
-#[cfg(test)]
-pub const LAG_WEIGHT_BASE: u64 = 100;
+/// Starvation floor in nanos at 2ms, twice the fixed quantum.
+pub const STARVE_NS: u64 = 2_000_000;
 
 /// True when the first time is before the second with wrap safety.
 /// The signed diff keeps order across the u64 wrap with no extra branch.
@@ -23,67 +19,29 @@ pub fn time_before(a: u64, b: u64) -> bool {
     (a.wrapping_sub(b) as i64) < 0
 }
 
-/// Advance virtual time by scaled runtime.
-/// The sum wraps with the clock, so long runs stay ordered with no check.
+/// Later of two times with wrap safety.
+/// The later time wins, so a fresh deadline never trails the clock.
 #[cfg(test)]
-pub fn vruntime_add(v: u64, delta: u64) -> u64 {
-    v.wrapping_add(delta)
+pub fn time_max(a: u64, b: u64) -> u64 {
+    if time_before(a, b) { b } else { a }
 }
 
-/// Max of two virtual times with wrap safety.
-/// The later time wins, so the minimum never moves backward.
+/// Next deadline from the later of now and the last deadline.
+/// A long sleep never earns credit, and a back to back arrival queues
+/// behind its own last deadline with one step per arrival.
 #[cfg(test)]
-pub fn min_max(old: u64, next: u64) -> u64 {
-    if time_before(old, next) { next } else { old }
+pub fn deadline_next(last: u64, now: u64, weight: u32) -> u64 {
+    time_max(last, now).wrapping_add(crate::flow_slice::deadline_step(weight))
 }
 
-/// Lag cap for one weight at 5ms times base over weight.
-/// Light tasks may lag further behind the minimum than heavy ones.
+/// True when one queued task waited past the 2ms floor.
+/// Unknown stamps never count, so fresh tasks miss past.
 #[cfg(test)]
-pub fn lag_cap(weight: u32) -> u64 {
-    let w = crate::flow_slice::clamp_weight(weight) as u64;
-    LAG_BASE_NS * LAG_WEIGHT_BASE / w
-}
-
-/// Clamped entry virtual time against the CPU minimum.
-/// Fresh tasks anchor at minimum minus lag cap with wrap safety.
-#[cfg(test)]
-pub fn clamp_entry(task_v: u64, min_v: u64, cap: u64) -> u64 {
-    let floor = min_v.wrapping_sub(cap);
-    if time_before(task_v, floor) {
-        floor
-    } else {
-        task_v
+pub fn starved(wait_at: u64, now: u64) -> bool {
+    if wait_at == 0 || time_before(now, wait_at) {
+        return false;
     }
-}
-
-/// Synthetic vruntime penalty for one stolen task when enabled.
-/// The 500us add is weight scaled, so heavy tasks pay less time.
-#[cfg(test)]
-pub fn steal_penalty(weight: u32) -> u64 {
-    let w = crate::flow_slice::clamp_weight(weight) as u64;
-    500_000 * LAG_WEIGHT_BASE / w
-}
-
-/// Guarded idle minimum.
-/// Keeps the old minimum when the waking value is zero.
-#[cfg(test)]
-pub fn min_guarded(old: u64, waking_v: u64) -> u64 {
-    if waking_v == 0 { old } else { waking_v }
-}
-
-/// Guarded idle minimum refresh with wrap safety.
-/// Keeps the old mark when idle plus empty miss or when the newcomer trails,
-/// so an empty CPU keeps order with no decay and no backward step. Advances
-/// only for a heavy arrival past the mark, so migration cannot drag it back.
-/// Stopping advances through the inner max with no guard while enqueue guards
-/// idle plus empty with the same max.
-#[cfg(test)]
-pub fn min_idle_refresh(old: u64, cand: u64, idle_empty: bool) -> u64 {
-    if !idle_empty {
-        return old;
-    }
-    min_max(old, cand)
+    now - wait_at > STARVE_NS
 }
 
 #[cfg(test)]
@@ -91,58 +49,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn max_holds_high_water() {
-        assert_eq!(min_max(10, 20), 20);
-        assert_eq!(min_max(20, 10), 20);
+    fn max_holds_later_time() {
+        assert_eq!(time_max(10, 20), 20);
+        assert_eq!(time_max(20, 10), 20);
     }
 
     #[test]
-    fn lag_cap_scales_with_weight() {
-        assert_eq!(lag_cap(100), 5_000_000);
-        assert_eq!(lag_cap(1000), 500_000);
-        assert_eq!(lag_cap(1), 500_000_000);
+    fn fresh_arrival_anchors_past_now() {
+        assert_eq!(deadline_next(0, 10_000_000, 100), 11_000_000);
     }
 
     #[test]
-    fn fresh_task_anchors_at_floor() {
-        assert_eq!(clamp_entry(0, 10_000_000, 5_000_000), 5_000_000);
-        assert_eq!(clamp_entry(9_000_000, 10_000_000, 5_000_000), 9_000_000);
+    fn sleep_earns_no_credit() {
+        assert_eq!(deadline_next(1_000, 10_000_000, 100), 11_000_000);
     }
 
     #[test]
-    fn steal_penalty_scales_with_weight() {
-        assert_eq!(steal_penalty(100), 500_000);
-        assert_eq!(steal_penalty(1000), 50_000);
+    fn back_to_back_queues_behind_last() {
+        assert_eq!(deadline_next(10_000_000, 9_000_000, 100), 11_000_000);
+        assert_eq!(deadline_next(10_000_000, 9_000_000, 1000), 10_100_000);
     }
 
     #[test]
-    fn vruntime_sums_with_wrap() {
-        assert_eq!(vruntime_add(10, 20), 30);
-        assert_eq!(vruntime_add(u64::MAX, 1), 0);
+    fn wrap_keeps_order() {
+        assert!(time_before(u64::MAX, 1));
+        assert_eq!(time_max(u64::MAX, 1), 1);
     }
 
     #[test]
-    fn guarded_minimum_keeps_zero_wake() {
-        assert_eq!(min_guarded(7, 0), 7);
-        assert_eq!(min_guarded(7, 9), 9);
-    }
-
-    #[test]
-    fn idle_refresh_moves_forward_only_when_empty() {
-        assert_eq!(min_idle_refresh(7, 9, true), 9);
-        assert_eq!(min_idle_refresh(9, 7, true), 9);
-        assert_eq!(min_idle_refresh(7, 9, false), 7);
-        assert_eq!(min_idle_refresh(7, 0, true), 7);
-        assert_eq!(min_idle_refresh(u64::MAX, 1, true), 1);
-        assert_eq!(min_idle_refresh(100, 10, true), 100);
-        assert_eq!(min_idle_refresh(10, 100, true), 100);
-        assert_eq!(min_idle_refresh(10, 100, false), 10);
-    }
-
-    #[test]
-    fn idle_refresh_keeps_order_on_empty() {
-        assert_eq!(min_idle_refresh(50, 5, true), 50);
-        assert_eq!(min_idle_refresh(50, 60, true), 60);
-        assert_eq!(min_idle_refresh(60, 50, true), 60);
+    fn starve_needs_old_stamp() {
+        assert!(starved(100, 100 + STARVE_NS + 1));
+        assert!(!starved(100, 100 + STARVE_NS));
+        assert!(!starved(0, u64::MAX));
+        assert!(!starved(200, 100));
     }
 }

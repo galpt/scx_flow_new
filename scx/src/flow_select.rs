@@ -4,14 +4,14 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the placement and steal helpers shared by tests and docs.
-//! Placement order lives in select_cpu.bpf.c with the lane choice in
-//! enqueue.bpf.c, and this file mirrors the depth and scan predicates.
-//! The scan best never beats the previous CPU when deeper, so warmth
+//! Placement order lives in select_cpu.bpf.c with the deadline choice
+//! in enqueue.bpf.c, and this file mirrors the scan predicates.
+//! The scan best never beats the previous CPU on a tie, so warmth
 //! never loses to load with the best versus previous compare below.
 //!
 //! Live means below the attach snapshot with no kernel online read.
 //! An offlined CPU needs a restart with no live rebalance, and its
-//! fast FIFO strands while its deadline work stays stealable.
+//! deadline work stays stealable.
 //!
 //! Full drain order lives in BPF dispatch. Mirrors cover the
 //! per-tier predicates with tests walking sibling, window, then
@@ -20,16 +20,10 @@
 /// Compile time CPU bound. Mirrors the BPF header.
 #[cfg(test)]
 pub const MAX_CPUS: u32 = 1024;
-/// Bound of peers visited by one steal scan.
-#[cfg(test)]
+/// Bound of peers visited by one placement or steal scan.
 pub const STEAL_BOUND: usize = 8;
-/// Least donor depth that always allows a steal.
-#[cfg(test)]
+/// Least donor depth for one steal. Donors always keep one task back.
 pub const STEAL_MIN_DEPTH: u64 = 2;
-/// Queued depth that scans the cache domain.
-/// Holds fast 4 plus own 12, so a previous CPU past 16 scans.
-#[cfg(test)]
-pub const PLACE_SCAN_THRESH: u64 = 16;
 
 /// Check that a CPU may run a task with the given mask.
 /// A negative CPU fails closed. A CPU at or past 1024 fails closed.
@@ -85,41 +79,7 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
     None
 }
 
-/// Shallow select model for tests.
-/// Mirrors the BPF idle fast path of waker idle, any idle, previous,
-/// then first with no depth gate and no cache scan. The full order needs
-/// prev deep plus shallowest peer plus best beats plus place pick below,
-/// so this model holds the shallow previous case only.
-/// Returns none for overflow use when no CPU allows.
-/// Approximate when the caller passes summed depth as queued.
-#[cfg(test)]
-pub fn select_cpu_model(prev: i32, cur: i32, allowed: &[bool], idle: &[bool]) -> Option<u32> {
-    if may_run_on(cur, allowed) && idle.get(cur as usize).copied().unwrap_or(false) {
-        return Some(cur as u32);
-    }
-    if let Some(c) = pick_any_idle(allowed, idle) {
-        return Some(c);
-    }
-    if may_run_on(prev, allowed) {
-        return Some(prev as u32);
-    }
-    for (cpu, &ok) in allowed.iter().enumerate() {
-        if ok {
-            return Some(cpu as u32);
-        }
-    }
-    None
-}
-
-/// True when one previous CPU is deep enough to scan.
-/// Sums the fast plus the deadline depth against 16, so 4 plus 12
-/// keeps cache warmth and anything past scans the cache domain.
-#[cfg(test)]
-pub fn prev_deep(fast_q: u64, vtime_q: u64) -> bool {
-    fast_q.saturating_add(vtime_q) >= PLACE_SCAN_THRESH
-}
-
-/// Start peer for one placement scan from cursor plus salt.
+/// Start peer for one placement or steal scan from cursor plus salt.
 /// Steps one past the cursor with the prandom salt and wraps, so
 /// repeated passes spread with no hot spot.
 #[cfg(test)]
@@ -132,7 +92,7 @@ pub fn place_start(cursor: u32, salt: u32, nr_cpus: usize) -> u32 {
 
 /// Shallowest live allowed peer in the same cache domain.
 /// Visits bound peers from a start with wrap and keeps the peer with
-/// the least combined depth. Skips the waker, offline peers, foreign
+/// the least deadline depth. Skips the waker, offline peers, foreign
 /// masks, and foreign domains. A missing depth never wins, a missing
 /// domain view fails open to the same domain, and ties keep the first
 /// peer. Live is the attach snapshot with no online read. Returns none
@@ -185,7 +145,7 @@ pub fn shallowest_llc_peer(
 
 /// True when one scan best beats the previous CPU.
 /// Needs a best depth strictly shallower than the previous depth, so a
-/// deeper peer never steals cache warmth. Equal keeps the previous CPU.
+/// deeper peer never moves cache warmth. Equal keeps the previous CPU.
 #[cfg(test)]
 pub fn best_beats_prev(prev_depth: u64, best_depth: u64) -> bool {
     best_depth < prev_depth
@@ -213,6 +173,50 @@ pub fn place_pick(
     }
     if prev_ok {
         return Some(prev as u32);
+    }
+    None
+}
+
+/// Full placement model for tests with the cache scan always on.
+/// Walks waker idle, any idle, the bound 8 scan from a start, then the
+/// previous versus best compare, then the first allowed CPU. Returns
+/// none for overflow use when no CPU allows.
+#[cfg(test)]
+pub fn select_cpu_model(
+    prev: i32,
+    cur: i32,
+    allowed: &[bool],
+    idle: &[bool],
+    llcs: &[u32],
+    depths: &[u64],
+    start: u32,
+) -> Option<u32> {
+    if may_run_on(cur, allowed) && idle.get(cur as usize).copied().unwrap_or(false) {
+        return Some(cur as u32);
+    }
+    if let Some(c) = pick_any_idle(allowed, idle) {
+        return Some(c);
+    }
+    let nr = allowed.len();
+    let prev_ok = may_run_on(prev, allowed);
+    let prev_depth = if prev_ok {
+        depths.get(prev as usize).copied().unwrap_or(u64::MAX)
+    } else {
+        u64::MAX
+    };
+    let want = llcs.get(cur.max(0) as usize).copied();
+    let cur_u = if cur < 0 { u32::MAX } else { cur as u32 };
+    let best = shallowest_llc_peer(start, nr, want, llcs, depths, allowed, cur_u);
+    let best_depth = best
+        .and_then(|b| depths.get(b as usize).copied())
+        .unwrap_or(u64::MAX);
+    if let Some(p) = place_pick(prev_ok, prev, prev_depth, best, best_depth) {
+        return Some(p);
+    }
+    for (cpu, &ok) in allowed.iter().enumerate() {
+        if ok {
+            return Some(cpu as u32);
+        }
     }
     None
 }
@@ -317,27 +321,17 @@ pub struct PendingTask {
     pub wait_at: u64,
 }
 
-/// True when one queued task waited past the 1.5ms floor.
-/// Unknown stamps never count, so fresh tasks miss past.
-#[cfg(test)]
-pub fn starved(wait_at: u64, now: u64) -> bool {
-    if wait_at == 0 || now < wait_at {
-        return false;
-    }
-    now - wait_at > crate::flow_admit::STARVE_NS
-}
-
-/// True when one donor may serve a gated cross domain move.
+/// True when one donor may serve a steal move.
 /// Donors hold at least two, so the owner keeps one task back.
 #[cfg(test)]
 pub fn gated_donor_ok(depth: u64) -> bool {
-    depth >= 2
+    depth >= STEAL_MIN_DEPTH
 }
 
 /// Sibling donor id when live and deep enough.
 /// Returns none when the sibling is unknown, self, offline, or shallow.
 #[cfg(test)]
-pub fn sib_donor(sib: u32, cpu: u32, nr: usize, need: u64, depths: &[u64]) -> Option<u32> {
+pub fn sib_donor(sib: u32, cpu: u32, nr: usize, depths: &[u64]) -> Option<u32> {
     if sib == 0xffffffff {
         return None;
     }
@@ -347,10 +341,17 @@ pub fn sib_donor(sib: u32, cpu: u32, nr: usize, need: u64, depths: &[u64]) -> Op
     if (sib as usize) >= nr {
         return None;
     }
-    if depths.get(sib as usize).copied().unwrap_or(0) < need {
+    if depths.get(sib as usize).copied().unwrap_or(0) < STEAL_MIN_DEPTH {
         return None;
     }
     Some(sib)
+}
+
+/// True when one steal pass may run at all.
+/// Needs an empty local deadline queue, so a busy CPU keeps its order.
+#[cfg(test)]
+pub fn steal_armed(own_queued: u64) -> bool {
+    own_queued == 0
 }
 
 #[cfg(test)]
@@ -382,17 +383,42 @@ mod tests {
     }
 
     #[test]
-    fn select_prefers_idle_then_previous() {
+    fn select_prefers_idle_then_scan() {
         let allowed = vec![true, true, true];
         let idle = vec![false, true, false];
-        assert_eq!(select_cpu_model(0, 2, &allowed, &idle), Some(1));
+        let llcs = vec![0u32, 0, 0];
+        let depths = vec![9u64, 2, 5];
+        assert_eq!(
+            select_cpu_model(0, 2, &allowed, &idle, &llcs, &depths, 0),
+            Some(1)
+        );
         let idle_none = vec![false, false, false];
-        assert_eq!(select_cpu_model(2, 0, &allowed, &idle_none), Some(2));
+        assert_eq!(
+            select_cpu_model(2, 0, &allowed, &idle_none, &llcs, &depths, 1),
+            Some(1)
+        );
         assert_eq!(pick_target_cpu(1, &allowed), Some(1));
         assert_eq!(stay_target(2, 1, &allowed), Some(2));
         assert!(exiting_target_ok(true, true));
         assert!(!exiting_target_ok(false, true));
         assert_eq!(pick_any_idle(&allowed, &idle), Some(1));
+    }
+
+    #[test]
+    fn scan_beats_deep_previous_only() {
+        let allowed = vec![true, true, true, true];
+        let idle_none = vec![false, false, false, false];
+        let llcs = vec![0u32, 0, 0, 0];
+        let depths = vec![9u64, 2, 5, 7];
+        assert_eq!(
+            select_cpu_model(0, 3, &allowed, &idle_none, &llcs, &depths, 0),
+            Some(1)
+        );
+        let deep_best = vec![9u64, 20, 25, 30];
+        assert_eq!(
+            select_cpu_model(0, 3, &allowed, &idle_none, &llcs, &deep_best, 0),
+            Some(0)
+        );
     }
 
     #[test]
@@ -408,39 +434,46 @@ mod tests {
     }
 
     #[test]
-    fn starve_needs_old_stamp() {
-        assert!(starved(100, 100 + crate::flow_admit::STARVE_NS + 1));
-        assert!(!starved(100, 100 + crate::flow_admit::STARVE_NS));
-        assert!(!starved(0, u64::MAX));
-        assert!(!starved(200, 100));
+    fn starve_uses_two_millisecond_floor() {
+        use crate::flow_edf::STARVE_NS;
+        assert!(crate::flow_edf::starved(100, 100 + STARVE_NS + 1));
+        assert!(!crate::flow_edf::starved(100, 100 + STARVE_NS));
         assert!(gated_donor_ok(2));
         assert!(!gated_donor_ok(1));
+    }
+
+    #[test]
+    fn steal_needs_empty_local_queue() {
+        assert!(steal_armed(0));
+        assert!(!steal_armed(1));
+        assert!(!steal_armed(12));
     }
 
     #[test]
     fn sibling_wins_when_deep() {
         let depths = vec![0u64, 3, 0, 0];
-        assert_eq!(sib_donor(1, 0, 4, 2, &depths), Some(1));
-        assert_eq!(sib_donor(0xffffffff, 0, 4, 1, &depths), None);
-        assert_eq!(sib_donor(0, 0, 4, 1, &depths), None);
-        assert_eq!(sib_donor(9, 0, 4, 1, &depths), None);
-        assert_eq!(sib_donor(2, 0, 4, 2, &depths), None);
+        assert_eq!(sib_donor(1, 0, 4, &depths), Some(1));
+        assert_eq!(sib_donor(0xffffffff, 0, 4, &depths), None);
+        assert_eq!(sib_donor(0, 0, 4, &depths), None);
+        assert_eq!(sib_donor(9, 0, 4, &depths), None);
+        let shallow = vec![0u64, 1, 0, 0];
+        assert_eq!(sib_donor(1, 0, 4, &shallow), None);
     }
 
     #[test]
     fn steal_tiers_hold_sibling_then_window_then_gated() {
         let depths = vec![0u64, 3, 0, 0];
-        assert_eq!(sib_donor(1, 0, 4, 2, &depths), Some(1));
-        let got = crate::flow_slot::steal_first_donor(0, 4, 2, &depths).unwrap();
+        assert_eq!(sib_donor(1, 0, 4, &depths), Some(1));
+        let got = crate::flow_slot::steal_first_donor(0, 4, &depths).unwrap();
         assert_eq!(got, crate::flow_slot::VTIME_BASE + 1);
         let shallow = vec![0u64, 1, 0, 0];
-        assert!(crate::flow_slot::steal_first_donor(0, 4, 2, &shallow).is_none());
+        assert!(crate::flow_slot::steal_first_donor(0, 4, &shallow).is_none());
         let now = 10_000_000u64;
         assert!(gated_donor_ok(2));
-        assert!(starved(now - 5_000_000, now));
+        assert!(crate::flow_edf::starved(now - 5_000_000, now));
         assert!(!gated_donor_ok(1));
-        assert!(!starved(now - 100, now));
-        assert!(!starved(0, now));
+        assert!(!crate::flow_edf::starved(now - 100, now));
+        assert!(!crate::flow_edf::starved(0, now));
     }
 
     #[test]
@@ -448,19 +481,6 @@ mod tests {
         let t = task(&[true], 50);
         assert!(t.live && !t.fail && !t.exiting);
         assert_eq!(t.wait_at, 50);
-    }
-
-    #[test]
-    fn prev_depth_gates_cache_scan() {
-        assert_eq!(
-            PLACE_SCAN_THRESH,
-            crate::flow_slot::SLOT_D as u64 + crate::flow_slot::SLOT_OWN_CAP as u64
-        );
-        assert!(!prev_deep(0, 0));
-        assert!(!prev_deep(4, 11));
-        assert!(prev_deep(4, 12));
-        assert!(prev_deep(20, 20));
-        assert!(prev_deep(u64::MAX, 1));
     }
 
     #[test]

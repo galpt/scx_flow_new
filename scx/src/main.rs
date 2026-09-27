@@ -11,7 +11,6 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 mod config;
 mod flow;
-mod flow_admit;
 mod flow_edf;
 mod flow_preempt;
 mod flow_select;
@@ -222,16 +221,14 @@ impl<'a> Scheduler<'a> {
 
     /* Seed one topology row per CPU into the BPF view. */
     /* Each row carries the thread sibling and the cache domain. */
-    /* The slice field keeps the BPF default with no write here. */
     /* A failed update keeps the BPF default with no trap. */
     fn seed_topo(skel: &mut BpfSkel<'_>) {
         use libbpf_rs::MapCore;
         for (cpu, sib, llc) in topology::topo_rows() {
             let key = cpu.to_ne_bytes();
-            let mut val = [0u8; 16];
+            let mut val = [0u8; 8];
             val[0..4].copy_from_slice(&sib.to_ne_bytes());
             val[4..8].copy_from_slice(&llc.to_ne_bytes());
-            val[8..16].copy_from_slice(&crate::flow_slice::QMIN_NS.to_ne_bytes());
             if let Err(e) = skel
                 .maps
                 .topo_stor
@@ -268,10 +265,7 @@ impl<'a> Scheduler<'a> {
             "exit ins={} req={} done={} park={} steal={} \
             kick={} noctx={} \
             pkick={} pskip={} \
-            smoves={} \
-            fast={} fbound={} \
-            vtime={} dgate={} \
-            phold={} elev={} spen={} global={} \
+            smoves={} global={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -283,13 +277,6 @@ impl<'a> Scheduler<'a> {
             m.preempt_kicks,
             m.preempt_skipped,
             m.slot_moves,
-            m.fast_admits,
-            m.fast_bounds,
-            m.vtime_admits,
-            m.duty_gates,
-            m.prob_holds,
-            m.elev_moves,
-            m.steal_penalties,
             m.global_moves,
             runtime,
             oncpu,
@@ -381,25 +368,12 @@ mod tests {
     }
 
     #[test]
-    fn slice_matches_header() {
+    fn quantum_matches_header() {
         assert_eq!(
-            crate::flow_slice::QMIN_NS,
-            crate::bpf_intf::flow_consts_FLOW_QMIN_NS as u64
+            crate::flow_slice::QUANTUM_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(
-            crate::flow_slice::QMAX_NS,
-            crate::bpf_intf::flow_consts_FLOW_QMAX_NS as u64
-        );
-        assert_eq!(crate::flow_slice::QMIN_NS, 250_000);
-        assert_eq!(crate::flow_slice::QMAX_NS, 15_000_000);
-        assert_eq!(
-            crate::flow_slice::LTARGET_NS,
-            crate::bpf_intf::flow_consts_FLOW_LTARGET_NS as u64
-        );
-        assert_eq!(
-            crate::flow_slice::MICRO_QUANTUM_NS,
-            crate::bpf_intf::flow_consts_FLOW_MICRO_QUANTUM_NS as u64
-        );
+        assert_eq!(crate::flow_slice::QUANTUM_NS, 1_000_000);
         assert_eq!(crate::flow_slice::WEIGHT_BASE, 100);
         assert_eq!(crate::flow_slice::WEIGHT_MIN, 1);
         assert_eq!(crate::flow_slice::WEIGHT_MAX, 10_000);
@@ -413,10 +387,6 @@ mod tests {
         );
         assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x7000);
         assert_eq!(
-            crate::flow_slot::SLOT_D,
-            crate::bpf_intf::flow_consts_FLOW_FAST_D
-        );
-        assert_eq!(
             crate::flow_slot::SLOT_BUDGET,
             crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET
         );
@@ -424,39 +394,28 @@ mod tests {
             crate::flow_slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 2049);
-        assert_eq!(
-            crate::flow_slot::FAST_BASE,
-            crate::bpf_intf::flow_consts_FLOW_FAST_BASE as u64
-        );
+        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 1025);
         assert_eq!(
             crate::flow_slot::VTIME_BASE,
             crate::bpf_intf::flow_consts_FLOW_VTIME_BASE as u64
         );
+        assert_eq!(
+            crate::flow_slot::SLOT_OWN_CAP,
+            crate::bpf_intf::flow_consts_FLOW_OWN_VTIME_CAP
+        );
+        assert_eq!(
+            crate::flow_slot::SLOT_OVER_CAP,
+            crate::bpf_intf::flow_consts_FLOW_OVER_CAP
+        );
     }
 
     #[test]
-    fn admit_matches_header() {
+    fn starve_matches_header() {
         assert_eq!(
-            crate::flow_admit::DUTY_SHIFT,
-            crate::bpf_intf::flow_consts_FLOW_DUTY_SHIFT
-        );
-        assert_eq!(
-            crate::flow_admit::DUTY_FAST,
-            crate::bpf_intf::flow_consts_FLOW_DUTY_FAST as u8
-        );
-        assert_eq!(
-            crate::flow_admit::DUTY_BATCH,
-            crate::bpf_intf::flow_consts_FLOW_DUTY_BATCH as u8
-        );
-        assert_eq!(
-            crate::flow_admit::PROB_CYCLES,
-            crate::bpf_intf::flow_consts_FLOW_PROB_CYCLES as u8
-        );
-        assert_eq!(
-            crate::flow_admit::STARVE_NS,
+            crate::flow_edf::STARVE_NS,
             crate::bpf_intf::flow_consts_FLOW_STARVE_NS as u64
         );
+        assert_eq!(crate::flow_edf::STARVE_NS, 2_000_000);
     }
 
     #[test]
@@ -472,30 +431,25 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_40() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
+    fn task_size_is_24() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 24);
     }
 
     #[test]
-    fn cpu_size_is_16() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 16);
+    fn cpu_size_is_8() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 8);
     }
 
     #[test]
-    fn pi_wait_size_is_16() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_pi_wait>(), 16);
+    fn topo_size_is_8() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_topo>(), 8);
     }
 
     #[test]
-    fn topo_size_is_16() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_topo>(), 16);
-    }
-
-    #[test]
-    fn sched_stats_size_is_160() {
+    fn sched_stats_size_is_104() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            160
+            104
         );
     }
 }

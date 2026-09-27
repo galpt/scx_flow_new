@@ -3,9 +3,10 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Reexports the slice, admission, deadline, and queue helpers.
+//! Reexports the quantum, deadline, placement, and queue helpers.
+//! The kick rule lives in flow_preempt for tests.
 
-pub use crate::flow_admit::*;
 pub use crate::flow_edf::*;
+pub use crate::flow_select::*;
 pub use crate::flow_slice::*;
 pub use crate::flow_slot::*;

@@ -121,9 +121,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Slice stays single line with ellipsis. The stale
-     * pill keeps its own KEEP-stale slot below so idle
-     * and live cards share one height with no shift. */
+    /* Slice stays single line with ellipsis. The quantum
+      is fixed, so every card shows the same slice. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
@@ -134,28 +133,6 @@
       text-overflow: ellipsis;
       font-feature-settings: "tnum";
       font-variant-numeric: tabular-nums;
-    }
-    /* Reserved stale slot. Fixed height with flex, pill
-     * toggles by visibility only so space stays reserved
-     * with zero layout shift. KEEP-stale: keep slot. */
-    .core-card .core-stale {
-      min-height: 1.35em;
-      display: flex;
-      align-items: center;
-      margin-top: 1px;
-    }
-    /* Idle stale pill. Mono dashed pill, hidden live via
-     * visibility with space kept. KEEP-stale. */
-    .stale-pill {
-      font-family: var(--font-mono);
-      font-size: 0.5625rem;
-      font-weight: 600;
-      border: 1px dashed var(--border-hover);
-      border-radius: 999px;
-      padding: 0 6px;
-      line-height: 1.5;
-      white-space: nowrap;
-      color: var(--text-muted);
     }
     /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. */
@@ -308,7 +285,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU queues, dynamic slices and placement
+          per-CPU deadline queues, fixed quantum and placement
         </p>
         <p style="font-size:0.75rem;
           color:var(--text-muted);margin-top:2px;
@@ -432,34 +409,6 @@
           <span class="stat-value" id="slot-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Fast admits:</span>
-          <span class="stat-value" id="fast-admits">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Fast bound:</span>
-          <span class="stat-value" id="fast-bound">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Deadline admits:</span>
-          <span class="stat-value" id="vtime-admits">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Duty gates:</span>
-          <span class="stat-value" id="duty-gates">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Probation holds:</span>
-          <span class="stat-value" id="prob-holds">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          PI elevations:</span>
-          <span class="stat-value" id="elev-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Steal penalties:</span>
-          <span class="stat-value" id="steal-pen">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           Global moves:</span>
           <span class="stat-value" id="global-moves">0</span>
         </div>
@@ -514,11 +463,10 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per-CPU cards with dynamic slice, minimum, and pid. They show
-     * freq, SMT, LLC, slice, and the anchor minimum. Freq unknown stays
-     * plain with no zero print. Slice stays single line with full text
-     * in the title. Idle keeps a stale pill in a reserved KEEP-stale
-     * slot with visibility only, so live and idle share height. */
+    /* Per-CPU cards with fixed slice and pid. They show
+     * freq, SMT, LLC, and slice. Freq
+     * unknown stays plain with no zero print. Slice stays
+     * single line with full text in the title. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -556,18 +504,8 @@
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
         var sliceText = 'slice ' + fmtSlice(slice);
-        var fullSlice = sliceText +
-          (idle ? ' stale' : '');
         var sliceLabel = '<div class="core-slice" title="' +
-          fullSlice + '">' + sliceText + '</div>';
-        var staleLabel = '<div class="core-stale">' +
-          '<span class="stale-pill" title="Last slice CPU idle" ' +
-          'style="visibility:' +
-          (idle ? 'visible' : 'hidden') +
-          '">stale</span></div>';
-        var minV = cpu.min_vruntime || 0;
-        var minLabel = '<div class="core-llc">min ' +
-          fmtSlice(minV) + '</div>';
+          sliceText + '">' + sliceText + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
@@ -576,7 +514,7 @@
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + sliceLabel + staleLabel + minLabel +
+          pidLabel + sliceLabel +
           '</div>';
       }).join('');
     }
@@ -684,7 +622,7 @@
       if (ver && topo) meta += ', ';
       if (topo) meta += topo;
       el('meta-line').textContent = meta ||
-        'per-CPU queues, dynamic slices and placement';
+        'per-CPU deadline queues, fixed quantum and placement';
 
       el('on-cpu').textContent = fmt(s.on_cpu || 0);
       el('uptime').textContent =
@@ -711,20 +649,6 @@
         fmt(s.preempt_skipped || 0);
       el('slot-moves').textContent =
         fmt(s.slot_moves || 0);
-      el('fast-admits').textContent =
-        fmt(s.fast_admits || 0);
-      el('fast-bound').textContent =
-        fmt(s.fast_bounds || 0);
-      el('vtime-admits').textContent =
-        fmt(s.vtime_admits || 0);
-      el('duty-gates').textContent =
-        fmt(s.duty_gates || 0);
-      el('prob-holds').textContent =
-        fmt(s.prob_holds || 0);
-      el('elev-moves').textContent =
-        fmt(s.elev_moves || 0);
-      el('steal-pen').textContent =
-        fmt(s.steal_penalties || 0);
       el('global-moves').textContent =
         fmt(s.global_moves || 0);
 

@@ -387,13 +387,6 @@ mod tests {
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
         assert_eq!(m.stats.slot_moves, 0);
-        assert_eq!(m.stats.fast_admits, 0);
-        assert_eq!(m.stats.fast_bounds, 0);
-        assert_eq!(m.stats.vtime_admits, 0);
-        assert_eq!(m.stats.duty_gates, 0);
-        assert_eq!(m.stats.prob_holds, 0);
-        assert_eq!(m.stats.elev_moves, 0);
-        assert_eq!(m.stats.steal_penalties, 0);
         assert_eq!(m.stats.global_moves, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
@@ -424,13 +417,6 @@ mod tests {
                 preempt_kicks: 6,
                 preempt_skipped: 7,
                 slot_moves: 40,
-                fast_admits: 30,
-                fast_bounds: 4,
-                vtime_admits: 12,
-                duty_gates: 5,
-                prob_holds: 2,
-                elev_moves: 1,
-                steal_penalties: 3,
                 global_moves: 6,
                 ..Default::default()
             },
@@ -440,7 +426,7 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.4.0".to_string(),
+            version: "4.4.1".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             governor: "performance (epp:performance)".to_string(),
@@ -452,13 +438,6 @@ mod tests {
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("slot_moves"));
-        assert!(txt.contains("fast_admits"));
-        assert!(txt.contains("fast_bounds"));
-        assert!(txt.contains("vtime_admits"));
-        assert!(txt.contains("duty_gates"));
-        assert!(txt.contains("prob_holds"));
-        assert!(txt.contains("elev_moves"));
-        assert!(txt.contains("steal_penalties"));
         assert!(txt.contains("global_moves"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
@@ -472,19 +451,24 @@ mod tests {
         assert!(!txt.contains("accepted_pairs"));
         assert!(!txt.contains("rejected_pairs"));
         assert!(!txt.contains("headline"));
+        assert!(!txt.contains("fast_admits"));
+        assert!(!txt.contains("fast_bounds"));
+        assert!(!txt.contains("vtime_admits"));
+        assert!(!txt.contains("duty_gates"));
+        assert!(!txt.contains("prob_holds"));
+        assert!(!txt.contains("elev_moves"));
+        assert!(!txt.contains("steal_penalties"));
+        assert!(!txt.contains("min_vruntime"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.preempt_kicks, 6);
         assert_eq!(back.stats.preempt_skipped, 7);
         assert_eq!(back.stats.slot_moves, 40);
-        assert_eq!(back.stats.fast_admits, 30);
-        assert_eq!(back.stats.fast_bounds, 4);
-        assert_eq!(back.stats.elev_moves, 1);
         assert_eq!(back.stats.global_moves, 6);
         assert_eq!(back.stats.steal_moves, 2);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.0");
+        assert_eq!(back.version, "4.4.1");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
@@ -496,18 +480,20 @@ mod tests {
         );
     }
 
-    /* Dashboard keeps the stale pill slot with no shift. KEEP-stale. */
+    /* Dashboard keeps live ids without stale cards. */
     #[test]
-    fn dashboard_shows_stale_when_idle() {
+    fn dashboard_keeps_live_layout() {
         let html = include_str!("../ui/index.html");
-        assert!(html.contains("stale-pill"));
-        assert!(html.contains(".core-stale"));
-        assert!(html.contains("visibility"));
-        assert!(html.contains("visible"));
-        assert!(html.contains("hidden"));
-        assert!(html.contains("Last slice CPU idle"));
-        assert!(html.contains("min-height: 1.35em"));
-        assert!(html.contains("(idle ? ' stale' : '')"));
+        assert!(!html.contains("stale-pill"));
+        assert!(!html.contains("core-stale"));
+        assert!(!html.contains("Last slice CPU idle"));
+        assert!(!html.contains("fast-admits"));
+        assert!(!html.contains("fast-bound"));
+        assert!(!html.contains("vtime-admits"));
+        assert!(!html.contains("duty-gates"));
+        assert!(!html.contains("prob-holds"));
+        assert!(!html.contains("elev-moves"));
+        assert!(!html.contains("steal-pen"));
         assert!(html.contains("text-overflow: ellipsis"));
         assert!(html.contains("tabular-nums"));
     }
@@ -534,29 +520,32 @@ mod tests {
         assert!(html.contains("preempt_skipped"));
     }
 
-    /* Dashboard shows the slot cells. */
+    /* Dashboard shows the slot cell. */
     #[test]
     fn dashboard_shows_slot_cells() {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"slot-moves\""));
-        assert!(html.contains("id=\"fast-admits\""));
-        assert!(html.contains("id=\"fast-bound\""));
         assert!(html.contains("slot_moves"));
-        assert!(html.contains("fast_admits"));
-        assert!(html.contains("fast_bounds"));
-        assert!(html.contains("vtime_admits"));
+        assert!(!html.contains("fast_admits"));
+        assert!(!html.contains("fast_bounds"));
+        assert!(!html.contains("vtime_admits"));
     }
 
-    /* Dashboard shows the admission cells. */
+    /* Dashboard hides prior lane cells. */
     #[test]
-    fn dashboard_shows_admit_cells() {
+    fn dashboard_hides_prior_cells() {
         let html = include_str!("../ui/index.html");
-        assert!(html.contains("id=\"duty-gates\""));
-        assert!(html.contains("id=\"prob-holds\""));
-        assert!(html.contains("id=\"elev-moves\""));
-        assert!(html.contains("duty_gates"));
-        assert!(html.contains("prob_holds"));
-        assert!(html.contains("elev_moves"));
+        assert!(!html.contains("id=\"fast-admits\""));
+        assert!(!html.contains("id=\"fast-bound\""));
+        assert!(!html.contains("id=\"vtime-admits\""));
+        assert!(!html.contains("id=\"duty-gates\""));
+        assert!(!html.contains("id=\"prob-holds\""));
+        assert!(!html.contains("id=\"elev-moves\""));
+        assert!(!html.contains("id=\"steal-pen\""));
+        assert!(!html.contains("duty_gates"));
+        assert!(!html.contains("prob_holds"));
+        assert!(!html.contains("elev_moves"));
+        assert!(!html.contains("steal_penalties"));
     }
 
     /* Dashboard shows the global moves cell. */
@@ -565,7 +554,7 @@ mod tests {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"global-moves\""));
         assert!(html.contains("global_moves"));
-        assert!(html.contains("steal_penalties"));
+        assert!(!html.contains("steal_penalties"));
     }
 
     /* Dashboard shows the steal cell. */
