@@ -66,6 +66,18 @@ pub struct Metrics {
     #[stat(desc = "Moves from the kernel global queue")]
     #[serde(default)]
     pub global_moves: u64,
+    #[stat(desc = "Throttled time in nanoseconds")]
+    #[serde(default)]
+    pub throttled_ns: u64,
+    #[stat(desc = "Throttle hits on limited hierarchies")]
+    #[serde(default)]
+    pub nr_throttled: u64,
+    #[stat(desc = "Overflow parks from throttling")]
+    #[serde(default)]
+    pub parked: u64,
+    #[stat(desc = "Hierarchy moves with deadline carry")]
+    #[serde(default)]
+    pub bw_moves: u64,
 }
 
 /// One card of the per-CPU grid.
@@ -174,7 +186,8 @@ impl Metrics {
             ins={} req={} done={} park={} steal={} \
             kick={} noctx={} \
             pkick={} pskip={} \
-            smoves={} global={}",
+            smoves={} global={} \
+            thr={} nthr={} parked={} bw={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -190,6 +203,10 @@ impl Metrics {
             self.preempt_skipped,
             self.slot_moves,
             self.global_moves,
+            self.throttled_ns,
+            self.nr_throttled,
+            self.parked,
+            self.bw_moves,
         )?;
         Ok(())
     }
@@ -212,6 +229,10 @@ impl Metrics {
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
             slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             global_moves: self.global_moves.wrapping_sub(rhs.global_moves),
+            throttled_ns: self.throttled_ns.wrapping_sub(rhs.throttled_ns),
+            nr_throttled: self.nr_throttled.wrapping_sub(rhs.nr_throttled),
+            parked: self.parked.wrapping_sub(rhs.parked),
+            bw_moves: self.bw_moves.wrapping_sub(rhs.bw_moves),
         }
     }
 }

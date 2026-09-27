@@ -11,6 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 mod config;
 mod flow;
+mod flow_cgrp;
 mod flow_edf;
 mod flow_preempt;
 mod flow_select;
@@ -266,6 +267,7 @@ impl<'a> Scheduler<'a> {
             kick={} noctx={} \
             pkick={} pskip={} \
             smoves={} global={} \
+            thr={} nthr={} parked={} bw={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -278,6 +280,10 @@ impl<'a> Scheduler<'a> {
             m.preempt_skipped,
             m.slot_moves,
             m.global_moves,
+            m.throttled_ns,
+            m.nr_throttled,
+            m.parked,
+            m.bw_moves,
             runtime,
             oncpu,
         );
@@ -436,7 +442,7 @@ mod tests {
 
     #[test]
     fn task_size_is_24() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 24);
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
     }
 
     #[test]
@@ -453,7 +459,31 @@ mod tests {
     fn sched_stats_size_is_104() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            104
+            136
         );
+    }
+
+    #[test]
+    fn cgrp_matches_header() {
+        assert_eq!(
+            crate::flow_cgrp::CGRP_MAX as u64,
+            crate::bpf_intf::flow_consts_FLOW_CGRP_MAX as u64
+        );
+        assert_eq!(
+            crate::flow_cgrp::CGRP_DEPTH_MAX as u64,
+            crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64
+        );
+        assert_eq!(
+            crate::flow_cgrp::BW_PERIOD_MIN_US,
+            crate::bpf_intf::flow_consts_FLOW_BW_PERIOD_MIN_US as u64
+        );
+        assert_eq!(crate::flow_cgrp::CGRP_MAX, 2048);
+        assert_eq!(crate::flow_cgrp::CGRP_DEPTH_MAX, 8);
+        assert_eq!(crate::flow_cgrp::BW_PERIOD_MIN_US, 1000);
+    }
+
+    #[test]
+    fn cgrp_size_is_48() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cgrp_ctx>(), 48);
     }
 }

@@ -412,6 +412,22 @@
           Global moves:</span>
           <span class="stat-value" id="global-moves">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Throttled:</span>
+          <span class="stat-value" id="throttled-ns">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Throttle hits:</span>
+          <span class="stat-value" id="nr-throttled">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Parked:</span>
+          <span class="stat-value" id="parked">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Hierarchy moves:</span>
+          <span class="stat-value" id="bw-moves">0</span>
+        </div>
       </div>
     </div>
 
@@ -651,6 +667,14 @@
         fmt(s.slot_moves || 0);
       el('global-moves').textContent =
         fmt(s.global_moves || 0);
+      el('throttled-ns').textContent =
+        fmtRuntime(s.throttled_ns || 0);
+      el('nr-throttled').textContent =
+        fmt(s.nr_throttled || 0);
+      el('parked').textContent =
+        fmt(s.parked || 0);
+      el('bw-moves').textContent =
+        fmt(s.bw_moves || 0);
 
       renderCoreCards(data);
     }

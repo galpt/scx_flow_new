@@ -1,0 +1,333 @@
+// SPDX-License-Identifier: GPL-2.0
+//! Hierarchy share and pool helpers for the flow scheduler.
+//!
+//! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+
+//! Holds the hierarchy share walk plus the pool helpers shared by tests.
+//! The BPF share lives in main.bpf.c with the pool in cgroup.bpf.c,
+//! and this file mirrors the walk predicates with no map use.
+
+/// Bound of hierarchy rows. Mirrors the BPF header.
+pub const CGRP_MAX: usize = 2048;
+/// Bound of ancestors visited by one share or pool walk.
+pub const CGRP_DEPTH_MAX: usize = 8;
+/// Default share on miss with neutral weight.
+pub const CGRP_WEIGHT_DFL: u32 = 100;
+/// Least period in microseconds at 1ms. Short periods fail closed here.
+pub const BW_PERIOD_MIN_US: u64 = 1000;
+/// Single timer interval in nanos at 10ms. Wakes parks with no scan.
+#[cfg(test)]
+pub const BW_TIMER_NS: u64 = 10_000_000;
+/// Unlimited quota value mapped to zero for no cap use.
+#[cfg(test)]
+pub const RUNTIME_INF: u64 = u64::MAX;
+
+/// Clamp one share into 1 to 10000.
+/// Zero or oversize shares fail closed to the nearer bound.
+#[cfg(test)]
+pub fn clamp_share(w: u32) -> u32 {
+    w.clamp(crate::flow_slice::WEIGHT_MIN, crate::flow_slice::WEIGHT_MAX)
+}
+
+/// Effective weight from task weight and hierarchy share.
+/// Both inputs clamp to range, and the product scales by base 100.
+/// A missing hierarchy entry uses base, so the task weight stands.
+#[cfg(test)]
+pub fn eff_weight(task_w: u32, hier_w: u32) -> u32 {
+    let t = clamp_share(task_w) as u64;
+    let h = clamp_share(hier_w) as u64;
+    let eff = t * h / crate::flow_slice::WEIGHT_BASE as u64;
+    eff.clamp(
+        crate::flow_slice::WEIGHT_MIN as u64,
+        crate::flow_slice::WEIGHT_MAX as u64,
+    ) as u32
+}
+
+/// Hierarchy share over ancestors with miss default 100.
+/// Compounds each weight by base 100, so a light parent lowers
+/// the share. Caps at range with no trap.
+#[cfg(test)]
+pub fn hier_weight(weights: &[u32]) -> u32 {
+    let mut hier = CGRP_WEIGHT_DFL as u64;
+    for &w in weights.iter().take(CGRP_DEPTH_MAX) {
+        let v = clamp_share(w) as u64;
+        hier = hier * v / crate::flow_slice::WEIGHT_BASE as u64;
+        hier = hier.clamp(
+            crate::flow_slice::WEIGHT_MIN as u64,
+            crate::flow_slice::WEIGHT_MAX as u64,
+        );
+    }
+    hier as u32
+}
+
+/// Floored period in microseconds with a 1ms floor.
+/// Short periods fail closed to the floor with no trap.
+#[cfg(test)]
+pub fn bw_period_floor(period_us: u64) -> u64 {
+    period_us.max(BW_PERIOD_MIN_US)
+}
+
+/// Normalized quota with unlimited mapped to zero.
+/// Zero means no cap, so zero means no check.
+#[cfg(test)]
+pub fn bw_quota_norm(quota_us: u64) -> u64 {
+    if quota_us == RUNTIME_INF {
+        return 0;
+    }
+    quota_us
+}
+
+/// True when one pool has no cap and never throttles.
+/// Zero quota means unlimited with no pool use.
+#[cfg(test)]
+pub fn bw_unlimited(quota_us: u64) -> bool {
+    quota_us == 0
+}
+
+/// Pool cap in nanos from quota plus burst with burst cap.
+/// Unlimited pools hold zero with no cap use, limited pools cap
+/// at quota plus burst converted to nanos.
+#[cfg(test)]
+pub fn bw_max_ns(quota_us: u64, burst_us: u64) -> u64 {
+    if bw_unlimited(quota_us) {
+        return 0;
+    }
+    quota_us.saturating_add(burst_us).saturating_mul(1000)
+}
+
+/// Cached share entry for one task.
+/// Cgid holds the last hierarchy id, eweight holds the share,
+/// cached marks a valid entry, and generation holds the low bits
+/// of the global generation for validation.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskCache {
+    /// Last hierarchy id.
+    pub cgid: u64,
+    /// Hierarchy share with base 100.
+    pub eweight: u32,
+    /// True when the entry may be used.
+    pub cached: bool,
+    /// Low bits of the global generation.
+    pub generation: u16,
+}
+
+/// True when one cached share may be used at once.
+/// Needs a set flag with matching id and generation, so a move
+/// or a share change misses past with a fresh walk.
+#[cfg(test)]
+pub fn cache_valid(cache: &TaskCache, cur_id: u64, cur_generation: u64) -> bool {
+    cache.cached && cache.cgid == cur_id && cache.generation == cur_generation as u16
+}
+
+/// Pool state for one hierarchy entry.
+/// Quota holds zero for unlimited, pool holds the rest in nanos,
+/// and updated holds the last refill time in nanos.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolState {
+    /// Quota in microseconds, zero for unlimited.
+    pub quota_us: u64,
+    /// Burst in microseconds for the cap.
+    pub burst_us: u64,
+    /// Period in microseconds floored at 1ms.
+    pub period_us: u64,
+    /// Rest in nanos, zero when drained.
+    pub pool_ns: u64,
+    /// Last refill time in nanos.
+    pub updated_at: u64,
+}
+
+/// Lazy refill of one pool with burst cap.
+/// Unlimited pools stay zero with no time use. Elapsed time
+/// refills by quota over period, capped at quota plus burst.
+#[cfg(test)]
+pub fn pool_refill(pool: &mut PoolState, now: u64) {
+    if bw_unlimited(pool.quota_us) {
+        return;
+    }
+    if now < pool.updated_at {
+        return;
+    }
+    let elapsed = now - pool.updated_at;
+    if elapsed == 0 {
+        return;
+    }
+    pool.updated_at = now;
+    if pool.period_us == 0 {
+        return;
+    }
+    let add = elapsed.saturating_mul(pool.quota_us) / pool.period_us;
+    if add == 0 {
+        return;
+    }
+    let max = bw_max_ns(pool.quota_us, pool.burst_us);
+    if max == 0 {
+        return;
+    }
+    if pool.pool_ns >= max {
+        return;
+    }
+    pool.pool_ns = (pool.pool_ns + add).min(max);
+}
+
+/// True when one pool walk is throttled with lazy refill.
+/// Any drained pool binds, so the tightest ancestor parks.
+/// Unlimited entries pass with no pool use.
+#[cfg(test)]
+pub fn pools_throttled(pools: &mut [PoolState], now: u64) -> bool {
+    for p in pools.iter_mut().take(CGRP_DEPTH_MAX) {
+        if bw_unlimited(p.quota_us) {
+            continue;
+        }
+        pool_refill(p, now);
+        if p.pool_ns == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Charge one runtime delta to pools with floor at zero.
+/// Limited pools drain saturating to zero with no wrap.
+#[cfg(test)]
+pub fn pools_consume(pools: &mut [PoolState], delta: u64) {
+    if delta == 0 {
+        return;
+    }
+    for p in pools.iter_mut().take(CGRP_DEPTH_MAX) {
+        if bw_unlimited(p.quota_us) {
+            continue;
+        }
+        p.pool_ns = p.pool_ns.saturating_sub(delta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consts_match_header() {
+        assert_eq!(CGRP_MAX, 2048);
+        assert_eq!(CGRP_DEPTH_MAX, 8);
+        assert_eq!(CGRP_WEIGHT_DFL, 100);
+        assert_eq!(BW_PERIOD_MIN_US, 1000);
+        assert_eq!(BW_TIMER_NS, 10_000_000);
+        assert_eq!(RUNTIME_INF, u64::MAX);
+        assert_eq!(
+            CGRP_MAX as u64,
+            crate::bpf_intf::flow_consts_FLOW_CGRP_MAX as u64
+        );
+        assert_eq!(
+            CGRP_DEPTH_MAX as u64,
+            crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64
+        );
+    }
+
+    #[test]
+    fn eff_folds_task_with_hierarchy() {
+        assert_eq!(eff_weight(100, 100), 100);
+        assert_eq!(eff_weight(200, 100), 200);
+        assert_eq!(eff_weight(100, 200), 200);
+        assert_eq!(eff_weight(100, 50), 50);
+        assert_eq!(eff_weight(0, 0), 1);
+        assert_eq!(eff_weight(99_999, 99_999), 10_000);
+    }
+
+    #[test]
+    fn hier_compounds_with_miss_default() {
+        assert_eq!(hier_weight(&[]), 100);
+        assert_eq!(hier_weight(&[100]), 100);
+        assert_eq!(hier_weight(&[200]), 200);
+        assert_eq!(hier_weight(&[100, 200]), 200);
+        assert_eq!(hier_weight(&[50, 50]), 25);
+        let deep = vec![200u32; 16];
+        assert_eq!(hier_weight(&deep), hier_weight(&vec![200u32; 8]));
+    }
+
+    #[test]
+    fn bw_helpers_hold_floor_and_inf() {
+        assert_eq!(bw_period_floor(500), 1000);
+        assert_eq!(bw_period_floor(5000), 5000);
+        assert_eq!(bw_quota_norm(RUNTIME_INF), 0);
+        assert_eq!(bw_quota_norm(1000), 1000);
+        assert!(bw_unlimited(0));
+        assert!(!bw_unlimited(1000));
+        assert_eq!(bw_max_ns(0, 0), 0);
+        assert_eq!(bw_max_ns(1000, 500), 1_500_000);
+    }
+
+    #[test]
+    fn cache_needs_id_and_gen() {
+        let c = TaskCache {
+            cgid: 7,
+            eweight: 100,
+            cached: true,
+            generation: 3,
+        };
+        assert!(cache_valid(&c, 7, 3));
+        assert!(!cache_valid(&c, 8, 3));
+        assert!(!cache_valid(&c, 7, 4));
+        let cold = TaskCache {
+            cgid: 7,
+            eweight: 100,
+            cached: false,
+            generation: 3,
+        };
+        assert!(!cache_valid(&cold, 7, 3));
+    }
+
+    #[test]
+    fn pools_bind_tightest_with_refill() {
+        let mut pools = vec![
+            PoolState {
+                quota_us: 1000,
+                burst_us: 0,
+                period_us: 1000,
+                pool_ns: 1_000_000,
+                updated_at: 0,
+            },
+            PoolState {
+                quota_us: 0,
+                burst_us: 0,
+                period_us: 1000,
+                pool_ns: 0,
+                updated_at: 0,
+            },
+        ];
+        assert!(!pools_throttled(&mut pools, 0));
+        pools[0].pool_ns = 0;
+        pools[0].updated_at = 0;
+        assert!(pools_throttled(&mut pools, 0));
+        pools[0].pool_ns = 0;
+        pools[0].updated_at = 0;
+        assert!(!pools_throttled(&mut pools, 500));
+        pools_consume(&mut pools, 500_000);
+        assert_eq!(pools[0].pool_ns, 0);
+    }
+
+    #[test]
+    fn refill_caps_at_burst() {
+        let mut p = PoolState {
+            quota_us: 1000,
+            burst_us: 500,
+            period_us: 1000,
+            pool_ns: 0,
+            updated_at: 0,
+        };
+        pool_refill(&mut p, 10_000_000);
+        assert_eq!(p.pool_ns, 1_500_000);
+        pool_refill(&mut p, 20_000_000);
+        assert_eq!(p.pool_ns, 1_500_000);
+        let mut u = PoolState {
+            quota_us: 0,
+            burst_us: 0,
+            period_us: 1000,
+            pool_ns: 0,
+            updated_at: 0,
+        };
+        pool_refill(&mut u, 10_000_000);
+        assert_eq!(u.pool_ns, 0);
+    }
+}

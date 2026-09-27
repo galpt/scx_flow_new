@@ -10,7 +10,15 @@ Each CPU owns one deadline queue at `0x6800` plus id, overflow at `0x7000` is sh
 
 ### Deadlines
 
-Every arrival steps past the later of now and last deadline, the step shrinks as weight grows. Nice folds into weight. See `src/bpf/enqueue.bpf.c`.
+Every arrival steps past the later of now and last deadline, the step shrinks as effective weight grows. Task weight folds nice, hierarchy share folds ancestors to depth `8`. See `src/bpf/enqueue.bpf.c`.
+
+### Hierarchies
+
+Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation, moves carry deadline. See `src/bpf/cgroup.bpf.c`.
+
+### Bandwidth
+
+Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap, lazy refill, tightest pool binds. Throttled parks rest in overflow with no kick, one timer wakes parks. See `src/bpf/cgroup.bpf.c`.
 
 ### Preemption
 
@@ -30,11 +38,11 @@ Steal runs only with an empty local queue. Sibling wins first, then same cache d
 
 ### Accounting
 
-Running stamps segment start, stopping charges raw time and counts one requeue or completion, disable plus exit charge a leftover once. See `src/bpf/lifecycle.bpf.c`.
+Running stamps segment start, stopping charges raw time plus pool drain and counts one requeue or completion, disable plus exit charge a leftover once. See `src/bpf/lifecycle.bpf.c`.
 
 ### Counters
 
-Counters stay at `104B` with `13` live fields. JSON carries live counters only, slice reads the fixed quantum. See `src/stats.rs`.
+Counters stay at `136B` with `17` live fields. JSON carries live counters only, slice reads the fixed quantum. See `src/stats.rs`.
 
 ## Configuration
 
@@ -52,9 +60,10 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 - Inserts: `src/bpf/enqueue.bpf.c`
 - Drains: `src/bpf/dispatch.bpf.c`
 - Lifecycle: `src/bpf/lifecycle.bpf.c`
+- Hierarchy: `src/bpf/cgroup.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
   `src/flow_select.rs`, `src/flow_preempt.rs`,
-  `src/flow_slot.rs`
+  `src/flow_slot.rs`, `src/flow_cgrp.rs`
 - Facade: `src/flow.rs`
 - Tests: inline `tests` modules in each mirror
 - Constant validation: `src/config.rs`
@@ -68,6 +77,6 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 ## Limitations
 
 - Live means below the attach snapshot. Hotplug needs a restart.
-- Releases need a restart. State is `24B` plus `8B` plus `104B`.
+- Releases need a restart. State is `40B` plus `8B` plus `48B` plus `136B`.
 - Overflow and global inserts send no kick. Fail closed, next kicking enqueue or dispatch wakes.
 - Needs kernels, `7.2` series and up.

@@ -397,6 +397,10 @@ impl<'a> Scheduler<'a> {
             preempt_skipped: s.preempt_skipped,
             slot_moves: s.slot_moves,
             global_moves: s.global_moves,
+            throttled_ns: s.throttled_ns,
+            nr_throttled: s.nr_throttled,
+            parked: s.parked,
+            bw_moves: s.bw_moves,
         }
     }
 

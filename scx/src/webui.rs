@@ -388,6 +388,10 @@ mod tests {
         assert_eq!(m.stats.preempt_skipped, 0);
         assert_eq!(m.stats.slot_moves, 0);
         assert_eq!(m.stats.global_moves, 0);
+        assert_eq!(m.stats.throttled_ns, 0);
+        assert_eq!(m.stats.nr_throttled, 0);
+        assert_eq!(m.stats.parked, 0);
+        assert_eq!(m.stats.bw_moves, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "");
         assert_eq!(m.timestamp_ns, 0);
@@ -418,6 +422,10 @@ mod tests {
                 preempt_skipped: 7,
                 slot_moves: 40,
                 global_moves: 6,
+                throttled_ns: 1_000_000,
+                nr_throttled: 2,
+                parked: 2,
+                bw_moves: 1,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
@@ -426,7 +434,7 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.4.1".to_string(),
+            version: "4.4.2".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             governor: "performance (epp:performance)".to_string(),
@@ -439,6 +447,10 @@ mod tests {
         assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("slot_moves"));
         assert!(txt.contains("global_moves"));
+        assert!(txt.contains("throttled_ns"));
+        assert!(txt.contains("nr_throttled"));
+        assert!(txt.contains("parked"));
+        assert!(txt.contains("bw_moves"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("governor"));
@@ -466,9 +478,13 @@ mod tests {
         assert_eq!(back.stats.slot_moves, 40);
         assert_eq!(back.stats.global_moves, 6);
         assert_eq!(back.stats.steal_moves, 2);
+        assert_eq!(back.stats.throttled_ns, 1_000_000);
+        assert_eq!(back.stats.nr_throttled, 2);
+        assert_eq!(back.stats.parked, 2);
+        assert_eq!(back.stats.bw_moves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.1");
+        assert_eq!(back.version, "4.4.2");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
@@ -563,6 +579,20 @@ mod tests {
         let html = include_str!("../ui/index.html");
         assert!(html.contains("id=\"steal\""));
         assert!(html.contains("steal_moves"));
+    }
+
+    /* Dashboard shows the four hierarchy cells. */
+    #[test]
+    fn dashboard_shows_hierarchy_cells() {
+        let html = include_str!("../ui/index.html");
+        assert!(html.contains("id=\"throttled-ns\""));
+        assert!(html.contains("throttled_ns"));
+        assert!(html.contains("id=\"nr-throttled\""));
+        assert!(html.contains("nr_throttled"));
+        assert!(html.contains("id=\"parked\""));
+        assert!(html.contains("parked"));
+        assert!(html.contains("id=\"bw-moves\""));
+        assert!(html.contains("bw_moves"));
     }
 
     /* Dashboard shows the governor mode cell. */
