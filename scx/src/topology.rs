@@ -44,8 +44,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             llc_id: cpu.llc_id as u32,
             smt,
             running_pid: 0,
-            slice_ns: crate::flow_slice::QMIN_NS,
-            min_vruntime: 0,
+            slice_ns: crate::flow_slice::QUANTUM_NS,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -363,7 +362,7 @@ pub fn filter_allowed(
 
 /// Synthetic card for tests.
 /// Builds one display only card with the given id and frequency.
-/// Slice starts at the 250us minimum.
+/// Slice shows the fixed 1ms quantum.
 #[cfg(test)]
 pub fn synthetic_card(
     id: u32,
@@ -378,8 +377,7 @@ pub fn synthetic_card(
         llc_id,
         smt,
         running_pid: 0,
-        slice_ns: crate::flow_slice::QMIN_NS,
-        min_vruntime: 0,
+        slice_ns: crate::flow_slice::QUANTUM_NS,
     }
 }
 

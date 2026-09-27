@@ -396,24 +396,16 @@ impl<'a> Scheduler<'a> {
             preempt_kicks: s.preempt_kicks,
             preempt_skipped: s.preempt_skipped,
             slot_moves: s.slot_moves,
-            fast_admits: s.fast_admits,
-            fast_bounds: s.fast_bounds,
-            vtime_admits: s.vtime_admits,
-            duty_gates: s.duty_gates,
-            prob_holds: s.prob_holds,
-            elev_moves: s.elev_moves,
-            steal_penalties: s.steal_penalties,
             global_moves: s.global_moves,
         }
     }
 
     /*
      * Read one CPU state without heap use. Failed lookups yield an idle view
-     * with zero minimum and pid. The minimum is the anchor high water mark.
+     * with zero pid. The cursor spreads scans with no heap use.
      */
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::flow_cpu_state {
         let idle = crate::flow_cpu_state {
-            min_vruntime: 0,
             running_pid: 0,
             cursor: 0,
         };
@@ -438,43 +430,12 @@ impl<'a> Scheduler<'a> {
     }
 
     /*
-     * Read one topology view without heap use. Failed lookups yield a view
-     * with unknown sibling and the minimum slice. The slice is display
-     * only and never shapes placement.
-     */
-    pub(crate) fn read_topo(&self, cpu: usize) -> crate::flow_topo {
-        let idle = crate::flow_topo {
-            smt_sib: 0xffffffff,
-            llc: 0,
-            last_slice: crate::flow_slice::QMIN_NS,
-        };
-        if cpu >= crate::MAX_CPUS {
-            return idle;
-        }
-        let fd = self.skel.maps.topo_stor.as_fd().as_raw_fd();
-        let key = cpu as u32;
-        let mut out = MaybeUninit::<crate::flow_topo>::zeroed();
-        let ret = unsafe {
-            libbpf_rs::libbpf_sys::bpf_map_lookup_elem(
-                fd,
-                &key as *const _ as *const std::ffi::c_void,
-                out.as_mut_ptr() as *mut std::ffi::c_void,
-            )
-        };
-        if ret == 0 {
-            unsafe { out.assume_init() }
-        } else {
-            idle
-        }
-    }
-
-    /*
      * Dashboard snapshot. Merges the static cards with live state by online
-     * rank. Gauges only, no deltas. Frequency, LLC, SMT, slice, minimum,
-     * and energy stay display only. Offline stays out, so per CPU count
-     * matches online count. Version, timestamp, topology, and governor join
-     * the counters. Governor polls online only on the 1s tick for display
-     * with no BPF write.
+     * rank. Gauges only, no deltas. Frequency, LLC, SMT, slice, and energy
+     * stay display only. Offline stays out, so per CPU count matches online
+     * count. Version, timestamp, topology, and governor join the counters.
+     * Governor polls online only on the 1s tick for display with no BPF
+     * write. Slice reads the fixed quantum.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr_raw = {
@@ -520,8 +481,7 @@ impl<'a> Scheduler<'a> {
             e.cur_freq_khz = self.cur_freq_khz.get(rank).copied().unwrap_or(0);
             let st = self.read_cpu(cpu);
             e.running_pid = st.running_pid;
-            e.min_vruntime = st.min_vruntime;
-            e.slice_ns = self.read_topo(cpu).last_slice;
+            e.slice_ns = crate::flow_slice::QUANTUM_NS;
             per_cpu.push(e);
         }
         let topology = if self.cpu_static.is_empty() {
