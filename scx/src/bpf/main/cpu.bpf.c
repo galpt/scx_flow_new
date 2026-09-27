@@ -70,8 +70,7 @@ static __always_inline void flow_clear_running(s32 cpu)
 	if (!st)
 		return;
 	bpf_for(i, 0, 4) {
-		u32 cur = __sync_fetch_and_add(
-		    &st->running_pid, 0);
+		u32 cur = READ_ONCE(st->running_pid);
 		u32 old;
 		if (cur == 0)
 			break;

@@ -31,7 +31,7 @@ static __noinline void flow_charge_leftover(s32 cpu,
 		return;
 	if (pid == 0)
 		return;
-	start = __sync_fetch_and_add(&tctx->run_at, 0);
+	start = READ_ONCE(tctx->run_at);
 	if (start == 0)
 		return;
 	if (cpu < 0)
@@ -45,7 +45,7 @@ static __noinline void flow_charge_leftover(s32 cpu,
 		u32 cur;
 		if (!st)
 			return;
-		cur = __sync_fetch_and_add(&st->running_pid, 0);
+		cur = READ_ONCE(st->running_pid);
 		if (cur != pid)
 			return;
 	}
@@ -99,7 +99,7 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 		if (j == 0)
 			leaf = e;
 		if (flow_bw_unlimited(
-		    __sync_fetch_and_add(&e->quota_us, 0)))
+		    READ_ONCE(e->quota_us)))
 			continue;
 		before = flow_load_pool(e);
 		flow_bw_refill(e, now);
@@ -174,7 +174,7 @@ static int flow_bw_timer_cb(void *map, int *key,
 	n = nr_cpu_ids;
 	if (n == 0 || n > (u64)FLOW_MAX_CPUS)
 		goto arm;
-	kicks = __sync_fetch_and_add(&flow_stats.kicks, 0);
+	kicks = READ_ONCE(flow_stats.kicks);
 	start = (u32)(kicks % n);
 	bpf_for(off, 0, FLOW_STEAL_BOUND) {
 		u32 peer;

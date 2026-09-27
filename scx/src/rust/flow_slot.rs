@@ -74,7 +74,7 @@ pub fn insert_dsq(cpu: i32, pinned: bool, nr: usize) -> u64 {
     if (cpu as usize) >= nr {
         return slot_global_dsq();
     }
-    if (cpu as u64) >= 1024 {
+    if cpu >= 1024 {
         return slot_global_dsq();
     }
     vtime_dsq(cpu as u32)
@@ -266,7 +266,7 @@ pub fn steal_first_donor(start: u32, nr: usize, depths: &[u64]) -> Option<u64> {
         if (peer as usize) >= nr {
             continue;
         }
-        if (peer as u64) >= 1024 {
+        if peer >= 1024 {
             continue;
         }
         let q = depths.get(peer as usize).copied().unwrap_or(0);

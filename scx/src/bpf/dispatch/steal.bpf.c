@@ -117,6 +117,8 @@ static __noinline u64 flow_steal_pick_remote(s32 cpu, u32 start,
 
 /* One peer steal over bound 8 peers with SMT first. */
 /* Takes CPU plus budget plus base scalars with no struct pass. */
+/* The cursor advances only on a donor hit with no ABI change, */
+/* so misses skip the store with no correctness use. */
 static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
 	u32 base)
 {
@@ -132,7 +134,7 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
 		return 0;
 	if (base >= budget)
 		return 0;
-	start = (__sync_fetch_and_add(&st->cursor, 0) + 1U) %
+	start = (READ_ONCE(st->cursor) + 1U) %
 	    (u32)nr_cpu_ids;
 	steal_dsq = flow_steal_pick_smt(cpu);
 	if (!steal_dsq)
@@ -142,10 +144,10 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
 
 		steal_dsq = flow_steal_pick_remote(cpu, start, now);
 	}
-	__sync_lock_test_and_set(&st->cursor,
-	    (start + 8U) % (u32)nr_cpu_ids);
 	if (!steal_dsq)
 		return 0;
+	__sync_lock_test_and_set(&st->cursor,
+	    (start + 8U) % (u32)nr_cpu_ids);
 	lim = base + 1U;
 	if (lim > budget)
 		lim = budget;

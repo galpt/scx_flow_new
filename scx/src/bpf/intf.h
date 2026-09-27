@@ -38,6 +38,9 @@ typedef int pid_t;
 #ifndef __noinline
 #define __noinline __attribute__((noinline))
 #endif
+#ifndef READ_ONCE
+#define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
+#endif
 /* Fixed quantum of 1ms with no knob. Every insert uses this slice. */
 enum flow_consts {
 	FLOW_QUANTUM_NS = 1000000ULL,

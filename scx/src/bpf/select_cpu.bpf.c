@@ -52,11 +52,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	}
 	/* The waker CPU is free when it runs nothing and the mask allows. */
 	/* An idle core cannot stack so locality stays free with no cost. */
-	/* The pid read uses an atomic load to match the running stores. */
+	/* The pid read uses a relaxed load to match the running stores. */
 	if (flow_cpu_ok(p, this_cpu)) {
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
-		if (wst && __sync_fetch_and_add(&wst->running_pid,
-		    0) == 0)
+		if (wst && READ_ONCE(wst->running_pid) == 0)
 			return this_cpu;
 	}
 	/* One idle scan only with no depth pass. */
@@ -80,7 +79,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* Live is the attach snapshot with no online read, so a stale */
 	/* pick still lands with mask wins at enqueue. */
 	/* The scan pays at most eight probes with one per peer. */
+	/* An empty peer stops the scan with no further probe. */
 	/* The waker cursor steps by 8 with wrap, so passes spread. */
+	/* The cursor advances only on a hit with no ABI change, */
+	/* so misses skip the store with no correctness use. */
 	/* The cursor races best effort with no atomic order, so a lost */
 	/* update only shifts the next start with no correctness use. */
 	{
@@ -88,8 +90,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
 		struct flow_topo *wtp = flow_topo((u32)this_cpu);
 		u32 want = wtp ? wtp->llc : 0;
-		u32 cursor = wst ? __sync_fetch_and_add(
-		    &wst->cursor, 0) : 0;
+		u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
 		u32 salt = 0;
 		u32 start = 0;
 		u32 best = 0xffffffffU;
@@ -112,6 +113,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				if (ptp && wtp && ptp->llc != want)
 					continue;
 				/* One depth probe per peer, vtime only. */
+				/* An empty peer ends the scan at once. */
 				pv = scx_bpf_dsq_nr_queued(
 				    flow_vtime_dsq(peer));
 				if (pv < 0)
@@ -120,9 +122,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				if (pd < best_depth) {
 					best_depth = pd;
 					best = peer;
+					if (pd == 0)
+						break;
 				}
 			}
-			if (wst)
+			if (wst && best != 0xffffffffU)
 				__sync_lock_test_and_set(
 				    &wst->cursor,
 				    (start + 8U) % n);

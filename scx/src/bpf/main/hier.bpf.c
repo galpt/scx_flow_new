@@ -28,12 +28,12 @@ static __noinline void flow_hint_chain(u64 ids[8])
 	key = (u32)(idx % (u64)FLOW_PARK_HINT_NR);
 	bpf_map_update_elem(&park_hint, &key, &chain, BPF_ANY);
 }
-/* Atomic load of one hierarchy flags to match the flag stores. */
+/* Relaxed load of one hierarchy flags to match the flag stores. */
 /* Pairs with the set and clear stores with no torn read. */
 static __always_inline u32 flow_load_flags(
 	struct flow_cgrp_ctx *e)
 {
-	return __sync_fetch_and_add(&e->flags, 0);
+	return READ_ONCE(e->flags);
 }
 /* Set the throttle bit on one hierarchy entry with one try. */
 /* Uses one compare and swap, so concurrent sets never tear. A lost */
@@ -138,8 +138,7 @@ static __noinline u32 flow_hier_weight(
 			w = (u32)FLOW_CGRP_WEIGHT_DFL;
 		else
 			w = flow_weight_clamp(
-			    __sync_fetch_and_add(&e->weight,
-			    0));
+			    READ_ONCE(e->weight));
 		hier = hier * (u64)w / (u64)FLOW_WEIGHT_BASE;
 		if (hier > (u64)FLOW_WEIGHT_MAX)
 			hier = (u64)FLOW_WEIGHT_MAX;

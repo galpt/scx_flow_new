@@ -10,10 +10,14 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/` maps, placement, and dispatch
 - `scx/src/main.rs` frontend and run loop
-- `scx/src/snapshot.rs` metrics and dashboard snapshots
-- `scx/src/stats.rs` counters and web payload
-- `scx/src/rapl.rs` package energy reads
-- `scx/src/webui.rs` loopback dashboard server
+- `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
+- `scx/src/rust/config.rs` constant validation
+- `scx/src/rust/flow*.rs` scheduling mirrors and facade
+- `scx/src/rust/snapshot.rs` metrics and dashboard snapshots
+- `scx/src/rust/stats.rs` counters and web payload
+- `scx/src/rust/topology.rs` topology view
+- `scx/src/rust/rapl.rs` package energy reads
+- `scx/src/rust/webui.rs` loopback dashboard server
 - `scx/ui/index.html` dashboard page
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/edf_harness/` load probe with its own README

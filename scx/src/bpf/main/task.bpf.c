@@ -66,21 +66,21 @@ static __always_inline void flow_cgrp_put(
 	if (cgrp)
 		bpf_cgroup_release(cgrp);
 }
-/* Atomic load of the hierarchy generation to match the bumps. */
+/* Relaxed load of the hierarchy generation to match the bumps. */
 /* Pairs with the fetch and add stores with no torn read. */
 static __always_inline u64 flow_load_gen(void)
 {
-	return __sync_fetch_and_add(&flow_cgrp_gen, 0);
+	return READ_ONCE(flow_cgrp_gen);
 }
-/* Atomic load of the limited count to match the fixups. */
+/* Relaxed load of the limited count to match the fixups. */
 /* Pairs with the fetch and add stores with no torn read. */
 static __always_inline u64 flow_load_limited(void)
 {
-	return __sync_fetch_and_add(&flow_bw_limited, 0);
+	return READ_ONCE(flow_bw_limited);
 }
-/* Atomic load of the pending flag to match the enqueue store. */
+/* Relaxed load of the pending flag to match the enqueue store. */
 /* Pairs with the fetch and add stores with no torn read. */
 static __always_inline u64 flow_load_pending(void)
 {
-	return __sync_fetch_and_add(&flow_bw_pending, 0);
+	return READ_ONCE(flow_bw_pending);
 }

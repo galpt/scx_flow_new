@@ -52,7 +52,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	old = flow_cgrp(id);
 	if (old)
 		was_limited = !flow_bw_unlimited(
-		    __sync_fetch_and_add(&old->quota_us, 0));
+		    READ_ONCE(old->quota_us));
 	is_limited = !flow_bw_unlimited(quota);
 	if (bpf_map_update_elem(&cgrp_stor, &id, &e, BPF_ANY) < 0)
 		return -ENOMEM;
@@ -76,7 +76,7 @@ void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
 		return;
 	e = flow_cgrp(id);
 	if (e && !flow_bw_unlimited(
-	    __sync_fetch_and_add(&e->quota_us, 0)))
+	    READ_ONCE(e->quota_us)))
 		__sync_fetch_and_add(&flow_bw_limited, (u64)-1);
 	bpf_map_delete_elem(&cgrp_stor, &id);
 	__sync_fetch_and_add(&flow_cgrp_gen, 1);
@@ -187,7 +187,7 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 		u64 cur;
 		u64 want;
 		was_limited = !flow_bw_unlimited(
-		    __sync_fetch_and_add(&e->quota_us, 0));
+		    READ_ONCE(e->quota_us));
 		__sync_lock_test_and_set(&e->period_us, period);
 		__sync_lock_test_and_set(&e->quota_us, quota);
 		__sync_lock_test_and_set(&e->burst_us, burst_us);
@@ -195,8 +195,7 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 			__sync_lock_test_and_set(&e->pool_ns, 0);
 			flow_flag_clear(e);
 		} else {
-			cur = __sync_fetch_and_add(
-			    &e->pool_ns, 0);
+			cur = READ_ONCE(e->pool_ns);
 			want = cur;
 			if (cur > max)
 				want = max;
