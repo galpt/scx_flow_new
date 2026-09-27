@@ -3,10 +3,10 @@
  * Dispatch op.
  *
  * Each pass drains in fixed order. The own deadline queue moves
- * first with a cap at 12, then one peer steal moves a single task,
+ * first with the header cap, then one peer steal moves a single task,
  * then the kernel global plus the shared overflow tail with a
  * shared cap at 4, and last a gated starvation pass over overflow
- * when nothing moved. Empty trips pay one read with no scan.
+ * when nothing moved. Empty trips pay one queued read with no scan.
  * Steal never visits a peer deadline queue unless the local queue
  * drained empty, so a busy CPU keeps its own order. The SMT
  * sibling wins first, then the same cache domain, then a gated
@@ -92,6 +92,7 @@ static __noinline u32 flow_drain_starved(s32 cpu,
 }
 /* True when the head of one donor waited past the floor. */
 /* A missing head or a missing state fails closed with no move. */
+/* The peek stays inside RCU with the lookup, so the head stays valid. */
 static __noinline bool flow_head_starved(u64 dsq,
 	u64 now)
 {
@@ -99,10 +100,12 @@ static __noinline bool flow_head_starved(u64 dsq,
 	struct task_struct *trusted;
 	struct flow_task_ctx *tctx;
 	bool old = false;
-	head = __COMPAT_scx_bpf_dsq_peek(dsq);
-	if (!head)
-		return false;
 	bpf_rcu_read_lock();
+	head = __COMPAT_scx_bpf_dsq_peek(dsq);
+	if (!head) {
+		bpf_rcu_read_unlock();
+		return false;
+	}
 	trusted = bpf_task_from_pid(head->pid);
 	if (!trusted) {
 		bpf_rcu_read_unlock();
@@ -215,6 +218,7 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
+	/* Budget 32 bounds one pass with no stall. */
 	u32 budget = (u32)FLOW_SLOT_BUDGET;
 	u32 moved = 0;
 	u32 over_moved = 0;
@@ -231,7 +235,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		return;
 	own_vtime = flow_vtime_dsq((u32)cpu);
 	over = flow_overflow_dsq();
-	/* Own deadline queue first with a cap at 12 and mask wins. */
+	/* Own deadline queue first with the header cap and mask wins. */
 	/* Priority order reaches local in queue order with one probe. */
 	if (scx_bpf_dsq_nr_queued(own_vtime) != 0) {
 		lim = moved + flow_own_cap(budget);
@@ -270,7 +274,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Gated backstop over overflow when nothing moved yet. */
 	/* Young tasks miss past, so old tasks behind them still surface. */
 	if (moved == 0) {
-		lim = flow_tail_cap(budget);
+		lim = flow_gated_cap(budget);
 		if (lim > budget)
 			lim = budget;
 		got = flow_drain_starved(cpu, over, lim, 0,

@@ -4,7 +4,7 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Reexports the quantum, deadline, placement, and queue helpers.
-//! The kick rule lives in flow_preempt for tests.
+//! The kick rule lives in flow_preempt for tests. No logic lives here.
 
 pub use crate::flow_edf::*;
 pub use crate::flow_select::*;

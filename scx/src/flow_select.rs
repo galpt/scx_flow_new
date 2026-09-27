@@ -224,27 +224,9 @@ pub fn select_cpu_model(
 /// Target CPU for one enqueue with trust in select.
 /// Keeps the selected CPU when allowed, else the first allowed CPU.
 /// Returns none for overflow use when no CPU allows.
+/// Pinned tasks never reach here, they rest in overflow with no kick.
 #[cfg(test)]
 pub fn pick_target_cpu(selected: i32, allowed: &[bool]) -> Option<u32> {
-    if may_run_on(selected, allowed) {
-        return Some(selected as u32);
-    }
-    for (cpu, &ok) in allowed.iter().enumerate() {
-        if ok {
-            return Some(cpu as u32);
-        }
-    }
-    None
-}
-
-/// Pinned target for one enqueue.
-/// Keeps the task CPU when allowed, else the selected CPU, else the first.
-/// Returns none for overflow use when no CPU allows.
-#[cfg(test)]
-pub fn stay_target(here: i32, selected: i32, allowed: &[bool]) -> Option<u32> {
-    if may_run_on(here, allowed) {
-        return Some(here as u32);
-    }
     if may_run_on(selected, allowed) {
         return Some(selected as u32);
     }
@@ -263,17 +245,18 @@ pub fn exiting_target_ok(exiting: bool, tgt_allowed: bool) -> bool {
     exiting && tgt_allowed
 }
 
-/// Start peer for one dispatch from the cursor.
-/// Steps one with wrap, so repeated passes spread with no hot spot.
+/// Start peer for one dispatch from the cursor plus salt.
+/// Steps one past the cursor with the prandom salt and wraps, so
+/// repeated passes spread with no hot spot. Mirrors the BPF steal start.
 #[cfg(test)]
-pub fn steal_start(cursor: u32, nr_cpus: usize) -> u32 {
+pub fn steal_start(cursor: u32, salt: u32, nr_cpus: usize) -> u32 {
     if nr_cpus == 0 {
         return 0;
     }
     if nr_cpus == 1 {
         return 0;
     }
-    (cursor.wrapping_add(1)) % nr_cpus as u32
+    (cursor.wrapping_add(1).wrapping_add(salt)) % nr_cpus as u32
 }
 
 /// Peers visited by one steal scan from a start.
@@ -398,7 +381,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(pick_target_cpu(1, &allowed), Some(1));
-        assert_eq!(stay_target(2, 1, &allowed), Some(2));
+        assert_eq!(pick_target_cpu(9, &allowed), Some(0));
         assert!(exiting_target_ok(true, true));
         assert!(!exiting_target_ok(false, true));
         assert_eq!(pick_any_idle(&allowed, &idle), Some(1));
@@ -423,8 +406,10 @@ mod tests {
 
     #[test]
     fn steal_cursor_spreads_with_wrap() {
-        assert_eq!(steal_start(0, 4), 1);
-        assert_eq!(steal_start(3, 4), 0);
+        assert_eq!(steal_start(0, 0, 4), 1);
+        assert_eq!(steal_start(3, 0, 4), 0);
+        assert_eq!(steal_start(0, 2, 4), 3);
+        assert_eq!(steal_start(0, 4, 4), 1);
         assert_eq!(cursor_next(0, 4), 0);
         assert_eq!(cursor_next(1, 4), 1);
         let peers = steal_peers_from(3, 4);

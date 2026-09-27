@@ -26,23 +26,12 @@ static __always_inline bool flow_task_pinned(
 	return false;
 }
 /* Target CPU for one enqueue with trust in select. */
-/* Pinned tasks keep the task CPU when allowed, else select, else first. */
 /* Open tasks keep select when allowed, else the first allowed CPU. */
+/* Pinned tasks never reach here, they rest in overflow above. */
 static __always_inline s32 flow_pick_target(
-	struct task_struct *p, s32 sel, bool pinned)
+	struct task_struct *p, s32 sel)
 {
 	s32 first;
-	if (pinned) {
-		s32 here = scx_bpf_task_cpu(p);
-		if (flow_cpu_ok(p, here))
-			return here;
-		if (flow_cpu_ok(p, sel))
-			return sel;
-		first = (s32)bpf_cpumask_first(p->cpus_ptr);
-		if (flow_cpu_ok(p, first))
-			return first;
-		return -1;
-	}
 	if (sel >= 0 && flow_cpu_ok(p, sel))
 		return sel;
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
@@ -111,22 +100,30 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	policy = p->policy;
 	now = flow_now();
 	/* Tasks without state keep the kernel global queue with no kick. */
-	/* The next dispatch pass collects them with mask wins. */
+	/* Homeless tasks without a route count here too, the name stays */
+	/* for the wire with no split. Fail closed, the next kicking */
+	/* enqueue or dispatch wakes them with mask wins. */
 	if (!tctx) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		flow_global_insert(p);
 		return;
 	}
-	/* Pinned, foreign, and non batch tasks rest in overflow. */
+	/* Pinned plus non normal, batch, idle tasks rest in overflow. */
 	/* Only normal plus batch plus idle policies join the deadline */
 	/* queues, and realtime stays ordered with no deadline use. */
+	/* Overflow sends no kick. Fail closed, the next kicking enqueue */
+	/* or dispatch wakes them with mask wins. Pinned never kicks. */
 	if (pinned || (policy != (int)FLOW_POL_NORMAL &&
 	    policy != (int)FLOW_POL_BATCH &&
 	    policy != (int)FLOW_POL_IDLE)) {
 		flow_over_insert(p);
 		return;
 	}
-	cpu = flow_pick_target(p, sel, false);
+	cpu = flow_pick_target(p, sel);
+	/* No live CPU keeps the kernel global queue with no kick. */
+	/* Homeless tasks without a route count here too, the name stays */
+	/* for the wire with no split. Fail closed, the next kicking */
+	/* enqueue or dispatch wakes them with mask wins. */
 	if (!flow_cpu_ok(p, cpu)) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		flow_global_insert(p);
@@ -157,12 +154,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
 			return;
 		}
-		/* Pinned arrivals never preempt a busy CPU. */
-		if (pinned) {
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
-			return;
-		}
+		/* Pinned rests in overflow above with no kick, so this busy */
+		/* path sees open tasks only with no pinned check. */
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */
 		/* missing occupant fails closed with no kick. */

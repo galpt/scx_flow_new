@@ -50,6 +50,7 @@ pub struct Metrics {
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
+    /// Counts missing state plus homeless with no route. Name stays for the wire.
     #[stat(desc = "Inserts without task state")]
     #[serde(default)]
     pub enq_no_tctx: u64,

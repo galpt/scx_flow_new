@@ -102,8 +102,9 @@ static __always_inline bool flow_cpu_ok(
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
-/* Drop the on CPU gauge by one with no wrap to zero. */
-/* Retries the compare and swap so concurrent stops pair. */
+/* Drop the on CPU gauge by one with no wrap and no clear. */
+/* Retries the compare and swap so concurrent stops pair, and a lost */
+/* race leaves the gauge to the winner with no silent zero. */
 static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
@@ -118,9 +119,6 @@ static __always_inline void flow_on_cpu_dec(void)
 		    &flow_stats.on_cpu, cur, nxt);
 		if (old == cur)
 			break;
-		if (i == 3)
-			__sync_lock_test_and_set(
-			    &flow_stats.on_cpu, 0);
 	}
 }
 /* Clear the running pid with no other state change. */
@@ -207,7 +205,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	bpf_for(cpu, 0, 1024) {
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		struct flow_cpu_state *st;
 		struct flow_topo *tp;
 		u32 key;
@@ -231,8 +229,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	/* One deadline queue per CPU plus one overflow tail. */
 	/* Deadline holds 0x6800 plus id and overflow holds 0x7000. */
-	/* Max 1025 at 1024 CPUs with one bounded pass at init. */
-	bpf_for(cpu, 0, 1024) {
+	/* Count holds one per CPU plus one with one bounded pass at init. */
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 vtime;
 		if (cpu < 0)
 			continue;

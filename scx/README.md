@@ -69,4 +69,5 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 
 - Live means below the attach snapshot. Hotplug needs a restart.
 - Releases need a restart. State is `24B` plus `8B` plus `104B`.
+- Overflow and global inserts send no kick. Fail closed, next kicking enqueue or dispatch wakes.
 - Needs kernels, `7.2` series and up.

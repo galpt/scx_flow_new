@@ -62,7 +62,8 @@ enum flow_consts {
 /* Deadline holds the last assigned deadline for the next max. */
 /* Wait holds the last enqueue time for the starvation check. */
 /* Run holds the segment start while on CPU else zero, so nonzero */
-/* pairs the on CPU gauge with the stopping charge. */
+/* pairs the on CPU gauge with the stopping charge. Stamps stay */
+/* per task owned with no atomics, only counters use atomics. */
 struct flow_task_ctx {
 	u64 deadline;
 	u64 wait_at;
@@ -83,6 +84,8 @@ struct flow_topo {
 	u32 llc;
 };
 /* Scheduler counters with 13 live fields. */
+/* enq_no_tctx counts missing state plus homeless with no route, */
+/* the name stays for the wire with no split. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -110,6 +113,9 @@ _Static_assert(sizeof(struct flow_topo) == 8,
 /* Stats hold 13 counters in 104 bytes. */
 _Static_assert(sizeof(struct flow_sched_stats) == 104,
     "stats stay at 104B");
+/* One deadline queue per CPU plus one overflow tail. */
+_Static_assert(FLOW_MAX_DSQS == FLOW_MAX_CPUS + 1,
+    "dsq count stays nr plus one");
 /* True when the first time is before the second with wrap safety. */
 /* The signed diff keeps order across the u64 wrap with no branch. */
 static __always_inline bool flow_time_before(u64 a,
@@ -178,20 +184,28 @@ static __always_inline bool flow_starved(u64 wait_at,
 		return false;
 	return now - wait_at > (u64)FLOW_STARVE_NS;
 }
-/* Own deadline queue cap at 12 under budget 32. */
-/* Holds 12 with budget 32 so overflow and steal keep room. */
+/* Own deadline queue cap under budget 32. */
+/* Holds the header cap so overflow and steal keep room. */
 static __always_inline u32 flow_own_cap(u32 budget)
 {
-	if (budget > 12U)
-		return 12U;
+	if (budget > (u32)FLOW_OWN_VTIME_CAP)
+		return (u32)FLOW_OWN_VTIME_CAP;
 	return budget;
 }
-/* Shared tail cap at 4 under the dispatch budget. */
-/* Returns the min of budget and 4 with no head stall. */
+/* Shared tail cap under the dispatch budget. */
+/* Returns the min of budget and the header cap with no head stall. */
 static __always_inline u32 flow_tail_cap(u32 budget)
 {
 	if (budget > (u32)FLOW_OVER_CAP)
 		return (u32)FLOW_OVER_CAP;
+	return budget;
+}
+/* Gated starvation cap under the dispatch budget. */
+/* Returns the min of budget and the header cap with no head stall. */
+static __always_inline u32 flow_gated_cap(u32 budget)
+{
+	if (budget > (u32)FLOW_GATED_CAP)
+		return (u32)FLOW_GATED_CAP;
 	return budget;
 }
 #endif

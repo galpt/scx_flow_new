@@ -99,6 +99,13 @@ pub fn tail_cap(budget: u32) -> u32 {
     budget.min(SLOT_OVER_CAP)
 }
 
+/// Gated starvation cap at 4 under the dispatch budget.
+/// Returns the min of budget and 4 with no head stall.
+#[cfg(test)]
+pub fn gated_cap(budget: u32) -> u32 {
+    budget.min(SLOT_GATED_CAP)
+}
+
 /// Drain up to a cap from one queue for one CPU.
 /// The scan visits queued tasks in queue order and moves each live
 /// task with the CPU in the mask. Dead, foreign, and failed tasks count
@@ -234,6 +241,8 @@ mod tests {
         assert_eq!(slot_own_cap(5), 5);
         assert_eq!(tail_cap(32), 4);
         assert_eq!(tail_cap(1), 1);
+        assert_eq!(gated_cap(32), 4);
+        assert_eq!(gated_cap(1), 1);
         assert_eq!(SLOT_GATED_CAP, 4);
         assert_eq!(SLOT_MISS_CAP, 4);
         assert_eq!(SLOT_OVER_CAP, 4);
