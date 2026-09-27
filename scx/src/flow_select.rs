@@ -6,6 +6,8 @@
 //! Holds the placement and steal helpers shared by tests and docs.
 //! Placement order lives in select_cpu.bpf.c with the lane choice in
 //! enqueue.bpf.c, and this file mirrors the depth and scan predicates.
+//! The scan best never beats the previous CPU when deeper, so warmth
+//! never loses to load with the best versus previous compare below.
 //!
 //! Live means below the attach snapshot with no kernel online read.
 //! An offlined CPU needs a restart with no live rebalance, and its
@@ -83,10 +85,11 @@ pub fn pick_any_idle(allowed: &[bool], idle: &[bool]) -> Option<u32> {
     None
 }
 
-/// Full select model for tests.
+/// Shallow select model for tests.
 /// Mirrors the BPF idle fast path of waker idle, any idle, previous,
-/// then first. The depth gate plus the cache scan live in the helpers
-/// below, so this model holds the shallow previous case.
+/// then first with no depth gate and no cache scan. The full order needs
+/// prev deep plus shallowest peer plus best beats plus place pick below,
+/// so this model holds the shallow previous case only.
 /// Returns none for overflow use when no CPU allows.
 /// Approximate when the caller passes summed depth as queued.
 #[cfg(test)]
@@ -130,8 +133,12 @@ pub fn place_start(cursor: u32, salt: u32, nr_cpus: usize) -> u32 {
 /// Shallowest live allowed peer in the same cache domain.
 /// Visits bound peers from a start with wrap and keeps the peer with
 /// the least combined depth. Skips the waker, offline peers, foreign
-/// masks, and foreign domains. A missing depth never wins, and ties
-/// keep the first peer. Returns none when no peer qualifies.
+/// masks, and foreign domains. A missing depth never wins, a missing
+/// domain view fails open to the same domain, and ties keep the first
+/// peer. Live is the attach snapshot with no online read. Returns none
+/// when no peer qualifies or when the CPU count is out of bound. The
+/// caller keeps the previous CPU when this best is not shallower, so
+/// warmth never loses to load. See best beats and place pick below.
 #[cfg(test)]
 pub fn shallowest_llc_peer(
     start: u32,
@@ -142,7 +149,7 @@ pub fn shallowest_llc_peer(
     allowed: &[bool],
     self_cpu: u32,
 ) -> Option<u32> {
-    if nr_cpus <= 1 {
+    if nr_cpus <= 1 || nr_cpus > MAX_CPUS as usize {
         return None;
     }
     let mut best: Option<u32> = None;
@@ -174,6 +181,40 @@ pub fn shallowest_llc_peer(
         }
     }
     best
+}
+
+/// True when one scan best beats the previous CPU.
+/// Needs a best depth strictly shallower than the previous depth, so a
+/// deeper peer never steals cache warmth. Equal keeps the previous CPU.
+#[cfg(test)]
+pub fn best_beats_prev(prev_depth: u64, best_depth: u64) -> bool {
+    best_depth < prev_depth
+}
+
+/// Pick between the previous CPU and the scan best with no worse guard.
+/// Keeps the previous CPU when allowed and the scan best is missing or not
+/// shallower, else takes the scan best. Returns none when neither allows.
+/// Models the BPF fallback with the best versus previous compare.
+#[cfg(test)]
+pub fn place_pick(
+    prev_ok: bool,
+    prev: i32,
+    prev_depth: u64,
+    best: Option<u32>,
+    best_depth: u64,
+) -> Option<u32> {
+    if let Some(b) = best {
+        if !prev_ok || best_depth < prev_depth {
+            return Some(b);
+        }
+        if prev_ok {
+            return Some(prev as u32);
+        }
+    }
+    if prev_ok {
+        return Some(prev as u32);
+    }
+    None
 }
 
 /// Target CPU for one enqueue with trust in select.
@@ -468,5 +509,30 @@ mod tests {
             shallowest_llc_peer(0, 1, Some(0), &llcs, &depths, &allowed, 0),
             None
         );
+        assert_eq!(
+            shallowest_llc_peer(0, 2048, Some(0), &llcs, &depths, &allowed, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn deeper_peer_never_beats_previous() {
+        assert!(!best_beats_prev(20, 50));
+        assert!(!best_beats_prev(20, 60));
+        assert!(!best_beats_prev(20, 20));
+        assert!(best_beats_prev(20, 5));
+        assert!(best_beats_prev(50, 20));
+        assert!(!best_beats_prev(0, 0));
+        assert!(best_beats_prev(1, 0));
+    }
+
+    #[test]
+    fn place_pick_keeps_previous_when_not_shallower() {
+        assert_eq!(place_pick(true, 0, 20, Some(1), 50), Some(0));
+        assert_eq!(place_pick(true, 0, 20, Some(1), 20), Some(0));
+        assert_eq!(place_pick(true, 0, 20, Some(1), 5), Some(1));
+        assert_eq!(place_pick(true, 0, 20, None, u64::MAX), Some(0));
+        assert_eq!(place_pick(false, 0, u64::MAX, Some(1), 50), Some(1));
+        assert_eq!(place_pick(false, 0, u64::MAX, None, u64::MAX), None);
     }
 }

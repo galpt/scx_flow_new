@@ -6,8 +6,11 @@
  * probation tick and a PI correlate. REENQ marks slice exhaust with no
  * tick. LAST keeps the local target with no redirect. PREEMPT marks
  * urgency and joins the fast lane only when duty and probation allow.
- * HEAD and IMMED mark kernel urgency and take the fast head when the
- * lane allows, else the earliest deadline. Stopping with runnable set
+ * HEAD and IMMED mark kernel urgency and take the fast head for normal
+ * tasks with low duty with probation bypass alone, else the earliest
+ * deadline. A full fast queue still spills to deadline with no wait.
+ * Probation needs two voluntary low duty wakes, so a first runnable
+ * stop keeps the task steady until sleep. Stopping with runnable set
  * means preempted or exhausted, and without it means voluntary sleep.
  * Only SCHED_OTHER tasks may use the fast lane. Pinned tasks and foreign
  * policies rest in overflow. See intf.h for the shared helpers and
@@ -191,8 +194,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	wakeup = (enq_flags & SCX_ENQ_WAKEUP) != 0;
 	urgent = (enq_flags & ((u64)SCX_ENQ_HEAD |
 	    (u64)SCX_ENQ_IMMED)) != 0;
-	/* Probation spends one wake per low duty sleep wake cycle. */
-	/* Two cycles under 15 percent graduate the task to the lane. */
+	/* Probation spends one wake per voluntary low duty sleep cycle. */
+	/* Two voluntary cycles under 15 percent graduate the task. */
+	/* A runnable stop clears the sleep flag with no spend. */
 	if (flow_prob_count(tctx->prob) != 0 && wakeup &&
 	    flow_prob_vol(tctx->prob) &&
 	    duty < (u8)FLOW_DUTY_FAST) {
@@ -235,10 +239,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		goto kicked;
 	}
 	/* Fast lane needs a normal task past probation with low duty. */
-	/* A voluntary wake also opens it, and kernel urgency takes head. */
+	/* A wakeup with the sleep flag also opens it with no extra probe. */
 	/* Idle and batch policies never enter, whatever the duty reads. */
 	/* A preempt flagged arrival under half duty also opens it. */
-	/* Kernel urgency with low duty bypasses probation alone. */
+	/* Kernel urgency with low duty bypasses probation alone for normal */
+	/* tasks only with fast room else deadline. */
 	/* The check runs before any sizing, so a closed lane pays no */
 	/* probe and no divide on the wakeup path. */
 	bool prob_ok = flow_prob_count(tctx->prob) == 0;
@@ -289,8 +294,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 min_v = mst ? mst->min_vruntime : 0;
 		u64 queued = 1ULL;
 		u64 deadline;
-		/* An idle empty CPU refreshes the minimum forward only. */
-		/* The shared helper keeps enqueue and stopping in step. */
+		/* An idle empty CPU keeps the mark when the newcomer trails. */
+		/* Only a heavy arrival past the mark moves it forward, so an */
+		/* empty CPU keeps order with no decay and no backward step. */
+		/* Stopping advances through the inner max with no guard while */
+		/* enqueue guards idle plus empty with the same max. */
 		if (mst) {
 			s32 qf = scx_bpf_dsq_nr_queued(
 			    flow_fast_dsq((u32)cpu));
@@ -401,18 +409,31 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		/* Interactive over batch shortens to the 100us floor. */
-		/* No window gates this pair, so sleepers preempt prompt. */
-		/* A storm here would take a 500us gate in testing. */
-		/* The slice write uses the held trusted reference. */
+		/* Interactive over batch shortens to the 100us floor with a */
+		/* 500us prompt window on a separate stamp, so sleepers stay */
+		/* prompt with no storm and batch pairs keep their own window. */
+		/* A hot prompt window still shortens to the floor with no kick */
+		/* and no shared stamp. The slice write uses the held trusted */
+		/* reference with no second lookup and no second RCU pass. */
 		/* No timer kick runs here, so the floor is an */
 		/* approximation with kick timing, not a precise preempt. */
+		/* The busy path pays one lookup plus one RCU pass with no */
+		/* early window skip, since class decides the gate. */
 		if (cls == (u32)FLOW_CLS_INTERACTIVE) {
+			u64 plast = flow_prompt_at[(u32)cpu & 1023U];
 			scx_bpf_task_set_slice(trusted,
 			    (u64)FLOW_PREEMPT_FLOOR_NS);
+			if (plast != 0 && now - plast <
+			    (u64)FLOW_MICRO_QUANTUM_NS) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
+				__sync_fetch_and_add(
+				    &flow_stats.preempt_skipped, 1);
+				return;
+			}
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			flow_rate_at[(u32)cpu & 1023U] = now;
+			flow_prompt_at[(u32)cpu & 1023U] = now;
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_kicks, 1);
@@ -436,7 +457,8 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		/* One prompt kick per 2ms window per CPU for batch pairs. */
+		/* One prompt kick per 2ms window per CPU for batch pairs on */
+		/* the shared stamp with no prompt pollute. */
 		/* A hot window still shortens to the floor with no kick. */
 		/* Entry time serves the window with no fresh read. */
 		last = flow_rate_at[(u32)cpu & 1023U];

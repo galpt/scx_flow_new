@@ -73,8 +73,11 @@ pub fn min_guarded(old: u64, waking_v: u64) -> u64 {
 }
 
 /// Guarded idle minimum refresh with wrap safety.
-/// Moves forward only when the CPU is idle and empty, so enqueue and
-/// stopping share one funnel with the high water mark.
+/// Keeps the old mark when idle plus empty miss or when the newcomer trails,
+/// so an empty CPU keeps order with no decay and no backward step. Advances
+/// only for a heavy arrival past the mark, so migration cannot drag it back.
+/// Stopping advances through the inner max with no guard while enqueue guards
+/// idle plus empty with the same max.
 #[cfg(test)]
 pub fn min_idle_refresh(old: u64, cand: u64, idle_empty: bool) -> u64 {
     if !idle_empty {
@@ -131,5 +134,15 @@ mod tests {
         assert_eq!(min_idle_refresh(7, 9, false), 7);
         assert_eq!(min_idle_refresh(7, 0, true), 7);
         assert_eq!(min_idle_refresh(u64::MAX, 1, true), 1);
+        assert_eq!(min_idle_refresh(100, 10, true), 100);
+        assert_eq!(min_idle_refresh(10, 100, true), 100);
+        assert_eq!(min_idle_refresh(10, 100, false), 10);
+    }
+
+    #[test]
+    fn idle_refresh_keeps_order_on_empty() {
+        assert_eq!(min_idle_refresh(50, 5, true), 50);
+        assert_eq!(min_idle_refresh(50, 60, true), 60);
+        assert_eq!(min_idle_refresh(60, 50, true), 60);
     }
 }

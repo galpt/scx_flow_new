@@ -4,7 +4,8 @@
  *
  * Placement keeps the waker CPU when idle and allowed, then any idle
  * CPU, then the previous CPU when shallow, else the shallowest same
- * cache peer over bound 8, then the first allowed CPU. Pinned tasks
+ * cache peer over bound 8 when shallower than previous, then the
+ * previous CPU, then the first allowed CPU. Pinned tasks
  * stay where the mask allows with no scan, and the task mask always
  * wins. An empty mask falls through to the global queue at enqueue.
  * Topology stays display only except the cache domain used here.
@@ -18,6 +19,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 this_cpu;
 	s32 picked;
 	s32 first;
+	bool prev_ok;
+	u64 prev_depth;
 	(void)wake_flags;
 	this_cpu = (s32)bpf_get_smp_processor_id();
 	/* Pinned tasks stay where the mask allows with no scan. */
@@ -58,7 +61,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		return picked;
 	/* The previous CPU keeps cache warmth when shallow and allowed. */
 	/* Fast plus deadline past 4 plus 12 scans the cache domain. */
-	if (flow_cpu_ok(p, prev_cpu)) {
+	/* The shallow path pays two probes with no scan. */
+	prev_ok = flow_cpu_ok(p, prev_cpu);
+	prev_depth = 0xffffffffffffffffULL;
+	if (prev_ok) {
 		s32 qf = scx_bpf_dsq_nr_queued(
 		    flow_fast_dsq((u32)prev_cpu));
 		s32 qv = scx_bpf_dsq_nr_queued(
@@ -68,12 +74,18 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			depth += (u64)qf;
 		if (qv > 0)
 			depth += (u64)qv;
+		prev_depth = depth;
 		if (depth < (u64)FLOW_FAST_D +
 		    (u64)FLOW_OWN_VTIME_CAP)
 			return prev_cpu;
 	}
 	/* A deep previous CPU scans the same cache domain bound 8. */
-	/* The shallowest live allowed peer wins with salt spread. */
+	/* The shallowest live allowed peer wins with salt spread, but never */
+	/* deeper than the previous CPU, so warmth never loses to load. */
+	/* A missing domain view fails open to the same domain with no skip. */
+	/* Live is the attach snapshot with no online read, so a stale pick */
+	/* still lands with mask wins at enqueue with live checks at drain. */
+	/* The deep path pays at most eighteen probes with two per peer. */
 	/* The waker cursor steps by 8 with wrap, so passes spread. */
 	{
 		u64 nr = nr_cpu_ids;
@@ -118,12 +130,14 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			}
 			if (wst)
 				wst->cursor = (start + 8U) % n;
-			if (best != 0xffffffffU)
-				return (s32)best;
+			if (best != 0xffffffffU) {
+				if (!prev_ok || best_depth < prev_depth)
+					return (s32)best;
+			}
 		}
 	}
-	/* A shallow scan miss keeps the previous CPU when allowed. */
-	if (flow_cpu_ok(p, prev_cpu))
+	/* A scan miss or a deeper peer keeps the previous CPU when allowed. */
+	if (prev_ok)
 		return prev_cpu;
 	/* The first allowed CPU is the fail closed fallback. */
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);

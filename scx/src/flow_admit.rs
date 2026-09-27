@@ -67,16 +67,18 @@ pub fn prob_make(count: u8, vol: bool) -> u8 {
 }
 
 /// True when one arrival may use the fast lane.
-/// Needs a normal policy with low duty, a voluntary wake, or a
-/// preempt flagged arrival under half duty past probation. Kernel
-/// urgency with low duty bypasses probation alone. Mirrors the BPF
-/// lane check with no probe and no divide.
+/// Needs a normal policy with low duty, a wakeup with the sleep flag, or a
+/// preempt flagged arrival under half duty past probation. Kernel urgency
+/// with low duty bypasses probation alone for normal tasks only with fast
+/// room else deadline. Mirrors the BPF lane check with no probe and no
+/// divide. Wakeup is the enqueue flag and sleep is the probation flag, so
+/// both must hold for the voluntary path with no combined shortcut.
 #[cfg(test)]
 pub fn fast_eligible(
     policy_normal: bool,
     prob: u8,
     duty: u8,
-    wakeup_vol: bool,
+    wakeup: bool,
     preempt: bool,
     urgent: bool,
 ) -> bool {
@@ -89,7 +91,7 @@ pub fn fast_eligible(
     if prob_count(prob) != 0 {
         return false;
     }
-    duty < DUTY_FAST || wakeup_vol || (preempt && duty < DUTY_BATCH)
+    duty < DUTY_FAST || (wakeup && prob_vol(prob)) || (preempt && duty < DUTY_BATCH)
 }
 
 /// Next probation byte after one sleep wake arrival.
@@ -145,8 +147,31 @@ mod tests {
     fn high_duty_blocks_without_voluntary_wake() {
         let done = prob_make(0, false);
         assert!(!fast_eligible(true, done, 200, false, false, false));
-        assert!(fast_eligible(true, done, 200, true, false, false));
-        assert!(!fast_eligible(false, done, 0, true, false, false));
+        assert!(!fast_eligible(true, done, 200, true, false, false));
+        let sleepy = prob_make(0, true);
+        assert!(fast_eligible(true, sleepy, 200, true, false, false));
+        assert!(!fast_eligible(true, sleepy, 200, false, false, false));
+        assert!(!fast_eligible(false, sleepy, 0, true, false, false));
+    }
+
+    #[test]
+    fn voluntary_needs_wakeup_and_sleep_flag() {
+        let sleepy = prob_make(0, true);
+        let awake = prob_make(0, false);
+        assert!(fast_eligible(true, sleepy, 200, true, false, false));
+        assert!(!fast_eligible(true, awake, 200, true, false, false));
+        assert!(!fast_eligible(true, sleepy, 200, false, false, false));
+        assert!(!fast_eligible(true, awake, 200, false, false, false));
+        assert!(fast_eligible(true, awake, 0, false, false, false));
+        assert!(fast_eligible(
+            true,
+            awake,
+            DUTY_FAST - 1,
+            false,
+            false,
+            false
+        ));
+        assert!(!fast_eligible(true, awake, DUTY_FAST, false, false, false));
     }
 
     #[test]

@@ -48,6 +48,9 @@ volatile struct flow_sched_stats flow_stats;
 /* Last busy kick time per CPU in nanos at 2ms. */
 /* Zero init so the first kick always runs with wrap. */
 volatile u64 flow_rate_at[1024];
+/* Last prompt kick time per CPU in nanos at 500us. */
+/* Zero init so the first prompt kick always runs with wrap. */
+volatile u64 flow_prompt_at[1024];
 /* Monotonic clock in nanos for run segments and rate windows. */
 static __always_inline u64 flow_now(void)
 {

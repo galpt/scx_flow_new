@@ -93,8 +93,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	/* Minimum keeps the high water mark with no queue read. */
-	/* Stopping owns the unguarded advance while enqueue guards idle */
-	/* plus empty, and both funnel through the shared min helper. */
+	/* Stopping advances through the inner max with no guard while */
+	/* enqueue guards idle plus empty through the shared helper with */
+	/* the same max, so migration cannot drag the mark back. */
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		struct flow_cpu_state *fst = flow_cpu((u32)cpu);
 		if (fst) {

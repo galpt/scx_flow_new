@@ -174,8 +174,11 @@ static __always_inline u64 flow_min_max(u64 old,
 	return old;
 }
 /* Guarded idle minimum refresh with wrap safety. */
-/* Moves forward only when the CPU is idle and empty, so enqueue and */
-/* stopping share one funnel with the high water mark below. */
+/* Keeps the old mark when idle plus empty miss or when the newcomer */
+/* trails, so an empty CPU keeps order with no decay and no backward */
+/* step. Only a heavy arrival past the mark moves it forward. */
+/* Stopping advances through the inner max with no guard while enqueue */
+/* guards idle plus empty through this helper with the same max. */
 static __always_inline u64 flow_min_idle_refresh(u64 old,
 	u64 cand, bool idle_empty)
 {
