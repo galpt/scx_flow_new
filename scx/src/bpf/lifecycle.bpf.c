@@ -19,12 +19,16 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_cpu_state *st;
 	s32 cpu;
 	u64 now;
+	u64 stamp;
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
 	if (tctx) {
 		/* Zero never marks a run, so a zero clock folds to one. */
-		tctx->run_at = now ? now : 1;
+		/* The store uses an exchange to pair with the stopping and */
+		/* leftover claims with no torn stamp. */
+		stamp = now ? now : 1;
+		__sync_lock_test_and_set(&tctx->run_at, stamp);
 	}
 	if (cpu < 0)
 		goto inc;
@@ -32,7 +36,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		goto inc;
 	st = flow_cpu((u32)cpu);
 	if (st)
-		st->running_pid = (u32)p->pid;
+		__sync_lock_test_and_set(&st->running_pid,
+		    (u32)p->pid);
 inc:
 	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
 }
@@ -49,6 +54,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	s32 cpu;
 	u64 now;
 	u64 delta;
+	u64 start;
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
@@ -58,16 +64,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		flow_on_cpu_dec();
 		return;
 	}
-	/* A zero start means a leftover already charged this run. */
+	/* The start claims with an exchange, so stopping versus disable */
+	/* or exit charges once. A zero claim means a leftover already */
+	/* charged this run. */
 	/* The owner clear still runs, so a migrated stop stays clean. */
-	if (tctx->run_at == 0) {
+	start = __sync_lock_test_and_set(&tctx->run_at, 0);
+	if (start == 0) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		return;
 	}
-	if (flow_time_before(now, tctx->run_at))
+	if (flow_time_before(now, start))
 		delta = 0;
 	else
-		delta = now - tctx->run_at;
+		delta = now - start;
 	/* Every segment counts raw time with no weight scaling. */
 	/* Order already carries weight through the deadline step. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
@@ -82,9 +91,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			flow_cgrp_put(cgrp);
 		}
 	}
-	/* Zero pairs the gauge, so disable plus exit stay once. */
+	/* The exchange above already zeroed the start, so disable plus */
+	/* exit stay once. */
 	/* Owner only clears, so a migrated stop never clears a new owner. */
-	tctx->run_at = 0;
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	if (runnable) {

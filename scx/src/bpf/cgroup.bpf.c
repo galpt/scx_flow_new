@@ -51,7 +51,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	e.updated_at = now;
 	old = flow_cgrp(id);
 	if (old)
-		was_limited = !flow_bw_unlimited(old->quota_us);
+		was_limited = !flow_bw_unlimited(
+		    __sync_fetch_and_add(&old->quota_us, 0));
 	is_limited = !flow_bw_unlimited(quota);
 	if (bpf_map_update_elem(&cgrp_stor, &id, &e, BPF_ANY) < 0)
 		return -ENOMEM;
@@ -74,7 +75,8 @@ void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
 	if (!id)
 		return;
 	e = flow_cgrp(id);
-	if (e && !flow_bw_unlimited(e->quota_us))
+	if (e && !flow_bw_unlimited(
+	    __sync_fetch_and_add(&e->quota_us, 0)))
 		__sync_fetch_and_add(&flow_bw_limited, (u64)-1);
 	bpf_map_delete_elem(&cgrp_stor, &id);
 	__sync_fetch_and_add(&flow_cgrp_gen, 1);
@@ -121,7 +123,8 @@ void BPF_STRUCT_OPS(flow_cgroup_cancel_move, struct task_struct *p,
 }
 /* Update one hierarchy share with generation bump. */
 /* Creates the row on miss with unlimited pool, so later */
-/* walks see the new share at once. */
+/* walks see the new share at once. The share store uses an */
+/* exchange to pair with the hierarchy walks with no torn share. */
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	u32 weight)
 {
@@ -137,7 +140,7 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	w = flow_weight_clamp(weight);
 	e = flow_cgrp(id);
 	if (e) {
-		e->weight = w;
+		__sync_lock_test_and_set(&e->weight, w);
 		__sync_fetch_and_add(&flow_cgrp_gen, 1);
 		return;
 	}
@@ -153,7 +156,10 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 }
 /* Update one hierarchy pool with floor plus burst cap. */
 /* Unlimited maps to zero with no cap use. Limited pools cap */
-/* at quota plus burst, and the generation bumps once. */
+/* at quota plus burst, and the generation bumps once. Pool and */
+/* stamp updates use atomics, so refill versus consume never tears. */
+/* A drained pool refills to full here, so a new limit admits work */
+/* at once with the timer waking the rest. */
 void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 	u64 period_us, u64 quota_us, u64 burst_us)
 {
@@ -165,6 +171,7 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 	struct flow_cgrp_ctx n = {};
 	bool was_limited = false;
 	bool is_limited;
+	u64 now;
 	if (!cgrp)
 		return;
 	id = flow_cgrp_id(cgrp);
@@ -174,21 +181,32 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 	quota = flow_bw_quota_norm(quota_us);
 	max = flow_bw_max_ns(quota, burst_us);
 	is_limited = !flow_bw_unlimited(quota);
+	now = flow_now();
 	e = flow_cgrp(id);
 	if (e) {
-		was_limited = !flow_bw_unlimited(e->quota_us);
-		e->period_us = period;
-		e->quota_us = quota;
-		e->burst_us = burst_us;
+		u64 cur;
+		u64 want;
+		was_limited = !flow_bw_unlimited(
+		    __sync_fetch_and_add(&e->quota_us, 0));
+		__sync_lock_test_and_set(&e->period_us, period);
+		__sync_lock_test_and_set(&e->quota_us, quota);
+		__sync_lock_test_and_set(&e->burst_us, burst_us);
 		if (flow_bw_unlimited(quota)) {
-			e->pool_ns = 0;
+			__sync_lock_test_and_set(&e->pool_ns, 0);
+			flow_flag_clear(e);
 		} else {
-			if (e->pool_ns > max)
-				e->pool_ns = max;
-			if (e->pool_ns == 0 && max)
-				e->pool_ns = max;
+			cur = __sync_fetch_and_add(
+			    &e->pool_ns, 0);
+			want = cur;
+			if (cur > max)
+				want = max;
+			else if (cur == 0 && max)
+				want = max;
+			if (want != cur)
+				__sync_val_compare_and_swap(
+				    &e->pool_ns, cur, want);
 		}
-		e->updated_at = flow_now();
+		__sync_lock_test_and_set(&e->updated_at, now);
 		if (is_limited && !was_limited)
 			__sync_fetch_and_add(&flow_bw_limited, 1);
 		if (!is_limited && was_limited)

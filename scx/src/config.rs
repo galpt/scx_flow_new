@@ -59,11 +59,13 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The quantum stays fixed at 1ms with base weight 100 in range
     /// 1 to 10000. The batch stays fixed at 32 and the budget at 32.
-    /// The own trip stays at 12 with shared tails at 4 and a miss cap
-    /// at 4. Steal scans bound 8 peers with donors past 2 and a 2ms
-    /// starvation floor. Queues hold one deadline queue per CPU plus
-    /// one overflow tail with ids below local on. Hierarchies hold
-    /// 2048 rows with depth 8 and base share 100 plus a 1ms pool floor.
+    /// The own trip stays at 12 with the shared tail at 4 and a miss
+    /// cap at 4. The gated cap runs bounded but larger at 6, so old
+    /// tasks behind young heads still surface. Steal scans bound
+    /// 8 peers with donors past 2 and a 2ms starvation floor. Queues
+    /// hold one deadline queue per CPU plus one overflow tail with ids
+    /// below local on. Hierarchies hold 2048 rows with depth 8 and base
+    /// share 100 plus a 1ms pool floor.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -89,7 +91,7 @@ impl Config {
         if self.slot_budget != 32 {
             bail!("slot budget bad {}", self.slot_budget);
         }
-        if SLOT_OWN_CAP != 12 || SLOT_OVER_CAP != 4 || SLOT_GATED_CAP != 4 {
+        if SLOT_OWN_CAP != 12 || SLOT_OVER_CAP != 4 || SLOT_GATED_CAP != 6 {
             bail!("drain caps bad");
         }
         if SLOT_MISS_CAP != 4 {
@@ -194,7 +196,7 @@ mod tests {
     fn slot_consts_are_fixed() {
         assert_eq!(crate::flow_slot::SLOT_OWN_CAP, 12);
         assert_eq!(crate::flow_slot::SLOT_OVER_CAP, 4);
-        assert_eq!(crate::flow_slot::SLOT_GATED_CAP, 4);
+        assert_eq!(crate::flow_slot::SLOT_GATED_CAP, 6);
         assert_eq!(crate::flow_slot::SLOT_MISS_CAP, 4);
         assert_eq!(Config::default().slot_budget, crate::flow_slot::SLOT_BUDGET);
     }

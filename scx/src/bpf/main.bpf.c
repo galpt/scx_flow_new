@@ -56,11 +56,24 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_bw_timer);
 } bw_timer SEC(".maps");
+/* Ring of lately parked chains for the timer refill scan. */
+/* Each slot holds 8 ancestor ids with the leaf first and zero pad. */
+/* Parks record the walked chain with a wrapping counter, and the */
+/* timer refills each listed pool with cap. Stale or reused ids refill */
+/* harmlessly, so no cleanup runs. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_PARK_HINT_NR);
+	__type(key, u32);
+	__type(value, struct flow_park_chain);
+} park_hint SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile struct flow_sched_stats flow_stats;
 volatile u64 flow_cgrp_gen = 1;
 volatile u64 flow_bw_limited = 0;
 volatile u64 flow_bw_pending = 0;
+/* Wrapping counter for the parked hint ring. */
+volatile u64 flow_hint_idx = 0;
 /* Monotonic clock in nanos for deadlines and starvation. */
 static __always_inline u64 flow_now(void)
 {
@@ -136,6 +149,57 @@ static __always_inline u64 flow_load_limited(void)
 static __always_inline u64 flow_load_pending(void)
 {
 	return __sync_fetch_and_add(&flow_bw_pending, 0);
+}
+/* Record one parked chain of 8 ancestor ids with the leaf first. */
+/* Uses a wrapping counter with one map update, so concurrent parks */
+/* never tear and an overwrite only drops an older chain with the */
+/* enqueue refill covering active groups. */
+static __always_inline void flow_hint_chain(u64 ids[8])
+{
+	u64 idx;
+	u32 key;
+	struct flow_park_chain chain;
+	int i;
+	bpf_for(i, 0, 8) {
+		if ((u64)i >= (u64)FLOW_CGRP_DEPTH_MAX)
+			break;
+		chain.ids[i] = ids[i];
+	}
+	idx = __sync_fetch_and_add(&flow_hint_idx, 1);
+	key = (u32)(idx % (u64)FLOW_PARK_HINT_NR);
+	bpf_map_update_elem(&park_hint, &key, &chain, BPF_ANY);
+}
+/* Atomic load of one hierarchy flags to match the flag stores. */
+/* Pairs with the set and clear stores with no torn read. */
+static __always_inline u32 flow_load_flags(
+	struct flow_cgrp_ctx *e)
+{
+	return __sync_fetch_and_add(&e->flags, 0);
+}
+/* Set the throttle bit on one hierarchy entry with one try. */
+/* Uses one compare and swap, so concurrent sets never tear. A lost */
+/* try leaves the bit to the winner with no stall. */
+static __always_inline void flow_flag_set(
+	struct flow_cgrp_ctx *e)
+{
+	u32 cur = flow_load_flags(e);
+	u32 want;
+	if (cur & (u32)FLOW_CGRP_THROTTLED)
+		return;
+	want = cur | (u32)FLOW_CGRP_THROTTLED;
+	__sync_val_compare_and_swap(&e->flags, cur, want);
+}
+/* Clear the throttle bit on one hierarchy entry with one try. */
+/* Uses one compare and swap, so concurrent clears never tear. */
+static __always_inline void flow_flag_clear(
+	struct flow_cgrp_ctx *e)
+{
+	u32 cur = flow_load_flags(e);
+	u32 want;
+	if (!(cur & (u32)FLOW_CGRP_THROTTLED))
+		return;
+	want = cur & ~(u32)FLOW_CGRP_THROTTLED;
+	__sync_val_compare_and_swap(&e->flags, cur, want);
 }
 /* Id of one hierarchy with root at one on missing. */
 /* Runs on an acquired or ops trusted pointer with a held view, */
@@ -213,7 +277,9 @@ static __always_inline u32 flow_hier_weight(
 		if (!e)
 			w = (u32)FLOW_CGRP_WEIGHT_DFL;
 		else
-			w = flow_weight_clamp(e->weight);
+			w = flow_weight_clamp(
+			    __sync_fetch_and_add(&e->weight,
+			    0));
 		hier = hier * (u64)w / (u64)FLOW_WEIGHT_BASE;
 		if (hier > (u64)FLOW_WEIGHT_MAX)
 			hier = (u64)FLOW_WEIGHT_MAX;
@@ -224,62 +290,100 @@ static __always_inline u32 flow_hier_weight(
 	}
 	return (u32)hier;
 }
+/* Atomic load of one pool rest to match the compare and swap stores. */
+/* Pairs with the refill and consume loops with no torn read. */
+static __always_inline u64 flow_load_pool(
+	struct flow_cgrp_ctx *e)
+{
+	return __sync_fetch_and_add(&e->pool_ns, 0);
+}
+/* Atomic load of one refill stamp to match the compare and swap stores. */
+/* Pairs with the refill claim with no torn read. */
+static __always_inline u64 flow_load_updated(
+	struct flow_cgrp_ctx *e)
+{
+	return __sync_fetch_and_add(&e->updated_at, 0);
+}
 /* Lazy refill of one pool with burst cap and floor use. */
 /* Unlimited pools stay zero with no time use. Elapsed time */
 /* refills by quota over period with saturating math, capped at */
 /* quota plus burst. Huge inputs clamp instead of wrapping, so the */
 /* pool never collapses to a small cap. The stamp advances only when */
 /* the refill adds, so tiny elapsed keeps its fraction for the next */
-/* pass. */
-static __always_inline void flow_bw_refill(
+/* pass. The stamp claims with a compare and swap, so concurrent */
+/* refills add once. The pool adds with one compare and swap try, so */
+/* concurrent refills never tear. A lost try drops the add with the */
+/* stamp advanced, so the next elapsed refills with no stall. */
+static __noinline void flow_bw_refill(
 	struct flow_cgrp_ctx *e, u64 now)
 {
+	u64 updated;
 	u64 elapsed;
 	u64 prod;
 	u64 add;
 	u64 max;
+	u64 old;
+	u64 cur;
 	u64 sum;
+	u64 want;
 	if (!e)
 		return;
-	if (flow_bw_unlimited(e->quota_us))
+	if (flow_bw_unlimited(
+	    __sync_fetch_and_add(&e->quota_us, 0)))
 		return;
-	if (flow_time_before(now, e->updated_at))
+	updated = flow_load_updated(e);
+	if (flow_time_before(now, updated))
 		return;
-	elapsed = now - e->updated_at;
+	elapsed = now - updated;
 	if (!elapsed)
 		return;
-	if (!e->period_us)
+	if (!__sync_fetch_and_add(&e->period_us, 0))
 		return;
-	if (elapsed > 4294967295ULL || e->quota_us > 4294967295ULL)
+	if (elapsed > 4294967295ULL ||
+	    __sync_fetch_and_add(&e->quota_us, 0) > 4294967295ULL)
 		prod = (u64)~0ULL;
 	else
-		prod = elapsed * e->quota_us;
-	add = prod / e->period_us;
+		prod = elapsed *
+		    __sync_fetch_and_add(&e->quota_us, 0);
+	add = prod / __sync_fetch_and_add(&e->period_us, 0);
 	if (!add)
 		return;
-	e->updated_at = now;
-	max = flow_bw_max_ns(e->quota_us, e->burst_us);
+	old = __sync_val_compare_and_swap(&e->updated_at,
+	    updated, now);
+	if (old != updated)
+		return;
+	max = flow_bw_max_ns(
+	    __sync_fetch_and_add(&e->quota_us, 0),
+	    __sync_fetch_and_add(&e->burst_us, 0));
 	if (!max)
 		return;
-	if (e->pool_ns >= max)
+	cur = flow_load_pool(e);
+	if (cur >= max)
 		return;
-	sum = e->pool_ns + add;
-	if (sum < e->pool_ns)
+	sum = cur + add;
+	if (sum < cur)
 		sum = (u64)~0ULL;
-	e->pool_ns = sum;
-	if (e->pool_ns > max)
-		e->pool_ns = max;
+	want = sum;
+	if (want > max)
+		want = max;
+	__sync_val_compare_and_swap(&e->pool_ns, cur, want);
 }
 /* True when one hierarchy is throttled with lazy refill. */
 /* Walks the nearest 8 ancestors with refill, and the tightest pool */
 /* binds, so any drained pool parks the task. Unlimited walks */
 /* pass at once with no pool use. A null hierarchy passes at once. */
+/* Pool reads use atomic loads to match the refill stores. The walked */
+/* chain records to the hint ring on park with the leaf first, and */
+/* the leaf flag sets on park else clears on pass, so the dispatch */
+/* check stays a single lookup with no walk. */
 /* Each ancestor carries a reference with a paired release. */
-static __always_inline bool flow_bw_throttled(
+static __noinline bool flow_bw_throttled(
 	struct cgroup *cgrp, u64 now)
 {
 	int level;
 	int i;
+	u64 chain[8] = {};
+	struct flow_cgrp_ctx *leaf = NULL;
 	if (!cgrp)
 		return false;
 	if (!flow_load_limited())
@@ -302,28 +406,43 @@ static __always_inline bool flow_bw_throttled(
 		flow_cgrp_put(anc);
 		if (!id)
 			continue;
+		chain[i] = id;
 		e = flow_cgrp(id);
 		if (!e)
 			continue;
-		if (flow_bw_unlimited(e->quota_us))
+		if (i == 0)
+			leaf = e;
+		if (flow_bw_unlimited(
+		    __sync_fetch_and_add(&e->quota_us, 0)))
 			continue;
 		flow_bw_refill(e, now);
-		if (e->pool_ns == 0)
+		if (flow_load_pool(e) == 0) {
+			if (leaf)
+				flow_flag_set(leaf);
+			flow_hint_chain(chain);
 			return true;
+		}
 		if (i == 0 && lvl == 0)
 			break;
 	}
+	if (leaf)
+		flow_flag_clear(leaf);
 	return false;
 }
-/* Charge one runtime delta to the nearest 8 ancestors with floor. */
 /* Limited pools drain saturating to zero with no wrap, and */
-/* unlimited pools pass with no charge. A null hierarchy passes. */
+/* unlimited pools pass with no charge. Pool updates use one compare */
+/* and swap try, so concurrent charges never tear. A lost try drops */
+/* the charge with the next charge covering, so no stall. When any */
+/* ancestor sits drained, the leaf flag sets, so the dispatch check */
+/* holds later parks with no walk. A null hierarchy passes. */
 /* Each ancestor carries a reference with a paired release. */
-static __always_inline void flow_bw_consume(
+static __noinline void flow_bw_consume(
 	struct cgroup *cgrp, u64 delta)
 {
 	int level;
 	int i;
+	struct flow_cgrp_ctx *leaf = NULL;
+	bool drained = false;
 	if (!cgrp)
 		return;
 	if (!delta)
@@ -336,6 +455,8 @@ static __always_inline void flow_bw_consume(
 		u64 id;
 		struct flow_cgrp_ctx *e;
 		int lvl;
+		u64 cur;
+		u64 want;
 		if (i > level)
 			break;
 		lvl = level - i;
@@ -351,15 +472,31 @@ static __always_inline void flow_bw_consume(
 		e = flow_cgrp(id);
 		if (!e)
 			continue;
-		if (flow_bw_unlimited(e->quota_us))
+		if (i == 0)
+			leaf = e;
+		if (flow_bw_unlimited(
+		    __sync_fetch_and_add(&e->quota_us, 0)))
 			continue;
-		if (e->pool_ns > delta)
-			e->pool_ns -= delta;
+		cur = flow_load_pool(e);
+		if (cur == 0) {
+			drained = true;
+			if (i == 0 && lvl == 0)
+				break;
+			continue;
+		}
+		if (cur > delta)
+			want = cur - delta;
 		else
-			e->pool_ns = 0;
+			want = 0;
+		__sync_val_compare_and_swap(&e->pool_ns, cur,
+		    want);
+		if (want == 0)
+			drained = true;
 		if (i == 0 && lvl == 0)
 			break;
 	}
+	if (drained && leaf)
+		flow_flag_set(leaf);
 }
 /* True when the id is a live CPU below nr and the bound. */
 /* Live means below the nr snapshot at init with no kernel online read. */
@@ -406,10 +543,15 @@ static __always_inline void flow_on_cpu_dec(void)
 			break;
 	}
 }
-/* Clear the running pid with no other state change. */
+/* Clear the running pid with a compare and swap loop. */
+/* Retries the swap so a concurrent run pairs, and a lost race keeps */
+/* the winner with no torn zero. Release carries no pid, so the loop */
+/* claims whatever owner it finds. The segment still ends through */
+/* stopping or disable with no charge here. */
 static __always_inline void flow_clear_running(s32 cpu)
 {
 	struct flow_cpu_state *st;
+	s32 i;
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
@@ -417,30 +559,43 @@ static __always_inline void flow_clear_running(s32 cpu)
 	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
-	st->running_pid = 0;
+	bpf_for(i, 0, 4) {
+		u32 cur = __sync_fetch_and_add(
+		    &st->running_pid, 0);
+		u32 old;
+		if (cur == 0)
+			break;
+		old = __sync_val_compare_and_swap(
+		    &st->running_pid, cur, 0);
+		if (old == cur)
+			break;
+	}
 }
 /* Clear the running pid only when the pid owns it. */
-/* A stale exit never clears a new owner after a switch. */
+/* Uses one compare and swap, so a stale exit never clears a new */
+/* owner after a switch. A zero pid never owns, so it passes. */
 static __always_inline void flow_clear_running_if_owner(
 	s32 cpu, u32 pid)
 {
 	struct flow_cpu_state *st;
 	if (cpu < 0)
 		return;
+	if (pid == 0)
+		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
 	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
-	if (st->running_pid != pid)
-		return;
-	st->running_pid = 0;
+	__sync_val_compare_and_swap(&st->running_pid, pid, 0);
 }
 /* Charge one leftover run segment at most once with no scaling. */
 /* Stopping owns the normal charge and clears the run start. */
 /* Disable and exit funnel here only for a running task that */
-/* stopping never saw. The count flag pairs with stopping through */
-/* the run start, so a release never double charges. */
+/* stopping never saw. The start claims with a compare and swap, so */
+/* stopping versus disable or exit charges once. The owner check runs */
+/* before the claim, and a failed claim means stopping won, so this */
+/* pass drops with no double charge and no stolen segment. */
 /* The hierarchy lookup carries a reference with a paired release, */
 /* and a null lookup skips the pool charge with no trap. */
 static __always_inline void flow_charge_leftover(s32 cpu,
@@ -449,10 +604,13 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 	u64 start;
 	u64 now;
 	u64 delta;
+	u64 got;
 	struct cgroup *cgrp;
 	if (!tctx)
 		return;
-	start = tctx->run_at;
+	if (pid == 0)
+		return;
+	start = __sync_fetch_and_add(&tctx->run_at, 0);
 	if (start == 0)
 		return;
 	if (cpu < 0)
@@ -463,14 +621,21 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 	/* Only the owning CPU charges, so a migrated stop stays once. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
-		if (!st || st->running_pid != pid)
+		u32 cur;
+		if (!st)
+			return;
+		cur = __sync_fetch_and_add(&st->running_pid, 0);
+		if (cur != pid)
 			return;
 	}
 	now = flow_now();
 	if (flow_time_before(now, start))
 		return;
 	delta = now - start;
-	tctx->run_at = 0;
+	got = __sync_val_compare_and_swap(&tctx->run_at,
+	    start, 0);
+	if (got != start)
+		return;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_on_cpu_dec();
 	cgrp = flow_task_cgrp(p);
@@ -479,19 +644,38 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 		flow_cgrp_put(cgrp);
 	}
 }
-/* Single kicking timer for throttled parks with lazy refill. */
-/* Scans for the first live CPU instead of a fixed id, so an offlined */
-/* boot CPU never parks the kick. Kicks only when a park waits, so */
-/* idle ticks stay quiet with no storm. A cleared limited count still */
-/* kicks once, so parks from a removed limit drain soon. */
-/* Refill stays lazy on the enqueue path with no pool scan here, and */
-/* the 10ms tick always covers the 1ms floor, so a kick finds refill. */
+/* Single kicking timer for throttled parks with hint refill scan. */
+/* Scans from a rotated live start instead of a fixed id, so an offlined */
+/* boot CPU never parks the kick and passes spread with no hotspot. */
+/* The start rotates by the kick count, so consecutive ticks visit */
+/* different CPUs first. When a park waits, the timer refills each */
+/* hinted pool over the bounded ring, so time based refill unparks */
+/* tasks with no new enqueue. Hints record drained ids at park time */
+/* with a wrapping counter, and stale or reused ids refill harmlessly */
+/* with cap and no cleanup. Active groups past the ring still refill */
+/* on the enqueue path. The kick is refill gated: it fires only when */
+/* refill added pool or no limit remains, so idle ticks and still */
+/* throttled ticks stay quiet with no storm. A cleared limited count */
+/* still kicks once, so parks from a removed limit drain soon. When */
+/* still throttled with no refill yet, pending re-arms for the next */
+/* tick with no stall. The kick targets the first live CPU with mask */
+/* wins on drain, so a parked mask mismatch stays best effort with no */
+/* task scan here. The dispatch recheck uses loads only with no walk */
+/* refill, and the 10ms tick always covers the 1ms floor, so a gated */
+/* kick finds fresh pools. Pending uses an atomic exchange to match */
+/* the enqueue store with no torn flag. */
 static int flow_bw_timer_cb(void *map, int *key,
 	struct bpf_timer *timer)
 {
-	u32 cpu;
 	u32 found = 0xffffffffU;
 	u64 was;
+	u64 kicks;
+	u64 n;
+	u32 start = 0;
+	u32 off;
+	u64 now;
+	bool refilled = false;
+	u32 i;
 	(void)map;
 	(void)key;
 	if (!flow_load_pending())
@@ -499,11 +683,69 @@ static int flow_bw_timer_cb(void *map, int *key,
 	was = __sync_lock_test_and_set(&flow_bw_pending, 0);
 	if (!was)
 		goto arm;
-	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		if ((u64)cpu >= nr_cpu_ids)
+	/* Refill each hinted chain over the bounded ring. */
+	/* Each slot holds 8 ancestor ids with the leaf first. Every */
+	/* listed pool refills alone with cap, and the leaf flag clears */
+	/* only when the whole chain holds pool, so a drained parent */
+	/* keeps the park with no bypass. Stale or reused ids refill */
+	/* harmlessly with no cleanup. */
+	now = flow_now();
+	bpf_for(i, 0, FLOW_PARK_HINT_NR) {
+		u32 hkey = i;
+		struct flow_park_chain *chain;
+		struct flow_cgrp_ctx *leaf = NULL;
+		bool drained = false;
+		u32 j;
+		chain = bpf_map_lookup_elem(&park_hint, &hkey);
+		if (!chain)
+			continue;
+		bpf_for(j, 0, FLOW_CGRP_DEPTH_MAX) {
+			struct flow_cgrp_ctx *e;
+			u64 hid;
+			u64 before;
+			u64 after;
+			if ((u64)j >= 8ULL)
+				break;
+			hid = chain->ids[j];
+			if (!hid)
+				continue;
+			e = flow_cgrp(hid);
+			if (!e)
+				continue;
+			if (j == 0)
+				leaf = e;
+			if (flow_bw_unlimited(
+			    __sync_fetch_and_add(&e->quota_us,
+			    0)))
+				continue;
+			before = flow_load_pool(e);
+			flow_bw_refill(e, now);
+			after = flow_load_pool(e);
+			if (after > before)
+				refilled = true;
+			if (after == 0)
+				drained = true;
+		}
+		if (leaf && !drained)
+			flow_flag_clear(leaf);
+	}
+	/* Refill gated kick only with retry when still throttled. */
+	if (!refilled && flow_load_limited()) {
+		__sync_lock_test_and_set(&flow_bw_pending, 1);
+		goto arm;
+	}
+	n = nr_cpu_ids;
+	if (n == 0 || n > (u64)FLOW_MAX_CPUS)
+		goto arm;
+	kicks = __sync_fetch_and_add(&flow_stats.kicks, 0);
+	start = (u32)(kicks % n);
+	bpf_for(off, 0, FLOW_MAX_CPUS) {
+		u32 peer;
+		if ((u64)off >= n)
 			break;
-		if (flow_cpu_live(cpu)) {
-			found = cpu;
+		peer = (start + off) % (u32)n;
+		if (flow_cpu_live(peer)) {
+			found = peer;
 			break;
 		}
 	}

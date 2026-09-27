@@ -417,6 +417,7 @@ mod tests {
             crate::flow_slot::SLOT_GATED_CAP,
             crate::bpf_intf::flow_consts_FLOW_GATED_CAP
         );
+        assert_eq!(crate::flow_slot::SLOT_GATED_CAP, 6);
     }
 
     #[test]

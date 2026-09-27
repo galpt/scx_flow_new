@@ -8,10 +8,12 @@
  * the hierarchy share over depth 8, so a task under a light
  * parent waits longer. The hierarchy share caches by id with
  * generation validation, and a miss uses base share. Throttled
- * hierarchies park in overflow with no kick and lazy refill, and
+ * hierarchies park in overflow with no preempt kick and lazy refill, and
  * the single timer wakes parks soon. The task joins its target
  * deadline queue, so old kernels keep working. Pinned tasks and
- * foreign policies rest in overflow. A busy target kicks only for
+ * foreign policies rest in overflow with wait set and one idle kick.
+ * Overflow and global parks kick one idle allowed CPU only, so no
+ * stall with no preempt storm. A busy target kicks only for
  * a strictly earlier deadline, and pinned arrivals never kick a
  * busy CPU. Slice expiry paces the rest, so no slice write and no
  * stamp run here. See intf.h for the step helper and
@@ -69,6 +71,46 @@ static __always_inline void flow_global_insert(
 	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL,
 	    (u64)FLOW_QUANTUM_NS, 0);
 }
+/* Kick one idle allowed CPU for overflow or global parks. */
+/* Tries the kernel idle pick first, then the first allowed live CPU. */
+/* Kicks only when the target runs nothing, with the idle flag cleared */
+/* first so the kick sticks. Never sends a preempt kick, so pinned */
+/* parks stay idle only. A kick miss stays fail closed with mask wins */
+/* on drain and the timer or a later kicking enqueue wakes the park. */
+static __noinline void flow_kick_idle_allowed(
+	const struct task_struct *p)
+{
+	s32 idle;
+	s32 first;
+	struct flow_cpu_state *st;
+	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (idle >= 0 && flow_cpu_ok(p, idle)) {
+		st = flow_cpu((u32)idle);
+		if (st &&
+		    __sync_fetch_and_add(&st->running_pid,
+		    0) == 0) {
+			scx_bpf_test_and_clear_cpu_idle(
+			    (s32)idle);
+			scx_bpf_kick_cpu((s32)idle,
+			    SCX_KICK_IDLE);
+			__sync_fetch_and_add(
+			    &flow_stats.kicks, 1);
+			return;
+		}
+	}
+	first = (s32)bpf_cpumask_first(p->cpus_ptr);
+	if (first >= 0 && flow_cpu_ok(p, first)) {
+		st = flow_cpu((u32)first);
+		if (st &&
+		    __sync_fetch_and_add(&st->running_pid,
+		    0) == 0) {
+			scx_bpf_test_and_clear_cpu_idle(first);
+			scx_bpf_kick_cpu(first, SCX_KICK_IDLE);
+			__sync_fetch_and_add(
+			    &flow_stats.kicks, 1);
+		}
+	}
+}
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
@@ -93,7 +135,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (u64)SCX_DSQ_LOCAL_ON | (u64)tgt,
 			    (u64)FLOW_QUANTUM_NS, enq_flags);
 			tst = flow_cpu((u32)tgt);
-			if (tst && tst->running_pid == 0) {
+			if (tst &&
+			    __sync_fetch_and_add(
+			    &tst->running_pid, 0) == 0) {
 				scx_bpf_kick_cpu(tgt,
 				    SCX_KICK_IDLE);
 				__sync_fetch_and_add(
@@ -107,34 +151,61 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	pinned = flow_task_pinned(p);
 	policy = p->policy;
 	now = flow_now();
-	/* Tasks without state keep the kernel global queue with no kick. */
+	/* Tasks without state keep the kernel global queue with an idle kick. */
 	/* Homeless tasks without a route count here too, the name stays */
-	/* for the wire with no split. Fail closed, the next kicking */
-	/* enqueue or dispatch wakes them with mask wins. */
+	/* for the wire with no split. The kick targets one idle allowed */
+	/* CPU with no preempt, so a parked global wakes without a storm. */
 	if (!tctx) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		flow_global_insert(p);
+		flow_kick_idle_allowed(p);
 		return;
 	}
 	/* Pinned plus non normal, batch, idle tasks rest in overflow. */
 	/* Only normal plus batch plus idle policies join the deadline */
 	/* queues, and realtime stays ordered with no deadline use. */
-	/* Overflow sends no kick. Fail closed, the next kicking enqueue */
-	/* or dispatch wakes them with mask wins. Pinned never kicks. */
+	/* Overflow parks set wait for the gated backstop, then send one */
+	/* idle kick with no preempt. The share walk populates the cache */
+	/* with a throttle sync, so the gated flag check stays a single */
+	/* lookup with no walk. Fail closed, the timer or a later */
+	/* kicking enqueue wakes the rest with mask wins. Pinned never */
+	/* kicks a busy CPU. */
 	if (pinned || (policy != (int)FLOW_POL_NORMAL &&
 	    policy != (int)FLOW_POL_BATCH &&
 	    policy != (int)FLOW_POL_IDLE)) {
+		u64 pcgid;
+		u32 phier;
+		struct cgroup *pcgrp;
+		tctx->wait_at = now;
+		pcgrp = flow_task_cgrp(p);
+		pcgid = flow_cgrp_id(pcgrp);
+		if (tctx->cached && tctx->cgid == pcgid &&
+		    tctx->generation == (u16)flow_load_gen()) {
+			phier = tctx->eweight;
+		} else {
+			phier = flow_hier_weight(pcgrp);
+			tctx->cgid = pcgid;
+			tctx->eweight = phier;
+			tctx->generation = (u16)flow_load_gen();
+			tctx->cached = true;
+		}
+		if (flow_load_limited())
+			flow_bw_throttled(pcgrp, now);
+		flow_cgrp_put(pcgrp);
 		flow_over_insert(p);
+		flow_kick_idle_allowed(p);
 		return;
 	}
 	cpu = flow_pick_target(p, sel);
-	/* No live CPU keeps the kernel global queue with no kick. */
+	/* No live CPU keeps the kernel global queue with an idle kick. */
 	/* Homeless tasks without a route count here too, the name stays */
-	/* for the wire with no split. Fail closed, the next kicking */
-	/* enqueue or dispatch wakes them with mask wins. */
+	/* for the wire with no split. The kick targets one idle allowed */
+	/* CPU with no preempt, so a parked global wakes without a storm. */
 	if (!flow_cpu_ok(p, cpu)) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
+		tctx->wait_at = now;
 		flow_global_insert(p);
+		flow_kick_idle_allowed(p);
 		return;
 	}
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
@@ -188,7 +259,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx->wait_at = now;
 	flow_vtime_insert(p, cpu, deadline);
 	/* Idle targets kick at once with no rate window. */
-	/* The idle flag clears first so the kick sticks. */
+	/* The idle flag clears first so the kick sticks. The pid read */
+	/* uses an atomic load to match the running stores. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
@@ -196,7 +268,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		struct flow_task_ctx *octx;
 		if (!st)
 			return;
-		if (st->running_pid == 0) {
+		if (__sync_fetch_and_add(&st->running_pid,
+		    0) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
@@ -206,8 +279,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* path sees open tasks only with no pinned check. */
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */
-		/* missing occupant fails closed with no kick. */
-		occ_pid = st->running_pid;
+		/* missing occupant fails closed with no kick. The occupant */
+		/* CPU validates before the compare, so a migrated occupant */
+		/* never kicks the wrong CPU. A zero occupant deadline means */
+		/* no order yet, so the arrival paces with no kick. */
+		occ_pid = __sync_fetch_and_add(&st->running_pid,
+		    0);
 		if (occ_pid == 0 || occ_pid == (u32)p->pid) {
 			__sync_fetch_and_add(
 			    &flow_stats.preempt_skipped, 1);
@@ -221,8 +298,22 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
+		if (scx_bpf_task_cpu(trusted) != cpu) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
 		octx = flow_lookup(trusted);
 		if (!octx) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		if (octx->deadline == 0) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
 			__sync_fetch_and_add(

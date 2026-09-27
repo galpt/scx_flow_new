@@ -52,9 +52,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	}
 	/* The waker CPU is free when it runs nothing and the mask allows. */
 	/* An idle core cannot stack so locality stays free with no cost. */
+	/* The pid read uses an atomic load to match the running stores. */
 	if (flow_cpu_ok(p, this_cpu)) {
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
-		if (wst && wst->running_pid == 0)
+		if (wst && __sync_fetch_and_add(&wst->running_pid,
+		    0) == 0)
 			return this_cpu;
 	}
 	/* One idle scan only with no depth pass. */
@@ -79,12 +81,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* pick still lands with mask wins at enqueue. */
 	/* The scan pays at most eight probes with one per peer. */
 	/* The waker cursor steps by 8 with wrap, so passes spread. */
+	/* The cursor races best effort with no atomic order, so a lost */
+	/* update only shifts the next start with no correctness use. */
 	{
 		u64 nr = nr_cpu_ids;
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
 		struct flow_topo *wtp = flow_topo((u32)this_cpu);
 		u32 want = wtp ? wtp->llc : 0;
-		u32 cursor = wst ? wst->cursor : 0;
+		u32 cursor = wst ? __sync_fetch_and_add(
+		    &wst->cursor, 0) : 0;
 		u32 salt = 0;
 		u32 start = 0;
 		u32 best = 0xffffffffU;
@@ -118,7 +123,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				}
 			}
 			if (wst)
-				wst->cursor = (start + 8U) % n;
+				__sync_lock_test_and_set(
+				    &wst->cursor,
+				    (start + 8U) % n);
 			if (best != 0xffffffffU) {
 				if (!prev_ok || best_depth < prev_depth)
 					return (s32)best;
