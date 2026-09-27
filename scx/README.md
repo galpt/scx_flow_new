@@ -40,32 +40,36 @@ Duty tracks intensity with alpha `1/8` over each stop. Sleep
 decays it, short bursts climb gently with a `1.5ms` allowance,
 and long runs climb hard. Only duty under `15` percent, or a
 voluntary wake, enters the fast lane past two probation
-wakes. Fresh tasks anchor at the minimum minus lag cap and
-never take the fast lane early. See `src/bpf/enqueue.bpf.c`
-and `src/flow_admit.rs`.
+wakes. Fresh tasks start as voluntary sleepers, so two low
+duty wakes graduate them. Kernel urgency with low duty
+bypasses probation alone. Fresh tasks anchor at the minimum
+minus lag cap and never take the fast lane early. See
+`src/bpf/enqueue.bpf.c` and `src/flow_admit.rs`.
 
 ### Ledger
 
 Every segment charges weight scaled time to virtual time, fast
 lane or not. Each CPU keeps a high water minimum that never
-moves back. Entries clamp to the larger of task time and
-minimum minus lag cap, where lag is `5ms` times base over
-weight. The deadline is the clamped time, carried as DSQ
-vtime. Steals add a scaled `500us` penalty with no knob to
-turn it off. See `src/bpf/lifecycle.bpf.c`.
+moves back. An idle empty CPU refreshes the minimum forward
+only through one shared helper. Entries clamp to the larger
+of task time and minimum minus lag cap, where lag is `5ms`
+times base over weight. The deadline is the clamped time,
+carried as DSQ vtime. Steals add a scaled `500us` penalty
+with no knob to turn it off. See `src/bpf/lifecycle.bpf.c`.
 
 ### Preemption
 
 Interactive tasks preempt batch owners prompt at a `100us`
-floor, one kick per `2ms` window per CPU. The window gates
-before occupant resolution, and one trusted lookup serves
-class plus slice shorten under one RCU pass. Interactive
-pairs yield at the micro quantum end with no kick. Batch
-pairs kick only past slice exhaust with a deadline gap over
-one quantum. Batch never preempts interactive, and pinned
-arrivals never preempt a busy CPU. No timer kick runs, so
-the floor is a slice shorten plus kick approximation. See
-`src/bpf/enqueue.bpf.c` and `src/flow_preempt.rs`.
+floor with no window. One trusted lookup serves class plus
+slice shorten under one RCU pass, and the `2ms` window gates
+batch pairs only. Interactive pairs yield at the micro
+quantum end with no kick. Batch pairs kick only past slice
+exhaust with a deadline gap over one quantum. A hot window
+still shortens to the floor with no kick. Batch never
+preempts interactive, and pinned arrivals never preempt a
+busy CPU. No timer kick runs, so the floor is a slice shorten
+plus kick approximation. See `src/bpf/enqueue.bpf.c` and
+`src/flow_preempt.rs`.
 
 ### Priority help
 
@@ -79,14 +83,13 @@ See `src/bpf/lifecycle.bpf.c` and `src/bpf/enqueue.bpf.c`.
 ### Placement
 
 Order is waker CPU when idle and allowed, any idle via
-`pick_idle`, prior when allowed, then first allowed, and the
-task mask always wins. Pinned tasks keep the task CPU when
-allowed, else the selected CPU, else the first allowed CPU.
-Pinned means migration disabled or one CPU allowed. Empty
-masks rest in the global queue. Frequency cards stay display
-only and never shape placement. No frequency write runs in
-this scheduler, and the governor stays free. A running-only
-boost stays out, so responsiveness wins with no knob writes.
+`pick_idle`, prior when shallow and allowed, else the
+shallowest same cache peer over bound `8`, then first
+allowed, and the task mask always wins. Pinned tasks keep the
+task CPU when allowed, else the selected CPU, else the first
+allowed CPU. Pinned means migration disabled or one CPU
+allowed. Empty masks rest in the global queue. Frequency
+stays display only with no write, so the governor stays free.
 See `src/bpf/select_cpu.bpf.c`
 and `src/bpf/enqueue.bpf.c`.
 
@@ -115,12 +118,12 @@ See `src/bpf/dispatch.bpf.c` and `src/flow_select.rs`.
 
 Idle targets kick at once with the idle flag cleared first,
 so no idle CPU with queued work sleeps unkicked. Busy kicks
-follow the class rules with the rate window. A null or self
-occupant keeps kick only with no shorten. Fallback global
-with no live CPU sends no kick and the next drain pass
-collects it with mask wins. Exiting uses an idle kick on the
-task CPU. See `src/bpf/intf.h`, `src/bpf/main.bpf.c`, and
-`src/bpf/enqueue.bpf.c`.
+follow the class rules with the window gating batch pairs
+only. A null or self occupant keeps kick only with no
+shorten. Fallback global with no live CPU sends no kick and
+the next drain pass collects it with mask wins. Exiting uses
+an idle kick on the task CPU. See `src/bpf/intf.h`,
+`src/bpf/main.bpf.c`, and `src/bpf/enqueue.bpf.c`.
 
 ### Accounting
 
@@ -151,7 +154,7 @@ fields with per CPU `running_pid`, dynamic `slice_ns`, and
 Short wakes serve from the per CPU fast FIFO under duty
 admission, long work serves in deadline order with dynamic
 weight sized slices, interactive owners preempt batch owners
-under a rate window, and idle CPUs steal deadline work with
+prompt, and idle CPUs steal deadline work with
 SMT and cache preference. Run `schbench` plus `cyclictest`
 plus `stress-ng` on the same host and governor, and watch
 `fast_admits`, `vtime_admits`, `duty_gates`, `prob_holds`,

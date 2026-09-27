@@ -4,6 +4,8 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the wrap safe virtual time helpers shared by tests and docs.
+//! The BPF ledger lives in lifecycle.bpf.c with the clamp at insert
+//! in enqueue.bpf.c, and this file mirrors the min predicates.
 
 /// Bound of moved tasks in one pass.
 pub const DISPATCH_BATCH: u32 = 32;
@@ -70,6 +72,17 @@ pub fn min_guarded(old: u64, waking_v: u64) -> u64 {
     if waking_v == 0 { old } else { waking_v }
 }
 
+/// Guarded idle minimum refresh with wrap safety.
+/// Moves forward only when the CPU is idle and empty, so enqueue and
+/// stopping share one funnel with the high water mark.
+#[cfg(test)]
+pub fn min_idle_refresh(old: u64, cand: u64, idle_empty: bool) -> u64 {
+    if !idle_empty {
+        return old;
+    }
+    min_max(old, cand)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +122,14 @@ mod tests {
     fn guarded_minimum_keeps_zero_wake() {
         assert_eq!(min_guarded(7, 0), 7);
         assert_eq!(min_guarded(7, 9), 9);
+    }
+
+    #[test]
+    fn idle_refresh_moves_forward_only_when_empty() {
+        assert_eq!(min_idle_refresh(7, 9, true), 9);
+        assert_eq!(min_idle_refresh(9, 7, true), 9);
+        assert_eq!(min_idle_refresh(7, 9, false), 7);
+        assert_eq!(min_idle_refresh(7, 0, true), 7);
+        assert_eq!(min_idle_refresh(u64::MAX, 1, true), 1);
     }
 }

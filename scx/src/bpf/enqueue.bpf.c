@@ -238,14 +238,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A voluntary wake also opens it, and kernel urgency takes head. */
 	/* Idle and batch policies never enter, whatever the duty reads. */
 	/* A preempt flagged arrival under half duty also opens it. */
+	/* Kernel urgency with low duty bypasses probation alone. */
 	/* The check runs before any sizing, so a closed lane pays no */
 	/* probe and no divide on the wakeup path. */
+	bool prob_ok = flow_prob_count(tctx->prob) == 0;
+	bool urgent_bypass = urgent &&
+	    duty < (u8)FLOW_DUTY_FAST;
 	bool fast_ok = flow_fast_lane_ok(policy) &&
-	    flow_prob_count(tctx->prob) == 0 &&
+	    ((prob_ok &&
 	    (duty < (u8)FLOW_DUTY_FAST ||
 	    (wakeup && flow_prob_vol(tctx->prob)) ||
 	    ((enq_flags & (u64)SCX_ENQ_PREEMPT) != 0 &&
-	    duty < (u8)FLOW_DUTY_BATCH));
+	    duty < (u8)FLOW_DUTY_BATCH))) ||
+	    urgent_bypass);
 	/* Fast arrivals size from the fast depth only with one probe. */
 	/* One divide serves the insert, and no deadline forms here, */
 	/* so the lag cap divide stays off the fast path. */
@@ -274,8 +279,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(
 			    &flow_stats.duty_gates, 1);
 	}
-	/* Steady tasks size from the deadline depth only with one probe. */
+	/* Steady tasks size from the deadline depth with one sizing probe. */
 	/* Fresh tasks anchor at minimum minus lag cap with wrap safety. */
+	/* The deadline stays a clamp at insert with no exec term. */
 	{
 		s32 qv = scx_bpf_dsq_nr_queued(
 		    flow_vtime_dsq((u32)cpu));
@@ -283,6 +289,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 min_v = mst ? mst->min_vruntime : 0;
 		u64 queued = 1ULL;
 		u64 deadline;
+		/* An idle empty CPU refreshes the minimum forward only. */
+		/* The shared helper keeps enqueue and stopping in step. */
+		if (mst) {
+			s32 qf = scx_bpf_dsq_nr_queued(
+			    flow_fast_dsq((u32)cpu));
+			bool idle_empty = mst->running_pid == 0 &&
+			    qf == 0 && qv == 0;
+			mst->min_vruntime = flow_min_idle_refresh(
+			    mst->min_vruntime, tctx->vruntime,
+			    idle_empty);
+			min_v = mst->min_vruntime;
+		}
 		if (qv > 0)
 			queued += (u64)qv;
 		slice = flow_dyn_slice(w, queued);
@@ -323,22 +341,11 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		/* One prompt kick per 2ms window per CPU. */
-		/* The window gates before any occupant lookup, so a hot */
-		/* window skips the task lookup plus the RCU pass on the */
-		/* wakeup path. The stamp still lands only on a real kick */
-		/* below. Entry time serves the window with no fresh read. */
-		last = flow_rate_at[(u32)cpu & 1023U];
-		if (last != 0 && now - last < (u64)FLOW_PREEMPT_RATE_NS) {
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
-			return;
-		}
 		/* Use the compat helper, it falls back to cpu_rq on old kernels. */
 		/* The occupant may be untrusted there, so the class read */
 		/* goes through one trusted lookup with release on each path. */
-		/* The same lookup serves the slice shorten below, so the */
-		/* busy path pays one task lookup plus one RCU pass. */
+		/* Class decides the gate, so the lookup runs before the */
+		/* window check with one RCU pass serving class plus shorten. */
 		occupant = __COMPAT_scx_bpf_cpu_curr(cpu);
 		if (!occupant || occupant == p) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
@@ -394,36 +401,56 @@ kicked:
 			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
-		/* Batch pairs need an exhausted slice plus a deadline gap */
-		/* past one micro quantum before a prompt kick may run. */
-		if (cls == (u32)FLOW_CLS_BATCH) {
-			if (occ_slice == 0 || occ_ran < occ_slice) {
-				bpf_task_release(trusted);
-				bpf_rcu_read_unlock();
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped, 1);
-				return;
-			}
-			if (!flow_time_before(tctx->vruntime +
-			    (u64)FLOW_MICRO_QUANTUM_NS,
-			    occ_vt)) {
-				bpf_task_release(trusted);
-				bpf_rcu_read_unlock();
-				__sync_fetch_and_add(
-				    &flow_stats.preempt_skipped, 1);
-				return;
-			}
-		}
 		/* Interactive over batch shortens to the 100us floor. */
-		/* Batch over batch shortens to zero at slice end. */
+		/* No window gates this pair, so sleepers preempt prompt. */
+		/* A storm here would take a 500us gate in testing. */
 		/* The slice write uses the held trusted reference. */
 		/* No timer kick runs here, so the floor is an */
 		/* approximation with kick timing, not a precise preempt. */
-		if (cls == (u32)FLOW_CLS_INTERACTIVE)
+		if (cls == (u32)FLOW_CLS_INTERACTIVE) {
 			scx_bpf_task_set_slice(trusted,
 			    (u64)FLOW_PREEMPT_FLOOR_NS);
-		else
-			scx_bpf_task_set_slice(trusted, 0);
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			flow_rate_at[(u32)cpu & 1023U] = now;
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_kicks, 1);
+			return;
+		}
+		/* Batch pairs need an exhausted slice plus a deadline gap */
+		/* past one micro quantum before a prompt kick may run. */
+		if (occ_slice == 0 || occ_ran < occ_slice) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		if (!flow_time_before(tctx->vruntime +
+		    (u64)FLOW_MICRO_QUANTUM_NS,
+		    occ_vt)) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* One prompt kick per 2ms window per CPU for batch pairs. */
+		/* A hot window still shortens to the floor with no kick. */
+		/* Entry time serves the window with no fresh read. */
+		last = flow_rate_at[(u32)cpu & 1023U];
+		if (last != 0 && now - last < (u64)FLOW_PREEMPT_RATE_NS) {
+			scx_bpf_task_set_slice(trusted,
+			    (u64)FLOW_PREEMPT_FLOOR_NS);
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(
+			    &flow_stats.preempt_skipped, 1);
+			return;
+		}
+		/* Batch over batch shortens to zero at slice end. */
+		scx_bpf_task_set_slice(trusted, 0);
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		flow_rate_at[(u32)cpu & 1023U] = now;

@@ -17,6 +17,8 @@
 /* Shared drain with DSQ and budget only. */
 /* Moves mask allowed tasks to local with a miss cap at 4. */
 /* One bad head never blocks later work with no full scan. */
+/* Plain move keeps LOCAL_ON order with no vtime write, since the move */
+/* with vtime stays for user to user DSQ order only. */
 static __noinline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base, bool penalty)
 {

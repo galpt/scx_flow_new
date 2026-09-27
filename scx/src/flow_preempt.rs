@@ -4,10 +4,9 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the busy kick rate and class rule helpers shared by tests and docs.
-//!
-//! The BPF busy path gates on the rate window before resolving the
-//! occupant, then serves class plus slice shorten from one trusted
-//! lookup under one RCU pass.
+//! The BPF busy path resolves the occupant first under one RCU pass,
+//! then serves class plus slice shorten with the window gating batch
+//! pairs only. See enqueue.bpf.c for the kick order.
 
 /// Busy kick window in nanos at 2ms.
 #[cfg(test)]
@@ -31,6 +30,29 @@ pub fn rate_ok(now: u64, last: u64) -> bool {
         return true;
     }
     now.wrapping_sub(last) >= RATE_WINDOW_NS
+}
+
+/// True when one kick choice needs the 2ms window.
+/// Batch pairs gate on the window, and interactive pairs keep it for
+/// order though they yield with no kick. Interactive over batch stays
+/// prompt with no gate, and denied pairs never kick.
+#[cfg(test)]
+pub fn kick_needs_gate(new_cls: u8, occ_cls: u8) -> bool {
+    if new_cls == CLS_INTERACTIVE && occ_cls == CLS_BATCH {
+        return false;
+    }
+    if new_cls == CLS_BATCH && occ_cls == CLS_INTERACTIVE {
+        return false;
+    }
+    new_cls == occ_cls
+}
+
+/// Slice left for one occupant when the kick is rate limited.
+/// Holds the 100us floor, so a hot window still shortens the slice
+/// with no kick storm.
+#[cfg(test)]
+pub fn limited_shorten_ns() -> u64 {
+    PREEMPT_FLOOR_NS
 }
 
 /// Class of one task from policy and duty.
@@ -134,5 +156,23 @@ mod tests {
         assert!(!rate_ok(1_000_000, 500_000));
         assert!(rate_ok(3_000_000, 500_000));
         assert_eq!(PREEMPT_FLOOR_NS, 100_000);
+    }
+
+    #[test]
+    fn prompt_pair_bypasses_window_while_batch_gates() {
+        assert!(!kick_needs_gate(CLS_INTERACTIVE, CLS_BATCH));
+        assert!(kick_needs_gate(CLS_BATCH, CLS_BATCH));
+        assert!(kick_needs_gate(CLS_INTERACTIVE, CLS_INTERACTIVE));
+        assert!(!kick_needs_gate(CLS_BATCH, CLS_INTERACTIVE));
+    }
+
+    #[test]
+    fn limited_window_still_shortens_to_floor() {
+        assert_eq!(limited_shorten_ns(), 100_000);
+        assert_eq!(limited_shorten_ns(), PREEMPT_FLOOR_NS);
+        assert_eq!(
+            kick_choice(CLS_INTERACTIVE, CLS_BATCH, false, false),
+            Kick::PromptFloor
+        );
     }
 }

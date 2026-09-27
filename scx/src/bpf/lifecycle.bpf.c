@@ -93,8 +93,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	/* Minimum keeps the high water mark with no queue read. */
-	/* Placement and dispatch never read it for order, so one max */
-	/* keeps the anchor view with no scheduling use beyond clamping. */
+	/* Stopping owns the unguarded advance while enqueue guards idle */
+	/* plus empty, and both funnel through the shared min helper. */
 	if (cpu >= 0 && flow_cpu_live((u32)cpu)) {
 		struct flow_cpu_state *fst = flow_cpu((u32)cpu);
 		if (fst) {
@@ -131,9 +131,10 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->slice_ns = 0;
 	tctx->elev_at = 0;
 	tctx->duty = 0;
-	/* Fresh tasks hold two probation wakes with no fast lane. */
+	/* Fresh tasks hold two probation wakes as voluntary sleepers. */
 	/* Forks share this path, so children anchor at the minimum. */
-	tctx->prob = flow_prob_make((u32)FLOW_PROB_CYCLES, false);
+	/* Two low duty wakes graduate the task to the lane. */
+	tctx->prob = flow_prob_make((u32)FLOW_PROB_CYCLES, true);
 	tctx->on_cpu = 0;
 	tctx->elevated = 0;
 	tctx->cls = (u8)FLOW_CLS_INTERACTIVE;

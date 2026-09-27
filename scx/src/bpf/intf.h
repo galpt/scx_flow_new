@@ -173,6 +173,16 @@ static __always_inline u64 flow_min_max(u64 old,
 		return next;
 	return old;
 }
+/* Guarded idle minimum refresh with wrap safety. */
+/* Moves forward only when the CPU is idle and empty, so enqueue and */
+/* stopping share one funnel with the high water mark below. */
+static __always_inline u64 flow_min_idle_refresh(u64 old,
+	u64 cand, bool idle_empty)
+{
+	if (!idle_empty)
+		return old;
+	return flow_min_max(old, cand);
+}
 /* Clamped weight in 1 to 10000 with base 100. */
 /* Zero or oversize weights fail closed to the nearer bound. */
 static __always_inline u32 flow_weight_clamp(u32 w)
