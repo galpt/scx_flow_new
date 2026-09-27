@@ -30,11 +30,11 @@ Order is waker idle, any idle, shallowest same cache peer over bound `8` when st
 
 ### Dispatch
 
-Order is own queue at `12`, one peer steal of one task, global plus overflow at `4`, then a gated pass at `6`. Overflow drains in the normal pass only when no limit exists, else the gated pass moves starved tasks with the flag check. See `src/bpf/dispatch.bpf.c`.
+Order is own queue at `12`, one peer steal of one task, global plus overflow at `4`, then a gated pass at `6`. Overflow drains in the normal pass only when no limit exists, else the gated pass moves starved tasks with the flag check. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`drain`, `gated`, `steal`, `tail`).
 
 ### Steal
 
-Steal runs only with an empty local queue. Sibling wins first, then same cache domain, then a gated move past `2ms`. Cursor and miss scans stay best effort. See `src/bpf/dispatch.bpf.c`.
+Steal runs only with an empty local queue. Sibling wins first, then same cache domain, then a gated move past `2ms`. Cursor and miss scans stay best effort. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`steal`).
 
 ### Accounting
 
@@ -58,7 +58,8 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 - Maps, helpers, ops table: `src/bpf/main.bpf.c`
 - Placement: `src/bpf/select_cpu.bpf.c`
 - Inserts: `src/bpf/enqueue.bpf.c`
-- Drains: `src/bpf/dispatch.bpf.c`
+- Drains: `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/`
+  (`drain.bpf.c`, `gated.bpf.c`, `steal.bpf.c`, `tail.bpf.c`)
 - Lifecycle: `src/bpf/lifecycle.bpf.c`
 - Hierarchy: `src/bpf/cgroup.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,

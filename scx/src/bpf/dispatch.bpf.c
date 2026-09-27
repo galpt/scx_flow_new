@@ -16,16 +16,17 @@
  * at least two, and stolen tasks pay no extra charge. See intf.h
  * for the caps and enqueue.bpf.c for the deadline choice.
  *
- * The pass splits across drain, gated, steal, and tail files with
- * one RCU section here. Each helper stays noinline with scalar
- * inputs and no duplicate walks, so the verifier stays small.
+ * The pass splits across dispatch/drain, gated, steal, and tail
+ * files with one RCU section here. Each helper stays noinline
+ * with scalar inputs and no duplicate walks, so the verifier
+ * stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#include "dispatch_drain.bpf.c"
-#include "dispatch_gated.bpf.c"
-#include "dispatch_steal.bpf.c"
-#include "dispatch_tail.bpf.c"
+#include "dispatch/drain.bpf.c"
+#include "dispatch/gated.bpf.c"
+#include "dispatch/steal.bpf.c"
+#include "dispatch/tail.bpf.c"
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
