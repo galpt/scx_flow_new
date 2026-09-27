@@ -179,6 +179,7 @@ static __always_inline struct cgroup *flow_cgrp_ancestor(
 /* Hierarchy share over depth 8 with miss default 100. */
 /* Compounds each ancestor weight by base 100, so a light */
 /* parent lowers the share. Misses use base with no trap. */
+/* Idle entries use weight one with the saved share kept. */
 /* Depth 8 covers the nearest 8 levels from the leaf, so a deeper */
 /* tree truncates the far root levels with the leaf order kept. */
 /* Each ancestor carries a reference with a paired release. */
@@ -212,6 +213,8 @@ static __always_inline u32 flow_hier_weight(
 		e = flow_cgrp(id);
 		if (!e)
 			w = (u32)FLOW_CGRP_WEIGHT_DFL;
+		else if (e->__pad0)
+			w = (u32)FLOW_WEIGHT_MIN;
 		else
 			w = flow_weight_clamp(e->weight);
 		hier = hier * (u64)w / (u64)FLOW_WEIGHT_BASE;
