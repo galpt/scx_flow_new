@@ -14,11 +14,11 @@ Every arrival steps past the later of now and last deadline, the step shrinks as
 
 ### Hierarchies
 
-Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation, moves carry deadline. See `src/bpf/cgroup.bpf.c`.
+Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. See `src/bpf/cgroup.bpf.c`.
 
 ### Bandwidth
 
-Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap, lazy refill, tightest pool binds. Throttled parks rest in overflow with no kick, one timer wakes parks. See `src/bpf/cgroup.bpf.c`.
+Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap with saturating math, lazy refill with fraction kept, tightest pool binds. Throttled parks rest in overflow with no kick, one timer wakes parks from the first live CPU. Throttled ns counts quanta at `1ms` per hit with no wall use, nr throttled plus parked count the same hits with the names kept for the wire. See `src/bpf/cgroup.bpf.c`.
 
 ### Preemption
 
@@ -77,6 +77,6 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 ## Limitations
 
 - Live means below the attach snapshot. Hotplug needs a restart.
-- Releases need a restart. State is `40B` plus `8B` plus `48B` plus `136B`.
+- Releases need a restart. State is `40B` plus `8B` plus `8B` plus `48B` plus `136B` for task, CPU, topology, hierarchy, and counters.
 - Overflow and global inserts send no kick. Fail closed, next kicking enqueue or dispatch wakes.
 - Needs kernels, `7.2` series and up.

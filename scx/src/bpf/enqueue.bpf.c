@@ -141,34 +141,43 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 	/* Hierarchy share with cache and generation validation. */
 	/* A cached id with current generation skips the depth walk. */
-	/* A miss walks depth 8 ancestors with base on miss. The task */
-	/* weight folds at use, so nice changes need no cache drop. */
+	/* A miss walks the nearest 8 ancestors with base on miss. */
+	/* The task weight folds at use, so nice changes need no drop. */
+	/* The generation compares only the low bits, so 64k bumps wrap. */
+	/* Moves clear the cache and share changes bump the generation, */
+	/* so a wrap needs 64k bumps with no move to falsely hit. */
+	/* The hierarchy carries a reference with a paired release. */
 	cgrp = flow_task_cgrp(p);
 	cgid = flow_cgrp_id(cgrp);
 	if (tctx->cached && tctx->cgid == cgid &&
-	    tctx->generation == (u16)flow_cgrp_gen) {
+	    tctx->generation == (u16)flow_load_gen()) {
 		hier = tctx->eweight;
 	} else {
 		hier = flow_hier_weight(cgrp);
 		tctx->cgid = cgid;
 		tctx->eweight = hier;
-		tctx->generation = (u16)flow_cgrp_gen;
+		tctx->generation = (u16)flow_load_gen();
 		tctx->cached = true;
 	}
 	/* Throttled hierarchies park in overflow with no kick. */
 	/* Lazy refill runs on the walk, and the tightest pool binds. */
 	/* Unlimited walks pass at once with no pool use. Fail closed, */
 	/* the single timer wakes parks with mask wins on drain. */
-	if (flow_bw_limited && flow_bw_throttled(cgrp, now)) {
+	/* Throttled ns counts quanta at 1ms per hit with no wall use, */
+	/* and nr throttled plus parked count the same hits. The names */
+	/* stay for the wire with the quantum semantic documented. */
+	if (flow_load_limited() && flow_bw_throttled(cgrp, now)) {
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		__sync_fetch_and_add(&flow_stats.throttled_ns,
 		    (u64)FLOW_QUANTUM_NS);
 		__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
 		__sync_fetch_and_add(&flow_stats.parked, 1);
-		flow_bw_pending = 1;
+		__sync_lock_test_and_set(&flow_bw_pending, 1);
+		flow_cgrp_put(cgrp);
 		return;
 	}
+	flow_cgrp_put(cgrp);
 	/* One step past the later of now and the last deadline. */
 	/* The effective weight folds task plus hierarchy, so a long */
 	/* sleep earns no credit and a back to back arrival queues */

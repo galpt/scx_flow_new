@@ -29,7 +29,7 @@ need rsync
 need git
 
 # Always start from a fresh workspace so no run reuses
-# a stale tree. Guard the remove against empty or root.
+# an existing tree. Guard the remove against empty or root.
 if [ -z "${WS}" ] || [ "${WS}" = "/" ]; then
     echo "refusing to clean an empty or root path" >&2
     exit 1

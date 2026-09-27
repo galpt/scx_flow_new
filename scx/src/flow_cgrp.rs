@@ -16,9 +16,13 @@ pub const CGRP_WEIGHT_DFL: u32 = 100;
 /// Least period in microseconds at 1ms. Short periods fail closed here.
 pub const BW_PERIOD_MIN_US: u64 = 1000;
 /// Single timer interval in nanos at 10ms. Wakes parks with no scan.
+/// Test only by design. The BPF header owns the live value, and Rust
+/// never arms the timer, so this const only checks the header in tests.
 #[cfg(test)]
 pub const BW_TIMER_NS: u64 = 10_000_000;
 /// Unlimited quota value mapped to zero for no cap use.
+/// Test only by design. The BPF header owns the live value, and Rust
+/// never reads kernel quotas, so this const only checks the norm in tests.
 #[cfg(test)]
 pub const RUNTIME_INF: u64 = u64::MAX;
 
@@ -45,7 +49,10 @@ pub fn eff_weight(task_w: u32, hier_w: u32) -> u32 {
 
 /// Hierarchy share over ancestors with miss default 100.
 /// Compounds each weight by base 100, so a light parent lowers
-/// the share. Caps at range with no trap.
+/// the share. Caps at range with no trap. Takes the nearest 8
+/// entries from the leaf, so a deeper chain truncates the far
+/// root levels with the leaf order kept. Order matters only for
+/// truncation, the product itself commutes.
 #[cfg(test)]
 pub fn hier_weight(weights: &[u32]) -> u32 {
     let mut hier = CGRP_WEIGHT_DFL as u64;
@@ -98,7 +105,10 @@ pub fn bw_max_ns(quota_us: u64, burst_us: u64) -> u64 {
 /// Cached share entry for one task.
 /// Cgid holds the last hierarchy id, eweight holds the share,
 /// cached marks a valid entry, and generation holds the low bits
-/// of the global generation for validation.
+/// of the global generation for validation. The low bits wrap past
+/// 64k bumps, so a wrap needs 64k bumps with no move to falsely hit.
+/// Moves clear the cache and share changes bump the generation, so
+/// the window stays huge with no false hit in practice.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskCache {
@@ -140,7 +150,9 @@ pub struct PoolState {
 
 /// Lazy refill of one pool with burst cap.
 /// Unlimited pools stay zero with no time use. Elapsed time
-/// refills by quota over period, capped at quota plus burst.
+/// refills by quota over period with saturating math, capped at
+/// quota plus burst. The stamp advances only when the refill adds,
+/// so tiny elapsed keeps its fraction for the next pass.
 #[cfg(test)]
 pub fn pool_refill(pool: &mut PoolState, now: u64) {
     if bw_unlimited(pool.quota_us) {
@@ -153,7 +165,6 @@ pub fn pool_refill(pool: &mut PoolState, now: u64) {
     if elapsed == 0 {
         return;
     }
-    pool.updated_at = now;
     if pool.period_us == 0 {
         return;
     }
@@ -161,6 +172,7 @@ pub fn pool_refill(pool: &mut PoolState, now: u64) {
     if add == 0 {
         return;
     }
+    pool.updated_at = now;
     let max = bw_max_ns(pool.quota_us, pool.burst_us);
     if max == 0 {
         return;
@@ -168,7 +180,7 @@ pub fn pool_refill(pool: &mut PoolState, now: u64) {
     if pool.pool_ns >= max {
         return;
     }
-    pool.pool_ns = (pool.pool_ns + add).min(max);
+    pool.pool_ns = (pool.pool_ns.saturating_add(add)).min(max);
 }
 
 /// True when one pool walk is throttled with lazy refill.
@@ -223,6 +235,14 @@ mod tests {
             CGRP_DEPTH_MAX as u64,
             crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64
         );
+        assert_eq!(
+            BW_TIMER_NS,
+            crate::bpf_intf::flow_consts_FLOW_BW_TIMER_NS as u64
+        );
+        assert_eq!(
+            BW_PERIOD_MIN_US,
+            crate::bpf_intf::flow_consts_FLOW_BW_PERIOD_MIN_US as u64
+        );
     }
 
     #[test]
@@ -244,6 +264,54 @@ mod tests {
         assert_eq!(hier_weight(&[50, 50]), 25);
         let deep = vec![200u32; 16];
         assert_eq!(hier_weight(&deep), hier_weight(&[200u32; 8]));
+    }
+
+    #[test]
+    fn hier_keeps_nearest_eight_in_order() {
+        let leaf_first = vec![50u32, 100, 100, 100, 100, 100, 100, 100, 100];
+        let root_light = vec![100u32, 100, 100, 100, 100, 100, 100, 100, 50];
+        assert_eq!(hier_weight(&leaf_first), 50);
+        assert_eq!(hier_weight(&root_light), 100);
+        assert_ne!(hier_weight(&leaf_first), hier_weight(&root_light));
+        let nine = vec![200u32; 9];
+        assert_eq!(hier_weight(&nine), hier_weight(&[200u32; 8]));
+    }
+
+    #[test]
+    fn bw_max_saturates_huge_inputs() {
+        assert_eq!(bw_max_ns(u64::MAX - 1, 10), u64::MAX);
+        assert_eq!(bw_max_ns(u64::MAX / 1000 + 10, 0), u64::MAX);
+        assert_eq!(bw_max_ns(1000, 500), 1_500_000);
+    }
+
+    #[test]
+    fn refill_keeps_fraction_for_next_pass() {
+        let mut p = PoolState {
+            quota_us: 1000,
+            burst_us: 0,
+            period_us: 1_000_000,
+            pool_ns: 0,
+            updated_at: 0,
+        };
+        pool_refill(&mut p, 100);
+        assert_eq!(p.pool_ns, 0);
+        assert_eq!(p.updated_at, 0);
+        pool_refill(&mut p, 1000);
+        assert_eq!(p.pool_ns, 1);
+        assert_eq!(p.updated_at, 1000);
+    }
+
+    #[test]
+    fn gen_wrap_needs_huge_window_without_move() {
+        let c = TaskCache {
+            cgid: 7,
+            eweight: 100,
+            cached: true,
+            generation: 0,
+        };
+        assert!(cache_valid(&c, 7, 65536));
+        assert!(!cache_valid(&c, 7, 65537));
+        assert!(!cache_valid(&c, 8, 65536));
     }
 
     #[test]

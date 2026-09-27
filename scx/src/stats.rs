@@ -66,12 +66,18 @@ pub struct Metrics {
     #[stat(desc = "Moves from the kernel global queue")]
     #[serde(default)]
     pub global_moves: u64,
-    #[stat(desc = "Throttled time in nanoseconds")]
+    /// Counts quanta at 1ms per throttle hit with no wall use.
+    /// Keeps the wire name with the quantum semantic.
+    #[stat(desc = "Throttled quanta in nanoseconds at 1ms per hit")]
     #[serde(default)]
     pub throttled_ns: u64,
+    /// Counts throttle hits, same hits as parked below.
+    /// Keeps the wire name with no split.
     #[stat(desc = "Throttle hits on limited hierarchies")]
     #[serde(default)]
     pub nr_throttled: u64,
+    /// Counts overflow parks from throttling, same hits as above.
+    /// Keeps the wire name with no split.
     #[stat(desc = "Overflow parks from throttling")]
     #[serde(default)]
     pub parked: u64,

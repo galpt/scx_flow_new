@@ -72,8 +72,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* Order already carries weight through the deadline step. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	/* Pools drain by raw time with the tightest pool binding. */
-	/* Unlimited hierarchies pass with no charge. */
-	flow_bw_consume(flow_task_cgrp(p), delta);
+	/* Unlimited hierarchies pass with no charge. The lookup */
+	/* carries a reference with a paired release, and a null */
+	/* lookup skips the charge with no trap. */
+	{
+		struct cgroup *cgrp = flow_task_cgrp(p);
+		if (cgrp) {
+			flow_bw_consume(cgrp, delta);
+			flow_cgrp_put(cgrp);
+		}
+	}
 	/* Zero pairs the gauge, so disable plus exit stay once. */
 	/* Owner only clears, so a migrated stop never clears a new owner. */
 	tctx->run_at = 0;

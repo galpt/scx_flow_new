@@ -121,8 +121,9 @@ struct flow_cgrp_ctx {
 /* Scheduler counters with 17 live fields. */
 /* enq_no_tctx counts missing state plus homeless with no route, */
 /* the name stays for the wire with no split. Throttled ns counts */
-/* the parked time from bandwidth, nr throttled counts the hits, */
-/* parked counts the overflow parks from bandwidth, and bw moves */
+/* quanta at 1ms per hit with no wall use, nr throttled plus parked */
+/* count the same hits with the names kept for the wire. Parked */
+/* counts the overflow parks from bandwidth, and bw moves */
 /* counts the hierarchy moves. */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -245,14 +246,23 @@ static __always_inline bool flow_bw_unlimited(u64 quota_us)
 }
 /* Pool cap in nanos from quota plus burst with burst cap. */
 /* Unlimited pools hold zero with no cap use, limited pools cap */
-/* at quota plus burst converted to nanos. */
+/* at quota plus burst converted to nanos with saturating math, */
+/* so huge inputs clamp instead of wrapping to a small cap. */
+/* Mirrors the Rust saturating helper with no wrap. */
 static __always_inline u64 flow_bw_max_ns(u64 quota_us,
 	u64 burst_us)
 {
 	u64 total;
 	if (flow_bw_unlimited(quota_us))
 		return 0;
+	if (quota_us > 18446744073709551ULL ||
+	    burst_us > 18446744073709551ULL)
+		return (u64)~0ULL;
 	total = quota_us + burst_us;
+	if (total < quota_us)
+		return (u64)~0ULL;
+	if (total > 18446744073709551ULL)
+		return (u64)~0ULL;
 	return total * 1000ULL;
 }
 /* Deadline queue id of one CPU from base plus id. */

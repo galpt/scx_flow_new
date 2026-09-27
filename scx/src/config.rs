@@ -267,5 +267,13 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64,
             crate::flow_cgrp::CGRP_DEPTH_MAX as u64
         );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_BW_TIMER_NS as u64,
+            crate::flow_cgrp::BW_TIMER_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_BW_PERIOD_MIN_US as u64,
+            crate::flow_cgrp::BW_PERIOD_MIN_US
+        );
     }
 }

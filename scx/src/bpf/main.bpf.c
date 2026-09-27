@@ -102,24 +102,45 @@ static struct flow_cgrp_ctx *flow_cgrp(u64 cgid)
 {
 	return bpf_map_lookup_elem(&cgrp_stor, &cgid);
 }
-/* Borrowed hierarchy of one task with no reference. */
-/* Reads the task group directly, so no release runs here. */
-/* A missing group means the root with no hierarchy use. */
+/* Acquired hierarchy of one task with paired release. */
+/* Uses the scheduler view with a reference, so the caller releases */
+/* with release when non null. A null return means the root with */
+/* miss defaults and no hierarchy use. */
 static __always_inline struct cgroup *flow_task_cgrp(
 	struct task_struct *p)
 {
-	struct task_group *tg;
-	struct cgroup *cgrp;
-	if (!bpf_core_field_exists(struct task_struct, sched_task_group))
-		return NULL;
-	tg = BPF_CORE_READ(p, sched_task_group);
-	if (!tg)
-		return NULL;
-	cgrp = BPF_CORE_READ(tg, css.cgroup);
-	return cgrp;
+	return scx_bpf_task_cgroup(p);
+}
+/* Release one acquired hierarchy with null tolerance. */
+/* A null pointer needs no release, so miss paths stay cheap. */
+static __always_inline void flow_cgrp_put(
+	struct cgroup *cgrp)
+{
+	if (cgrp)
+		bpf_cgroup_release(cgrp);
+}
+/* Atomic load of the hierarchy generation to match the bumps. */
+/* Pairs with the fetch and add stores with no torn read. */
+static __always_inline u64 flow_load_gen(void)
+{
+	return __sync_fetch_and_add(&flow_cgrp_gen, 0);
+}
+/* Atomic load of the limited count to match the fixups. */
+/* Pairs with the fetch and add stores with no torn read. */
+static __always_inline u64 flow_load_limited(void)
+{
+	return __sync_fetch_and_add(&flow_bw_limited, 0);
+}
+/* Atomic load of the pending flag to match the enqueue store. */
+/* Pairs with the fetch and add stores with no torn read. */
+static __always_inline u64 flow_load_pending(void)
+{
+	return __sync_fetch_and_add(&flow_bw_pending, 0);
 }
 /* Id of one hierarchy with root at one on missing. */
-/* A missing pointer means the root, so the id stays one. */
+/* Runs on an acquired or ops trusted pointer with a held view, */
+/* so the node read stays valid. A missing pointer means the root, */
+/* so the id stays one. */
 static __always_inline u64 flow_cgrp_id(
 	struct cgroup *cgrp)
 {
@@ -136,6 +157,8 @@ static __always_inline u64 flow_cgrp_id(
 	return id;
 }
 /* Level of one hierarchy with root at zero on missing. */
+/* Runs on an acquired or ops trusted pointer with a held view. */
+/* The level never changes after creation, so the read stays valid. */
 static __always_inline int flow_cgrp_level(
 	struct cgroup *cgrp)
 {
@@ -143,22 +166,22 @@ static __always_inline int flow_cgrp_level(
 		return 0;
 	return BPF_CORE_READ(cgrp, level);
 }
-/* Ancestor at one level with no reference and no lock. */
+/* Ancestor at one level with a reference and paired release. */
+/* Uses the tryget lookup, so the caller releases when non null. */
 /* A bad level fails closed to null with no trap. */
 static __always_inline struct cgroup *flow_cgrp_ancestor(
 	struct cgroup *cgrp, int level)
 {
-	int cur;
 	if (!cgrp)
 		return NULL;
-	cur = BPF_CORE_READ(cgrp, level);
-	if (level < 0 || level > cur)
-		return NULL;
-	return BPF_CORE_READ(cgrp, ancestors[level]);
+	return bpf_cgroup_ancestor(cgrp, level);
 }
 /* Hierarchy share over depth 8 with miss default 100. */
 /* Compounds each ancestor weight by base 100, so a light */
 /* parent lowers the share. Misses use base with no trap. */
+/* Depth 8 covers the nearest 8 levels from the leaf, so a deeper */
+/* tree truncates the far root levels with the leaf order kept. */
+/* Each ancestor carries a reference with a paired release. */
 static __always_inline u32 flow_hier_weight(
 	struct cgroup *cgrp)
 {
@@ -183,6 +206,7 @@ static __always_inline u32 flow_hier_weight(
 		if (!anc)
 			continue;
 		id = flow_cgrp_id(anc);
+		flow_cgrp_put(anc);
 		if (!id)
 			continue;
 		e = flow_cgrp(id);
@@ -202,13 +226,19 @@ static __always_inline u32 flow_hier_weight(
 }
 /* Lazy refill of one pool with burst cap and floor use. */
 /* Unlimited pools stay zero with no time use. Elapsed time */
-/* refills by quota over period, capped at quota plus burst. */
+/* refills by quota over period with saturating math, capped at */
+/* quota plus burst. Huge inputs clamp instead of wrapping, so the */
+/* pool never collapses to a small cap. The stamp advances only when */
+/* the refill adds, so tiny elapsed keeps its fraction for the next */
+/* pass. */
 static __always_inline void flow_bw_refill(
 	struct flow_cgrp_ctx *e, u64 now)
 {
 	u64 elapsed;
+	u64 prod;
 	u64 add;
 	u64 max;
+	u64 sum;
 	if (!e)
 		return;
 	if (flow_bw_unlimited(e->quota_us))
@@ -218,25 +248,33 @@ static __always_inline void flow_bw_refill(
 	elapsed = now - e->updated_at;
 	if (!elapsed)
 		return;
-	e->updated_at = now;
 	if (!e->period_us)
 		return;
-	add = elapsed * e->quota_us / e->period_us;
+	if (elapsed > 4294967295ULL || e->quota_us > 4294967295ULL)
+		prod = (u64)~0ULL;
+	else
+		prod = elapsed * e->quota_us;
+	add = prod / e->period_us;
 	if (!add)
 		return;
+	e->updated_at = now;
 	max = flow_bw_max_ns(e->quota_us, e->burst_us);
 	if (!max)
 		return;
 	if (e->pool_ns >= max)
 		return;
-	e->pool_ns += add;
+	sum = e->pool_ns + add;
+	if (sum < e->pool_ns)
+		sum = (u64)~0ULL;
+	e->pool_ns = sum;
 	if (e->pool_ns > max)
 		e->pool_ns = max;
 }
 /* True when one hierarchy is throttled with lazy refill. */
-/* Walks depth 8 ancestors with refill, and the tightest pool */
+/* Walks the nearest 8 ancestors with refill, and the tightest pool */
 /* binds, so any drained pool parks the task. Unlimited walks */
-/* pass at once with no pool use. */
+/* pass at once with no pool use. A null hierarchy passes at once. */
+/* Each ancestor carries a reference with a paired release. */
 static __always_inline bool flow_bw_throttled(
 	struct cgroup *cgrp, u64 now)
 {
@@ -244,7 +282,7 @@ static __always_inline bool flow_bw_throttled(
 	int i;
 	if (!cgrp)
 		return false;
-	if (!flow_bw_limited)
+	if (!flow_load_limited())
 		return false;
 	level = flow_cgrp_level(cgrp);
 	bpf_for(i, 0, FLOW_CGRP_DEPTH_MAX) {
@@ -261,6 +299,7 @@ static __always_inline bool flow_bw_throttled(
 		if (!anc)
 			continue;
 		id = flow_cgrp_id(anc);
+		flow_cgrp_put(anc);
 		if (!id)
 			continue;
 		e = flow_cgrp(id);
@@ -276,9 +315,10 @@ static __always_inline bool flow_bw_throttled(
 	}
 	return false;
 }
-/* Charge one runtime delta to depth 8 ancestors with floor. */
+/* Charge one runtime delta to the nearest 8 ancestors with floor. */
 /* Limited pools drain saturating to zero with no wrap, and */
-/* unlimited pools pass with no charge. */
+/* unlimited pools pass with no charge. A null hierarchy passes. */
+/* Each ancestor carries a reference with a paired release. */
 static __always_inline void flow_bw_consume(
 	struct cgroup *cgrp, u64 delta)
 {
@@ -288,7 +328,7 @@ static __always_inline void flow_bw_consume(
 		return;
 	if (!delta)
 		return;
-	if (!flow_bw_limited)
+	if (!flow_load_limited())
 		return;
 	level = flow_cgrp_level(cgrp);
 	bpf_for(i, 0, FLOW_CGRP_DEPTH_MAX) {
@@ -305,6 +345,7 @@ static __always_inline void flow_bw_consume(
 		if (!anc)
 			continue;
 		id = flow_cgrp_id(anc);
+		flow_cgrp_put(anc);
 		if (!id)
 			continue;
 		e = flow_cgrp(id);
@@ -400,12 +441,15 @@ static __always_inline void flow_clear_running_if_owner(
 /* Disable and exit funnel here only for a running task that */
 /* stopping never saw. The count flag pairs with stopping through */
 /* the run start, so a release never double charges. */
+/* The hierarchy lookup carries a reference with a paired release, */
+/* and a null lookup skips the pool charge with no trap. */
 static __always_inline void flow_charge_leftover(s32 cpu,
 	struct task_struct *p, struct flow_task_ctx *tctx, u32 pid)
 {
 	u64 start;
 	u64 now;
 	u64 delta;
+	struct cgroup *cgrp;
 	if (!tctx)
 		return;
 	start = tctx->run_at;
@@ -429,24 +473,45 @@ static __always_inline void flow_charge_leftover(s32 cpu,
 	tctx->run_at = 0;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_on_cpu_dec();
-	flow_bw_consume(flow_task_cgrp(p), delta);
+	cgrp = flow_task_cgrp(p);
+	if (cgrp) {
+		flow_bw_consume(cgrp, delta);
+		flow_cgrp_put(cgrp);
+	}
 }
 /* Single kicking timer for throttled parks with lazy refill. */
-/* Wakes one live CPU when parks wait, so overflow drains soon. */
-/* Refill stays lazy on the enqueue path with no pool scan here. */
+/* Scans for the first live CPU instead of a fixed id, so an offlined */
+/* boot CPU never parks the kick. Kicks only when a park waits, so */
+/* idle ticks stay quiet with no storm. A cleared limited count still */
+/* kicks once, so parks from a removed limit drain soon. */
+/* Refill stays lazy on the enqueue path with no pool scan here, and */
+/* the 10ms tick always covers the 1ms floor, so a kick finds refill. */
 static int flow_bw_timer_cb(void *map, int *key,
 	struct bpf_timer *timer)
 {
-	u32 cpu = 0;
+	u32 cpu;
+	u32 found = 0xffffffffU;
+	u64 was;
 	(void)map;
 	(void)key;
-	if (flow_bw_pending) {
-		flow_bw_pending = 0;
+	if (!flow_load_pending())
+		goto arm;
+	was = __sync_lock_test_and_set(&flow_bw_pending, 0);
+	if (!was)
+		goto arm;
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
+		if ((u64)cpu >= nr_cpu_ids)
+			break;
 		if (flow_cpu_live(cpu)) {
-			scx_bpf_kick_cpu((s32)cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			found = cpu;
+			break;
 		}
 	}
+	if (found != 0xffffffffU) {
+		scx_bpf_kick_cpu((s32)found, SCX_KICK_IDLE);
+		__sync_fetch_and_add(&flow_stats.kicks, 1);
+	}
+arm:
 	bpf_timer_start(timer, (u64)FLOW_BW_TIMER_NS, 0);
 	return 0;
 }

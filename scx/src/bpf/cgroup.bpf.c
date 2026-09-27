@@ -37,8 +37,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	period = flow_bw_period_floor(args->bw_period_us);
 	quota = flow_bw_quota_norm(args->bw_quota_us);
 	burst = args->bw_burst_us;
-	if (quota == (u64)FLOW_RUNTIME_INF)
-		quota = 0;
 	max = flow_bw_max_ns(quota, burst);
 	now = flow_now();
 	e.weight = flow_weight_clamp(args->weight);
@@ -174,8 +172,6 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 		return;
 	period = flow_bw_period_floor(period_us);
 	quota = flow_bw_quota_norm(quota_us);
-	if (quota == (u64)FLOW_RUNTIME_INF)
-		quota = 0;
 	max = flow_bw_max_ns(quota, burst_us);
 	is_limited = !flow_bw_unlimited(quota);
 	e = flow_cgrp(id);
