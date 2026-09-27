@@ -4,14 +4,21 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the busy kick rate and class rule helpers shared by tests and docs.
-//!
-//! The BPF busy path gates on the rate window before resolving the
-//! occupant, then serves class plus slice shorten from one trusted
-//! lookup under one RCU pass.
+//! The BPF busy path resolves the occupant first under one RCU pass,
+//! then serves class plus slice shorten with the 2ms window gating batch
+//! pairs only and a 500us prompt window on a separate stamp gating
+//! interactive over batch with no shared pollute. Rust mirrors are read
+//! only predicates with no stamp write. BPF owns the stamps with prompt
+//! kicks stamping the prompt slot only and batch kicks stamping the shared
+//! slot. See enqueue.bpf.c for the kick order.
 
 /// Busy kick window in nanos at 2ms.
 #[cfg(test)]
 pub const RATE_WINDOW_NS: u64 = 2_000_000;
+/// Prompt kick window in nanos at 500us.
+/// Reuses the micro quantum, so interactive over batch stays prompt with no storm.
+#[cfg(test)]
+pub const PROMPT_WINDOW_NS: u64 = 500_000;
 /// Preempt floor in nanos at 100us.
 #[cfg(test)]
 pub const PREEMPT_FLOOR_NS: u64 = 100_000;
@@ -33,6 +40,35 @@ pub fn rate_ok(now: u64, last: u64) -> bool {
     now.wrapping_sub(last) >= RATE_WINDOW_NS
 }
 
+/// True when one prompt kick may run.
+/// Zero last always wins with wrap, so the first prompt never waits.
+/// Later prompts need one full 500us since the last prompt win with no
+/// shared stamp, so batch pairs keep their own window.
+#[cfg(test)]
+pub fn prompt_ok(now: u64, last: u64) -> bool {
+    if last == 0 {
+        return true;
+    }
+    now.wrapping_sub(last) >= PROMPT_WINDOW_NS
+}
+
+/// True when one kick choice needs the 2ms window.
+/// Only batch pairs gate on the shared window. Interactive over batch uses
+/// the separate 500us prompt window, and all other pairs never kick with no
+/// window consult, so kick choice stays the authority.
+#[cfg(test)]
+pub fn kick_needs_gate(new_cls: u8, occ_cls: u8) -> bool {
+    new_cls == CLS_BATCH && occ_cls == CLS_BATCH
+}
+
+/// Slice left for one occupant when the kick is rate limited.
+/// Holds the 100us floor, so a hot window still shortens the slice
+/// with no kick storm.
+#[cfg(test)]
+pub fn limited_shorten_ns() -> u64 {
+    PREEMPT_FLOOR_NS
+}
+
 /// Class of one task from policy and duty.
 /// Idle and batch policies always rest in batch. Other non normal policies
 /// stay out of the fast lane with batch class. Normal tasks split at half
@@ -52,10 +88,11 @@ pub fn class_of(policy: i32, duty: u8) -> u8 {
 }
 
 /// Kick choice for one busy arrival.
-/// Interactive over batch preempts prompt at the 100us floor. Interactive
-/// pairs yield at the micro quantum end with no kick. Batch over
-/// interactive never preempts. Batch over batch preempts only past slice
-/// exhaust with a deadline gap over one micro quantum.
+/// Interactive over batch preempts prompt at the 100us floor under a 500us
+/// prompt window with floor only and no kick when hot. Interactive pairs
+/// yield at the micro quantum end with no kick. Batch over interactive never
+/// preempts. Batch over batch preempts only past slice exhaust with a
+/// deadline gap over one micro quantum under the 2ms window.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kick {
@@ -134,5 +171,32 @@ mod tests {
         assert!(!rate_ok(1_000_000, 500_000));
         assert!(rate_ok(3_000_000, 500_000));
         assert_eq!(PREEMPT_FLOOR_NS, 100_000);
+    }
+
+    #[test]
+    fn only_batch_pair_gates_on_shared_window() {
+        assert!(!kick_needs_gate(CLS_INTERACTIVE, CLS_BATCH));
+        assert!(kick_needs_gate(CLS_BATCH, CLS_BATCH));
+        assert!(!kick_needs_gate(CLS_INTERACTIVE, CLS_INTERACTIVE));
+        assert!(!kick_needs_gate(CLS_BATCH, CLS_INTERACTIVE));
+    }
+
+    #[test]
+    fn prompt_window_holds_first_and_window() {
+        assert!(prompt_ok(1_000_000, 0));
+        assert!(!prompt_ok(1_000_000, 800_000));
+        assert!(prompt_ok(1_500_000, 800_000));
+        assert_eq!(PROMPT_WINDOW_NS, 500_000);
+        assert_eq!(PROMPT_WINDOW_NS, crate::flow_slice::MICRO_QUANTUM_NS);
+    }
+
+    #[test]
+    fn limited_window_still_shortens_to_floor() {
+        assert_eq!(limited_shorten_ns(), 100_000);
+        assert_eq!(limited_shorten_ns(), PREEMPT_FLOOR_NS);
+        assert_eq!(
+            kick_choice(CLS_INTERACTIVE, CLS_BATCH, false, false),
+            Kick::PromptFloor
+        );
     }
 }

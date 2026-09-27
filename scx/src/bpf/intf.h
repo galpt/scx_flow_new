@@ -173,6 +173,19 @@ static __always_inline u64 flow_min_max(u64 old,
 		return next;
 	return old;
 }
+/* Guarded idle minimum refresh with wrap safety. */
+/* Keeps the old mark when idle plus empty miss or when the newcomer */
+/* trails, so an empty CPU keeps order with no decay and no backward */
+/* step. Only a heavy arrival past the mark moves it forward. */
+/* Stopping advances through the inner max with no guard while enqueue */
+/* guards idle plus empty through this helper with the same max. */
+static __always_inline u64 flow_min_idle_refresh(u64 old,
+	u64 cand, bool idle_empty)
+{
+	if (!idle_empty)
+		return old;
+	return flow_min_max(old, cand);
+}
 /* Clamped weight in 1 to 10000 with base 100. */
 /* Zero or oversize weights fail closed to the nearer bound. */
 static __always_inline u32 flow_weight_clamp(u32 w)

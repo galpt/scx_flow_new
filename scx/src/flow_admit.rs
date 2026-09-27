@@ -4,6 +4,8 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the duty average, fast lane, and probation helpers.
+//! The BPF admit path lives in enqueue.bpf.c with enable in
+//! lifecycle.bpf.c, and this file mirrors the lane predicates.
 
 /// Duty average shift at alpha 1 over 8.
 pub const DUTY_SHIFT: u32 = 3;
@@ -65,24 +67,31 @@ pub fn prob_make(count: u8, vol: bool) -> u8 {
 }
 
 /// True when one arrival may use the fast lane.
-/// Needs a normal policy past probation with low duty, a voluntary
-/// wake, or a preempt flagged arrival under half duty. Mirrors the
-/// BPF lane check with no probe and no divide.
+/// Needs a normal policy with low duty, a wakeup with the sleep flag, or a
+/// preempt flagged arrival under half duty past probation. Kernel urgency
+/// with low duty bypasses probation alone for normal tasks only with fast
+/// room else deadline. Mirrors the BPF lane check with no probe and no
+/// divide. Wakeup is the enqueue flag and sleep is the probation flag, so
+/// both must hold for the voluntary path with no combined shortcut.
 #[cfg(test)]
 pub fn fast_eligible(
     policy_normal: bool,
     prob: u8,
     duty: u8,
-    wakeup_vol: bool,
+    wakeup: bool,
     preempt: bool,
+    urgent: bool,
 ) -> bool {
     if !policy_normal {
         return false;
     }
+    if urgent && duty < DUTY_FAST {
+        return true;
+    }
     if prob_count(prob) != 0 {
         return false;
     }
-    duty < DUTY_FAST || wakeup_vol || (preempt && duty < DUTY_BATCH)
+    duty < DUTY_FAST || (wakeup && prob_vol(prob)) || (preempt && duty < DUTY_BATCH)
 }
 
 /// Next probation byte after one sleep wake arrival.
@@ -127,31 +136,81 @@ mod tests {
     #[test]
     fn probation_needs_two_low_wakes() {
         let fresh = prob_make(PROB_CYCLES, true);
-        assert!(!fast_eligible(true, fresh, 0, true, false));
+        assert!(!fast_eligible(true, fresh, 0, true, false, false));
         let one = prob_tick(fresh, true, 0);
         assert_eq!(prob_count(one), 1);
         let done = prob_tick(one, true, 0);
-        assert!(fast_eligible(true, done, 0, true, false));
+        assert!(fast_eligible(true, done, 0, true, false, false));
     }
 
     #[test]
     fn high_duty_blocks_without_voluntary_wake() {
         let done = prob_make(0, false);
-        assert!(!fast_eligible(true, done, 200, false, false));
-        assert!(fast_eligible(true, done, 200, true, false));
-        assert!(!fast_eligible(false, done, 0, true, false));
+        assert!(!fast_eligible(true, done, 200, false, false, false));
+        assert!(!fast_eligible(true, done, 200, true, false, false));
+        let sleepy = prob_make(0, true);
+        assert!(fast_eligible(true, sleepy, 200, true, false, false));
+        assert!(!fast_eligible(true, sleepy, 200, false, false, false));
+        assert!(!fast_eligible(false, sleepy, 0, true, false, false));
+    }
+
+    #[test]
+    fn voluntary_needs_wakeup_and_sleep_flag() {
+        let sleepy = prob_make(0, true);
+        let awake = prob_make(0, false);
+        assert!(fast_eligible(true, sleepy, 200, true, false, false));
+        assert!(!fast_eligible(true, awake, 200, true, false, false));
+        assert!(!fast_eligible(true, sleepy, 200, false, false, false));
+        assert!(!fast_eligible(true, awake, 200, false, false, false));
+        assert!(fast_eligible(true, awake, 0, false, false, false));
+        assert!(fast_eligible(
+            true,
+            awake,
+            DUTY_FAST - 1,
+            false,
+            false,
+            false
+        ));
+        assert!(!fast_eligible(true, awake, DUTY_FAST, false, false, false));
     }
 
     #[test]
     fn preempt_lane_opens_under_half_duty() {
         let done = prob_make(0, false);
-        assert!(fast_eligible(true, done, 100, false, true));
-        assert!(fast_eligible(true, done, DUTY_BATCH - 1, false, true));
-        assert!(!fast_eligible(true, done, 100, false, false));
-        assert!(!fast_eligible(true, done, DUTY_BATCH, false, true));
-        assert!(!fast_eligible(true, done, 200, false, true));
-        assert!(!fast_eligible(false, done, 0, false, true));
+        assert!(fast_eligible(true, done, 100, false, true, false));
+        assert!(fast_eligible(
+            true,
+            done,
+            DUTY_BATCH - 1,
+            false,
+            true,
+            false
+        ));
+        assert!(!fast_eligible(true, done, 100, false, false, false));
+        assert!(!fast_eligible(true, done, DUTY_BATCH, false, true, false));
+        assert!(!fast_eligible(true, done, 200, false, true, false));
+        assert!(!fast_eligible(false, done, 0, false, true, false));
         let fresh = prob_make(PROB_CYCLES, true);
-        assert!(!fast_eligible(true, fresh, 0, false, true));
+        assert!(!fast_eligible(true, fresh, 0, false, true, false));
+    }
+
+    #[test]
+    fn urgent_bypass_opens_probation_under_fast_duty() {
+        let fresh = prob_make(PROB_CYCLES, true);
+        assert!(fast_eligible(true, fresh, 0, false, false, true));
+        assert!(fast_eligible(
+            true,
+            fresh,
+            DUTY_FAST - 1,
+            false,
+            false,
+            true
+        ));
+        assert!(!fast_eligible(true, fresh, DUTY_FAST, false, false, true));
+        assert!(!fast_eligible(true, fresh, 200, false, false, true));
+        assert!(!fast_eligible(false, fresh, 0, false, false, true));
+        let done = prob_make(0, false);
+        assert!(fast_eligible(true, done, 0, false, false, true));
+        assert!(!fast_eligible(true, done, 200, false, false, true));
     }
 }

@@ -5,18 +5,21 @@
  * Each pass drains in fixed order. The own fast FIFO moves first with a
  * depth of four, then the own deadline queue with twelve, then one peer
  * steal, then the kernel global plus the shared overflow tail, and last
- * a gated starvation pass over overflow. Steal never visits a peer fast
- * queue, so sleepy tasks stay local. The SMT sibling wins first, then
- * the same cache domain, then a gated cross domain move of a task that
- * waited past 1.5ms. Stolen tasks pay a weight scaled 500us penalty in
- * virtual time with no knob to turn it off. See intf.h for the caps and
- * enqueue.bpf.c for the matching lane choice.
+ * a gated starvation pass over overflow. One pass moves at most 21 under
+ * budget 32 with no raise, and empty trips pay one read with no scan.
+ * Steal never visits a peer fast queue, so sleepy tasks stay local. The
+ * SMT sibling wins first, then the same cache domain, then a gated cross
+ * domain move of a task that waited past 1.5ms. Stolen tasks pay a weight
+ * scaled 500us penalty in virtual time with no knob to turn it off. See
+ * intf.h for the caps and enqueue.bpf.c for the matching lane choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Shared drain with DSQ and budget only. */
 /* Moves mask allowed tasks to local with a miss cap at 4. */
 /* One bad head never blocks later work with no full scan. */
+/* Plain move keeps LOCAL_ON order with no vtime write, since the move */
+/* with vtime stays for user to user DSQ order only. */
 static __noinline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base, bool penalty)
 {
