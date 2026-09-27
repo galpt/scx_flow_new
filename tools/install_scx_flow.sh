@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="4.4.1"
+VER="4.4.2"
 # Pinned upstream ref, same as repo CI.
 SCX_REF="6752d59a4297d8918e8fd4d7237b50e2fceb1d14"
 UPSTREAM="https://github.com/sched-ext/scx"
@@ -29,7 +29,7 @@ need rsync
 need git
 
 # Always start from a fresh workspace so no run reuses
-# a stale tree. Guard the remove against empty or root.
+# an existing tree. Guard the remove against empty or root.
 if [ -z "${WS}" ] || [ "${WS}" = "/" ]; then
     echo "refusing to clean an empty or root path" >&2
     exit 1

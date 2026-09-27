@@ -3,9 +3,10 @@
  * Task lifecycle ops.
  *
  * Running stamps the segment start and pairs the on CPU gauge.
- * Stopping charges the raw segment to total runtime and counts one
- * requeue per runnable stop else one completion. Enable clears the
- * deadline state, and disable plus exit charge a leftover segment
+ * Stopping charges the raw segment to total runtime and drains
+ * the hierarchy pools, then counts one requeue per runnable stop
+ * else one completion. Enable clears the deadline state plus the
+ * share cache, and disable plus exit charge a leftover segment
  * at most once when stopping never ran. Release clears a stale
  * running view with no charge. See intf.h for the shared helpers
  * and enqueue.bpf.c for the deadline choice.
@@ -70,6 +71,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* Every segment counts raw time with no weight scaling. */
 	/* Order already carries weight through the deadline step. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	/* Pools drain by raw time with the tightest pool binding. */
+	/* Unlimited hierarchies pass with no charge. The lookup */
+	/* carries a reference with a paired release, and a null */
+	/* lookup skips the charge with no trap. */
+	{
+		struct cgroup *cgrp = flow_task_cgrp(p);
+		if (cgrp) {
+			flow_bw_consume(cgrp, delta);
+			flow_cgrp_put(cgrp);
+		}
+	}
 	/* Zero pairs the gauge, so disable plus exit stay once. */
 	/* Owner only clears, so a migrated stop never clears a new owner. */
 	tctx->run_at = 0;
@@ -87,11 +99,15 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
-	/* Fresh tasks hold no deadline and no stamps. */
+	/* Fresh tasks hold no deadline, no stamps, and no cache. */
 	/* The first enqueue anchors past now with one step. */
 	tctx->deadline = 0;
 	tctx->wait_at = 0;
 	tctx->run_at = 0;
+	tctx->cgid = 0;
+	tctx->eweight = (u32)FLOW_WEIGHT_BASE;
+	tctx->cached = false;
+	tctx->generation = 0;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

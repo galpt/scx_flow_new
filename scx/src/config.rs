@@ -5,6 +5,10 @@
 
 //! Holds the validated constants with defaults that match intf.h.
 
+use crate::flow::BW_PERIOD_MIN_US;
+use crate::flow::CGRP_DEPTH_MAX;
+use crate::flow::CGRP_MAX;
+use crate::flow::CGRP_WEIGHT_DFL;
 use crate::flow::DISPATCH_BATCH;
 use crate::flow::QUANTUM_NS;
 use crate::flow::SLOT_BUDGET;
@@ -58,7 +62,8 @@ impl Config {
     /// The own trip stays at 12 with shared tails at 4 and a miss cap
     /// at 4. Steal scans bound 8 peers with donors past 2 and a 2ms
     /// starvation floor. Queues hold one deadline queue per CPU plus
-    /// one overflow tail with ids below local on.
+    /// one overflow tail with ids below local on. Hierarchies hold
+    /// 2048 rows with depth 8 and base share 100 plus a 1ms pool floor.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -95,6 +100,18 @@ impl Config {
         }
         if STEAL_MIN_DEPTH != 2 {
             bail!("steal depth bad");
+        }
+        if CGRP_MAX != 2048 {
+            bail!("hierarchy bound bad");
+        }
+        if CGRP_DEPTH_MAX != 8 {
+            bail!("hierarchy depth bad");
+        }
+        if CGRP_WEIGHT_DFL != 100 {
+            bail!("hierarchy share bad");
+        }
+        if BW_PERIOD_MIN_US != 1000 {
+            bail!("pool floor bad");
         }
         Ok(())
     }
@@ -241,6 +258,22 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_STARVE_NS as u64,
             crate::flow_edf::STARVE_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_CGRP_MAX as u64,
+            crate::flow_cgrp::CGRP_MAX as u64
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64,
+            crate::flow_cgrp::CGRP_DEPTH_MAX as u64
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_BW_TIMER_NS as u64,
+            crate::flow_cgrp::BW_TIMER_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_BW_PERIOD_MIN_US as u64,
+            crate::flow_cgrp::BW_PERIOD_MIN_US
         );
     }
 }

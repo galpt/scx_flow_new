@@ -6,7 +6,8 @@
  * first with the header cap, then one peer steal moves a single task,
  * then the kernel global plus the shared overflow tail with a
  * shared cap at 4, and last a gated starvation pass over overflow
- * when nothing moved. Empty trips pay one queued read with no scan.
+ * when nothing moved. Throttled parks share the overflow tail with
+ * mask wins on drain. Empty trips pay one queued read with no scan.
  * Steal never visits a peer deadline queue unless the local queue
  * drained empty, so a busy CPU keeps its own order. The SMT
  * sibling wins first, then the same cache domain, then a gated

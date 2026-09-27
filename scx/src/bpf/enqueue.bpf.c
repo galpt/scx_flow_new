@@ -3,14 +3,18 @@
  * Enqueue op.
  *
  * Every arrival earns one deadline step past the later of now and
- * its last deadline, with the step shrinking as the kernel weight
- * grows. The kernel already folds nice into that weight, and flow
- * reads no cgroup state. The task joins its target deadline queue
- * through the compat insert wrapper, so old kernels keep working.
- * Pinned tasks and foreign policies rest in overflow. A busy target
- * kicks only for a strictly earlier deadline, and pinned arrivals
- * never kick a busy CPU. Slice expiry paces the rest, so no slice
- * write and no stamp run here. See intf.h for the step helper and
+ * its last deadline, with the step shrinking as the effective
+ * weight grows. The effective weight folds the task weight with
+ * the hierarchy share over depth 8, so a task under a light
+ * parent waits longer. The hierarchy share caches by id with
+ * generation validation, and a miss uses base share. Throttled
+ * hierarchies park in overflow with no kick and lazy refill, and
+ * the single timer wakes parks soon. The task joins its target
+ * deadline queue, so old kernels keep working. Pinned tasks and
+ * foreign policies rest in overflow. A busy target kicks only for
+ * a strictly earlier deadline, and pinned arrivals never kick a
+ * busy CPU. Slice expiry paces the rest, so no slice write and no
+ * stamp run here. See intf.h for the step helper and
  * dispatch.bpf.c for the matching drain order.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -49,6 +53,7 @@ static __always_inline void flow_vtime_insert(
 }
 /* Insert one task into the shared overflow tail. */
 /* Pinned and foreign tasks rest here with mask wins on drain. */
+/* Throttled tasks park here too with no kick and lazy refill. */
 static __always_inline void flow_over_insert(
 	struct task_struct *p)
 {
@@ -72,9 +77,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	s32 cpu = -1;
 	bool pinned = false;
 	int policy;
-	u32 w;
+	u32 hier;
+	u32 eff;
 	u64 now;
 	u64 deadline;
+	struct cgroup *cgrp = NULL;
+	u64 cgid = 1;
 	(void)enq_flags;
 	/* Exiting tasks run at once on the task CPU with no queue wait. */
 	if (p->flags & PF_EXITING) {
@@ -131,11 +139,51 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
+	/* Hierarchy share with cache and generation validation. */
+	/* A cached id with current generation skips the depth walk. */
+	/* A miss walks the nearest 8 ancestors with base on miss. */
+	/* The task weight folds at use, so nice changes need no drop. */
+	/* The generation compares only the low bits, so 64k bumps wrap. */
+	/* Moves clear the cache and share changes bump the generation, */
+	/* so a wrap needs 64k bumps with no move to falsely hit. */
+	/* The hierarchy carries a reference with a paired release. */
+	cgrp = flow_task_cgrp(p);
+	cgid = flow_cgrp_id(cgrp);
+	if (tctx->cached && tctx->cgid == cgid &&
+	    tctx->generation == (u16)flow_load_gen()) {
+		hier = tctx->eweight;
+	} else {
+		hier = flow_hier_weight(cgrp);
+		tctx->cgid = cgid;
+		tctx->eweight = hier;
+		tctx->generation = (u16)flow_load_gen();
+		tctx->cached = true;
+	}
+	/* Throttled hierarchies park in overflow with no kick. */
+	/* Lazy refill runs on the walk, and the tightest pool binds. */
+	/* Unlimited walks pass at once with no pool use. Fail closed, */
+	/* the single timer wakes parks with mask wins on drain. */
+	/* Throttled ns counts quanta at 1ms per hit with no wall use, */
+	/* and nr throttled plus parked count the same hits. The names */
+	/* stay for the wire with the quantum semantic documented. */
+	if (flow_load_limited() && flow_bw_throttled(cgrp, now)) {
+		tctx->wait_at = now;
+		flow_over_insert(p);
+		__sync_fetch_and_add(&flow_stats.throttled_ns,
+		    (u64)FLOW_QUANTUM_NS);
+		__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
+		__sync_fetch_and_add(&flow_stats.parked, 1);
+		__sync_lock_test_and_set(&flow_bw_pending, 1);
+		flow_cgrp_put(cgrp);
+		return;
+	}
+	flow_cgrp_put(cgrp);
 	/* One step past the later of now and the last deadline. */
-	/* The weight folds nice only, so a long sleep earns no credit */
-	/* and a back to back arrival queues behind its own last step. */
-	w = flow_weight_clamp(p->scx.weight);
-	deadline = flow_deadline_next(tctx->deadline, now, w);
+	/* The effective weight folds task plus hierarchy, so a long */
+	/* sleep earns no credit and a back to back arrival queues */
+	/* behind its own last step. Moves carry the deadline. */
+	eff = flow_eff_weight(p->scx.weight, hier);
+	deadline = flow_deadline_next(tctx->deadline, now, eff);
 	tctx->deadline = deadline;
 	tctx->wait_at = now;
 	flow_vtime_insert(p, cpu, deadline);
