@@ -19,98 +19,17 @@
  * stamp run here. See intf.h for the step helper and
  * dispatch.bpf.c for the matching drain order.
  *
+ * The op splits across enqueue/target, insert, and kick files with
+ * the enqueue body here. Each helper stays inline except the kick,
+ * which stays noinline with scalar input and no duplicate walk, so
+ * the verifier stays small.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one task cannot move to another CPU. */
-static __always_inline bool flow_task_pinned(
-	const struct task_struct *p)
-{
-	if (is_migration_disabled(p))
-		return true;
-	if (p->nr_cpus_allowed == 1)
-		return true;
-	return false;
-}
-/* Target CPU for one enqueue with trust in select. */
-/* Open tasks keep select when allowed, else the first allowed CPU. */
-/* Pinned tasks never reach here, they rest in overflow above. */
-static __always_inline s32 flow_pick_target(
-	struct task_struct *p, s32 sel)
-{
-	s32 first;
-	if (sel >= 0 && flow_cpu_ok(p, sel))
-		return sel;
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (flow_cpu_ok(p, first))
-		return first;
-	return -1;
-}
-/* Insert one task into the deadline queue with its deadline. */
-/* The compat wrapper keeps old kernels working with no new kfunc. */
-static __always_inline void flow_vtime_insert(
-	struct task_struct *p, s32 cpu, u64 deadline)
-{
-	scx_bpf_dsq_insert_vtime(p, flow_vtime_dsq((u32)cpu),
-	    (u64)FLOW_QUANTUM_NS, deadline, 0);
-}
-/* Insert one task into the shared overflow tail. */
-/* Pinned and foreign tasks rest here with mask wins on drain. */
-/* Throttled tasks park here too with no kick and lazy refill. */
-static __always_inline void flow_over_insert(
-	struct task_struct *p)
-{
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
-	    (u64)FLOW_QUANTUM_NS, 0);
-}
-/* Insert one homeless task into the kernel global queue. */
-/* Tasks without state or without a live CPU rest here with */
-/* mask wins on drain, and the drain counts the global moves. */
-static __always_inline void flow_global_insert(
-	struct task_struct *p)
-{
-	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL,
-	    (u64)FLOW_QUANTUM_NS, 0);
-}
-/* Kick one idle allowed CPU for overflow or global parks. */
-/* Tries the kernel idle pick first, then the first allowed live CPU. */
-/* Kicks only when the target runs nothing, with the idle flag cleared */
-/* first so the kick sticks. Never sends a preempt kick, so pinned */
-/* parks stay idle only. A kick miss stays fail closed with mask wins */
-/* on drain and the timer or a later kicking enqueue wakes the park. */
-static __noinline void flow_kick_idle_allowed(
-	const struct task_struct *p)
-{
-	s32 idle;
-	s32 first;
-	struct flow_cpu_state *st;
-	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (idle >= 0 && flow_cpu_ok(p, idle)) {
-		st = flow_cpu((u32)idle);
-		if (st &&
-		    __sync_fetch_and_add(&st->running_pid,
-		    0) == 0) {
-			scx_bpf_test_and_clear_cpu_idle(
-			    (s32)idle);
-			scx_bpf_kick_cpu((s32)idle,
-			    SCX_KICK_IDLE);
-			__sync_fetch_and_add(
-			    &flow_stats.kicks, 1);
-			return;
-		}
-	}
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (first >= 0 && flow_cpu_ok(p, first)) {
-		st = flow_cpu((u32)first);
-		if (st &&
-		    __sync_fetch_and_add(&st->running_pid,
-		    0) == 0) {
-			scx_bpf_test_and_clear_cpu_idle(first);
-			scx_bpf_kick_cpu(first, SCX_KICK_IDLE);
-			__sync_fetch_and_add(
-			    &flow_stats.kicks, 1);
-		}
-	}
-}
+#include "enqueue/target.bpf.c"
+#include "enqueue/insert.bpf.c"
+#include "enqueue/kick.bpf.c"
+
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {
@@ -136,8 +55,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (u64)FLOW_QUANTUM_NS, enq_flags);
 			tst = flow_cpu((u32)tgt);
 			if (tst &&
-			    __sync_fetch_and_add(
-			    &tst->running_pid, 0) == 0) {
+			    READ_ONCE(tst->running_pid) == 0) {
 				scx_bpf_kick_cpu(tgt,
 				    SCX_KICK_IDLE);
 				__sync_fetch_and_add(
@@ -158,7 +76,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (!tctx) {
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		flow_global_insert(p);
-		flow_kick_idle_allowed(p);
+		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	/* Pinned plus non normal, batch, idle tasks rest in overflow. */
@@ -193,7 +111,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			flow_bw_throttled(pcgrp, now);
 		flow_cgrp_put(pcgrp);
 		flow_over_insert(p);
-		flow_kick_idle_allowed(p);
+		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	cpu = flow_pick_target(p, sel);
@@ -205,48 +123,55 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		__sync_fetch_and_add(&flow_stats.enq_no_tctx, 1);
 		tctx->wait_at = now;
 		flow_global_insert(p);
-		flow_kick_idle_allowed(p);
+		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 	/* Hierarchy share with cache and generation validation. */
 	/* A cached id with current generation skips the depth walk. */
-	/* A miss walks the nearest 8 ancestors with base on miss. */
+	/* A miss fuses share plus throttle in one depth-8 walk with */
+	/* hint once, so the hot path pays one walk instead of two. */
 	/* The task weight folds at use, so nice changes need no drop. */
 	/* The generation compares only the low bits, so 64k bumps wrap. */
 	/* Moves clear the cache and share changes bump the generation, */
 	/* so a wrap needs 64k bumps with no move to falsely hit. */
 	/* The hierarchy carries a reference with a paired release. */
+	/* The cold pinned path above keeps two walks with no hot use. */
 	cgrp = flow_task_cgrp(p);
 	cgid = flow_cgrp_id(cgrp);
-	if (tctx->cached && tctx->cgid == cgid &&
-	    tctx->generation == (u16)flow_load_gen()) {
-		hier = tctx->eweight;
-	} else {
-		hier = flow_hier_weight(cgrp);
-		tctx->cgid = cgid;
-		tctx->eweight = hier;
-		tctx->generation = (u16)flow_load_gen();
-		tctx->cached = true;
-	}
-	/* Throttled hierarchies park in overflow with no kick. */
-	/* Lazy refill runs on the walk, and the tightest pool binds. */
-	/* Unlimited walks pass at once with no pool use. Fail closed, */
-	/* the single timer wakes parks with mask wins on drain. */
-	/* Throttled ns counts quanta at 1ms per hit with no wall use, */
-	/* and nr throttled plus parked count the same hits. The names */
-	/* stay for the wire with the quantum semantic documented. */
-	if (flow_load_limited() && flow_bw_throttled(cgrp, now)) {
-		tctx->wait_at = now;
-		flow_over_insert(p);
-		__sync_fetch_and_add(&flow_stats.throttled_ns,
-		    (u64)FLOW_QUANTUM_NS);
-		__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
-		__sync_fetch_and_add(&flow_stats.parked, 1);
-		__sync_lock_test_and_set(&flow_bw_pending, 1);
-		flow_cgrp_put(cgrp);
-		return;
+	{
+		bool throttled = false;
+		if (tctx->cached && tctx->cgid == cgid &&
+		    tctx->generation == (u16)flow_load_gen()) {
+			hier = tctx->eweight;
+			if (flow_load_limited())
+				throttled = flow_bw_throttled(cgrp, now);
+		} else {
+			throttled = flow_hier_checked(cgrp, now, &hier);
+			tctx->cgid = cgid;
+			tctx->eweight = hier;
+			tctx->generation = (u16)flow_load_gen();
+			tctx->cached = true;
+		}
+		/* Throttled hierarchies park in overflow with no kick. */
+		/* Lazy refill runs on the walk, and the tightest pool binds. */
+		/* Unlimited walks pass at once with no pool use. Fail closed, */
+		/* the single timer wakes parks with mask wins on drain. */
+		/* Throttled ns counts quanta at 1ms per hit with no wall use, */
+		/* and nr throttled plus parked count the same hits. The names */
+		/* stay for the wire with the quantum semantic documented. */
+		if (throttled) {
+			tctx->wait_at = now;
+			flow_over_insert(p);
+			__sync_fetch_and_add(&flow_stats.throttled_ns,
+			    (u64)FLOW_QUANTUM_NS);
+			__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
+			__sync_fetch_and_add(&flow_stats.parked, 1);
+			__sync_lock_test_and_set(&flow_bw_pending, 1);
+			flow_cgrp_put(cgrp);
+			return;
+		}
 	}
 	flow_cgrp_put(cgrp);
 	/* One step past the later of now and the last deadline. */
@@ -260,7 +185,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	flow_vtime_insert(p, cpu, deadline);
 	/* Idle targets kick at once with no rate window. */
 	/* The idle flag clears first so the kick sticks. The pid read */
-	/* uses an atomic load to match the running stores. */
+	/* uses a relaxed load to match the running stores. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
@@ -268,8 +193,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		struct flow_task_ctx *octx;
 		if (!st)
 			return;
-		if (__sync_fetch_and_add(&st->running_pid,
-		    0) == 0) {
+		if (READ_ONCE(st->running_pid) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
@@ -279,49 +203,41 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* path sees open tasks only with no pinned check. */
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */
-		/* missing occupant fails closed with no kick. The occupant */
-		/* CPU validates before the compare, so a migrated occupant */
-		/* never kicks the wrong CPU. A zero occupant deadline means */
-		/* no order yet, so the arrival paces with no kick. */
-		occ_pid = __sync_fetch_and_add(&st->running_pid,
-		    0);
-		if (occ_pid == 0 || occ_pid == (u32)p->pid) {
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
+		/* missing occupant fails closed with no kick and no count. */
+		/* The occupant CPU validates before the compare, so a */
+		/* migrated occupant never kicks the wrong CPU. A zero */
+		/* occupant deadline means no order yet, so the arrival */
+		/* paces with no kick. Fail closed exits pace with no */
+		/* count, and only the decision exit counts one skip, so */
+		/* the hot path pays one global store at most. */
+		occ_pid = READ_ONCE(st->running_pid);
+		if (occ_pid == 0 || occ_pid == (u32)p->pid)
 			return;
-		}
 		bpf_rcu_read_lock();
 		trusted = bpf_task_from_pid(occ_pid);
 		if (!trusted) {
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
 		if (scx_bpf_task_cpu(trusted) != cpu) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
 		octx = flow_lookup(trusted);
 		if (!octx) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
 		if (octx->deadline == 0) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(
-			    &flow_stats.preempt_skipped, 1);
 			return;
 		}
 		/* A strictly earlier deadline kicks at once. */
-		/* Equal or later deadlines pace at slice expiry. */
+		/* Equal or later deadlines pace at slice expiry with one */
+		/* skip count at this decision exit only. */
 		if (flow_time_before(deadline, octx->deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();

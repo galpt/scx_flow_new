@@ -127,7 +127,7 @@ fn unix_client(
  */
 pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     log::info!("web thread started");
-    let html = include_str!("../ui/index.html").to_string();
+    let html = include_str!("../../ui/index.html").to_string();
     let state = Arc::new(Mutex::new(WebState {
         metrics: WebMetrics::default(),
     }));
@@ -499,7 +499,7 @@ mod tests {
     /* Dashboard keeps live ids without stale cards. */
     #[test]
     fn dashboard_keeps_live_layout() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(!html.contains("stale-pill"));
         assert!(!html.contains("core-stale"));
         assert!(!html.contains("Last slice CPU idle"));
@@ -517,7 +517,7 @@ mod tests {
     /* Download keeps version plus timestamp in the file name. */
     #[test]
     fn dashboard_download_names_versioned_file() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("downloadSnapshot"));
         assert!(html.contains("JSON.stringify(data, null, 2)"));
         assert!(html.contains("data.version"));
@@ -529,7 +529,7 @@ mod tests {
     /* Dashboard shows the preempt cells. */
     #[test]
     fn dashboard_shows_preempt_cells() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"pkick\""));
         assert!(html.contains("id=\"pskip\""));
         assert!(html.contains("preempt_kicks"));
@@ -539,7 +539,7 @@ mod tests {
     /* Dashboard shows the slot cell. */
     #[test]
     fn dashboard_shows_slot_cells() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"slot-moves\""));
         assert!(html.contains("slot_moves"));
         assert!(!html.contains("fast_admits"));
@@ -550,7 +550,7 @@ mod tests {
     /* Dashboard hides prior lane cells. */
     #[test]
     fn dashboard_hides_prior_cells() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(!html.contains("id=\"fast-admits\""));
         assert!(!html.contains("id=\"fast-bound\""));
         assert!(!html.contains("id=\"vtime-admits\""));
@@ -567,7 +567,7 @@ mod tests {
     /* Dashboard shows the global moves cell. */
     #[test]
     fn dashboard_shows_global_cell() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"global-moves\""));
         assert!(html.contains("global_moves"));
         assert!(!html.contains("steal_penalties"));
@@ -576,7 +576,7 @@ mod tests {
     /* Dashboard shows the steal cell. */
     #[test]
     fn dashboard_shows_steal_cell() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"steal\""));
         assert!(html.contains("steal_moves"));
     }
@@ -584,7 +584,7 @@ mod tests {
     /* Dashboard shows the four hierarchy cells. */
     #[test]
     fn dashboard_shows_hierarchy_cells() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"throttled-ns\""));
         assert!(html.contains("throttled_ns"));
         assert!(html.contains("id=\"nr-throttled\""));
@@ -598,7 +598,7 @@ mod tests {
     /* Dashboard shows the governor mode cell. */
     #[test]
     fn dashboard_shows_mode_cell() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"mode-badge\""));
         assert!(html.contains("governor"));
         assert!(!html.contains("perf_mode"));
@@ -607,7 +607,7 @@ mod tests {
     /* Dashboard shows the calm meter-only energy section. */
     #[test]
     fn dashboard_shows_energy_section() {
-        let html = include_str!("../ui/index.html");
+        let html = include_str!("../../ui/index.html");
         assert!(html.contains("id=\"energy-since\""));
         assert!(html.contains("id=\"energy-watts\""));
         assert!(html.contains("id=\"energy-note\""));

@@ -22,8 +22,10 @@ static __noinline u32 flow_drain_one(s32 cpu,
 		if (miss >= (u32)FLOW_MISS_CAP)
 			break;
 		p = bpf_task_from_pid(p->pid);
-		if (!p)
+		if (!p) {
+			miss++;
 			continue;
+		}
 		if (bpf_cpumask_test_cpu((u32)cpu,
 		    p->cpus_ptr) &&
 		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,

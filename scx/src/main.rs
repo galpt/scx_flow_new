@@ -9,18 +9,31 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
+#[path = "rust/config.rs"]
 mod config;
+#[path = "rust/flow.rs"]
 mod flow;
+#[path = "rust/flow_cgrp.rs"]
 mod flow_cgrp;
+#[path = "rust/flow_edf.rs"]
 mod flow_edf;
+#[path = "rust/flow_preempt.rs"]
 mod flow_preempt;
+#[path = "rust/flow_select.rs"]
 mod flow_select;
+#[path = "rust/flow_slice.rs"]
 mod flow_slice;
+#[path = "rust/flow_slot.rs"]
 mod flow_slot;
+#[path = "rust/rapl.rs"]
 mod rapl;
+#[path = "rust/snapshot.rs"]
 mod snapshot;
+#[path = "rust/stats.rs"]
 mod stats;
+#[path = "rust/topology.rs"]
 mod topology;
+#[path = "rust/webui.rs"]
 mod webui;
 
 use std::mem::MaybeUninit;
