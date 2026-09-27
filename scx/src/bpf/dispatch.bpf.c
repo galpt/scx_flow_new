@@ -6,7 +6,7 @@
  * first with the header cap, then one peer steal moves a single task,
  * then the kernel global plus the shared overflow tail with a
  * shared cap at 4, and last a gated starvation pass over overflow
- * when nothing moved. Throttled parks share the overflow tail with
+ * when nothing moved or throttling. Throttled parks share the overflow tail with
  * mask wins on drain and a throttle recheck, so drained pools hold
  * tasks back with no bypass. Empty trips pay one queued read with no scan.
  * Steal never visits a peer deadline queue unless the local queue

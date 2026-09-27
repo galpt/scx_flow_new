@@ -101,8 +101,8 @@ pub fn tail_cap(budget: u32) -> u32 {
     budget.min(SLOT_OVER_CAP)
 }
 
-/// Gated starvation cap at 4 under the dispatch budget.
-/// Returns the min of budget and 4 with no head stall.
+/// Gated starvation cap at 6 under the dispatch budget.
+/// Returns the min of budget and 6 with no head stall.
 #[cfg(test)]
 pub fn gated_cap(budget: u32) -> u32 {
     budget.min(SLOT_GATED_CAP)
