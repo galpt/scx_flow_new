@@ -11,8 +11,10 @@ pub const SLOT_BUDGET: u32 = 32;
 pub const SLOT_OWN_CAP: u32 = 12;
 /// Shared tail cap at 4 under the dispatch budget. Fixed with no knob.
 pub const SLOT_OVER_CAP: u32 = 4;
-/// Gated starvation cap at 4 under the dispatch budget. Fixed with no knob.
-pub const SLOT_GATED_CAP: u32 = 4;
+/// Gated starvation cap at 6 under the dispatch budget. Runs bounded
+/// but larger than the shared tail, so old tasks behind young heads
+/// still surface with a finite scan. Fixed with no knob.
+pub const SLOT_GATED_CAP: u32 = 6;
 /// Miss cap of one drain trip at 4. Fixed with no knob.
 pub const SLOT_MISS_CAP: u32 = 4;
 /// Base id of the per CPU deadline queues.
@@ -99,8 +101,8 @@ pub fn tail_cap(budget: u32) -> u32 {
     budget.min(SLOT_OVER_CAP)
 }
 
-/// Gated starvation cap at 4 under the dispatch budget.
-/// Returns the min of budget and 4 with no head stall.
+/// Gated starvation cap at 6 under the dispatch budget.
+/// Returns the min of budget and 6 with no head stall.
 #[cfg(test)]
 pub fn gated_cap(budget: u32) -> u32 {
     budget.min(SLOT_GATED_CAP)
@@ -111,6 +113,8 @@ pub fn gated_cap(budget: u32) -> u32 {
 /// task with the CPU in the mask. Dead, foreign, and failed tasks count
 /// one miss each with a miss cap at 4, so one bad head never blocks later
 /// work. The walk stops at cap plus base with no full scan.
+/// Throttled overflow parks skip with a miss through the throttled
+/// model, so drained pools hold tasks back with order kept.
 /// Returns the count moved.
 #[cfg(test)]
 pub fn slot_drain_model(
@@ -119,12 +123,15 @@ pub fn slot_drain_model(
     cap: u32,
     base: u32,
 ) -> u32 {
-    slot_drain_inner(queue, cpu, cap, base, None, u64::MAX)
+    slot_drain_inner(queue, cpu, cap, base, None, u64::MAX, None)
 }
 
 /// Starvation drain for the gated passes with a 2ms floor.
-/// Young tasks count one miss each, so old tasks behind them surface.
-/// Tasks without a wait stamp miss past with no move.
+/// Young tasks count one miss each with the miss cap at 4, and the
+/// gated cap runs bounded but larger at 6, so old tasks behind young
+/// heads still surface with a finite scan.
+/// Throttled parks skip with a miss when the pool is drained, so the
+/// soft park stays a hard gate with order kept.
 #[cfg(test)]
 pub fn slot_drain_starved_model(
     queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
@@ -133,7 +140,58 @@ pub fn slot_drain_starved_model(
     base: u32,
     now: u64,
 ) -> u32 {
-    slot_drain_inner(queue, cpu, cap, base, Some(now), crate::flow_edf::STARVE_NS)
+    slot_drain_inner(
+        queue,
+        cpu,
+        cap,
+        base,
+        Some(now),
+        crate::flow_edf::STARVE_NS,
+        None,
+    )
+}
+
+/// Overflow drain with a throttle recheck for tests.
+/// Moves mask allowed tasks that are not throttled. Throttled tasks
+/// skip with a miss and keep order, so drained pools hold tasks back.
+/// Young handling follows the plain drain with a miss per skip.
+#[cfg(test)]
+pub fn slot_drain_over_throttled_model(
+    queue: &mut std::collections::VecDeque<crate::flow_select::PendingTask>,
+    cpu: i32,
+    cap: u32,
+    base: u32,
+    throttled: &[bool],
+) -> u32 {
+    let mut moved = 0;
+    let mut miss = 0u32;
+    let mut kept = std::collections::VecDeque::new();
+    let mut rest = std::collections::VecDeque::new();
+    std::mem::swap(queue, &mut rest);
+    let mut idx = 0usize;
+    for task in rest.drain(..) {
+        let is_thr = throttled.get(idx).copied().unwrap_or(false);
+        idx += 1;
+        if moved + base >= cap || miss >= SLOT_MISS_CAP {
+            kept.push_back(task);
+            continue;
+        }
+        if is_thr {
+            miss += 1;
+            kept.push_back(task);
+            continue;
+        }
+        let ok = task.live && !task.fail && crate::flow_select::may_run_on(cpu, &task.allowed);
+        if ok {
+            moved += 1;
+            miss = 0;
+        } else {
+            miss += 1;
+            kept.push_back(task);
+        }
+    }
+    *queue = kept;
+    moved
 }
 
 #[cfg(test)]
@@ -144,13 +202,19 @@ fn slot_drain_inner(
     base: u32,
     now: Option<u64>,
     floor_ns: u64,
+    throttled: Option<&[bool]>,
 ) -> u32 {
     let mut moved = 0;
     let mut miss = 0u32;
     let mut kept = std::collections::VecDeque::new();
     let mut rest = std::collections::VecDeque::new();
     std::mem::swap(queue, &mut rest);
+    let mut idx = 0usize;
     for task in rest.drain(..) {
+        let is_thr = throttled
+            .map(|t| t.get(idx).copied().unwrap_or(false))
+            .unwrap_or(false);
+        idx += 1;
         if moved + base >= cap || miss >= SLOT_MISS_CAP {
             kept.push_back(task);
             continue;
@@ -162,6 +226,11 @@ fn slot_drain_inner(
                 kept.push_back(task);
                 continue;
             }
+        }
+        if is_thr {
+            miss += 1;
+            kept.push_back(task);
+            continue;
         }
         let ok = task.live && !task.fail && crate::flow_select::may_run_on(cpu, &task.allowed);
         if ok {
@@ -241,9 +310,14 @@ mod tests {
         assert_eq!(slot_own_cap(5), 5);
         assert_eq!(tail_cap(32), 4);
         assert_eq!(tail_cap(1), 1);
-        assert_eq!(gated_cap(32), 4);
+        assert_eq!(gated_cap(32), 6);
         assert_eq!(gated_cap(1), 1);
-        assert_eq!(SLOT_GATED_CAP, 4);
+        assert_eq!(SLOT_GATED_CAP, 6);
+        assert!(SLOT_GATED_CAP > SLOT_OVER_CAP);
+        assert_eq!(
+            SLOT_GATED_CAP,
+            crate::bpf_intf::flow_consts_FLOW_GATED_CAP as u32
+        );
         assert_eq!(SLOT_MISS_CAP, 4);
         assert_eq!(SLOT_OVER_CAP, 4);
         assert_eq!(SLOT_OWN_CAP, 12);
@@ -310,5 +384,71 @@ mod tests {
         assert!(steal_first_donor(0, 1, &depths).is_none());
         let shallow = vec![1u64; 4];
         assert!(steal_first_donor(0, 4, &shallow).is_none());
+    }
+
+    #[test]
+    fn gated_cap_runs_larger_than_tail() {
+        assert_eq!(gated_cap(32), 6);
+        assert_eq!(tail_cap(32), 4);
+        assert!(SLOT_GATED_CAP > SLOT_OVER_CAP);
+        let now = 10_000_000u64;
+        let mut q = std::collections::VecDeque::new();
+        for _ in 0..6 {
+            q.push_back(crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: now - 5_000_000,
+            });
+        }
+        assert_eq!(slot_drain_starved_model(&mut q, 0, 6, 0, now), 6);
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn throttled_parks_hold_with_miss_order() {
+        let mut q = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+        ]);
+        assert_eq!(
+            slot_drain_over_throttled_model(&mut q, 0, 4, 0, &[true, false]),
+            1
+        );
+        assert_eq!(q.len(), 1);
+        let mut q2 = std::collections::VecDeque::from(vec![
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+            crate::flow_select::PendingTask {
+                allowed: vec![true],
+                exiting: false,
+                live: true,
+                fail: false,
+                wait_at: 10,
+            },
+        ]);
+        assert_eq!(
+            slot_drain_over_throttled_model(&mut q2, 0, 4, 0, &[true, true]),
+            0
+        );
+        assert_eq!(q2.len(), 2);
     }
 }

@@ -52,7 +52,10 @@ enum flow_consts {
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	FLOW_OWN_VTIME_CAP = 12ULL,
 	FLOW_OVER_CAP = 4ULL,
-	FLOW_GATED_CAP = 4ULL,
+	/* Gated starvation cap at 6 under the dispatch budget. Runs bounded */
+	/* but larger than the shared tail, so old tasks behind young heads */
+	/* still surface with a finite scan. */
+	FLOW_GATED_CAP = 6ULL,
 	FLOW_MISS_CAP = 4ULL,
 	FLOW_STEAL_BOUND = 8ULL,
 	FLOW_STEAL_MIN_DEPTH = 2ULL,
@@ -66,18 +69,31 @@ enum flow_consts {
 	FLOW_CGRP_WEIGHT_DFL = 100ULL,
 	FLOW_BW_PERIOD_MIN_US = 1000ULL,
 	FLOW_BW_TIMER_NS = 10000000ULL,
+	/* Parked chain ring slots at 64. Each slot holds one park chain */
+	/* of 8 ancestor ids with the leaf first. The timer refills each */
+	/* listed pool, and enqueue refills cover active groups past it. */
+	FLOW_PARK_HINT_NR = 64ULL,
+	/* Throttle bit in the hierarchy flags. Set means gated skip. */
+	FLOW_CGRP_THROTTLED = 1ULL,
 };
 /* Unlimited quota value with no cap use and zero pool. */
 #define FLOW_RUNTIME_INF (~0ULL)
 /* Per task state at 40B with deadline plus stamps plus share cache. */
-/* Deadline holds the last assigned deadline for the next max. */
-/* Wait holds the last enqueue time for the starvation check. */
+/* Deadline holds the last assigned deadline for the next max. A zero */
+/* deadline means no order yet, so preempt compares skip with no kick. */
+/* Wait holds the last enqueue time for the starvation check. Pinned */
+/* parks set wait too, so the gated backstop sees them. */
 /* Run holds the segment start while on CPU else zero, so nonzero */
-/* pairs the on CPU gauge with the stopping charge. Cgid holds the */
+/* pairs the on CPU gauge with the stopping charge. Run claims use */
+/* atomics, so stopping versus disable or exit charges once. Cgid holds the */
 /* last hierarchy id for the cache, eweight holds the hierarchy */
 /* share with base 100, cached marks a valid entry, and generation */
-/* holds the low bits of the global generation for validation. Stamps stay */
-/* per task owned with no atomics, only counters use atomics. */
+/* holds the low bits of the global generation for validation. The low */
+/* bits wrap past 64k bumps, so a wrap needs 64k bumps with no move to */
+/* falsely hit. Moves clear the cache, so the window stays huge. Stamps stay */
+/* per task owned with no atomics except the run claim, only counters */
+/* plus pool plus pid rows use atomics. Cursor, miss, and steal scans */
+/* stay best effort with no atomic order. */
 struct flow_task_ctx {
 	u64 deadline;
 	u64 wait_at;
@@ -89,8 +105,12 @@ struct flow_task_ctx {
 	u16 generation;
 };
 /* Per CPU state at 8B with running pid plus steal cursor. */
-/* Pid holds the task now on the CPU else zero. Cursor spreads */
-/* the placement and steal scans with no hotspot. */
+/* Pid holds the task now on the CPU else zero. Owner clears use a */
+/* compare and swap, so a stale exit never clears a new owner. */
+/* Release clears with a compare and swap loop, so concurrent runs */
+/* pair without a torn zero. Cursor spreads */
+/* the placement and steal scans with no hotspot. The cursor races */
+/* best effort with no atomic order. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
@@ -104,14 +124,20 @@ struct flow_topo {
 };
 /* Per hierarchy state at 48B with share plus bandwidth pool. */
 /* Weight holds the share in 1 to 10000 with base 100. */
+/* Flags holds the throttle bit with atomic updates, so parks never */
+/* bypass a drained ancestor. Bit 0 set means throttled with a gated */
+/* skip, clear means admittable. Full walks plus consume set it, full */
+/* passes plus the timer chain refill clear it. */
 /* Period holds the floor clamped period in microseconds. */
 /* Quota holds zero for unlimited else the quota in microseconds. */
 /* Burst holds the burst in microseconds for the pool cap. */
-/* Pool holds the remaining runtime in nanos, zero when drained. */
+/* Pool holds the remaining runtime in nanos, zero when drained. Pool */
+/* plus updated use atomic updates, so refill versus consume versus */
+/* bandwidth set never tears. */
 /* Updated holds the last refill time in nanos for lazy refill. */
 struct flow_cgrp_ctx {
 	u32 weight;
-	u32 __pad0;
+	u32 flags;
 	u64 period_us;
 	u64 quota_us;
 	u64 burst_us;
@@ -159,6 +185,15 @@ _Static_assert(sizeof(struct flow_cgrp_ctx) == 48,
 /* Stats hold 17 counters in 136 bytes. */
 _Static_assert(sizeof(struct flow_sched_stats) == 136,
     "stats stay at 136B");
+/* Timer ticks at 10ms, always covering the 1ms floor. */
+_Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
+    "timer stays at 10ms");
+/* Parked chain holds 8 ancestor ids with the leaf first. */
+struct flow_park_chain {
+	u64 ids[8];
+};
+_Static_assert(sizeof(struct flow_park_chain) == 64,
+    "park chain stays at 64B");
 /* One deadline queue per CPU plus one overflow tail. */
 _Static_assert(FLOW_MAX_DSQS == FLOW_MAX_CPUS + 1,
     "dsq count stays nr plus one");

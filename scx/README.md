@@ -14,31 +14,31 @@ Every arrival steps past the later of now and last deadline, the step shrinks as
 
 ### Hierarchies
 
-Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. Idle groups run at configured shares. See `src/bpf/cgroup.bpf.c`.
+Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. Idle groups run at configured shares. Pool plus stamp updates use atomics. See `src/bpf/cgroup.bpf.c`.
 
 ### Bandwidth
 
-Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap with saturating math, lazy refill with fraction kept, tightest pool binds. Throttled parks rest in overflow with no kick, one timer wakes parks from the first live CPU. Throttled ns counts quanta at `1ms` per hit with no wall use, nr throttled plus parked count the same hits with the names kept for the wire. See `src/bpf/cgroup.bpf.c`.
+Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap with saturating math, lazy refill with fraction kept, tightest pool binds. A throttle bit on the leaf entry parks tasks, full walks plus consume set it, full passes plus a timer chain refill clear it. Throttled parks rest in overflow, one timer refills hinted chains from a ring at `64` and wakes parks from a rotated live CPU with a refill gate. Dispatch rechecks the leaf flag with a miss, so drained pools hold tasks back. Throttled ns counts quanta at `1ms` per hit with no wall use, nr throttled plus parked count the same hits with the names kept for the wire. See `src/bpf/cgroup.bpf.c`.
 
 ### Preemption
 
-A busy CPU kicks only for a strictly earlier deadline. Equal or later arrivals pace at slice expiry. Pinned arrivals never kick. See `src/bpf/enqueue.bpf.c`.
+A busy CPU kicks only for a strictly earlier deadline with the occupant CPU validated, a zero occupant deadline paces with no kick. Equal or later arrivals pace at slice expiry. Pinned arrivals send idle kicks only, never preempt. Overflow and global parks kick one idle allowed CPU. See `src/bpf/enqueue.bpf.c`.
 
 ### Placement
 
-Order is waker idle, any idle, shallowest same cache peer over bound `8` when strictly shallower than previous, then previous, then first. See `src/bpf/select_cpu.bpf.c`.
+Order is waker idle, any idle, shallowest same cache peer over bound `8` when strictly shallower than previous, then previous, then first. Cursor races best effort. See `src/bpf/select_cpu.bpf.c`.
 
 ### Dispatch
 
-Order is own queue at `12`, one peer steal of one task, global plus overflow at `4`, then a gated pass. See `src/bpf/dispatch.bpf.c`.
+Order is own queue at `12`, one peer steal of one task, global plus overflow at `4`, then a gated pass at `6`. Overflow drains in the normal pass only when no limit exists, else the gated pass moves starved tasks with the flag check. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`drain`, `gated`, `steal`, `tail`).
 
 ### Steal
 
-Steal runs only with an empty local queue. Sibling wins first, then same cache domain, then a gated move past `2ms`. See `src/bpf/dispatch.bpf.c`.
+Steal runs only with an empty local queue. Sibling wins first, then same cache domain, then a gated move past `2ms`. Cursor and miss scans stay best effort. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`steal`).
 
 ### Accounting
 
-Running stamps segment start, stopping charges raw time plus pool drain and counts one requeue or completion, disable plus exit charge a leftover once. See `src/bpf/lifecycle.bpf.c`.
+Running stamps segment start, stopping claims the start once and charges raw time plus pool drain and counts one requeue or completion, disable plus exit claim a leftover once. Owner clears use compare and swap. See `src/bpf/lifecycle.bpf.c`.
 
 ### Counters
 
@@ -58,7 +58,8 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 - Maps, helpers, ops table: `src/bpf/main.bpf.c`
 - Placement: `src/bpf/select_cpu.bpf.c`
 - Inserts: `src/bpf/enqueue.bpf.c`
-- Drains: `src/bpf/dispatch.bpf.c`
+- Drains: `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/`
+  (`drain.bpf.c`, `gated.bpf.c`, `steal.bpf.c`, `tail.bpf.c`)
 - Lifecycle: `src/bpf/lifecycle.bpf.c`
 - Hierarchy: `src/bpf/cgroup.bpf.c`
 - Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
@@ -78,5 +79,5 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 
 - Live means below the attach snapshot. Hotplug needs a restart.
 - Releases need a restart. State is `40B` plus `8B` plus `8B` plus `48B` plus `136B` for task, CPU, topology, hierarchy, and counters.
-- Overflow and global inserts send no kick. Fail closed, next kicking enqueue or dispatch wakes.
+- Ops stay at `7` with no idle callback, idle groups run at configured shares. Known regression from earlier idle handling, accepted with signoff.
 - Needs kernels, `7.2` series and up.

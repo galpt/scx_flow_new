@@ -25,6 +25,14 @@ pub const BW_TIMER_NS: u64 = 10_000_000;
 /// never reads kernel quotas, so this const only checks the norm in tests.
 #[cfg(test)]
 pub const RUNTIME_INF: u64 = u64::MAX;
+/// Throttle bit in the hierarchy flags. Set means the gated pass
+/// skips with a miss. Mirrors the BPF header.
+#[cfg(test)]
+pub const CGRP_THROTTLED: u32 = 1;
+/// Parked chain ring slots at 64. Each slot holds one park chain of
+/// 8 ancestor ids with the leaf first. Mirrors the BPF header.
+#[cfg(test)]
+pub const PARK_HINT_NR: u64 = 64;
 
 /// Clamp one share into 1 to 10000.
 /// Zero or oversize shares fail closed to the nearer bound.
@@ -124,10 +132,63 @@ pub struct TaskCache {
 
 /// True when one cached share may be used at once.
 /// Needs a set flag with matching id and generation, so a move
-/// or a share change misses past with a fresh walk.
+/// or a share change misses past with a fresh walk. Moves clear the
+/// cache at once, so a stale id never validates past a move. The
+/// generation compares only the low bits, so 64k bumps wrap with a
+/// huge window and no false hit in practice.
 #[cfg(test)]
 pub fn cache_valid(cache: &TaskCache, cur_id: u64, cur_generation: u64) -> bool {
     cache.cached && cache.cgid == cur_id && cache.generation == cur_generation as u16
+}
+
+/// Cleared cache for one hierarchy move with deadline carry.
+/// Drops the valid flag and records the new id, so the next enqueue
+/// walks the new ancestors with no stale share.
+#[cfg(test)]
+pub fn cache_on_move(nid: u64) -> TaskCache {
+    TaskCache {
+        cgid: nid,
+        eweight: CGRP_WEIGHT_DFL,
+        cached: false,
+        generation: 0,
+    }
+}
+
+/// Atomic run claim for one leftover segment.
+/// Models the BPF exchange and compare and swap pair: the first
+/// claimant takes the nonzero start and clears to zero, later
+/// claimants see zero with no double charge. Returns the claimed
+/// start, or zero when another path already charged.
+#[cfg(test)]
+pub fn run_claim(run_at: &mut u64) -> u64 {
+    let start = *run_at;
+    if start == 0 {
+        return 0;
+    }
+    *run_at = 0;
+    start
+}
+
+/// True when one leaf flag parks the task in the gated pass.
+/// Needs the throttle bit set, so full walks plus consume hold parks
+/// and full passes plus the timer chain refill release them.
+#[cfg(test)]
+pub fn flag_throttled(flags: u32) -> bool {
+    flags & CGRP_THROTTLED != 0
+}
+
+/// Set the throttle bit on one flags word.
+/// Models the BPF single compare and swap try with no tear.
+#[cfg(test)]
+pub fn flag_set(flags: u32) -> u32 {
+    flags | CGRP_THROTTLED
+}
+
+/// Clear the throttle bit on one flags word.
+/// Models the BPF single compare and swap try with no tear.
+#[cfg(test)]
+pub fn flag_clear(flags: u32) -> u32 {
+    flags & !CGRP_THROTTLED
 }
 
 /// Pool state for one hierarchy entry.
@@ -397,5 +458,51 @@ mod tests {
         };
         pool_refill(&mut u, 10_000_000);
         assert_eq!(u.pool_ns, 0);
+    }
+
+    #[test]
+    fn run_claim_charges_once() {
+        let mut run = 5_000u64;
+        assert_eq!(run_claim(&mut run), 5_000);
+        assert_eq!(run, 0);
+        assert_eq!(run_claim(&mut run), 0);
+        let mut zero = 0u64;
+        assert_eq!(run_claim(&mut zero), 0);
+    }
+
+    #[test]
+    fn move_clears_cache_for_fresh_walk() {
+        let c = cache_on_move(9);
+        assert!(!c.cached);
+        assert_eq!(c.cgid, 9);
+        assert!(!cache_valid(&c, 9, 0));
+        let live = TaskCache {
+            cgid: 7,
+            eweight: 100,
+            cached: true,
+            generation: 3,
+        };
+        assert!(cache_valid(&live, 7, 3));
+        let moved = cache_on_move(8);
+        assert!(!cache_valid(&moved, 7, 3));
+    }
+
+    #[test]
+    fn throttle_flag_parks_gated_pass() {
+        assert_eq!(CGRP_THROTTLED, 1);
+        assert_eq!(
+            CGRP_THROTTLED as u64,
+            crate::bpf_intf::flow_consts_FLOW_CGRP_THROTTLED as u64
+        );
+        assert_eq!(
+            PARK_HINT_NR,
+            crate::bpf_intf::flow_consts_FLOW_PARK_HINT_NR as u64
+        );
+        assert_eq!(PARK_HINT_NR, 64);
+        assert!(flag_throttled(flag_set(0)));
+        assert!(!flag_throttled(flag_clear(flag_set(0))));
+        assert!(!flag_throttled(0));
+        assert!(!flag_throttled(flag_clear(0)));
+        assert_eq!(flag_set(flag_set(0)), CGRP_THROTTLED);
     }
 }
