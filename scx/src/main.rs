@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_24() {
+    fn task_size_is_40() {
         assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
     }
 
@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_104() {
+    fn sched_stats_size_is_136() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             136

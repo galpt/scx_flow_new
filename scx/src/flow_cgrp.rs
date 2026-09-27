@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(hier_weight(&[100, 200]), 200);
         assert_eq!(hier_weight(&[50, 50]), 25);
         let deep = vec![200u32; 16];
-        assert_eq!(hier_weight(&deep), hier_weight(&vec![200u32; 8]));
+        assert_eq!(hier_weight(&deep), hier_weight(&[200u32; 8]));
     }
 
     #[test]
