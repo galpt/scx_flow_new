@@ -19,98 +19,17 @@
  * stamp run here. See intf.h for the step helper and
  * dispatch.bpf.c for the matching drain order.
  *
+ * The op splits across enqueue/target, insert, and kick files with
+ * the enqueue body here. Each helper stays inline except the kick,
+ * which stays noinline with scalar input and no duplicate walk, so
+ * the verifier stays small.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one task cannot move to another CPU. */
-static __always_inline bool flow_task_pinned(
-	const struct task_struct *p)
-{
-	if (is_migration_disabled(p))
-		return true;
-	if (p->nr_cpus_allowed == 1)
-		return true;
-	return false;
-}
-/* Target CPU for one enqueue with trust in select. */
-/* Open tasks keep select when allowed, else the first allowed CPU. */
-/* Pinned tasks never reach here, they rest in overflow above. */
-static __always_inline s32 flow_pick_target(
-	struct task_struct *p, s32 sel)
-{
-	s32 first;
-	if (sel >= 0 && flow_cpu_ok(p, sel))
-		return sel;
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (flow_cpu_ok(p, first))
-		return first;
-	return -1;
-}
-/* Insert one task into the deadline queue with its deadline. */
-/* The compat wrapper keeps old kernels working with no new kfunc. */
-static __always_inline void flow_vtime_insert(
-	struct task_struct *p, s32 cpu, u64 deadline)
-{
-	scx_bpf_dsq_insert_vtime(p, flow_vtime_dsq((u32)cpu),
-	    (u64)FLOW_QUANTUM_NS, deadline, 0);
-}
-/* Insert one task into the shared overflow tail. */
-/* Pinned and foreign tasks rest here with mask wins on drain. */
-/* Throttled tasks park here too with no kick and lazy refill. */
-static __always_inline void flow_over_insert(
-	struct task_struct *p)
-{
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
-	    (u64)FLOW_QUANTUM_NS, 0);
-}
-/* Insert one homeless task into the kernel global queue. */
-/* Tasks without state or without a live CPU rest here with */
-/* mask wins on drain, and the drain counts the global moves. */
-static __always_inline void flow_global_insert(
-	struct task_struct *p)
-{
-	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL,
-	    (u64)FLOW_QUANTUM_NS, 0);
-}
-/* Kick one idle allowed CPU for overflow or global parks. */
-/* Tries the kernel idle pick first, then the first allowed live CPU. */
-/* Kicks only when the target runs nothing, with the idle flag cleared */
-/* first so the kick sticks. Never sends a preempt kick, so pinned */
-/* parks stay idle only. A kick miss stays fail closed with mask wins */
-/* on drain and the timer or a later kicking enqueue wakes the park. */
-static __noinline void flow_kick_idle_allowed(
-	const struct task_struct *p)
-{
-	s32 idle;
-	s32 first;
-	struct flow_cpu_state *st;
-	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (idle >= 0 && flow_cpu_ok(p, idle)) {
-		st = flow_cpu((u32)idle);
-		if (st &&
-		    __sync_fetch_and_add(&st->running_pid,
-		    0) == 0) {
-			scx_bpf_test_and_clear_cpu_idle(
-			    (s32)idle);
-			scx_bpf_kick_cpu((s32)idle,
-			    SCX_KICK_IDLE);
-			__sync_fetch_and_add(
-			    &flow_stats.kicks, 1);
-			return;
-		}
-	}
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (first >= 0 && flow_cpu_ok(p, first)) {
-		st = flow_cpu((u32)first);
-		if (st &&
-		    __sync_fetch_and_add(&st->running_pid,
-		    0) == 0) {
-			scx_bpf_test_and_clear_cpu_idle(first);
-			scx_bpf_kick_cpu(first, SCX_KICK_IDLE);
-			__sync_fetch_and_add(
-			    &flow_stats.kicks, 1);
-		}
-	}
-}
+#include "enqueue/target.bpf.c"
+#include "enqueue/insert.bpf.c"
+#include "enqueue/kick.bpf.c"
+
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
 {

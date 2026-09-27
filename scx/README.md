@@ -10,7 +10,7 @@ Each CPU owns one deadline queue at `0x6800` plus id, overflow at `0x7000` is sh
 
 ### Deadlines
 
-Every arrival steps past the later of now and last deadline, the step shrinks as effective weight grows. Task weight folds nice, hierarchy share folds ancestors to depth `8`. See `src/bpf/enqueue.bpf.c`.
+Every arrival steps past the later of now and last deadline, the step shrinks as effective weight grows. Task weight folds nice, hierarchy share folds ancestors to depth `8`. See `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/` (`target`, `insert`, `kick`).
 
 ### Hierarchies
 
@@ -22,7 +22,7 @@ Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap w
 
 ### Preemption
 
-A busy CPU kicks only for a strictly earlier deadline with the occupant CPU validated, a zero occupant deadline paces with no kick. Equal or later arrivals pace at slice expiry. Pinned arrivals send idle kicks only, never preempt. Overflow and global parks kick one idle allowed CPU. See `src/bpf/enqueue.bpf.c`.
+A busy CPU kicks only for a strictly earlier deadline with the occupant CPU validated, a zero occupant deadline paces with no kick. Equal or later arrivals pace at slice expiry. Pinned arrivals send idle kicks only, never preempt. Overflow and global parks kick one idle allowed CPU. See `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/` (`kick`).
 
 ### Placement
 
@@ -42,7 +42,7 @@ Running stamps segment start, stopping claims the start once and charges raw tim
 
 ### Counters
 
-Counters stay at `136B` with `17` live fields. JSON carries live counters only, slice reads the fixed quantum. See `src/stats.rs`.
+Counters stay at `136B` with `17` live fields. JSON carries live counters only, slice reads the fixed quantum. See `src/rust/stats.rs`.
 
 ## Configuration
 
@@ -55,25 +55,28 @@ The dashboard serves loopback port `50005` with rates, per CPU pids, and a snaps
 ## Code map
 
 - Queue rules: `src/bpf/intf.h`
-- Maps, helpers, ops table: `src/bpf/main.bpf.c`
+- Maps, helpers, ops table: `src/bpf/main.bpf.c` plus `src/bpf/main/`
+  (`task.bpf.c`, `hier.bpf.c`, `bw.bpf.c`, `cpu.bpf.c`, `timer.bpf.c`)
 - Placement: `src/bpf/select_cpu.bpf.c`
-- Inserts: `src/bpf/enqueue.bpf.c`
+- Inserts: `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/`
+  (`target.bpf.c`, `insert.bpf.c`, `kick.bpf.c`)
 - Drains: `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/`
   (`drain.bpf.c`, `gated.bpf.c`, `steal.bpf.c`, `tail.bpf.c`)
 - Lifecycle: `src/bpf/lifecycle.bpf.c`
 - Hierarchy: `src/bpf/cgroup.bpf.c`
-- Rust mirrors: `src/flow_slice.rs`, `src/flow_edf.rs`,
-  `src/flow_select.rs`, `src/flow_preempt.rs`,
-  `src/flow_slot.rs`, `src/flow_cgrp.rs`
-- Facade: `src/flow.rs`
+- Rust mirrors: `src/rust/flow_slice.rs`, `src/rust/flow_edf.rs`,
+  `src/rust/flow_select.rs`, `src/rust/flow_preempt.rs`,
+  `src/rust/flow_slot.rs`, `src/rust/flow_cgrp.rs`
+- Facade: `src/rust/flow.rs`
 - Tests: inline `tests` modules in each mirror
-- Constant validation: `src/config.rs`
+- Constant validation: `src/rust/config.rs`
 - Generated bindings and skeleton: `src/bpf_intf.rs`,
   `src/bpf_skel.rs`
-- Snapshot and topology: `src/snapshot.rs`,
-  `src/topology.rs`
-- Stats and dashboard payload: `src/stats.rs`,
-  `src/webui.rs`, `ui/index.html`
+- Snapshot and topology: `src/rust/snapshot.rs`,
+  `src/rust/topology.rs`
+- Energy probe: `src/rust/rapl.rs`
+- Stats and dashboard payload: `src/rust/stats.rs`,
+  `src/rust/webui.rs`, `ui/index.html`
 
 ## Limitations
 
