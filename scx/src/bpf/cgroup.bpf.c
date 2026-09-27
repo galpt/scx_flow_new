@@ -211,34 +211,3 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp,
 		__sync_fetch_and_add(&flow_bw_limited, 1);
 	__sync_fetch_and_add(&flow_cgrp_gen, 1);
 }
-/* Update one hierarchy idle state with share override. */
-/* Idle stores one flag with no pool change, and the share walk */
-/* uses weight one while idle with the saved share kept. */
-void BPF_STRUCT_OPS(flow_cgroup_set_idle, struct cgroup *cgrp,
-	bool idle)
-{
-	u64 id;
-	struct flow_cgrp_ctx *e;
-	struct flow_cgrp_ctx n = {};
-	if (!cgrp)
-		return;
-	id = flow_cgrp_id(cgrp);
-	if (!id)
-		return;
-	e = flow_cgrp(id);
-	if (e) {
-		e->__pad0 = idle ? 1 : 0;
-		__sync_fetch_and_add(&flow_cgrp_gen, 1);
-		return;
-	}
-	n.weight = (u32)FLOW_CGRP_WEIGHT_DFL;
-	n.__pad0 = idle ? 1 : 0;
-	n.period_us = (u64)FLOW_BW_PERIOD_MIN_US;
-	n.quota_us = 0;
-	n.burst_us = 0;
-	n.pool_ns = 0;
-	n.updated_at = flow_now();
-	if (bpf_map_update_elem(&cgrp_stor, &id, &n, BPF_ANY) < 0)
-		return;
-	__sync_fetch_and_add(&flow_cgrp_gen, 1);
-}

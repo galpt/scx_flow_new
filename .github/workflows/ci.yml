@@ -65,12 +65,6 @@ jobs:
           target/ci/scx_flow --help > /dev/null
 
   veristat:
-    # Informational on 4.4.2: the runner kernel predates the cgroup idle
-    # ops member, so the new set_idle program fails with an empty verifier
-    # log while the other programs verify cleanly. Do not block on this
-    # kernel-mismatched check; re-enable as a hard gate once runners
-    # support the new op. The test job still blocks.
-    continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:

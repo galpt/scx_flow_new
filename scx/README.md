@@ -14,7 +14,7 @@ Every arrival steps past the later of now and last deadline, the step shrinks as
 
 ### Hierarchies
 
-Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. See `src/bpf/cgroup.bpf.c`.
+Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. Idle groups run at configured shares. See `src/bpf/cgroup.bpf.c`.
 
 ### Bandwidth
 
