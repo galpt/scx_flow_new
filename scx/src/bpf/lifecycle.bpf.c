@@ -2,8 +2,9 @@
 /*
  * Task lifecycle ops.
  *
- * Running stamps the segment start and pairs the on CPU gauge.
- * Stopping charges the raw segment to total runtime and drains
+ * Running claims the segment start from zero and counts the on CPU
+ * gauge once per claim. Stopping claims the start once and charges
+ * the raw segment to total runtime and drains
  * the hierarchy pools, then counts one requeue per runnable stop
  * else one completion. Enable clears the deadline state plus the
  * share cache, and disable plus exit charge a leftover segment
@@ -20,15 +21,21 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	s32 cpu;
 	u64 now;
 	u64 stamp;
+	u64 prev;
+	bool claimed = false;
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
 	if (tctx) {
 		/* Zero never marks a run, so a zero clock folds to one. */
-		/* The store uses an exchange to pair with the stopping and */
-		/* leftover claims with no torn stamp. */
+		/* The claim swaps from zero only, so a second running */
+		/* without a stop keeps the first start with no second */
+		/* gauge count. The stopping and leftover claims pair */
+		/* with no torn stamp. */
 		stamp = now ? now : 1;
-		__sync_lock_test_and_set(&tctx->run_at, stamp);
+		prev = __sync_val_compare_and_swap(&tctx->run_at,
+		    0, stamp);
+		claimed = prev == 0;
 	}
 	if (cpu < 0)
 		goto inc;
@@ -39,7 +46,10 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		__sync_lock_test_and_set(&st->running_pid,
 		    (u32)p->pid);
 inc:
-	__sync_fetch_and_add(&flow_stats.on_cpu, 1);
+	/* Count once per claimed start with no double count. */
+	/* Tasks without state hold no claim, so they hold no count. */
+	if (claimed)
+		__sync_fetch_and_add(&flow_stats.on_cpu, 1);
 }
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	u64 deq_flags)
@@ -58,16 +68,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	tctx = flow_lookup(p);
 	cpu = scx_bpf_task_cpu(p);
 	now = flow_now();
-	/* Tasks without state drop the gauge with no charge. */
+	/* Tasks without state hold no claim, so they hold no count. */
+	/* The pid view still clears when owned. */
 	if (!tctx) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
-		flow_on_cpu_dec();
 		return;
 	}
 	/* The start claims with an exchange, so stopping versus disable */
-	/* or exit charges once. A zero claim means a leftover already */
-	/* charged this run. */
-	/* The owner clear still runs, so a migrated stop stays clean. */
+	/* or exit charges once. A zero claim means no counted start, */
+	/* so this pass drops with no charge and no gauge move, and */
+	/* every counted start meets exactly one gauge drop. */
+	/* The owner check gates the pid clear only, the gauge drop */
+	/* follows the claim with no owner gate, so a migrated stop */
+	/* still pairs. */
 	start = __sync_lock_test_and_set(&tctx->run_at, 0);
 	if (start == 0) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
@@ -93,7 +106,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	}
 	/* The exchange above already zeroed the start, so disable plus */
 	/* exit stay once. */
-	/* Owner only clears, so a migrated stop never clears a new owner. */
+	/* Owner gates the pid clear only, the gauge drop follows the */
+	/* claim with no owner gate. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	if (runnable) {
@@ -124,7 +138,8 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	s32 cpu = scx_bpf_task_cpu(p);
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	flow_charge_leftover(cpu, p, tctx, (u32)p->pid);
+	/* The gauge drop follows the claim with no owner gate. */
+	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
@@ -135,7 +150,8 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	(void)args;
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	flow_charge_leftover(cpu, p, tctx, (u32)p->pid);
+	/* The gauge drop follows the claim with no owner gate. */
+	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,

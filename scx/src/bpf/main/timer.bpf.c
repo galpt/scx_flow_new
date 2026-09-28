@@ -13,14 +13,17 @@
 /* Stopping owns the normal charge and clears the run start. */
 /* Disable and exit funnel here only for a running task that */
 /* stopping never saw. The start claims with a compare and swap, so */
-/* stopping versus disable or exit charges once. The owner check runs */
-/* before the claim, and a failed claim means stopping won, so this */
-/* pass drops with no double charge and no stolen segment. */
+/* stopping versus disable or exit charges once, and a failed claim */
+/* means stopping won, so this pass drops with no double charge. */
+/* The gauge drop follows the claim with no owner gate, the owner */
+/* check gates the pid clear in the caller only, so a migrated */
+/* stop still pairs. A backward clock charges zero time but still */
+/* pairs the gauge. */
 /* The hierarchy lookup carries a reference with a paired release, */
 /* and a null lookup skips the pool charge with no trap. */
 /* Outlined to keep disable and exit small. */
-static __noinline void flow_charge_leftover(s32 cpu,
-	struct task_struct *p, struct flow_task_ctx *tctx, u32 pid)
+static __noinline void flow_charge_leftover(struct task_struct *p,
+	struct flow_task_ctx *tctx)
 {
 	u64 start;
 	u64 now;
@@ -29,30 +32,14 @@ static __noinline void flow_charge_leftover(s32 cpu,
 	struct cgroup *cgrp;
 	if (!tctx)
 		return;
-	if (pid == 0)
-		return;
 	start = READ_ONCE(tctx->run_at);
 	if (start == 0)
 		return;
-	if (cpu < 0)
-		return;
-	if (!flow_cpu_live((u32)cpu))
-		return;
-	/* A stopped task holds zero with no charge left. */
-	/* Only the owning CPU charges, so a migrated stop stays once. */
-	{
-		struct flow_cpu_state *st = flow_cpu((u32)cpu);
-		u32 cur;
-		if (!st)
-			return;
-		cur = READ_ONCE(st->running_pid);
-		if (cur != pid)
-			return;
-	}
 	now = flow_now();
 	if (flow_time_before(now, start))
-		return;
-	delta = now - start;
+		delta = 0;
+	else
+		delta = now - start;
 	got = __sync_val_compare_and_swap(&tctx->run_at,
 	    start, 0);
 	if (got != start)

@@ -86,9 +86,12 @@ enum flow_consts {
 /* deadline means no order yet, so preempt compares skip with no kick. */
 /* Wait holds the last enqueue time for the starvation check. Pinned */
 /* parks set wait too, so the gated backstop sees them. */
-/* Run holds the segment start while on CPU else zero, so nonzero */
-/* pairs the on CPU gauge with the stopping charge. Run claims use */
-/* atomics, so stopping versus disable or exit charges once. Cgid holds the */
+/* Run holds the segment start while on CPU else zero, so a claimed */
+/* start pairs the on CPU gauge with the stopping charge. Running */
+/* claims from zero only with a compare and swap, so a second running */
+/* without a stop keeps the first start with no second count. */
+/* Stopping versus disable or exit claims once with atomics, so each */
+/* counted start meets exactly one gauge drop with no owner gate. Cgid holds the */
 /* last hierarchy id for the cache, eweight holds the hierarchy */
 /* share with base 100, cached marks a valid entry, and generation */
 /* holds the low bits of the global generation for validation. The low */

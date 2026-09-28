@@ -361,6 +361,10 @@
           <span class="stat-value" id="on-cpu">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
+          Live pids:</span>
+          <span class="stat-value" id="running-pids">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
           Uptime:</span>
           <span class="stat-value" id="uptime">0</span>
         </div>
@@ -538,6 +542,27 @@
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
      * walks inserts, moves, and steal detail. */
+    /* Live pid count from the per CPU cards. */
+    /* Counts cards with a nonzero pid with no gauge use. */
+    function livePids(perCpu) {
+      var n = 0;
+      var i;
+      for (i = 0; i < perCpu.length; i++) {
+        if ((perCpu[i].running_pid || 0) !== 0) n++;
+      }
+      return n;
+    }
+
+    /* Clamped on CPU for display. Caps the raw gauge at the */
+    /* online card count, so a stale gauge never prints past */
+    /* the live cards. */
+    function shownOnCpu(s, perCpu) {
+      var raw = s.on_cpu || 0;
+      if (raw < 0) raw = 0;
+      if (raw > perCpu.length) return perCpu.length;
+      return raw;
+    }
+
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -625,7 +650,18 @@
       updateEnergy(data);
 
       var s = data.stats || {};
-      var summary = buildSummary(s);
+      var perCpu = data.per_cpu || [];
+      var live = livePids(perCpu);
+      var shown = shownOnCpu(s, perCpu);
+      var disp = {};
+      var k;
+      for (k in s) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) {
+          disp[k] = s[k];
+        }
+      }
+      disp.on_cpu = shown;
+      var summary = buildSummary(disp);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
@@ -640,7 +676,10 @@
       el('meta-line').textContent = meta ||
         'per-CPU deadline queues, fixed quantum and placement';
 
-      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('on-cpu').textContent = fmt(shown);
+      el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
+        ', live cards ' + fmt(live);
+      el('running-pids').textContent = fmt(live);
       el('uptime').textContent =
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =

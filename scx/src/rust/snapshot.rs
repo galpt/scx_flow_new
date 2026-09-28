@@ -435,11 +435,12 @@ impl<'a> Scheduler<'a> {
 
     /*
      * Dashboard snapshot. Merges the static cards with live state by online
-     * rank. Gauges only, no deltas. Frequency, LLC, SMT, slice, and energy
-     * stay display only. Offline stays out, so per CPU count matches online
-     * count. Version, timestamp, topology, and governor join the counters.
-     * Governor polls online only on the 1s tick for display with no BPF
-     * write. Slice reads the fixed quantum.
+     * rank. Counters stay raw with no deltas, the on CPU gauge passes
+     * through with the live pid view. Frequency, LLC, SMT, slice, and
+     * energy stay display only. Offline stays out, so per CPU count
+     * matches online count. Version, timestamp, topology, and governor
+     * join the counters. Governor polls online only on the 1s tick
+     * for display with no BPF write. Slice reads the fixed quantum.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr_raw = {
