@@ -390,17 +390,16 @@ impl<'a> Scheduler<'a> {
             requeues: s.requeues,
             completions: s.completions,
             park_moves: s.park_moves,
-            steal_moves: s.steal_moves,
+            tree_moves: s.tree_moves,
             kicks: s.kicks,
             enq_no_tctx: s.enq_no_tctx,
             preempt_kicks: s.preempt_kicks,
             preempt_skipped: s.preempt_skipped,
-            slot_moves: s.slot_moves,
             global_moves: s.global_moves,
-            throttled_ns: s.throttled_ns,
             nr_throttled: s.nr_throttled,
             parked: s.parked,
             bw_moves: s.bw_moves,
+            cpuperf_sets: s.cpuperf_sets,
         }
     }
 
@@ -436,11 +435,11 @@ impl<'a> Scheduler<'a> {
     /*
      * Dashboard snapshot. Merges the static cards with live state by online
      * rank. Counters stay raw with no deltas, the on CPU gauge passes
-     * through with the live pid view. Frequency, LLC, SMT, slice, and
+     * through with the live pid view. Frequency, LLC, SMT, and
      * energy stay display only. Offline stays out, so per CPU count
      * matches online count. Version, timestamp, topology, and governor
      * join the counters. Governor polls online only on the 1s tick
-     * for display with no BPF write. Slice reads the fixed quantum.
+     * for display with no BPF write.
      */
     pub(crate) fn get_web_metrics(&mut self) -> stats::WebMetrics {
         let nr_raw = {
@@ -486,7 +485,6 @@ impl<'a> Scheduler<'a> {
             e.cur_freq_khz = self.cur_freq_khz.get(rank).copied().unwrap_or(0);
             let st = self.read_cpu(cpu);
             e.running_pid = st.running_pid;
-            e.slice_ns = crate::flow_slice::QUANTUM_NS;
             per_cpu.push(e);
         }
         let topology = if self.cpu_static.is_empty() {

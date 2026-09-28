@@ -57,6 +57,7 @@
       font-family: var(--font-mono);
       font-weight: 600;
       font-feature-settings: "tnum";
+      font-variant-numeric: tabular-nums;
     }
     /* Per-CPU card grid. Dense small chips that
      * wrap across the page. No inner scroll. The
@@ -120,19 +121,6 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-    /* Slice stays single line with ellipsis. The quantum
-      is fixed, so every card shows the same slice. */
-    .core-card .core-slice {
-      font-size: 0.6rem;
-      color: var(--text-secondary);
-      font-family: var(--font-mono);
-      margin-top: 0;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      font-feature-settings: "tnum";
-      font-variant-numeric: tabular-nums;
     }
     /* Running badge on each CPU card. Running tasks
      * show live, idle cards stay muted. Flex centers
@@ -303,7 +291,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU deadline queues, fixed quantum and placement
+          global deadline tree, park ring and placement
         </p>
         <p style="font-size:0.75rem;
           color:var(--text-muted);margin-top:2px;
@@ -407,8 +395,8 @@
           <span class="stat-value" id="park">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Steal moves:</span>
-          <span class="stat-value" id="steal">0</span>
+          Tree moves:</span>
+          <span class="stat-value" id="tree-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Kicks:</span>
@@ -427,16 +415,12 @@
           <span class="stat-value" id="pskip">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Slot moves:</span>
-          <span class="stat-value" id="slot-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           Global moves:</span>
           <span class="stat-value" id="global-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Throttled:</span>
-          <span class="stat-value" id="throttled-ns">0</span>
+          Frequency sets:</span>
+          <span class="stat-value" id="cpuperf">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Throttle hits:</span>
@@ -491,20 +475,9 @@
       return day.toFixed(1) + ' days';
     }
 
-    /* Slice in nanos. Below a microsecond stays in
-     * ns, below a millisecond shows us, above
-     * shows ms. */
-    function fmtSlice(ns) {
-      ns = clamp(ns);
-      if (ns >= 1e6) return (ns / 1e6).toFixed(2) + ' ms';
-      if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' us';
-      return Math.round(ns) + ' ns';
-    }
-
-    /* Per-CPU cards with fixed slice and pid. They show
-     * freq, SMT, LLC, and slice. Freq
-     * unknown stays plain with no zero print. Slice stays
-     * single line with full text in the title. */
+    /* Per-CPU cards with pid. They show
+     * freq, SMT, LLC, and pid. Freq
+     * unknown stays plain with no zero print. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -533,7 +506,6 @@
           ? ' <span class="core-smt">SMT</span>'
           : '';
         var pid = cpu.running_pid || 0;
-        var slice = cpu.slice_ns || cpu.tq_ns || 0;
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'
@@ -541,9 +513,6 @@
         var pidLabel = idle
           ? '<div class="core-pid">pid -</div>'
           : '<div class="core-pid">pid ' + pid + '</div>';
-        var sliceText = 'slice ' + fmtSlice(slice);
-        var sliceLabel = '<div class="core-slice" title="' +
-          sliceText + '">' + sliceText + '</div>';
         var llcLabel = '<div class="core-llc">LLC ' +
           (cpu.llc_id || 0) + '</div>';
         return '<div class="card core-card">' +
@@ -552,14 +521,14 @@
           '<div class="core-freq">' + freqLabel +
           '</div>' + llcLabel +
           '<div>' + badge + '</div>' +
-          pidLabel + sliceLabel +
+          pidLabel +
           '</div>';
       }).join('');
     }
 
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
-     * walks inserts, moves, and steal detail. */
+     * walks inserts, moves, and tree detail. */
     /* Live pid count from the per CPU cards. */
     /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
@@ -587,8 +556,7 @@
       var req = s.requeues || 0;
       var done = s.completions || 0;
       var park = s.park_moves || 0;
-      var steal = s.steal_moves || 0;
-      var smoves = s.slot_moves || 0;
+      var tree = s.tree_moves || 0;
       var placed = ins + req;
       var tldr, explanation;
       if (!placed && !onCpu) {
@@ -602,8 +570,7 @@
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) +
-          '. Slot moves cover ' + fmt(smoves) + '.';
+          ' and tree moves cover ' + fmt(tree) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -611,8 +578,7 @@
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
           '. Park moves cover ' + fmt(park) +
-          ' and steal moves cover ' + fmt(steal) +
-          '. Slot moves cover ' + fmt(smoves) + '.';
+          ' and tree moves cover ' + fmt(tree) + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -692,7 +658,7 @@
       if (ver && topo) meta += ', ';
       if (topo) meta += topo;
       el('meta-line').textContent = meta ||
-        'per-CPU deadline queues, fixed quantum and placement';
+        'global deadline tree, park ring and placement';
 
       el('on-cpu').textContent = fmt(shown);
       el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
@@ -710,8 +676,8 @@
         fmt(s.completions || 0);
       el('park').textContent =
         fmt(s.park_moves || 0);
-      el('steal').textContent =
-        fmt(s.steal_moves || 0);
+      el('tree-moves').textContent =
+        fmt(s.tree_moves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
       el('no-tctx').textContent =
@@ -720,12 +686,10 @@
         fmt(s.preempt_kicks || 0);
       el('pskip').textContent =
         fmt(s.preempt_skipped || 0);
-      el('slot-moves').textContent =
-        fmt(s.slot_moves || 0);
+      el('cpuperf').textContent =
+        fmt(s.cpuperf_sets || 0);
       el('global-moves').textContent =
         fmt(s.global_moves || 0);
-      el('throttled-ns').textContent =
-        fmtRuntime(s.throttled_ns || 0);
       el('nr-throttled').textContent =
         fmt(s.nr_throttled || 0);
       el('parked').textContent =

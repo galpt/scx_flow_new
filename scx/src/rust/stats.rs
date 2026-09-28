@@ -21,7 +21,7 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with placement, preempt, and steal detail.
+/// Counters with placement, preempt, and tree detail.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -41,12 +41,12 @@ pub struct Metrics {
     #[stat(desc = "Blocks and exits with release")]
     #[serde(default)]
     pub completions: u64,
-    #[stat(desc = "Moves from the overflow tail")]
+    #[stat(desc = "Moves from the park ring")]
     #[serde(default)]
     pub park_moves: u64,
-    #[stat(desc = "Moves from a peer deadline queue")]
+    #[stat(desc = "Moves from the deadline tree")]
     #[serde(default)]
-    pub steal_moves: u64,
+    pub tree_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
@@ -60,30 +60,25 @@ pub struct Metrics {
     #[stat(desc = "Busy arrivals held without an earlier deadline")]
     #[serde(default)]
     pub preempt_skipped: u64,
-    #[stat(desc = "Queue tasks moved via dispatch")]
-    #[serde(default)]
-    pub slot_moves: u64,
     #[stat(desc = "Moves from the kernel global queue")]
     #[serde(default)]
     pub global_moves: u64,
-    /// Counts quanta at 1ms per throttle hit with no wall use.
-    /// Keeps the wire name with the quantum semantic.
-    #[stat(desc = "Throttled quanta in nanoseconds at 1ms per hit")]
-    #[serde(default)]
-    pub throttled_ns: u64,
-    /// Counts throttle hits, same hits as parked below.
+    /// Counts throttle hits on limited hierarchies.
     /// Keeps the wire name with no split.
     #[stat(desc = "Throttle hits on limited hierarchies")]
     #[serde(default)]
     pub nr_throttled: u64,
-    /// Counts overflow parks from throttling, same hits as above.
+    /// Counts every park ring arrival.
     /// Keeps the wire name with no split.
-    #[stat(desc = "Overflow parks from throttling")]
+    #[stat(desc = "Park ring arrivals")]
     #[serde(default)]
     pub parked: u64,
     #[stat(desc = "Hierarchy moves with deadline carry")]
     #[serde(default)]
     pub bw_moves: u64,
+    #[stat(desc = "Cache domain frequency transitions applied")]
+    #[serde(default)]
+    pub cpuperf_sets: u64,
 }
 
 /// One card of the per-CPU grid.
@@ -111,9 +106,6 @@ pub struct PerCpuMetrics {
     /// Pid now on the CPU. Zero when idle.
     #[serde(default)]
     pub running_pid: u32,
-    /// Fixed quantum in nanos. Always 1ms.
-    #[serde(default, alias = "tq_ns")]
-    pub slice_ns: u64,
 }
 
 /// Default state text of the energy object.
@@ -190,11 +182,11 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime={} uptime={} \
-            ins={} req={} done={} park={} steal={} \
+            ins={} req={} done={} park={} tree={} \
             kick={} noctx={} \
             pkick={} pskip={} \
-            smoves={} global={} \
-            thr={} nthr={} parked={} bw={}",
+            global={} \
+            nthr={} parked={} bw={} cpuperf={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -203,17 +195,16 @@ impl Metrics {
             self.requeues,
             self.completions,
             self.park_moves,
-            self.steal_moves,
+            self.tree_moves,
             self.kicks,
             self.enq_no_tctx,
             self.preempt_kicks,
             self.preempt_skipped,
-            self.slot_moves,
             self.global_moves,
-            self.throttled_ns,
             self.nr_throttled,
             self.parked,
             self.bw_moves,
+            self.cpuperf_sets,
         )?;
         Ok(())
     }
@@ -229,17 +220,16 @@ impl Metrics {
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             completions: self.completions.wrapping_sub(rhs.completions),
             park_moves: self.park_moves.wrapping_sub(rhs.park_moves),
-            steal_moves: self.steal_moves.wrapping_sub(rhs.steal_moves),
+            tree_moves: self.tree_moves.wrapping_sub(rhs.tree_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
-            slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             global_moves: self.global_moves.wrapping_sub(rhs.global_moves),
-            throttled_ns: self.throttled_ns.wrapping_sub(rhs.throttled_ns),
             nr_throttled: self.nr_throttled.wrapping_sub(rhs.nr_throttled),
             parked: self.parked.wrapping_sub(rhs.parked),
             bw_moves: self.bw_moves.wrapping_sub(rhs.bw_moves),
+            cpuperf_sets: self.cpuperf_sets.wrapping_sub(rhs.cpuperf_sets),
         }
     }
 }

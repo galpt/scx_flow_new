@@ -21,10 +21,12 @@ mod flow_edf;
 mod flow_preempt;
 #[path = "rust/flow_select.rs"]
 mod flow_select;
-#[path = "rust/flow_slice.rs"]
-mod flow_slice;
-#[path = "rust/flow_slot.rs"]
-mod flow_slot;
+#[path = "rust/flow_ssf.rs"]
+mod flow_ssf;
+#[path = "rust/flow_tree.rs"]
+mod flow_tree;
+#[path = "rust/flow_vruntime.rs"]
+mod flow_vruntime;
 #[path = "rust/rapl.rs"]
 mod rapl;
 #[path = "rust/snapshot.rs"]
@@ -182,7 +184,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
         /* Seed the BPF topology view with sibling plus domain rows. */
-        /* Failures keep the BPF defaults with cursor order steal. */
+        /* Failures keep the BPF defaults with hint order placement. */
         Self::seed_topo(&mut skel);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
@@ -276,27 +278,26 @@ impl<'a> Scheduler<'a> {
         let m = self.get_metrics();
         let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
-            "exit ins={} req={} done={} park={} steal={} \
+            "exit ins={} req={} done={} park={} tree={} \
             kick={} noctx={} \
             pkick={} pskip={} \
-            smoves={} global={} \
-            thr={} nthr={} parked={} bw={} \
+            global={} \
+            nthr={} parked={} bw={} cpuperf={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
             m.park_moves,
-            m.steal_moves,
+            m.tree_moves,
             m.kicks,
             m.enq_no_tctx,
             m.preempt_kicks,
             m.preempt_skipped,
-            m.slot_moves,
             m.global_moves,
-            m.throttled_ns,
             m.nr_throttled,
             m.parked,
             m.bw_moves,
+            m.cpuperf_sets,
             runtime,
             oncpu,
         );
@@ -381,56 +382,38 @@ mod tests {
     #[test]
     fn batch_matches_header() {
         assert_eq!(
-            crate::flow_edf::DISPATCH_BATCH as u64,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
+            crate::flow_edf::DISPATCH_BATCH,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_BATCH
         );
+        assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
+        assert_eq!(
+            crate::flow_tree::GLOBAL_SCAN,
+            crate::bpf_intf::flow_consts_FLOW_GLOBAL_SCAN
+        );
+        assert_eq!(crate::flow_tree::GLOBAL_SCAN, 4);
     }
 
     #[test]
-    fn quantum_matches_header() {
+    fn vruntime_matches_header() {
+        assert_eq!(crate::flow_vruntime::WEIGHT_BASE, 100);
+        assert_eq!(crate::flow_vruntime::WEIGHT_MIN, 1);
+        assert_eq!(crate::flow_vruntime::WEIGHT_MAX, 10_000);
         assert_eq!(
-            crate::flow_slice::QUANTUM_NS,
-            crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
-        );
-        assert_eq!(crate::flow_slice::QUANTUM_NS, 1_000_000);
-        assert_eq!(crate::flow_slice::WEIGHT_BASE, 100);
-        assert_eq!(crate::flow_slice::WEIGHT_MIN, 1);
-        assert_eq!(crate::flow_slice::WEIGHT_MAX, 10_000);
-    }
-
-    #[test]
-    fn slot_matches_header() {
-        assert_eq!(
-            crate::flow_slot::SLOT_OVERFLOW,
-            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
-        );
-        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x7000);
-        assert_eq!(
-            crate::flow_slot::SLOT_BUDGET,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET
+            crate::flow_tree::NODE_MAX,
+            crate::bpf_intf::flow_consts_FLOW_NODE_MAX as u64
         );
         assert_eq!(
-            crate::flow_slot::SLOT_MAX_DSQS,
-            crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
-        );
-        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 1025);
-        assert_eq!(
-            crate::flow_slot::VTIME_BASE,
-            crate::bpf_intf::flow_consts_FLOW_VTIME_BASE as u64
+            crate::flow_tree::PARK_NR,
+            crate::bpf_intf::flow_consts_FLOW_PARK_NR as u64
         );
         assert_eq!(
-            crate::flow_slot::SLOT_OWN_CAP,
-            crate::bpf_intf::flow_consts_FLOW_OWN_VTIME_CAP
+            crate::flow_tree::LLC_MAX,
+            crate::bpf_intf::flow_consts_FLOW_LLC_MAX as u64
         );
         assert_eq!(
-            crate::flow_slot::SLOT_OVER_CAP,
-            crate::bpf_intf::flow_consts_FLOW_OVER_CAP
+            crate::flow_tree::CPUFREQ_MIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_CPUFREQ_MIN_NS as u64
         );
-        assert_eq!(
-            crate::flow_slot::SLOT_GATED_CAP,
-            crate::bpf_intf::flow_consts_FLOW_GATED_CAP
-        );
-        assert_eq!(crate::flow_slot::SLOT_GATED_CAP, 6);
     }
 
     #[test]
@@ -443,20 +426,17 @@ mod tests {
     }
 
     #[test]
-    fn steal_matches_header() {
+    fn scan_matches_header() {
         assert_eq!(
-            crate::flow_select::STEAL_MIN_DEPTH,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_DEPTH as u64
+            crate::flow_select::SCAN_BOUND as u64,
+            crate::bpf_intf::flow_consts_FLOW_SCAN_BOUND as u64
         );
-        assert_eq!(
-            crate::flow_select::STEAL_BOUND as u64,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_BOUND as u64
-        );
+        assert_eq!(crate::flow_select::SCAN_BOUND, 8);
     }
 
     #[test]
-    fn task_size_is_40() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
+    fn task_size_is_64() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 64);
     }
 
     #[test]
@@ -470,11 +450,16 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_136() {
+    fn sched_stats_size_is_128() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            136
+            128
         );
+    }
+
+    #[test]
+    fn llc_size_is_24() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_llc_perf>(), 24);
     }
 
     #[test]
