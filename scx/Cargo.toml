@@ -4,7 +4,7 @@ version = "4.4.7"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
 rust-version = "1.91"
-description = "A per-CPU ordered queue scheduler for sched_ext."
+description = "The scx_flow CPU scheduler."
 license = "GPL-2.0-only"
 
 [dependencies]
