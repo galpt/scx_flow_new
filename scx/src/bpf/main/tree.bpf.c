@@ -12,9 +12,12 @@
  * node, so the rare defensive remove never corrupts. The park ring
  * holds pids in arrival order with head plus tail under the same
  * lock, and a full ring fails open to the global queue. The floor
- * tracks the last dispatched deadline with a monotonic max, so
- * sleepers clamp with no credit. The sequence hands out one
- * arrival order tick per insert with an atomic add.
+ * tracks the last live popped deadline with a monotonic max only
+ * past validation, so dead reaps never inflate later clamps and
+ * sleepers keep no credit. The sequence hands out one arrival order
+ * tick per insert with an atomic add. One lock guards the tree plus
+ * the ring with short holds, so contention stays bound with the key
+ * formed before the lock for the tree.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -109,38 +112,15 @@ static __noinline struct flow_node *flow_tree_fetch(u32 pid)
 		return old;
 	return bpf_kptr_xchg(&stash->node, NULL);
 }
-/* Add one taken node under the lock with queued set. */
-/* The caller fills the key before the call, so the locked section */
-/* holds no walk and no alloc. A set queued flag marks tree membership */
-/* for the reap and the double enqueue guard. */
-static __always_inline void flow_tree_add_locked(
-	struct flow_node *node, struct flow_task_ctx *tctx)
-{
-	bpf_rbtree_add(&edf_tree, &node->rb, flow_edf_less_cb);
-	if (tctx)
-		WRITE_ONCE(tctx->queued, (u8)1);
-}
-/* Remove one taken node under the lock with queued clear. */
-/* Removal reads safe on a missing node with a null return, so a */
-/* double remove never corrupts the tree. A clear queued flag keeps */
-/* the reap check exact after the unlock. */
-static __always_inline void flow_tree_remove_locked(
-	struct flow_node *node, struct flow_task_ctx *tctx)
-{
-	bpf_rbtree_remove(&edf_tree, &node->rb);
-	if (tctx)
-		WRITE_ONCE(tctx->queued, (u8)0);
-}
-/* Pop the head node under the lock with floor advance. */
-/* The floor takes the monotonic max with the popped deadline, so */
-/* later clamps never trail dispatched order. Null means an empty */
-/* tree with no floor move. The caller owns the returned node past */
-/* the unlock with the queued flag still set until restash. */
+/* Pop the head node under the lock with no floor move. */
+/* Null means an empty tree with no floor move. The caller owns the */
+/* returned node past the unlock with the queued flag still set until */
+/* restash. The caller advances the floor only for a live pop past */
+/* validation, so a dead reap never inflates later clamps. */
 static __noinline struct flow_node *flow_tree_pop(void)
 {
 	struct bpf_rb_node *rb;
 	struct flow_node *node;
-	u64 floor;
 	bpf_spin_lock(&edf_lock);
 	rb = bpf_rbtree_first(&edf_tree);
 	if (!rb) {
@@ -152,36 +132,37 @@ static __noinline struct flow_node *flow_tree_pop(void)
 	if (!rb)
 		return NULL;
 	node = container_of(rb, struct flow_node, rb);
-	floor = READ_ONCE(flow_floor);
-	if (flow_time_before(floor, node->deadline))
-		WRITE_ONCE(flow_floor, node->deadline);
 	return node;
 }
-/* Push one pid to the park ring under the lock. */
+/* Push one pid to the park ring with reserved slot. */
 /* False means a full ring, so the caller fails open to global with */
-/* no stall and no overwrite. The tail wraps with a mask free add, */
-/* so concurrent pushes never tear past the bound. */
+/* no stall. The slot reserves first with an atomic add, so two */
+/* pushes never claim one slot with no check then fill then inc */
+/* window. The full check runs under the lock past the reserve, so */
+/* a full ring leaves a hole that later pops skip with no loss, since */
+/* the caller fails open and the hole holds no task. The tail wraps */
+/* with a mask free add, so concurrent pushes never tear past the */
+/* bound. */
 static __noinline bool flow_park_push(u32 pid)
 {
 	u32 head;
-	u32 tail;
+	u32 my;
 	u32 key;
 	u64 n = (u64)FLOW_PARK_NR;
 	if (!n)
 		return false;
+	my = __sync_fetch_and_add(&flow_park_tail, 1);
 	bpf_spin_lock(&edf_lock);
 	head = READ_ONCE(flow_park_head);
-	tail = READ_ONCE(flow_park_tail);
-	if ((u64)(tail - head) >= n) {
+	if ((u64)(my - head) >= n) {
 		bpf_spin_unlock(&edf_lock);
 		return false;
 	}
-	key = tail % (u32)n;
+	key = my % (u32)n;
 	bpf_spin_unlock(&edf_lock);
 	if (bpf_map_update_elem(&park_ring, &key, &pid,
 	    BPF_ANY) != 0)
 		return false;
-	__sync_fetch_and_add(&flow_park_tail, 1);
 	return true;
 }
 /* Pop one pid from the park ring with snapshot plus revalidate. */
@@ -190,10 +171,9 @@ static __noinline bool flow_park_push(u32 pid)
 /* move, so the lookup past the unlock reads stable memory. A */
 /* second section advances the head only when it still matches, */
 /* so a concurrent pop wins once with the loser aborting. Pushes */
-/* cannot overwrite the snapshotted slot, since the full check */
-/* under the push lock excludes the wrap index while the head */
-/* holds. False means an empty ring or a lost race with no head */
-/* move and no slot drop. */
+/* reserve distinct slots with the atomic add, so a push never */
+/* overwrites a live slot. False means an empty ring or a lost race */
+/* with no head move and no slot drop. */
 static __noinline bool flow_park_pop(u32 *pid_out)
 {
 	u32 head;

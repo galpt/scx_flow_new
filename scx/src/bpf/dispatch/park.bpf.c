@@ -54,8 +54,8 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 		cached = tctx->cached;
 		cgid = tctx->cgid;
 		/* A blocked head rotates with the phase stopped. */
-		/* The push cannot fail past a pop, since the pop freed */
-		/* exactly one slot, so no fail open runs here. */
+		/* The pop freed exactly one slot, so the push finds room */
+		/* with no fail open past it. */
 		if (flow_tree_throttled_scalar(cached, cgid) ||
 		    !bpf_cpumask_test_cpu((u32)cpu,
 		    task->cpus_ptr)) {

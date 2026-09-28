@@ -2,19 +2,24 @@
 /*
  * Tree drain for the dispatch pass.
  *
- * Pops head nodes first in deadline order up to the batch bound.
- * Each pop resolves its owner past the unlock with no cgroup walk,
- * then lands local, parks, or reaps. Mask mismatches park in the
- * ring for a later pass, and a set throttle flag parks too with
- * the timer re-armed, so drained pools hold tasks back with no
- * bypass. A cold cache or a missing leaf moves fail open, so a
- * move while parked costs one slice at most. Gone tasks, cleared
- * queue flags, and sequence mismatches from pid reuse reap with
- * the entry dropped only when the slot sits empty, so a live
- * replacement node never frees. A full ring re-trees the node
- * with the same key and stops the phase, so no pass spins. Runs
- * under the caller RCU read lock with the tree lock taken per
- * pop only.
+ * Pops one head first in deadline order with no loop, so the jump
+ * chains stay short enough to load. Each pop resolves its owner
+ * past the unlock with no cgroup walk, then lands local, parks,
+ * or reaps. The floor advances only for a live pop past validation
+ * with a monotonic max, so dead reaps never inflate later clamps.
+ * Mask mismatches park in the ring for a later pass, and a set
+ * throttle flag parks too with the timer re-armed, so drained pools
+ * hold tasks back with no bypass. A cold cache or a missing leaf
+ * moves fail open, so a move while parked costs one slice at most.
+ * Gone tasks, cleared queue flags, and sequence mismatches from pid
+ * reuse reap with the entry dropped only when the slot sits empty,
+ * so a live replacement node never frees. A full ring fails open to
+ * global with the node reaped, so no pass spins with mask wins on
+ * the global drain. A dead head reaps with the pass spent and the next pass pops the
+ * next head with monotonic progress. CPUs re-dispatch as they
+ * consume, so order holds globally with the tree staying the single
+ * source despite one head per pass. Runs under the caller RCU read
+ * lock with the tree lock taken per pop only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -59,11 +64,13 @@ static __noinline void flow_tree_reap(u32 pid,
 /* Tree phase with narrow inputs. Returns the tree moves. */
 /* Takes CPU plus budget plus base scalars with no struct pass. */
 /* Pops one head per pass with no loop, so the jump chains stay */
-/* short enough to load. A dead head reaps with the pass spent, */
-/* and the next pass pops the next head with monotonic progress. */
-/* A live head lands local, parks, or re-trees with the pass */
-/* spent. CPUs re-dispatch as they consume, so order holds */
-/* globally with the tree staying the single source. */
+/* short enough to load. The floor moves only here past validation */
+/* with a monotonic max, so live order sets later clamps. A dead */
+/* head reaps with the pass spent and no floor move, and the next */
+/* pass pops the next head with monotonic progress. A live head */
+/* lands local, parks, or re-trees with the pass spent. CPUs */
+/* re-dispatch as they consume, so order holds globally with the */
+/* tree staying the single source. */
 static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 	u32 base)
 {
@@ -73,6 +80,7 @@ static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 	u32 pid;
 	bool cached;
 	u64 cgid;
+	u64 floor;
 	if (base >= budget)
 		return 0;
 	node = flow_tree_pop();
@@ -91,21 +99,22 @@ static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 		flow_tree_reap(pid, node);
 		return 0;
 	}
+	floor = READ_ONCE(flow_floor);
+	if (flow_time_before(floor, node->deadline))
+		WRITE_ONCE(flow_floor, node->deadline);
 	cached = tctx->cached;
 	cgid = tctx->cgid;
 	if (!bpf_cpumask_test_cpu((u32)cpu,
 	    task->cpus_ptr) ||
 	    flow_tree_throttled_scalar(cached, cgid)) {
-		/* A full ring re-trees with the same key, so */
-		/* order holds with no spin and the node never */
-		/* touches the stash mid flight. */
+		/* A full ring fails open to global with the node reaped, */
+		/* so no pass spins and no task stalls. The ring holds */
+		/* 4096 parks, so full is exceptional with mask wins on */
+		/* the global drain for the overflow. */
 		WRITE_ONCE(tctx->queued, (u8)0);
 		if (!flow_park_push(pid)) {
-			bpf_spin_lock(&edf_lock);
-			bpf_rbtree_add(&edf_tree, &node->rb,
-			    flow_edf_less_cb);
-			WRITE_ONCE(tctx->queued, (u8)1);
-			bpf_spin_unlock(&edf_lock);
+			flow_tree_reap(pid, node);
+			flow_global_insert(task);
 			bpf_task_release(task);
 			return 0;
 		}

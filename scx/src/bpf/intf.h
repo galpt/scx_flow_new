@@ -100,8 +100,8 @@ enum flow_consts {
 /* and for the preempt compare. A zero deadline means no order yet, */
 /* so preempt compares skip with no kick. Vruntime advances by */
 /* scaled execution only while on CPU, so order carries weight with */
-/* no fixed service step. Wait holds the last enqueue time for the */
-/* starvation check. Run holds the segment start while on CPU else */
+/* no fixed service step. Wait holds the last enqueue time for */
+/* diagnostics with no dispatch gate. Run holds the segment start */
 /* zero, so a claimed start pairs the on CPU gauge with the stopping */
 /* charge. Running claims from zero only with a compare and swap, so */
 /* a second running without a stop keeps the first start with no */
@@ -377,27 +377,22 @@ static __always_inline u64 flow_bw_max_ns(u64 quota_us,
 		return (u64)~0ULL;
 	return total * 1000ULL;
 }
-/* True when one queued task waited past the starvation floor. */
-/* Unknown stamps never count, so fresh tasks miss past. */
-static __always_inline bool flow_starved(u64 wait_at,
-	u64 now)
-{
-	if (wait_at == 0)
-		return false;
-	if (flow_time_before(now, wait_at))
-		return false;
-	return now - wait_at > (u64)FLOW_STARVE_NS;
-}
 /* Paper share math in the live path with the rest out of scope. */
 /* Demand bound plus load with lambda, mu, and beta need per task */
 /* period plus deadline plus suspension terms with loops and extra */
 /* dividers that do not fit the verifier budget yet, so they stay */
 /* out of scope for this slice with no frozen stubs. The live subset */
-/* keeps utilization plus density plus slack plus deadline with one */
-/* divider each, and every helper below runs on the enqueue path. */
+/* keeps one share plus slack plus deadline with at most one divider, */
+/* and the share runs once on the enqueue path. The window serves as */
+/* both period and span, so one share covers both with no second call. */
+/* The estimate scales the window by weight once, so the single share */
+/* carries weight with no second bias. */
 /* Share of one period used by execution in scale units. */
 /* Zero period fails closed to full with no divide, huge execution */
 /* saturates with no wrap, so overload reads past scale. One divider. */
+/* The live path calls once with the starvation window as both period */
+/* and span, so density stays as the span variant for tests with no */
+/* second live call. */
 static __always_inline u32 flow_ssf_util(u64 exec,
 	u64 period)
 {

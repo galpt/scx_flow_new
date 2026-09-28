@@ -8,9 +8,10 @@
 //! per task period plus deadline plus suspension terms with loops
 //! and extra dividers that do not fit the verifier budget yet, so
 //! they stay out of scope for this slice with no frozen stubs. The
-//! live subset keeps utilization plus density plus slack plus
-//! deadline with one divider each, and BPF runs every helper on
-//! the enqueue path with the same saturating edges as below.
+//! live subset keeps one share plus slack plus deadline with at most
+//! one divider, and BPF runs the share once on the enqueue path with
+//! the same saturating edges as below. The window serves as both
+//! period and span, so one share covers both with no second call.
 
 /// Fixed point scale for the share math at 1024.
 pub const SSF_SCALE: u32 = 1024;
@@ -39,6 +40,9 @@ pub fn ssf_util(exec: u64, period: u64) -> u32 {
 /// Share of one span used by execution in scale units.
 /// Zero span fails closed to full with no divide, huge execution
 /// saturates with no wrap, so overload reads past scale.
+/// Kept as the span variant for tests. The live path calls the period
+/// helper once with the window as both period and span, so no second
+/// live divider runs.
 #[cfg(test)]
 pub fn ssf_density(exec: u64, span: u64) -> u32 {
     if span == 0 {
@@ -145,23 +149,21 @@ mod tests {
         let base = 10_000_000u64;
         let now = 9_000_000u64;
         let exec = ssf_exec(crate::flow_edf::STARVE_NS, 100);
-        let util = ssf_util(exec, crate::flow_edf::STARVE_NS);
-        let dens = ssf_density(exec, crate::flow_edf::STARVE_NS);
+        let share = ssf_util(exec, crate::flow_edf::STARVE_NS);
+        assert_eq!(share, ssf_density(exec, crate::flow_edf::STARVE_NS));
         let mut slack = ssf_slack(crate::flow_edf::STARVE_NS, exec);
-        assert_eq!(util, SSF_SCALE);
-        assert_eq!(dens, SSF_SCALE);
+        assert_eq!(share, SSF_SCALE);
         assert_eq!(slack, 0);
-        if util > SSF_SCALE || dens > SSF_SCALE {
+        if share > SSF_SCALE {
             slack = 0;
         }
         assert_eq!(ssf_deadline(base, now, slack), base);
         let light = ssf_exec(crate::flow_edf::STARVE_NS, 1);
-        let lu = ssf_util(light, crate::flow_edf::STARVE_NS);
-        let ld = ssf_density(light, crate::flow_edf::STARVE_NS);
+        let ls_share = ssf_util(light, crate::flow_edf::STARVE_NS);
+        assert_eq!(ls_share, ssf_density(light, crate::flow_edf::STARVE_NS));
         let mut ls = ssf_slack(crate::flow_edf::STARVE_NS, light);
-        assert!(lu < SSF_SCALE);
-        assert!(ld < SSF_SCALE);
-        if lu > SSF_SCALE || ld > SSF_SCALE {
+        assert!(ls_share < SSF_SCALE);
+        if ls_share > SSF_SCALE {
             ls = 0;
         }
         assert_eq!(ls, crate::flow_edf::STARVE_NS - light);

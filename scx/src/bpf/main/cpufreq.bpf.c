@@ -25,25 +25,35 @@ static struct flow_llc_perf *flow_llc_slot(u32 llc)
 	return bpf_map_lookup_elem(&llc_stor, &key);
 }
 /* Note one running task in its domain with tag claim. */
-/* A tag mismatch clears the slot first, so a reused slot never */
-/* mixes two domains. Runs outside the tree lock with atomics only. */
+/* The winner of the tag compare claims and clears, the loser only */
+/* counts, so a reused slot never mixes two domains. The clear runs */
+/* only for the claim winner with no tear. Runs outside the tree lock */
+/* with atomics only. */
 static __always_inline void flow_llc_note_run(u32 llc)
 {
 	struct flow_llc_perf *slot = flow_llc_slot(llc);
 	u32 tag = llc + 1;
+	u32 cur;
+	u32 old;
 	if (!slot)
 		return;
-	if (READ_ONCE(slot->tag) != tag) {
-		WRITE_ONCE(slot->tag, tag);
-		WRITE_ONCE(slot->busy, 0);
-		WRITE_ONCE(slot->boosted, 0);
-		WRITE_ONCE(slot->last, 0);
+	cur = READ_ONCE(slot->tag);
+	if (cur != tag) {
+		old = __sync_val_compare_and_swap(&slot->tag,
+		    cur, tag);
+		if (old == cur) {
+			WRITE_ONCE(slot->busy, 0);
+			WRITE_ONCE(slot->boosted, 0);
+			WRITE_ONCE(slot->last, 0);
+		}
 	}
 	__sync_fetch_and_add(&slot->busy, 1);
 }
 /* Withdraw one running task from its domain with floor at zero. */
-/* A lost race clamps at zero instead of wrapping, so the idle edge */
-/* still fires with no stall. Runs outside the tree lock. */
+/* The tag revalidates inside the retry, so a domain reuse past the */
+/* check never withdraws from the new owner. A lost race clamps at */
+/* zero instead of wrapping, so the idle edge still fires with no */
+/* stall. Runs outside the tree lock. */
 static __always_inline void flow_llc_note_stop(u32 llc)
 {
 	struct flow_llc_perf *slot = flow_llc_slot(llc);
@@ -56,6 +66,8 @@ static __always_inline void flow_llc_note_stop(u32 llc)
 	if (READ_ONCE(slot->tag) != tag)
 		return;
 	bpf_for(i, 0, 4) {
+		if (READ_ONCE(slot->tag) != tag)
+			break;
 		cur = READ_ONCE(slot->busy);
 		if (cur == 0)
 			break;
@@ -67,7 +79,9 @@ static __always_inline void flow_llc_note_stop(u32 llc)
 }
 /* Apply one level to every live CPU in one domain. */
 /* Counts one set per CPU applied, so the wire tracks coalesced */
-/* transitions with no per task detail. Runs in the timer only. */
+/* transitions with no per task detail. The sweep stays bound at the */
+/* live count with no per task work. Runs in the timer only with one */
+/* transition per tick, so bursts coalesce past the gap. */
 static __noinline void flow_llc_apply(u32 llc, u32 level)
 {
 	u64 n = nr_cpu_ids;
@@ -90,10 +104,10 @@ static __noinline void flow_llc_apply(u32 llc, u32 level)
 	}
 }
 /* Tick one domain transition with gap plus hysteresis. */
-/* Boosts a busy domain past the gap, rests an idle domain past */
+/* Boosts a busy domain past the 16ms gap, rests an idle domain past */
 /* the gap, and applies at most one domain per tick, so the first */
-/* needy domain wins with the rest waiting one tick. A full slot */
-/* scan bounds the pass with no per task work. Runs in the timer */
+/* needy domain wins with the rest waiting one tick. The slot scan */
+/* stays bound at 64 with no per task work. Runs in the timer */
 /* only with no request lock held. */
 static __noinline void flow_cpufreq_tick(u64 now)
 {

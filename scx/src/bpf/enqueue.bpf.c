@@ -14,7 +14,7 @@
  * foreign policies rest in the ring too with wait set and one idle
  * kick. The key forms before the tree lock with the node fetched
  * beside it, and a null fetch means on tree or in flight, so the
- * arrival refreshes its key fields and still kicks. Kicks run past
+ * arrival keeps its live key and still kicks. Kicks run past
  * the unlock with idle first and a strictly earlier preempt on a
  * busy hint, and pinned arrivals never kick a busy CPU. See intf.h
  * for the key helpers and dispatch.bpf.c for the matching drain.
@@ -31,13 +31,16 @@
 #include "enqueue/kick.bpf.c"
 
 /* Park one arrival in the ring with wait set and one idle kick. */
-/* Detaches first, so a re-parked queued task never duplicates */
-/* between the tree and the ring. Marks parked membership, so a */
-/* stale ring pid never double serves. Counts every ring arrival, */
-/* counts the throttle hit when asked, arms the timer, and fails */
-/* open to the global queue when the ring fills. Pinned arrivals */
-/* skip the throttle count with the same rest. Runs with no lock */
-/* held. */
+/* Callers enter with no tree node, so no tree touch runs here. A */
+/* re-park of a tree member overwrites membership to parked with the */
+/* stale tree node left to reap at the next pop, so no double serve */
+/* runs. A re-park of a parked member pushes a second ring pid with */
+/* the second pop dropping past the serve, so no stall runs. Marks */
+/* parked membership, so a stale ring pid never double serves. Counts */
+/* every ring arrival, counts the throttle hit when asked, arms the */
+/* timer, and fails open to the global queue when the ring fills. */
+/* Pinned arrivals skip the throttle count with the same rest. Runs */
+/* with no lock held. */
 static __noinline void flow_park_arrival(struct task_struct *p,
 	struct flow_task_ctx *tctx, u64 now, s32 sel, bool count)
 {
@@ -103,7 +106,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinned plus non normal, batch, idle tasks rest in the ring. */
 	/* Only normal plus batch plus idle policies join the deadline */
 	/* tree, and realtime stays parked with no key use. */
-	/* Ring parks set wait for the backstop, then send one */
+	/* Ring parks set the wait stamp for diagnostics, then send one */
 	/* idle kick with no preempt. The share walk populates the cache */
 	/* with a throttle sync, so the park flag check stays a single */
 	/* lookup with no walk. Fail closed, the timer or a later */
@@ -189,39 +192,36 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* bend here. The floor clamp drops sleeper credit, and the */
 	/* sequence keeps equal deadlines first in first out. Moves carry */
 	/* the runtime. The share caches above for the stop advance and */
-	/* for the estimate below, so the hot insert pays three small */
-	/* dividers with no loop. Heavy shares estimate past the window */
-	/* and lose slack, light shares keep slack, so the key bends with */
-	/* weight while order stays deadline first. The key plus the node */
-	/* fetch both run before the lock, so the locked section holds */
-	/* add only. A null fetch with a live entry means on tree or in */
-	/* flight, so the arrival refreshes its deadline and still kicks */
-	/* with no insert and no stall. The sequence never refreshes */
-	/* here, so a concurrent pop still matches with no live reap. */
+	/* for the estimate below, so the hot insert pays one divider */
+	/* with no loop. The estimate scales the window by weight once, */
+	/* so the single share carries weight with no second bias. Heavy */
+	/* shares estimate past the window and lose slack, light shares */
+	/* keep slack, so the key bends with weight while order stays */
+	/* deadline first. The key plus the node fetch both run before */
+	/* the lock, so the locked section holds add only. A null fetch */
+	/* with a live entry means on tree or in flight, so the arrival */
+	/* keeps its live key with no insert and still kicks with the */
+	/* live deadline. The first arrival wins, so a duplicate enqueue */
+	/* while queued never moves the tree position and never churns. */
+	/* The wait stamp still refreshes, so diagnostics stay fresh. */
 	/* A null fetch with no entry means the alloc failed, so the */
 	/* arrival fails open to the global queue with no loss. */
 	{
 		u64 base;
 		u64 exec;
-		u32 util;
-		u32 dens;
+		u32 share;
 		u64 slack;
 		u32 eff_w = flow_eff_weight((u32)p->scx.weight, hier);
 		base = flow_deadline_clamp(tctx->vruntime,
 		    READ_ONCE(flow_floor));
 		exec = (u64)FLOW_STARVE_NS * (u64)eff_w /
 		    (u64)FLOW_WEIGHT_BASE;
-		util = flow_ssf_util(exec, (u64)FLOW_STARVE_NS);
-		dens = flow_ssf_density(exec, (u64)FLOW_STARVE_NS);
+		share = flow_ssf_util(exec, (u64)FLOW_STARVE_NS);
 		slack = flow_ssf_slack((u64)FLOW_STARVE_NS, exec);
-		if (util > (u32)FLOW_SSF_SCALE ||
-		    dens > (u32)FLOW_SSF_SCALE)
+		if (share > (u32)FLOW_SSF_SCALE)
 			slack = 0;
 		deadline = flow_ssf_deadline(base, now, slack);
 	}
-	seq = flow_seq_next();
-	tctx->deadline = deadline;
-	tctx->wait_at = now;
 	node = flow_tree_fetch((u32)p->pid);
 	if (!node) {
 		if (!flow_stash_lookup((u32)p->pid)) {
@@ -229,8 +229,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			flow_kick_idle_allowed(p, sel);
 			return;
 		}
+		tctx->wait_at = now;
+		deadline = READ_ONCE(tctx->deadline);
 		goto kick;
 	}
+	seq = flow_seq_next();
+	tctx->deadline = deadline;
+	tctx->wait_at = now;
 	tctx->seq = seq;
 	node->deadline = deadline;
 	node->seq = seq;
@@ -255,9 +260,11 @@ kick:
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
 			return;
 		}
-		/* Ring parks never preempt, so this busy path still */
-		/* skips pinned arrivals that fell through to a key. */
-		/* Pinned arrivals send idle kicks only with no compare. */
+		/* Pinned tasks rest in the ring above with no key, so this */
+		/* busy path sees open tasks only. The check below stays as */
+		/* a defensive guard for a mask change past target pick with */
+		/* no correctness use past it. Pinned arrivals send idle */
+		/* kicks only with no compare. */
 		if (pinned) {
 			flow_kick_idle_allowed(p, sel);
 			return;

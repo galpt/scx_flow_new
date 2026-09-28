@@ -20,22 +20,23 @@ static __noinline u32 flow_phase_global(s32 cpu, u32 budget,
 	u32 seen = 0;
 
 	bpf_for_each(scx_dsq, p, (u64)SCX_DSQ_GLOBAL, 0) {
+		struct task_struct *t;
 		if (moved + base >= budget)
 			break;
 		if (seen >= (u32)FLOW_GLOBAL_SCAN)
 			break;
 		seen++;
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
+		t = bpf_task_from_pid(p->pid);
+		if (!t)
 			continue;
 		if (bpf_cpumask_test_cpu((u32)cpu,
-		    p->cpus_ptr) &&
-		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+		    t->cpus_ptr) &&
+		    scx_bpf_dsq_move(BPF_FOR_EACH_ITER, t,
 		    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu, 0)) {
-			bpf_task_release(p);
+			bpf_task_release(t);
 			moved++;
 		} else {
-			bpf_task_release(p);
+			bpf_task_release(t);
 		}
 	}
 	return moved;
