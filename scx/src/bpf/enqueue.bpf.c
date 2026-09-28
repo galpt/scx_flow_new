@@ -2,9 +2,9 @@
 /*
  * Enqueue op.
  *
- * Every arrival earns one deadline step past the later of now and
- * its last deadline, with the step shrinking as the effective
- * weight grows. The effective weight folds the task weight with
+ * Every arrival earns one key past the later of runtime, last
+ * deadline, now, and the served floor, with a slack capped at
+ * twice the quantum that shrinks as the effective weight grows. The effective weight folds the task weight with
  * the hierarchy share over depth 8, so a task under a light
  * parent waits longer. The hierarchy share caches by id with
  * generation validation, and a miss uses base share. Throttled
@@ -16,7 +16,7 @@
  * stall with no preempt storm. A busy target kicks only for
  * a strictly earlier deadline, and pinned arrivals never kick a
  * busy CPU. Slice expiry paces the rest, so no slice write and no
- * stamp run here. See intf.h for the step helper and
+ * stamp run here. See intf.h for the key helpers and
  * dispatch.bpf.c for the matching drain order.
  *
  * The op splits across enqueue/target, insert, and kick files with
@@ -107,8 +107,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			tctx->generation = (u16)flow_load_gen();
 			tctx->cached = true;
 		}
-		if (flow_load_limited())
-			flow_bw_throttled(pcgrp, now);
+		if (flow_load_limited() && flow_bw_throttled(pcgrp, now)) {
+			/* A cold throttle parks with pending armed, so the */
+			/* timer refills plus wakes with no stall. The read */
+			/* runs before the write, so a set flag stays clean. */
+			if (!flow_load_pending())
+				__sync_lock_test_and_set(&flow_bw_pending,
+				    1);
+		}
 		flow_cgrp_put(pcgrp);
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -168,18 +174,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (u64)FLOW_QUANTUM_NS);
 			__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
 			__sync_fetch_and_add(&flow_stats.parked, 1);
-			__sync_lock_test_and_set(&flow_bw_pending, 1);
+			if (!flow_load_pending())
+				__sync_lock_test_and_set(&flow_bw_pending,
+				    1);
 			flow_cgrp_put(cgrp);
 			return;
 		}
 	}
 	flow_cgrp_put(cgrp);
-	/* One step past the later of now and the last deadline. */
-	/* The effective weight folds task plus hierarchy, so a long */
-	/* sleep earns no credit and a back to back arrival queues */
-	/* behind its own last step. Moves carry the deadline. */
+	/* One key past the later of runtime, last deadline, now, and floor. */
+	/* The effective weight folds task plus hierarchy through the */
+	/* slack, so a long sleep earns no credit and a back to back */
+	/* arrival queues behind its own last key. Moves carry the */
+	/* deadline plus the runtime. Only the open path keys here, */
+	/* parks keep no key use. */
 	eff = flow_eff_weight(p->scx.weight, hier);
-	deadline = flow_deadline_next(tctx->deadline, now, eff);
+	{
+		u64 base = flow_time_max(READ_ONCE(tctx->vruntime), now);
+		u64 floor = flow_floor_read((u32)cpu);
+		u64 slack = flow_deadline_slack(eff);
+		base = flow_time_max(base, tctx->deadline);
+		deadline = flow_deadline_key(base, floor, slack);
+	}
 	tctx->deadline = deadline;
 	tctx->wait_at = now;
 	flow_vtime_insert(p, cpu, deadline);
