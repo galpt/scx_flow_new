@@ -85,7 +85,7 @@ static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 			continue;
 		}
 		tctx = flow_lookup(task);
-		if (!tctx || READ_ONCE(tctx->queued) == 0 ||
+		if (!tctx || READ_ONCE(tctx->queued) != 1 ||
 		    READ_ONCE(tctx->seq) != node->seq) {
 			bpf_task_release(task);
 			flow_tree_reap(pid, node);
@@ -110,6 +110,7 @@ static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 				break;
 			}
 			flow_tree_give(pid, node);
+			WRITE_ONCE(tctx->queued, (u8)2);
 			__sync_fetch_and_add(&flow_stats.parked,
 			    1);
 			bpf_task_release(task);

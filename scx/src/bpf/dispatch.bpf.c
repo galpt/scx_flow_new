@@ -8,9 +8,10 @@
  * the whole pass with no per queue caps, so a deep tree cannot
  * starve parks and a deep park cannot starve homeless tasks. Empty
  * trips pay one head read with no scan. Throttled pops park with
- * the timer re-armed, and the park phase stops on a throttled head
- * with rotation, so drained pools hold tasks back with no bypass.
- * See intf.h for the batch and enqueue.bpf.c for the key choice.
+ * the timer re-armed, and the park phase rotates blocked heads with
+ * the scan continuing, so drained pools hold tasks back with no
+ * bypass and no head stall. See intf.h for the batch and
+ * enqueue.bpf.c for the key choice.
  *
  * The pass splits across dispatch/tree, park, and global files
  * with one RCU section here. Each helper stays noinline with

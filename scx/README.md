@@ -1,86 +1,19 @@
 # scx_flow
 
-scx_flow is a Linux deadline scheduler in Rust with a BPF core and one fixed quantum.
+scx_flow is a Linux deadline scheduler in Rust with a BPF core and one global tree.
 
-## Overview
+One global deadline tree orders every queued task by deadline then sequence. Every arrival keys past the later of virtual runtime and the dispatch floor with one sequence tick, and runtime advances by scaled execution at stop, so order carries weight with no fixed service. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
 
-### Queues
+Hierarchy rows hold share plus pool by id with lazy refill and a FIFO ring for throttled parks. See `src/bpf/cgroup.bpf.c`.
 
-Each CPU owns one deadline queue at `0x6800` plus id, overflow at `0x7000` is shared, global holds homeless tasks. See `src/bpf/intf.h`.
+Placement is a hint only over waker idle, any idle, idlest same cache peer, previous, then first. Dispatch drains tree, then park ring, then global, under one batch at `16`. A busy CPU kicks only for a strictly earlier deadline, parks kick idle CPUs only. The `10ms` timer applies at most one cache domain frequency transition past a `16ms` gap. See `src/bpf/select_cpu.bpf.c`, `src/bpf/dispatch.bpf.c`, and `src/rust/stats.rs`.
 
-### Deadlines
-
-Every arrival steps past the later of now and last deadline, the step shrinks as effective weight grows. Task weight folds nice, hierarchy share folds ancestors to depth `8`. See `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/` (`target`, `insert`, `kick`).
-
-### Hierarchies
-
-Hierarchy rows hold share plus pool by id with base `100` on miss. Tasks cache share by id with generation validation over the low bits, moves carry deadline and clear the cache. The share walks the nearest `8` levels from the leaf. Idle groups run at configured shares. Pool plus stamp updates use atomics. See `src/bpf/cgroup.bpf.c`.
-
-### Bandwidth
-
-Pools hold rest in nanos with unlimited at zero, period floor `1ms`, burst cap with saturating math, lazy refill with fraction kept, tightest pool binds. A throttle bit on the leaf entry parks tasks, full walks plus consume set it, full passes plus a timer chain refill clear it. Throttled parks rest in overflow, one timer refills hinted chains from a ring at `64` and wakes parks from a rotated live CPU with a refill gate. Dispatch rechecks the leaf flag with a miss, so drained pools hold tasks back. Throttled ns counts quanta at `1ms` per hit with no wall use, nr throttled plus parked count the same hits with the names kept for the wire. See `src/bpf/cgroup.bpf.c`.
-
-### Preemption
-
-A busy CPU kicks only for a strictly earlier deadline with the occupant CPU validated, a zero occupant deadline paces with no kick. Equal or later arrivals pace at slice expiry. Pinned arrivals send idle kicks only, never preempt. Overflow and global parks kick one idle allowed CPU. See `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/` (`kick`).
-
-### Placement
-
-Order is waker idle, any idle, shallowest same cache peer over bound `8` when strictly shallower than previous, then previous, then first. Cursor races best effort. See `src/bpf/select_cpu.bpf.c`.
-
-### Dispatch
-
-Order is own queue at `12`, one peer steal of one task, global plus overflow at `4`, then a gated pass at `6`. Overflow drains in the normal pass only when no limit exists, else the gated pass moves starved tasks with the flag check. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`drain`, `gated`, `steal`, `tail`).
-
-### Steal
-
-Steal runs only with an empty local queue. Sibling wins first, then same cache domain, then a gated move past `2ms`. Cursor and miss scans stay best effort. See `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/` (`steal`).
-
-### Accounting
-
-Running claims segment start from zero and counts once per claim, stopping claims the start once and charges raw time plus pool drain and counts one requeue or completion, disable plus exit claim a leftover once. Owner gates the pid clear only with the gauge drop on the claim. See `src/bpf/lifecycle.bpf.c`.
-
-### Counters
-
-Counters stay at `136B` with `17` live fields. JSON carries live counters only, slice reads the fixed quantum. See `src/rust/stats.rs`.
-
-## Configuration
-
-Scheduling stays fixed without options. Reporting only uses `--stats`, `--monitor` and `--no-webui`.
-
-## Web UI
-
-The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. On CPU prints clamped to the online cards with a live pid count beside it. `--no-webui` disables it.
+Scheduling stays fixed without options. Reporting only uses `--stats`, `--monitor` and `--no-webui`. The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. `--no-webui` disables it.
 
 ## Code map
 
-- Queue rules: `src/bpf/intf.h`
-- Maps, helpers, ops table: `src/bpf/main.bpf.c` plus `src/bpf/main/`
-  (`task.bpf.c`, `hier.bpf.c`, `bw.bpf.c`, `cpu.bpf.c`, `timer.bpf.c`)
-- Placement: `src/bpf/select_cpu.bpf.c`
-- Inserts: `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/`
-  (`target.bpf.c`, `insert.bpf.c`, `kick.bpf.c`)
-- Drains: `src/bpf/dispatch.bpf.c` plus `src/bpf/dispatch/`
-  (`drain.bpf.c`, `gated.bpf.c`, `steal.bpf.c`, `tail.bpf.c`)
-- Lifecycle: `src/bpf/lifecycle.bpf.c`
-- Hierarchy: `src/bpf/cgroup.bpf.c`
-- Rust mirrors: `src/rust/flow_slice.rs`, `src/rust/flow_edf.rs`,
-  `src/rust/flow_select.rs`, `src/rust/flow_preempt.rs`,
-  `src/rust/flow_slot.rs`, `src/rust/flow_cgrp.rs`
-- Facade: `src/rust/flow.rs`
-- Tests: inline `tests` modules in each mirror
-- Constant validation: `src/rust/config.rs`
-- Generated bindings and skeleton: `src/bpf_intf.rs`,
-  `src/bpf_skel.rs`
-- Snapshot and topology: `src/rust/snapshot.rs`,
-  `src/rust/topology.rs`
-- Energy probe: `src/rust/rapl.rs`
-- Stats and dashboard payload: `src/rust/stats.rs`,
-  `src/rust/webui.rs`, `ui/index.html`
+Rules live in `src/bpf/intf.h`. Maps plus helpers plus the ops table live in `src/bpf/main.bpf.c` with splits in `src/bpf/main/`, `src/bpf/enqueue/`, and `src/bpf/dispatch/`, plus `select_cpu`, `lifecycle`, and `cgroup` ops files. Rust mirrors with inline tests live in `src/rust/flow_*.rs` with the facade in `flow.rs` and validation in `config.rs`. Snapshots plus stats plus dashboard live in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, and `ui/index.html`.
 
 ## Limitations
 
-- Live means below the attach snapshot. Hotplug needs a restart.
-- Releases need a restart. State is `40B` plus `8B` plus `8B` plus `48B` plus `136B` for task, CPU, topology, hierarchy, and counters.
-- Ops stay at `7` with no idle callback, idle groups run at configured shares. Known regression from earlier idle handling, accepted with signoff.
-- Needs kernels, `7.2` series and up.
+Live means below the attach snapshot, so hotplug needs a restart. Releases need a restart. State is `64B` plus `8B` plus `8B` plus `48B` plus `24B` plus `128B` across task, CPU, topology, hierarchy, frequency, and counters. Frequency hints need a switching governor, else counts rise with no clock move. Needs kernels, `7.2` series and up.

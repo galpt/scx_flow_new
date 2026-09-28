@@ -32,18 +32,20 @@
 
 /* Park one arrival in the ring with wait set and one idle kick. */
 /* Detaches first, so a re-parked queued task never duplicates */
-/* between the tree and the ring. Counts the throttle hit when */
-/* asked, arms the timer, and fails open to the global queue when */
-/* the ring fills. Pinned arrivals skip the counts with the same */
-/* rest. Runs with no lock held. */
+/* between the tree and the ring. Marks parked membership, so a */
+/* stale ring pid never double serves. Counts every ring arrival, */
+/* counts the throttle hit when asked, arms the timer, and fails */
+/* open to the global queue when the ring fills. Pinned arrivals */
+/* skip the throttle count with the same rest. Runs with no lock */
+/* held. */
 static __noinline void flow_park_arrival(struct task_struct *p,
 	struct flow_task_ctx *tctx, u64 now, s32 sel, bool count)
 {
 	tctx->wait_at = now;
-	flow_tree_detach(p, tctx);
+	WRITE_ONCE(tctx->queued, (u8)2);
+	__sync_fetch_and_add(&flow_stats.parked, 1);
 	if (count) {
 		__sync_fetch_and_add(&flow_stats.nr_throttled, 1);
-		__sync_fetch_and_add(&flow_stats.parked, 1);
 		__sync_lock_test_and_set(&flow_bw_pending, 1);
 	}
 	if (!flow_park_push((u32)p->pid))
@@ -189,19 +191,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* runtime. The share caches above for the stop advance, so the */
 	/* hot insert needs no weight math. The key plus the node */
 	/* fetch both run before the lock, so the locked section holds */
-	/* add only. A null fetch means on tree or in flight, so the */
-	/* arrival refreshes its key fields and still kicks with no */
-	/* insert and no stall. */
+	/* add only. A null fetch with a live entry means on tree or in */
+	/* flight, so the arrival refreshes its deadline and still kicks */
+	/* with no insert and no stall. The sequence never refreshes */
+	/* here, so a concurrent pop still matches with no live reap. */
+	/* A null fetch with no entry means the alloc failed, so the */
+	/* arrival fails open to the global queue with no loss. */
 	(void)hier;
 	deadline = flow_deadline_clamp(tctx->vruntime,
 	    READ_ONCE(flow_floor));
 	seq = flow_seq_next();
 	tctx->deadline = deadline;
-	tctx->seq = seq;
 	tctx->wait_at = now;
 	node = flow_tree_fetch((u32)p->pid);
-	if (!node)
+	if (!node) {
+		if (!flow_stash_lookup((u32)p->pid)) {
+			flow_global_insert(p);
+			flow_kick_idle_allowed(p, sel);
+			return;
+		}
 		goto kick;
+	}
+	tctx->seq = seq;
 	node->deadline = deadline;
 	node->seq = seq;
 	bpf_spin_lock(&edf_lock);

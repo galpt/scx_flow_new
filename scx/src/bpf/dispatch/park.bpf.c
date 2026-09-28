@@ -4,17 +4,16 @@
  *
  * Pops ring heads in arrival order up to the batch bound. Each pop
  * resolves its owner with no cgroup walk, then lands local or
- * rotates. A throttled head or a masked out head rotates to the
- * tail with the phase stopped, so one unservable head never stalls
- * the ring and order churns only while blocked. The timer refill
- * plus kick retries throttled heads soon, and a compatible CPU
- * serves masked heads on its own pass with the arrival kick aimed
- * at allowed idle CPUs. Gone tasks drop their ring slot with no
- * node touch, since exit already freed the node. A queued task
- * means a stale ring pid from an earlier park, so the slot drops
- * with the live tree node left alone. Each phase takes scalars
- * only and verifies once. Runs under the caller RCU read lock
- * with no tree lock held here.
+ * rotates. A parked mark gates every serve, so a stale ring pid
+ * from an earlier park drops with the live tree node left alone.
+ * Blocked heads rotate to the tail with the scan continuing, so
+ * one unservable head never stalls servable tails and order churns
+ * only while blocked. Throttled heads wait on the timer refill,
+ * and masked heads wait on a compatible pass with the arrival kick
+ * aimed at allowed idle CPUs. Gone tasks drop their ring slot with
+ * no node touch, since exit already freed the node. Each phase
+ * takes scalars only and verifies once. Runs under the caller RCU
+ * read lock with no tree lock held here.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -43,27 +42,26 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 			bpf_task_release(task);
 			continue;
 		}
-		/* A queued task means a stale ring pid from an earlier */
-		/* park, since parks clear the flag at park time. */
-		/* The live tree node serves the task, so the stale slot */
-		/* drops with no insert and no stall. */
-		if (READ_ONCE(tctx->queued) != 0) {
+		/* Only parked members serve here. A stale ring pid */
+		/* from an earlier park drops with no insert, since */
+		/* the live tree node owns the task. */
+		if (READ_ONCE(tctx->queued) != 2) {
 			bpf_task_release(task);
 			continue;
 		}
 		cached = tctx->cached;
 		cgid = tctx->cgid;
-		/* A blocked head rotates with the phase stopped. */
-		/* Throttled heads wait on the timer refill, and masked */
-		/* heads wait on a compatible pass, so the rotation */
-		/* never stalls servable tails for long. */
+		/* A blocked head rotates with the scan continuing. */
+		/* The push cannot fail past a pop, since the pop freed */
+		/* exactly one slot, so no fail open runs here. */
 		if (flow_tree_throttled_scalar(cached, cgid) ||
 		    !bpf_cpumask_test_cpu((u32)cpu,
 		    task->cpus_ptr)) {
 			flow_park_push(pid);
 			bpf_task_release(task);
-			break;
+			continue;
 		}
+		WRITE_ONCE(tctx->queued, (u8)0);
 		flow_local_insert(task, cpu, 0);
 		bpf_task_release(task);
 		moved++;

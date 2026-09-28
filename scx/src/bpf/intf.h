@@ -101,10 +101,13 @@ enum flow_consts {
 /* atomics, so each counted start meets exactly one gauge drop with */
 /* no owner gate. Cgid holds the last hierarchy id for the cache, */
 /* eweight holds the hierarchy share with base 100, cached marks a */
-/* valid entry, queued marks a node on the tree, and generation holds */
-/* the low bits of the global generation for validation. The low bits */
-/* wrap past 64k bumps, so a wrap needs 64k bumps with no move to */
-/* falsely hit. Moves clear the cache, so the window stays huge. Seq */
+/* valid entry, and generation holds the low bits of the global */
+/* generation for validation. The low bits wrap past 64k bumps, so */
+/* a wrap needs 64k bumps with no move to falsely hit. Moves clear */
+/* the cache, so the window stays huge. Queued holds two for a parked */
+/* node, one for a node on the tree, else zero, so the park drain */
+/* serves parked nodes only with no double serve from a stale ring */
+/* pid. Seq */
 /* holds the last assigned key sequence, so a popped node with a */
 /* mismatched sequence reads stale from pid reuse with no harm. Run */
 /* llc holds the domain counted at the claimed start, so the stop */
@@ -188,10 +191,10 @@ struct flow_llc_perf {
 /* enq_no_tctx counts missing state plus homeless with no route, */
 /* the name stays for the wire with no split. Tree moves counts */
 /* dispatch pops from the deadline tree. Park moves counts park */
-/* ring drains. Nr throttled plus parked count the same throttle */
-/* hits with the names kept for the wire. Cpuperf sets counts */
-/* applied frequency transitions at domain scope. Bw moves counts */
-/* the hierarchy moves. */
+/* ring drains. Nr throttled counts throttle hits, and parked counts */
+/* every ring arrival with the names kept for the wire. Cpuperf sets */
+/* counts applied frequency transitions at domain scope. Bw moves */
+/* counts the hierarchy moves. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;

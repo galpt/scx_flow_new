@@ -119,7 +119,7 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 /* bounded. Hints record drained ids at park time with a wrapping */
 /* counter, and stale or reused ids refill harmlessly with cap and no */
 /* cleanup. Active groups past the ring still refill on the enqueue */
-/* path. The kick is refill gated: it fires only when refill added */
+/* path. The kick is refill gated and fires only when refill added */
 /* pool or no limit remains, so idle ticks and still throttled ticks */
 /* stay quiet with no storm. A cleared limited count still kicks once, */
 /* so parks from a removed limit drain soon. When still throttled with */

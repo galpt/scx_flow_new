@@ -77,7 +77,6 @@ static __noinline void flow_tree_give(u32 pid,
 static __noinline struct flow_node *flow_tree_fetch(u32 pid)
 {
 	struct flow_stash *stash;
-	struct flow_node *node;
 	struct flow_node *fresh;
 	struct flow_node *old;
 	struct flow_stash husk = {};
