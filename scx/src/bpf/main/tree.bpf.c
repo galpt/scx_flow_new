@@ -10,8 +10,9 @@
  * A taken node therefore always sits off tree, and a null take
  * means on tree or in flight. Removal reads safe on a missing
  * node, so the rare defensive remove never corrupts. The park ring
- * holds pids in arrival order with head plus tail under the same
- * lock, and a full ring fails open to the global queue. The floor
+ * holds pids in arrival order with the head under the lock and the
+ * tail reserved by atomic add, and a full ring fails open to the
+ * global queue. The floor
  * tracks the last live popped deadline with a monotonic max only
  * past validation, so dead reaps never inflate later clamps and
  * sleepers keep no credit. The sequence hands out one arrival order
@@ -137,12 +138,11 @@ static __noinline struct flow_node *flow_tree_pop(void)
 /* Push one pid to the park ring with reserved slot. */
 /* False means a full ring, so the caller fails open to global with */
 /* no stall. The slot reserves first with an atomic add, so two */
-/* pushes never claim one slot with no check then fill then inc */
+/* pushes never claim one slot through a check then fill then count */
 /* window. The full check runs under the lock past the reserve, so */
 /* a full ring leaves a hole that later pops skip with no loss, since */
-/* the caller fails open and the hole holds no task. The tail wraps */
-/* with a mask free add, so concurrent pushes never tear past the */
-/* bound. */
+/* the caller fails open and the hole holds no task. The slot wraps */
+/* with modulo, so concurrent pushes never tear past the bound. */
 static __noinline bool flow_park_push(u32 pid)
 {
 	u32 head;

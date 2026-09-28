@@ -15,11 +15,12 @@
  * reuse reap with the entry dropped only when the slot sits empty,
  * so a live replacement node never frees. A full ring fails open to
  * global with the node reaped, so no pass spins with mask wins on
- * the global drain. A dead head reaps with the pass spent and the next pass pops the
- * next head with monotonic progress. CPUs re-dispatch as they
- * consume, so order holds globally with the tree staying the single
- * source despite one head per pass. Runs under the caller RCU read
- * lock with the tree lock taken per pop only.
+ * the global drain. A dead head reaps with the pass spent and the
+ * next pass pops the next head with monotonic progress. CPUs
+ * re-dispatch as they consume, so order holds globally with the
+ * tree staying the single source despite one head per pass. Runs
+ * under the caller RCU read lock with the tree lock taken per pop
+ * only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -68,9 +69,9 @@ static __noinline void flow_tree_reap(u32 pid,
 /* with a monotonic max, so live order sets later clamps. A dead */
 /* head reaps with the pass spent and no floor move, and the next */
 /* pass pops the next head with monotonic progress. A live head */
-/* lands local, parks, or re-trees with the pass spent. CPUs */
-/* re-dispatch as they consume, so order holds globally with the */
-/* tree staying the single source. */
+/* lands local or parks with the pass spent, and a full ring fails */
+/* open to global. CPUs re-dispatch as they consume, so order holds */
+/* globally with the tree staying the single source. */
 static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 	u32 base)
 {

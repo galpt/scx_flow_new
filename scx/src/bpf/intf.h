@@ -83,7 +83,7 @@ enum flow_consts {
 	FLOW_BW_PERIOD_MIN_US = 1000ULL,
 	FLOW_BW_TIMER_NS = 10000000ULL,
 	/* Fixed point scale for the paper share math at 1024. */
-	/* Utilization plus density keep one unit here, so a value */
+	/* The single share keeps one unit here, so a value */
 	/* past 1024 means overload with no extra table. */
 	FLOW_SSF_SCALE = 1024ULL,
 	/* Parked chain ring slots at 64. Each slot holds one park chain */
@@ -95,19 +95,20 @@ enum flow_consts {
 };
 /* Unlimited quota value with no cap use and zero pool. */
 #define FLOW_RUNTIME_INF (~0ULL)
-/* Per task state at 56B with runtime plus key plus share cache. */
+/* Per task state at 64B with runtime plus key plus share cache. */
 /* Deadline holds the last assigned key deadline for the next clamp */
 /* and for the preempt compare. A zero deadline means no order yet, */
 /* so preempt compares skip with no kick. Vruntime advances by */
 /* scaled execution only while on CPU, so order carries weight with */
 /* no fixed service step. Wait holds the last enqueue time for */
 /* diagnostics with no dispatch gate. Run holds the segment start */
-/* zero, so a claimed start pairs the on CPU gauge with the stopping */
-/* charge. Running claims from zero only with a compare and swap, so */
-/* a second running without a stop keeps the first start with no */
-/* second count. Stopping versus disable or exit claims once with */
-/* atomics, so each counted start meets exactly one gauge drop with */
-/* no owner gate. Cgid holds the last hierarchy id for the cache, */
+/* while on CPU else zero, so a claimed start pairs the on CPU */
+/* gauge with the stopping charge. Running claims from zero only */
+/* with a compare and swap, so a second running without a stop */
+/* keeps the first start with no second count. Stopping versus */
+/* disable or exit claims once with atomics, so each counted */
+/* start meets exactly one gauge drop with no owner gate. Cgid */
+/* holds the last hierarchy id for the cache, */
 /* eweight holds the hierarchy share with base 100, cached marks a */
 /* valid entry, and generation holds the low bits of the global */
 /* generation for validation. The low bits wrap past 64k bumps, so */
@@ -382,7 +383,7 @@ static __always_inline u64 flow_bw_max_ns(u64 quota_us,
 /* period plus deadline plus suspension terms with loops and extra */
 /* dividers that do not fit the verifier budget yet, so they stay */
 /* out of scope for this slice with no frozen stubs. The live subset */
-/* keeps one share plus slack plus deadline with at most one divider, */
+/* keeps one share plus slack plus deadline with two small dividers, */
 /* and the share runs once on the enqueue path. The window serves as */
 /* both period and span, so one share covers both with no second call. */
 /* The estimate scales the window by weight once, so the single share */

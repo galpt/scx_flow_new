@@ -45,7 +45,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	bpf_rcu_read_lock();
 	got = flow_phase_tree(cpu, budget, moved);
 	moved += got;
-	if (moved != 0)
+	if (got != 0)
 		__sync_fetch_and_add(&flow_stats.tree_moves,
 		    (u64)got);
 	got = flow_phase_park(cpu, budget, moved);

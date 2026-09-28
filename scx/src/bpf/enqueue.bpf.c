@@ -192,8 +192,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* bend here. The floor clamp drops sleeper credit, and the */
 	/* sequence keeps equal deadlines first in first out. Moves carry */
 	/* the runtime. The share caches above for the stop advance and */
-	/* for the estimate below, so the hot insert pays one divider */
-	/* with no loop. The estimate scales the window by weight once, */
+	/* for the estimate below, so the hot insert pays two small */
+	/* dividers with no loop, with the window scaled by weight once, */
 	/* so the single share carries weight with no second bias. Heavy */
 	/* shares estimate past the window and lose slack, light shares */
 	/* keep slack, so the key bends with weight while order stays */

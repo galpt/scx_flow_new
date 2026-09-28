@@ -8,8 +8,8 @@
 //! per task period plus deadline plus suspension terms with loops
 //! and extra dividers that do not fit the verifier budget yet, so
 //! they stay out of scope for this slice with no frozen stubs. The
-//! live subset keeps one share plus slack plus deadline with at most
-//! one divider, and BPF runs the share once on the enqueue path with
+//! live subset keeps one share plus slack plus deadline with two small
+//! dividers, and BPF runs the share once on the enqueue path with
 //! the same saturating edges as below. The window serves as both
 //! period and span, so one share covers both with no second call.
 
