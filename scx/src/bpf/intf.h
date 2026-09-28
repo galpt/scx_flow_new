@@ -59,10 +59,15 @@ enum flow_consts {
 	FLOW_WEIGHT_MAX = 10000ULL,
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_DISPATCH_BATCH = 16ULL,
-	FLOW_PARK_BATCH = 1ULL,
-	/* Park recycle visits one head per pass. Parks are exceptional */
-	/* beside the tree flow, so a single head keeps the jump chains */
-	/* loadable with no head stall past the bound. */
+	FLOW_PARK_BATCH = 4ULL,
+	/* Park recycle visits at most 4 heads per pass. Parks are */
+	/* exceptional beside the tree flow, so four heads keep the jump */
+	/* chains loadable with no head stall past the bound. */
+	/* Tree visits at most 4 heads per pass. Each visit pops a fresh */
+	/* head with no reexamine, so a dead head reaps and the next head */
+	/* serves past it with monotonic progress. Visits plus moves plus */
+	/* skips share the batch, and 4 plus 4 plus 4 stays under 16. */
+	FLOW_SKIP_BOUND = 4ULL,
 	/* Homeless scan visits at most 4 per pass. Homeless tasks are */
 	/* exceptional, so a short iterator bound keeps the pass small */
 	/* with no head stall past the bound. */
@@ -252,9 +257,12 @@ _Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
 /* Share scale stays at 1024 with no knob. */
 _Static_assert(FLOW_SSF_SCALE == 1024ULL,
     "share scale stays at 1024");
-/* Park serves one head per pass with no loop. */
-_Static_assert(FLOW_PARK_BATCH == 1ULL,
-    "park serves one head");
+/* Park serves at most 4 heads per pass with a short loop. */
+_Static_assert(FLOW_PARK_BATCH == 4ULL,
+    "park serves four heads");
+/* Tree visits at most 4 heads per pass with a short loop. */
+_Static_assert(FLOW_SKIP_BOUND == 4ULL,
+    "tree visits four heads");
 /* Frequency gap stays inside the 10ms to 32ms window. */
 _Static_assert(FLOW_CPUFREQ_MIN_NS >= 10000000ULL &&
     FLOW_CPUFREQ_MIN_NS <= 32000000ULL,

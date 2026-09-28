@@ -2,16 +2,19 @@
 /*
  * Dispatch op.
  *
- * Each pass drains in fixed order. The deadline tree pops one head
- * in key order, then the park ring serves one head in arrival
- * order, then the kernel global queue drains homeless tasks. One
- * batch bounds the whole pass, so a deep global cannot stall a CPU
- * past a short bound. Empty trips pay one head read with no scan.
+ * Each pass drains in fixed order. The deadline tree visits at most
+ * 4 heads in key order, then the park ring serves at most 4 heads in
+ * arrival order, then the kernel global queue drains homeless tasks
+ * with at most 4 visits. Visits plus moves plus skips share one
+ * batch of 16, and 4 plus 4 plus 4 stays under it, so a deep queue
+ * never stalls a CPU past a short bound. Empty trips pay one head
+ * read with no scan.
  * Throttled pops park with the timer re-armed, and the park phase
- * rotates a blocked head with the pass spent, so drained pools
+ * rotates a blocked head with the visit spent, so drained pools
  * hold tasks back with no bypass and no head spin. Rotation cycles
- * depth across passes, so one blocked head paces one pass only
- * with the next pass serving past it. See intf.h for the batch and
+ * depth across visits, so one blocked head paces one visit only
+ * with the next visit serving past it. Mask only parks kick one
+ * idle allowed CPU with no preempt. See intf.h for the batch and
  * enqueue.bpf.c for the key choice.
  *
  * The pass splits across dispatch/tree, park, and global files
