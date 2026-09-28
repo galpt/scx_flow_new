@@ -20,6 +20,7 @@ use crate::flow::PARK_BATCH;
 use crate::flow::PARK_HINT_NR;
 use crate::flow::PARK_NR;
 use crate::flow::SCAN_BOUND;
+use crate::flow::SKIP_BOUND;
 use crate::flow::SSF_SCALE;
 use crate::flow::STARVE_NS;
 use crate::flow::WEIGHT_BASE;
@@ -50,8 +51,8 @@ impl Default for Config {
 impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
-    /// The batch stays fixed at 16 with the homeless scan at 4 and
-    /// the park recycle at 1. Base
+    /// The batch stays fixed at 16 with the homeless scan at 4, the
+    /// tree visit bound at 4, and the park recycle at 4. Base
     /// weight stays 100 in range 1 to 10000 with a 2ms starvation
     /// floor. The tree holds 32768 nodes with a 4096 park ring.
     /// Frequency keeps 64 domain slots with a 16ms gap inside the
@@ -75,8 +76,11 @@ impl Config {
         if GLOBAL_SCAN != 4 {
             bail!("global scan bad");
         }
-        if PARK_BATCH != 1 {
+        if PARK_BATCH != 4 {
             bail!("park batch bad");
+        }
+        if SKIP_BOUND != 4 {
+            bail!("tree visit bound bad");
         }
         if NODE_MAX != 32768 {
             bail!("node bound bad");
@@ -192,7 +196,8 @@ mod tests {
         assert_eq!(crate::flow_edf::STARVE_NS, 2_000_000);
         assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
         assert_eq!(crate::flow_tree::GLOBAL_SCAN, 4);
-        assert_eq!(crate::flow_tree::PARK_BATCH, 1);
+        assert_eq!(crate::flow_tree::PARK_BATCH, 4);
+        assert_eq!(crate::flow_tree::SKIP_BOUND, 4);
         assert_eq!(crate::flow_ssf::SSF_SCALE, 1024);
     }
 
@@ -213,6 +218,14 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_GLOBAL_SCAN,
             crate::flow_tree::GLOBAL_SCAN
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PARK_BATCH,
+            crate::flow_tree::PARK_BATCH
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_SKIP_BOUND,
+            crate::flow_tree::SKIP_BOUND
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_NODE_MAX as u64,

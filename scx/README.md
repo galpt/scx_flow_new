@@ -29,6 +29,6 @@ The `10ms` timer applies one cache domain transition past a `16ms` gap. Scheduli
 
 - Live set stays below attach snapshot, so hotplug needs a restart.
 - Releases need a restart.
-- State is `64B` plus `8B` plus `8B` plus `48B` plus `24B` plus `128B` across task, CPU, topology, hierarchy, frequency, and counters.
+- State is `64B` plus `8B` plus `8B` plus `48B` plus `24B` plus `152B` across task, CPU, topology, hierarchy, frequency, and counters.
 - Frequency hints need a switching governor, else counts rise with no clock move.
 - Needs kernels, `7.2` series and up.

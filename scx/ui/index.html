@@ -434,6 +434,18 @@
           Hierarchy moves:</span>
           <span class="stat-value" id="bw-moves">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Mask mismatch:</span>
+          <span class="stat-value" id="mask-mismatch">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Park skipped:</span>
+          <span class="stat-value" id="park-skipped">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Global skipped:</span>
+          <span class="stat-value" id="global-skipped">0</span>
+        </div>
       </div>
     </div>
 
@@ -696,6 +708,12 @@
         fmt(s.parked || 0);
       el('bw-moves').textContent =
         fmt(s.bw_moves || 0);
+      el('mask-mismatch').textContent =
+        fmt(s.mask_mismatch || 0);
+      el('park-skipped').textContent =
+        fmt(s.park_skipped || 0);
+      el('global-skipped').textContent =
+        fmt(s.global_skipped || 0);
 
       renderCoreCards(data);
     }

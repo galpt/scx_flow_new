@@ -59,10 +59,15 @@ enum flow_consts {
 	FLOW_WEIGHT_MAX = 10000ULL,
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_DISPATCH_BATCH = 16ULL,
-	FLOW_PARK_BATCH = 1ULL,
-	/* Park recycle visits one head per pass. Parks are exceptional */
-	/* beside the tree flow, so a single head keeps the jump chains */
-	/* loadable with no head stall past the bound. */
+	FLOW_PARK_BATCH = 4ULL,
+	/* Park recycle visits at most 4 heads per pass. Parks are */
+	/* exceptional beside the tree flow, so four heads keep the jump */
+	/* chains loadable with no head stall past the bound. */
+	/* Tree visits at most 4 heads per pass. Each visit pops a fresh */
+	/* head with no reexamine, so a dead head reaps and the next head */
+	/* serves past it with monotonic progress. Visits plus moves plus */
+	/* skips share the batch, and 4 plus 4 plus 4 stays under 16. */
+	FLOW_SKIP_BOUND = 4ULL,
 	/* Homeless scan visits at most 4 per pass. Homeless tasks are */
 	/* exceptional, so a short iterator bound keeps the pass small */
 	/* with no head stall past the bound. */
@@ -196,14 +201,17 @@ struct flow_llc_perf {
 	u32 __pad;
 	u64 last;
 };
-/* Scheduler counters with 16 live fields. */
+/* Scheduler counters with 19 live fields. */
 /* enq_no_tctx counts missing state plus homeless with no route, */
 /* the name stays for the wire with no split. Tree moves counts */
 /* dispatch pops from the deadline tree. Park moves counts park */
 /* ring drains. Nr throttled counts throttle hits, and parked counts */
 /* every ring arrival with the names kept for the wire. Cpuperf sets */
 /* counts applied frequency transitions at domain scope. Bw moves */
-/* counts the hierarchy moves. */
+/* counts the hierarchy moves. Mask mismatch counts tree heads */
+/* parked for affinity with the timer out of scope. Park skipped */
+/* counts park heads rotated past a block. Global skipped counts */
+/* global visits with no move on this pass. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -221,6 +229,9 @@ struct flow_sched_stats {
 	u64 parked;
 	u64 bw_moves;
 	u64 cpuperf_sets;
+	u64 mask_mismatch;
+	u64 park_skipped;
+	u64 global_skipped;
 };
 /* Task state holds runtime plus key plus cache in 64 bytes. */
 _Static_assert(sizeof(struct flow_task_ctx) == 64,
@@ -237,18 +248,21 @@ _Static_assert(sizeof(struct flow_cgrp_ctx) == 48,
 /* Frequency state holds tag plus busy plus level in 24 bytes. */
 _Static_assert(sizeof(struct flow_llc_perf) == 24,
     "frequency state stays at 24B");
-/* Stats hold 16 counters in 128 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 128,
-    "stats stay at 128B");
+/* Stats hold 19 counters in 152 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 152,
+    "stats stay at 152B");
 /* Timer ticks at 10ms, always covering the 1ms floor. */
 _Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
     "timer stays at 10ms");
 /* Share scale stays at 1024 with no knob. */
 _Static_assert(FLOW_SSF_SCALE == 1024ULL,
     "share scale stays at 1024");
-/* Park serves one head per pass with no loop. */
-_Static_assert(FLOW_PARK_BATCH == 1ULL,
-    "park serves one head");
+/* Park serves at most 4 heads per pass with a short loop. */
+_Static_assert(FLOW_PARK_BATCH == 4ULL,
+    "park serves four heads");
+/* Tree visits at most 4 heads per pass with a short loop. */
+_Static_assert(FLOW_SKIP_BOUND == 4ULL,
+    "tree visits four heads");
 /* Frequency gap stays inside the 10ms to 32ms window. */
 _Static_assert(FLOW_CPUFREQ_MIN_NS >= 10000000ULL &&
     FLOW_CPUFREQ_MIN_NS <= 32000000ULL,

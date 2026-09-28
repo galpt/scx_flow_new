@@ -7,8 +7,10 @@
 
 /// Homeless scan visits at most 4 per pass. Fixed with no knob.
 pub const GLOBAL_SCAN: u32 = 4;
-/// Park recycle visits one head per pass. Fixed with no knob.
-pub const PARK_BATCH: u32 = 1;
+/// Park recycle visits at most 4 heads per pass. Fixed with no knob.
+pub const PARK_BATCH: u32 = 4;
+/// Tree visits at most 4 heads per pass. Fixed with no knob.
+pub const SKIP_BOUND: u32 = 4;
 /// Live task nodes at most. Fixed with no knob.
 pub const NODE_MAX: u64 = 32768;
 /// Park ring slots at most. Fixed with no knob.
@@ -85,6 +87,18 @@ impl ParkRing {
     }
 }
 
+/// True when one more head visit fits the shared pass budget.
+/// Visits plus moves plus skips share one batch of 16, so a deep
+/// queue never stalls a pass past a short bound. Four tree visits
+/// plus four park visits plus four homeless visits stay under it.
+#[cfg(test)]
+pub fn visit_fits(base: u32, moved: u32, seen: u32, skips: u32, budget: u32) -> bool {
+    base.saturating_add(moved)
+        .saturating_add(seen)
+        .saturating_add(skips)
+        < budget
+}
+
 /// True when one popped node reaps instead of serving.
 /// Gone tasks, non tree members, and sequence mismatches from pid
 /// reuse all reap, so stale nodes never run and never re-tree.
@@ -129,6 +143,16 @@ pub fn park_serves(queued: u8) -> bool {
     queued == QUEUED_PARK
 }
 
+/// True when a duplicate arrival restores tree membership.
+/// Restores only from idle with a live entry and a null slot, so a
+/// duplicate while on tree keeps its key and a duplicate while
+/// parked stays parked with no tree move. The wait stamp still
+/// refreshes on every duplicate path.
+#[cfg(test)]
+pub fn enqueue_restores_tree(queued: u8, entry_exists: bool, slot_null: bool) -> bool {
+    queued == QUEUED_IDLE && entry_exists && slot_null
+}
+
 /// Frequency transition decision for one cache domain.
 /// Boosts past the gap when busy and unboosted, rests past the gap
 /// when idle and boosted, else holds. Models the BPF timer tick
@@ -155,7 +179,8 @@ mod tests {
     #[test]
     fn consts_are_fixed() {
         assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
-        assert_eq!(PARK_BATCH, 1);
+        assert_eq!(PARK_BATCH, 4);
+        assert_eq!(SKIP_BOUND, 4);
         assert_eq!(GLOBAL_SCAN, 4);
         assert_eq!(NODE_MAX, 32768);
         assert_eq!(PARK_NR, 4096);
@@ -255,6 +280,26 @@ mod tests {
         assert!(park_serves(QUEUED_PARK));
         assert!(!park_serves(QUEUED_TREE));
         assert!(!park_serves(QUEUED_IDLE));
+    }
+
+    #[test]
+    fn duplicate_restores_tree_only_from_idle() {
+        assert!(enqueue_restores_tree(QUEUED_IDLE, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_TREE, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_PARK, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, false, true));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, true, false));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, false, false));
+    }
+
+    #[test]
+    fn visit_budget_shares_sixteen() {
+        assert!(visit_fits(0, 0, 0, 0, 16));
+        assert!(visit_fits(0, 4, 4, 4, 16));
+        assert!(!visit_fits(4, 4, 4, 4, 16));
+        assert!(!visit_fits(16, 0, 0, 0, 16));
+        assert!(visit_fits(12, 0, 0, 0, 16));
+        assert!(!visit_fits(u32::MAX, 1, 1, 1, 16));
     }
 
     #[test]

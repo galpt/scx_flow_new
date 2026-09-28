@@ -79,6 +79,15 @@ pub struct Metrics {
     #[stat(desc = "Cache domain frequency transitions applied")]
     #[serde(default)]
     pub cpuperf_sets: u64,
+    #[stat(desc = "Tree heads parked for CPU mask mismatch")]
+    #[serde(default)]
+    pub mask_mismatch: u64,
+    #[stat(desc = "Park heads rotated past a block")]
+    #[serde(default)]
+    pub park_skipped: u64,
+    #[stat(desc = "Global visits with no move on this pass")]
+    #[serde(default)]
+    pub global_skipped: u64,
 }
 
 /// One card of the per-CPU grid.
@@ -186,7 +195,8 @@ impl Metrics {
             kick={} noctx={} \
             pkick={} pskip={} \
             global={} \
-            nthr={} parked={} bw={} cpuperf={}",
+            nthr={} parked={} bw={} cpuperf={} \
+            mmask={} pskipped={} gskipped={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -205,6 +215,9 @@ impl Metrics {
             self.parked,
             self.bw_moves,
             self.cpuperf_sets,
+            self.mask_mismatch,
+            self.park_skipped,
+            self.global_skipped,
         )?;
         Ok(())
     }
@@ -230,6 +243,9 @@ impl Metrics {
             parked: self.parked.wrapping_sub(rhs.parked),
             bw_moves: self.bw_moves.wrapping_sub(rhs.bw_moves),
             cpuperf_sets: self.cpuperf_sets.wrapping_sub(rhs.cpuperf_sets),
+            mask_mismatch: self.mask_mismatch.wrapping_sub(rhs.mask_mismatch),
+            park_skipped: self.park_skipped.wrapping_sub(rhs.park_skipped),
+            global_skipped: self.global_skipped.wrapping_sub(rhs.global_skipped),
         }
     }
 }
@@ -265,4 +281,56 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         || shutdown.load(Ordering::Relaxed),
         |m| m.format(&mut std::io::stdout()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_wire_without_new_fields_decodes() {
+        let old = serde_json::json!({
+            "on_cpu": 2,
+            "total_runtime": 9,
+            "inserts": 3,
+            "requeues": 1,
+            "completions": 1,
+            "park_moves": 0,
+            "tree_moves": 4,
+            "kicks": 5,
+            "enq_no_tctx": 0,
+            "preempt_kicks": 1,
+            "preempt_skipped": 2,
+            "global_moves": 0,
+            "nr_throttled": 0,
+            "parked": 1,
+            "bw_moves": 0,
+            "cpuperf_sets": 0
+        });
+        let m: Metrics = serde_json::from_value(old).unwrap();
+        assert_eq!(m.on_cpu, 2);
+        assert_eq!(m.tree_moves, 4);
+        assert_eq!(m.mask_mismatch, 0);
+        assert_eq!(m.park_skipped, 0);
+        assert_eq!(m.global_skipped, 0);
+    }
+
+    #[test]
+    fn new_fields_round_trip_with_delta() {
+        let prev = Metrics::default();
+        let cur = Metrics {
+            mask_mismatch: 7,
+            park_skipped: 3,
+            global_skipped: 5,
+            ..Default::default()
+        };
+        let d = cur.delta(&prev);
+        assert_eq!(d.mask_mismatch, 7);
+        assert_eq!(d.park_skipped, 3);
+        assert_eq!(d.global_skipped, 5);
+        let back: Metrics = serde_json::from_value(serde_json::to_value(&cur).unwrap()).unwrap();
+        assert_eq!(back.mask_mismatch, 7);
+        assert_eq!(back.park_skipped, 3);
+        assert_eq!(back.global_skipped, 5);
+    }
 }

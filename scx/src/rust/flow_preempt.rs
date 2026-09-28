@@ -41,6 +41,16 @@ pub fn may_kick_busy(parked: bool) -> bool {
     !parked
 }
 
+/// True when one parked head kicks an idle CPU.
+/// Mask only parks kick with idle only and no preempt, so a
+/// compatible pass wakes at once. Throttled heads wait on the timer
+/// refill instead, and served heads need no kick. Pinned heads kick
+/// too when their single CPU idles.
+#[cfg(test)]
+pub fn park_kick_idle(throttled: bool, allowed: bool) -> bool {
+    !throttled && !allowed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +95,13 @@ mod tests {
     fn parks_stay_idle_only() {
         assert!(may_kick_busy(false));
         assert!(!may_kick_busy(true));
+    }
+
+    #[test]
+    fn mask_only_parks_kick_idle() {
+        assert!(park_kick_idle(false, false));
+        assert!(!park_kick_idle(true, false));
+        assert!(!park_kick_idle(false, true));
+        assert!(!park_kick_idle(true, true));
     }
 }
