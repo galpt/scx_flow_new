@@ -23,11 +23,12 @@ static __always_inline u64 flow_floor_read(u32 cpu)
 		return 0;
 	return READ_ONCE(*v);
 }
-/* Bump one floor to the later time with wrap safety. */
-/* The signed diff keeps order across the u64 wrap, and the compare */
-/* and swap loop keeps the largest value with no torn floor. Past */
-/* bound or offline ids drop with no write. Outlined with scalar */
-/* inputs, so the enqueue and stop paths verify once. */
+/* Bump one floor to the later time with a plain compare. */
+/* Saturated floors never wrap, so the plain order keeps the */
+/* largest value with no signed diff use. The compare and swap */
+/* loop keeps the largest value with no torn floor. Past bound or */
+/* offline ids drop with no write. Outlined with scalar inputs, so */
+/* the enqueue and stop paths verify once. */
 static __noinline void flow_floor_max(u32 cpu, u64 val)
 {
 	u32 key = cpu;
@@ -43,7 +44,7 @@ static __noinline void flow_floor_max(u32 cpu, u64 val)
 	bpf_for(i, 0, 4) {
 		u64 cur = READ_ONCE(*v);
 		u64 old;
-		if (!flow_time_before(cur, val))
+		if (cur >= val)
 			break;
 		old = __sync_val_compare_and_swap(v, cur, val);
 		if (old == cur)

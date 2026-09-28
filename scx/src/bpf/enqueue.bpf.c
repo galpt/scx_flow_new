@@ -190,10 +190,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* parks keep no key use. */
 	eff = flow_eff_weight(p->scx.weight, hier);
 	{
-		u64 base = flow_time_max(READ_ONCE(tctx->vruntime), now);
+		u64 vrt = READ_ONCE(tctx->vruntime);
+		u64 base = flow_later(vrt, now);
 		u64 floor = flow_floor_read((u32)cpu);
 		u64 slack = flow_deadline_slack(eff);
-		base = flow_time_max(base, tctx->deadline);
+		base = flow_later(base, tctx->deadline);
 		deadline = flow_deadline_key(base, floor, slack);
 	}
 	tctx->deadline = deadline;

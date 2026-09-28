@@ -273,15 +273,26 @@ static __always_inline u64 flow_deadline_next(u64 last,
 /* Advanced runtime after one execution segment. */
 /* Scales raw time by base over the effective share with a split */
 /* divide, so heavy shares advance slowly and light shares advance */
-/* fast. The split keeps every intermediate small with no wrap, and */
-/* the add saturates, so huge segments clamp instead of wrapping. */
+/* fast. The split keeps every intermediate small for real segments, */
+/* a segment past the scale bound saturates at once, and both adds */
+/* saturate too, so huge inputs clamp instead of wrapping. */
 static __always_inline u64 flow_vruntime_advance(u64 vruntime,
 	u64 delta, u32 eff)
 {
 	u64 w = (u64)flow_weight_clamp(eff);
-	u64 adv = delta / w * (u64)FLOW_WEIGHT_BASE +
-	    delta % w * (u64)FLOW_WEIGHT_BASE / w;
-	u64 out = vruntime + adv;
+	u64 q = delta / w;
+	u64 head;
+	u64 tail;
+	u64 adv;
+	u64 out;
+	if (q > (u64)~0ULL / (u64)FLOW_WEIGHT_BASE)
+		return (u64)~0ULL;
+	head = q * (u64)FLOW_WEIGHT_BASE;
+	tail = delta % w * (u64)FLOW_WEIGHT_BASE / w;
+	adv = head + tail;
+	if (adv < head)
+		return (u64)~0ULL;
+	out = vruntime + adv;
 	if (out < vruntime)
 		return (u64)~0ULL;
 	return out;
@@ -297,6 +308,17 @@ static __always_inline u64 flow_deadline_slack(u32 weight)
 		return (u64)FLOW_STARVE_NS;
 	return step;
 }
+/* Later of two saturated times with a plain compare. */
+/* Saturated values never wrap, so the plain order keeps the */
+/* largest value with no signed diff use. Real times far below */
+/* the bound order the same either way. */
+static __always_inline u64 flow_later(u64 a,
+	u64 b)
+{
+	if (a >= b)
+		return a;
+	return b;
+}
 /* Key deadline from a base past the floor with slack. */
 /* The later of base and floor wins, so a long sleep never earns */
 /* credit past served work, and the add saturates, so a huge floor */
@@ -304,7 +326,7 @@ static __always_inline u64 flow_deadline_slack(u32 weight)
 static __always_inline u64 flow_deadline_key(u64 base,
 	u64 floor, u64 slack)
 {
-	u64 at = flow_time_max(base, floor);
+	u64 at = flow_later(base, floor);
 	u64 out = at + slack;
 	if (out < at)
 		return (u64)~0ULL;
