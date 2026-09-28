@@ -204,6 +204,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* live deadline. The first arrival wins, so a duplicate enqueue */
 	/* while queued never moves the tree position and never churns. */
 	/* The wait stamp still refreshes, so diagnostics stay fresh. */
+	/* A duplicate from idle restores tree membership only, since */
+	/* the live node still owns the task. A duplicate while parked */
+	/* stays parked, so the ring keeps the task with no tree move. */
 	/* A null fetch with no entry means the alloc failed, so the */
 	/* arrival fails open to the global queue with no loss. */
 	{
@@ -230,6 +233,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		}
 		tctx->wait_at = now;
+		if (READ_ONCE(tctx->queued) == 0)
+			WRITE_ONCE(tctx->queued, (u8)1);
 		deadline = READ_ONCE(tctx->deadline);
 		goto kick;
 	}

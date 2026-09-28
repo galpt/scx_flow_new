@@ -129,6 +129,16 @@ pub fn park_serves(queued: u8) -> bool {
     queued == QUEUED_PARK
 }
 
+/// True when a duplicate arrival restores tree membership.
+/// Restores only from idle with a live entry and a null slot, so a
+/// duplicate while on tree keeps its key and a duplicate while
+/// parked stays parked with no tree move. The wait stamp still
+/// refreshes on every duplicate path.
+#[cfg(test)]
+pub fn enqueue_restores_tree(queued: u8, entry_exists: bool, slot_null: bool) -> bool {
+    queued == QUEUED_IDLE && entry_exists && slot_null
+}
+
 /// Frequency transition decision for one cache domain.
 /// Boosts past the gap when busy and unboosted, rests past the gap
 /// when idle and boosted, else holds. Models the BPF timer tick
@@ -255,6 +265,16 @@ mod tests {
         assert!(park_serves(QUEUED_PARK));
         assert!(!park_serves(QUEUED_TREE));
         assert!(!park_serves(QUEUED_IDLE));
+    }
+
+    #[test]
+    fn duplicate_restores_tree_only_from_idle() {
+        assert!(enqueue_restores_tree(QUEUED_IDLE, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_TREE, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_PARK, true, true));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, false, true));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, true, false));
+        assert!(!enqueue_restores_tree(QUEUED_IDLE, false, false));
     }
 
     #[test]
