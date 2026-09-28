@@ -2,8 +2,8 @@
 /*
  * Flow scheduler BPF core.
  *
- * Maps hold task deadlines, CPU pid plus cursor rows, the
- * topology view, and the hierarchy share plus pool rows. Init
+ * Maps hold task deadlines, CPU pid plus cursor rows, the runtime
+ * floor per CPU, the topology view, and the hierarchy share plus pool rows. Init
  * creates one deadline queue per CPU plus one overflow tail, and
  * it fails loudly when an id reaches the local range. Ops split
  * across select_cpu, enqueue plus enqueue/, dispatch plus
@@ -34,6 +34,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
+/* Per CPU floor of served runtime with live use only. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, u64);
+} vruntime_floor SEC(".maps");
 /* Per CPU topology view with sibling plus domain. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -80,6 +87,7 @@ volatile u64 flow_hint_idx = 0;
 #include "main/hier.bpf.c"
 #include "main/bw.bpf.c"
 #include "main/cpu.bpf.c"
+#include "main/floor.bpf.c"
 #include "main/timer.bpf.c"
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
@@ -92,6 +100,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	u64 n;
 	s32 cpu;
 	u32 tkey = 0;
+	u64 fzero = 0;
 	struct flow_bw_timer *tm;
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
@@ -118,6 +127,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (st) {
 			st->running_pid = 0;
 			st->cursor = (u32)cpu;
+		}
+		if (bpf_map_update_elem(&vruntime_floor, &key,
+		    &fzero, BPF_ANY) < 0) {
+			scx_bpf_error("floor init failed");
+			return -ENOMEM;
 		}
 		tp = bpf_map_lookup_elem(&topo_stor, &key);
 		if (tp) {
