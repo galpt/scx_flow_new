@@ -6,7 +6,11 @@
  * overflow tail, and it uses the kernel global queue for homeless
  * work. Every task carries a deadline shaped by the task weight
  * through the effective share, and each queue orders by that
- * deadline. The effective share folds the task weight with the
+ * deadline. Every task also carries virtual runtime advanced by
+ * scaled execution at stop, and each CPU tracks a floor of served
+ * runtime. Open inserts key past the later of runtime and floor
+ * with a slack capped at twice the quantum, so a long sleep never
+ * earns credit and a light task never leaps in one arrival. The effective share folds the task weight with the
  * hierarchy weights along the ancestors, so a task under a light
  * parent waits longer. Bandwidth pools cap runtime per period with
  * lazy refill, and throttled work parks in overflow. Service runs
@@ -81,9 +85,11 @@ enum flow_consts {
 };
 /* Unlimited quota value with no cap use and zero pool. */
 #define FLOW_RUNTIME_INF (~0ULL)
-/* Per task state at 40B with deadline plus stamps plus share cache. */
+/* Per task state at 48B with deadline plus runtime plus stamps plus share cache. */
 /* Deadline holds the last assigned deadline for the next max. A zero */
 /* deadline means no order yet, so preempt compares skip with no kick. */
+/* Vruntime holds the scaled runtime served so far for the next key. */
+/* A zero runtime means no service yet, so fresh tasks key past now. */
 /* Wait holds the last enqueue time for the starvation check. Pinned */
 /* parks set wait too, so the gated backstop sees them. */
 /* Run holds the segment start while on CPU else zero, so a claimed */
@@ -102,6 +108,7 @@ enum flow_consts {
 /* stay best effort with no atomic order. */
 struct flow_task_ctx {
 	u64 deadline;
+	u64 vruntime;
 	u64 wait_at;
 	u64 run_at;
 	u64 cgid;
@@ -176,9 +183,9 @@ struct flow_sched_stats {
 	u64 parked;
 	u64 bw_moves;
 };
-/* Task state holds deadline plus stamps plus cache in 40 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 40,
-    "task state stays at 40B");
+/* Task state holds deadline plus runtime plus stamps plus cache in 48 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 48,
+    "task state stays at 48B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
     "cpu state stays at 8B");
@@ -262,6 +269,46 @@ static __always_inline u64 flow_deadline_next(u64 last,
 	u64 now, u32 weight)
 {
 	return flow_time_max(last, now) + flow_deadline_step(weight);
+}
+/* Advanced runtime after one execution segment. */
+/* Scales raw time by base over the effective share with a split */
+/* divide, so heavy shares advance slowly and light shares advance */
+/* fast. The split keeps every intermediate small with no wrap, and */
+/* the add saturates, so huge segments clamp instead of wrapping. */
+static __always_inline u64 flow_vruntime_advance(u64 vruntime,
+	u64 delta, u32 eff)
+{
+	u64 w = (u64)flow_weight_clamp(eff);
+	u64 adv = delta / w * (u64)FLOW_WEIGHT_BASE +
+	    delta % w * (u64)FLOW_WEIGHT_BASE / w;
+	u64 out = vruntime + adv;
+	if (out < vruntime)
+		return (u64)~0ULL;
+	return out;
+}
+/* Slack for one open insert as the step capped at 2ms. */
+/* Base weight keeps one quantum, heavy weights keep less, and light */
+/* weights stop at twice the quantum, so a light task never leaps */
+/* past the starvation floor in one arrival. */
+static __always_inline u64 flow_deadline_slack(u32 weight)
+{
+	u64 step = flow_deadline_step(weight);
+	if (step > (u64)FLOW_STARVE_NS)
+		return (u64)FLOW_STARVE_NS;
+	return step;
+}
+/* Key deadline from a base past the floor with slack. */
+/* The later of base and floor wins, so a long sleep never earns */
+/* credit past served work, and the add saturates, so a huge floor */
+/* clamps instead of wrapping to the front. */
+static __always_inline u64 flow_deadline_key(u64 base,
+	u64 floor, u64 slack)
+{
+	u64 at = flow_time_max(base, floor);
+	u64 out = at + slack;
+	if (out < at)
+		return (u64)~0ULL;
+	return out;
 }
 /* Floored period in microseconds with a 1ms floor. */
 /* Short periods fail closed to the floor with no trap. */
