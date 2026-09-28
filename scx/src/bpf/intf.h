@@ -59,9 +59,9 @@ enum flow_consts {
 	FLOW_WEIGHT_MAX = 10000ULL,
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_DISPATCH_BATCH = 16ULL,
-	FLOW_PARK_BATCH = 4ULL,
-	/* Park recycle visits at most 4 per pass. Parks are exceptional */
-	/* beside the tree flow, so a short bound keeps the jump chains */
+	FLOW_PARK_BATCH = 1ULL,
+	/* Park recycle visits one head per pass. Parks are exceptional */
+	/* beside the tree flow, so a single head keeps the jump chains */
 	/* loadable with no head stall past the bound. */
 	/* Homeless scan visits at most 4 per pass. Homeless tasks are */
 	/* exceptional, so a short iterator bound keeps the pass small */
@@ -246,6 +246,9 @@ _Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
 /* Share scale stays at 1024 with no knob. */
 _Static_assert(FLOW_SSF_SCALE == 1024ULL,
     "share scale stays at 1024");
+/* Park serves one head per pass with no loop. */
+_Static_assert(FLOW_PARK_BATCH == 1ULL,
+    "park serves one head");
 /* Frequency gap stays inside the 10ms to 32ms window. */
 _Static_assert(FLOW_CPUFREQ_MIN_NS >= 10000000ULL &&
     FLOW_CPUFREQ_MIN_NS <= 32000000ULL,

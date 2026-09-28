@@ -51,7 +51,7 @@ impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
     /// The batch stays fixed at 16 with the homeless scan at 4 and
-    /// the park recycle at 4. Base
+    /// the park recycle at 1. Base
     /// weight stays 100 in range 1 to 10000 with a 2ms starvation
     /// floor. The tree holds 32768 nodes with a 4096 park ring.
     /// Frequency keeps 64 domain slots with a 16ms gap inside the
@@ -75,7 +75,7 @@ impl Config {
         if GLOBAL_SCAN != 4 {
             bail!("global scan bad");
         }
-        if PARK_BATCH != 4 {
+        if PARK_BATCH != 1 {
             bail!("park batch bad");
         }
         if NODE_MAX != 32768 {
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(crate::flow_edf::STARVE_NS, 2_000_000);
         assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
         assert_eq!(crate::flow_tree::GLOBAL_SCAN, 4);
-        assert_eq!(crate::flow_tree::PARK_BATCH, 4);
+        assert_eq!(crate::flow_tree::PARK_BATCH, 1);
         assert_eq!(crate::flow_ssf::SSF_SCALE, 1024);
     }
 
