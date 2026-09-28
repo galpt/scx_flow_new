@@ -326,8 +326,7 @@ mod tests {
         assert_eq!(d.mask_mismatch, 7);
         assert_eq!(d.park_skipped, 3);
         assert_eq!(d.global_skipped, 5);
-        let back: Metrics =
-            serde_json::from_value(serde_json::to_value(&cur).unwrap()).unwrap();
+        let back: Metrics = serde_json::from_value(serde_json::to_value(&cur).unwrap()).unwrap();
         assert_eq!(back.mask_mismatch, 7);
         assert_eq!(back.park_skipped, 3);
         assert_eq!(back.global_skipped, 5);
