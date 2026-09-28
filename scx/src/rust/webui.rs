@@ -434,7 +434,7 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.4.5".to_string(),
+            version: "4.4.7".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             governor: "performance (epp:performance)".to_string(),
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(back.stats.bw_moves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.5");
+        assert_eq!(back.version, "4.4.7");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
