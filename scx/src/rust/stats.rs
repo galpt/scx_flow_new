@@ -318,10 +318,12 @@ mod tests {
     #[test]
     fn new_fields_round_trip_with_delta() {
         let prev = Metrics::default();
-        let mut cur = Metrics::default();
-        cur.mask_mismatch = 7;
-        cur.park_skipped = 3;
-        cur.global_skipped = 5;
+        let cur = Metrics {
+            mask_mismatch: 7,
+            park_skipped: 3,
+            global_skipped: 5,
+            ..Default::default()
+        };
         let d = cur.delta(&prev);
         assert_eq!(d.mask_mismatch, 7);
         assert_eq!(d.park_skipped, 3);
