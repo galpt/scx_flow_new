@@ -222,6 +222,31 @@ mod tests {
     }
 
     #[test]
+    fn runtime_key_holds_slack_cap() {
+        assert_eq!(crate::flow_runtime::deadline_slack(100), 1_000_000);
+        assert_eq!(
+            crate::flow_runtime::deadline_slack(1),
+            crate::flow_edf::STARVE_NS
+        );
+        assert_eq!(
+            crate::flow_runtime::deadline_key(u64::MAX, u64::MAX, 1_000_000),
+            u64::MAX
+        );
+        assert_eq!(
+            crate::flow_runtime::insert_key(1_000, 1_000, 10_000_000, 0, 100),
+            11_000_000
+        );
+        assert_eq!(
+            crate::flow_runtime::charge_share(false, 200),
+            crate::flow_slice::WEIGHT_BASE
+        );
+        assert_eq!(
+            crate::flow_runtime::floor_max(u64::MAX, 1),
+            crate::flow_runtime::deadline_key(u64::MAX, 1, 0)
+        );
+    }
+
+    #[test]
     fn rejects_bad_quantum() {
         let a = ConfigBuilder::default().quantum_ns(1).build();
         assert!(a.is_err());

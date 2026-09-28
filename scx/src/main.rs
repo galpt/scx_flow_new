@@ -19,6 +19,8 @@ mod flow_cgrp;
 mod flow_edf;
 #[path = "rust/flow_preempt.rs"]
 mod flow_preempt;
+#[path = "rust/flow_runtime.rs"]
+mod flow_runtime;
 #[path = "rust/flow_select.rs"]
 mod flow_select;
 #[path = "rust/flow_slice.rs"]
@@ -455,8 +457,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_40() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 40);
+    fn task_size_is_48() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
     }
 
     #[test]
