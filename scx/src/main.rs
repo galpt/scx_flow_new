@@ -283,6 +283,7 @@ impl<'a> Scheduler<'a> {
             pkick={} pskip={} \
             global={} \
             nthr={} parked={} bw={} cpuperf={} \
+            mmask={} pskipped={} gskipped={} \
             runtime={} oncpu={}",
             m.inserts,
             m.requeues,
@@ -298,6 +299,9 @@ impl<'a> Scheduler<'a> {
             m.parked,
             m.bw_moves,
             m.cpuperf_sets,
+            m.mask_mismatch,
+            m.park_skipped,
+            m.global_skipped,
             runtime,
             oncpu,
         );
@@ -450,10 +454,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_128() {
+    fn sched_stats_size_is_152() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            128
+            152
         );
     }
 

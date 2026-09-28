@@ -400,6 +400,9 @@ impl<'a> Scheduler<'a> {
             parked: s.parked,
             bw_moves: s.bw_moves,
             cpuperf_sets: s.cpuperf_sets,
+            mask_mismatch: s.mask_mismatch,
+            park_skipped: s.park_skipped,
+            global_skipped: s.global_skipped,
         }
     }
 
