@@ -38,7 +38,7 @@ Steal runs only with an empty local queue. Sibling wins first, then same cache d
 
 ### Accounting
 
-Running stamps segment start, stopping claims the start once and charges raw time plus pool drain and counts one requeue or completion, disable plus exit claim a leftover once. Owner clears use compare and swap. See `src/bpf/lifecycle.bpf.c`.
+Running claims segment start from zero and counts once per claim, stopping claims the start once and charges raw time plus pool drain and counts one requeue or completion, disable plus exit claim a leftover once. Owner gates the pid clear only with the gauge drop on the claim. See `src/bpf/lifecycle.bpf.c`.
 
 ### Counters
 
@@ -50,7 +50,7 @@ Scheduling stays fixed without options. Reporting only uses `--stats`, `--monito
 
 ## Web UI
 
-The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. `--no-webui` disables it.
+The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. On CPU prints clamped to the online cards with a live pid count beside it. `--no-webui` disables it.
 
 ## Code map
 

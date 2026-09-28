@@ -35,12 +35,14 @@ static __always_inline bool flow_cpu_ok(
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
 /* Drop the on CPU gauge by one with no wrap and no clear. */
-/* Retries the compare and swap so concurrent stops pair, and a lost */
-/* race leaves the gauge to the winner with no silent zero. */
+/* Retries the compare and swap to pair every counted start, and a lost */
+/* race retries with no silent drop. The bound stays at 32 for the */
+/* verifier, and the window is one swap, so 32 covers the worst burst */
+/* with no growing leak past it. */
 static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
-	bpf_for(i, 0, 4) {
+	bpf_for(i, 0, 32) {
 		u64 cur = flow_stats.on_cpu;
 		u64 nxt;
 		u64 old;

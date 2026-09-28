@@ -135,16 +135,22 @@
       font-variant-numeric: tabular-nums;
     }
     /* Running badge on each CPU card. Running tasks
-     * show live, idle cards stay muted. */
+     * show live, idle cards stay muted. Flex centers
+     * the text by height plus width with balanced
+     * padding, matching the header capsules. */
     .run-badge {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
       margin-top: 2px;
-      padding: 0 6px;
+      padding: 1px 6px;
       border-radius: 999px;
       border: 1px solid var(--border-hover);
       font-family: var(--font-mono);
       font-size: 0.6rem;
-      line-height: 1.5;
+      line-height: 1.4;
     }
     .run-idle { color: var(--text-muted); }
     .run-live {
@@ -246,6 +252,18 @@
       font-weight: 500;
     }
     /* Header badges. Weight and tracking mark mode, running, disconnected, never color alone. */
+    /* Flex centers the text by height plus width with the inline balanced
+     * padding, matching the per CPU live idle pill. */
+    #mode-badge,
+    #status-badge,
+    #download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
+      line-height: 1.4;
+    }
     #mode-badge,
     #status-badge {
       font-weight: 600;
@@ -359,6 +377,10 @@
         <div><span style="color:var(--text-muted)">
           On-CPU:</span>
           <span class="stat-value" id="on-cpu">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Live pids:</span>
+          <span class="stat-value" id="running-pids">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
           Uptime:</span>
@@ -538,6 +560,27 @@
     /* Summary prose, built from the live gauges.
      * The tldr names the running count. The explanation
      * walks inserts, moves, and steal detail. */
+    /* Live pid count from the per CPU cards. */
+    /* Counts cards with a nonzero pid with no gauge use. */
+    function livePids(perCpu) {
+      var n = 0;
+      var i;
+      for (i = 0; i < perCpu.length; i++) {
+        if ((perCpu[i].running_pid || 0) !== 0) n++;
+      }
+      return n;
+    }
+
+    /* Clamped on CPU for display. Caps the raw gauge at the */
+    /* online card count, so a stale gauge never prints past */
+    /* the live cards. */
+    function shownOnCpu(s, perCpu) {
+      var raw = s.on_cpu || 0;
+      if (raw < 0) raw = 0;
+      if (raw > perCpu.length) return perCpu.length;
+      return raw;
+    }
+
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -625,7 +668,18 @@
       updateEnergy(data);
 
       var s = data.stats || {};
-      var summary = buildSummary(s);
+      var perCpu = data.per_cpu || [];
+      var live = livePids(perCpu);
+      var shown = shownOnCpu(s, perCpu);
+      var disp = {};
+      var k;
+      for (k in s) {
+        if (Object.prototype.hasOwnProperty.call(s, k)) {
+          disp[k] = s[k];
+        }
+      }
+      disp.on_cpu = shown;
+      var summary = buildSummary(disp);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
         summary.explanation;
@@ -640,7 +694,10 @@
       el('meta-line').textContent = meta ||
         'per-CPU deadline queues, fixed quantum and placement';
 
-      el('on-cpu').textContent = fmt(s.on_cpu || 0);
+      el('on-cpu').textContent = fmt(shown);
+      el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
+        ', live cards ' + fmt(live);
+      el('running-pids').textContent = fmt(live);
       el('uptime').textContent =
         fmtRuntime(s.uptime_ns || 0);
       el('runtime').textContent =

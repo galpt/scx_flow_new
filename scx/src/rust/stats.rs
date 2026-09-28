@@ -158,7 +158,8 @@ impl Default for EnergyMetrics {
 }
 
 /// Snapshot for the web dashboard.
-/// All fields are gauges. The run loop pushes one per iteration.
+/// Counters stay raw with the on CPU gauge plus the live pid view.
+/// The run loop pushes one per iteration.
 /// The web thread keeps the newest behind a lock for the handlers.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {

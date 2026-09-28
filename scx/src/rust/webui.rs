@@ -434,7 +434,7 @@ mod tests {
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.4.3".to_string(),
+            version: "4.4.5".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             governor: "performance (epp:performance)".to_string(),
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(back.stats.bw_moves, 1);
         assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.3");
+        assert_eq!(back.version, "4.4.5");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
@@ -593,6 +593,31 @@ mod tests {
         assert!(html.contains("parked"));
         assert!(html.contains("id=\"bw-moves\""));
         assert!(html.contains("bw_moves"));
+    }
+
+    /* Dashboard clamps on CPU and shows the live pid count. */
+    #[test]
+    fn dashboard_shows_live_pids_cell() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("id=\"on-cpu\""));
+        assert!(html.contains("id=\"running-pids\""));
+        assert!(html.contains("livePids"));
+        assert!(html.contains("shownOnCpu"));
+        assert!(html.contains("running_pid"));
+    }
+
+    /* Header capsules plus the per CPU pill center text by height plus width. */
+    #[test]
+    fn dashboard_centers_header_capsules() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("#mode-badge"));
+        assert!(html.contains("#status-badge"));
+        assert!(html.contains("#download"));
+        assert!(html.contains(".run-badge"));
+        assert!(html.contains("display: inline-flex"));
+        assert!(html.contains("align-items: center"));
+        assert!(html.contains("justify-content: center"));
+        assert!(html.contains("line-height: 1.4"));
     }
 
     /* Dashboard shows the governor mode cell. */
