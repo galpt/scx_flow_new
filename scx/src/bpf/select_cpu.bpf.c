@@ -2,16 +2,18 @@
 /*
  * Select CPU op.
  *
- * Placement keeps the waker CPU when idle and allowed, then any
- * idle CPU, then a cache scan, then the previous CPU, then the
- * first allowed CPU. The scan walks bound 8 same cache peers from
- * a cursor plus salt start with one depth probe per peer, and the
- * shallowest peer wins only when strictly shallower than previous,
- * so warmth never loses to a tie. Pinned tasks stay where the mask
- * allows with no scan, and the task mask always wins. An empty
- * mask falls through to the global queue at enqueue. Topology
- * stays display only except the cache domain used here. See
- * enqueue.bpf.c for the deadline choice after select.
+ * Placement is a hint only with no queue behind it. It keeps the
+ * waker CPU when idle and allowed, then any idle CPU, then a cache
+ * scan, then the previous CPU, then the first allowed CPU. The scan
+ * walks bound 8 same cache peers from a cursor plus salt start with
+ * one running probe per peer, and the idlest peer wins only when
+ * strictly idler than previous, so warmth never loses to a tie. A
+ * running peer counts one and an idle peer counts zero, so the
+ * depth stays a single bit with no queue read. Pinned tasks stay
+ * where the mask allows with no scan, and the task mask always
+ * wins. An empty mask falls through to the global queue at
+ * enqueue. Topology stays display only except the cache domain
+ * used here. See enqueue.bpf.c for the key choice after select.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -62,24 +64,25 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (picked >= 0 && flow_cpu_ok(p, picked))
 		return picked;
-	/* Previous depth comes from one deadline probe with no scan. */
+	/* Previous depth comes from one pid probe with no scan. */
+	/* Running counts one and idle counts zero, so the scan below */
+	/* compares single bits with no queue read. */
 	prev_ok = flow_cpu_ok(p, prev_cpu);
 	if (prev_ok) {
-		s32 qv = scx_bpf_dsq_nr_queued(
-		    flow_vtime_dsq((u32)prev_cpu));
-		if (qv > 0)
-			prev_depth = (u64)qv;
+		struct flow_cpu_state *pst = flow_cpu((u32)prev_cpu);
+		if (pst && READ_ONCE(pst->running_pid) != 0)
+			prev_depth = 1;
 		else
 			prev_depth = 0;
 	}
 	/* A missing previous CPU still scans with max depth. */
-	/* The shallowest live allowed peer wins only when strictly */
-	/* shallower than previous, so warmth never loses to a tie. */
+	/* The idlest live allowed peer wins only when strictly */
+	/* idler than previous, so warmth never loses to a tie. */
 	/* A missing domain view fails open to the same domain. */
 	/* Live is the attach snapshot with no online read, so a stale */
 	/* pick still lands with mask wins at enqueue. */
 	/* The scan pays at most eight probes with one per peer. */
-	/* An empty peer stops the scan with no further probe. */
+	/* An idle peer ends the scan at once. */
 	/* The waker cursor steps by 8 with wrap, so passes spread. */
 	/* The cursor advances only on a hit with no ABI change, */
 	/* so misses skip the store with no correctness use. */
@@ -100,10 +103,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			u32 n = (u32)nr;
 			salt = bpf_get_prandom_u32() % n;
 			start = (cursor + 1U + salt) % n;
-			bpf_for(off, 0, FLOW_STEAL_BOUND) {
+			bpf_for(off, 0, FLOW_SCAN_BOUND) {
 				u32 peer = (start + off) % n;
 				struct flow_topo *ptp;
-				s32 pv;
+				struct flow_cpu_state *pst;
 				u64 pd;
 				if (peer == (u32)this_cpu)
 					continue;
@@ -112,13 +115,14 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				ptp = flow_topo(peer);
 				if (ptp && wtp && ptp->llc != want)
 					continue;
-				/* One depth probe per peer, vtime only. */
-				/* An empty peer ends the scan at once. */
-				pv = scx_bpf_dsq_nr_queued(
-				    flow_vtime_dsq(peer));
-				if (pv < 0)
-					continue;
-				pd = (u64)pv;
+				/* One running probe per peer, pid view only. */
+				/* An idle peer ends the scan at once. */
+				pst = flow_cpu(peer);
+				if (pst &&
+				    READ_ONCE(pst->running_pid) != 0)
+					pd = 1;
+				else
+					pd = 0;
 				if (pd < best_depth) {
 					best_depth = pd;
 					best = peer;
@@ -136,7 +140,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 			}
 		}
 	}
-	/* A scan miss or a deeper peer keeps the previous CPU when allowed. */
+	/* A scan miss or a busier peer keeps the previous CPU when allowed. */
 	if (prev_ok)
 		return prev_cpu;
 	/* The first allowed CPU is the fail closed fallback. */

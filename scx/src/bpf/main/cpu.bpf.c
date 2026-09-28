@@ -10,7 +10,7 @@
  */
 /* True when the id is a live CPU below nr and the bound. */
 /* Live means below the nr snapshot at init with no kernel online read. */
-/* Hotplug needs a restart with fail closed to overflow. */
+/* Hotplug needs a restart with fail closed to park. */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	if ((u64)cpu >= nr_cpu_ids)
@@ -22,7 +22,7 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 /* True when the CPU is live and inside the task mask. */
 /* Live is the init snapshot with no hotplug read, so an offlined CPU */
 /* past init still reads live here and needs a restart to drain. */
-/* Unknown CPUs fail closed to overflow with mask wins on drain. */
+/* Unknown CPUs fail closed to park with mask wins on drain. */
 static __always_inline bool flow_cpu_ok(
 	const struct task_struct *p, s32 cpu)
 {
