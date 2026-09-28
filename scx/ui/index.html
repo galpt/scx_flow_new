@@ -135,16 +135,22 @@
       font-variant-numeric: tabular-nums;
     }
     /* Running badge on each CPU card. Running tasks
-     * show live, idle cards stay muted. */
+     * show live, idle cards stay muted. Flex centers
+     * the text by height plus width with balanced
+     * padding, matching the header capsules. */
     .run-badge {
-      display: inline-block;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
       margin-top: 2px;
-      padding: 0 6px;
+      padding: 1px 6px;
       border-radius: 999px;
       border: 1px solid var(--border-hover);
       font-family: var(--font-mono);
       font-size: 0.6rem;
-      line-height: 1.5;
+      line-height: 1.4;
     }
     .run-idle { color: var(--text-muted); }
     .run-live {
@@ -246,6 +252,18 @@
       font-weight: 500;
     }
     /* Header badges. Weight and tracking mark mode, running, disconnected, never color alone. */
+    /* Flex centers the text by height plus width with the inline balanced
+     * padding, matching the per CPU live idle pill. */
+    #mode-badge,
+    #status-badge,
+    #download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      vertical-align: middle;
+      line-height: 1.4;
+    }
     #mode-badge,
     #status-badge {
       font-weight: 600;

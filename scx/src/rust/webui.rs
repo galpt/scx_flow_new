@@ -606,6 +606,20 @@ mod tests {
         assert!(html.contains("running_pid"));
     }
 
+    /* Header capsules plus the per CPU pill center text by height plus width. */
+    #[test]
+    fn dashboard_centers_header_capsules() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("#mode-badge"));
+        assert!(html.contains("#status-badge"));
+        assert!(html.contains("#download"));
+        assert!(html.contains(".run-badge"));
+        assert!(html.contains("display: inline-flex"));
+        assert!(html.contains("align-items: center"));
+        assert!(html.contains("justify-content: center"));
+        assert!(html.contains("line-height: 1.4"));
+    }
+
     /* Dashboard shows the governor mode cell. */
     #[test]
     fn dashboard_shows_mode_cell() {
