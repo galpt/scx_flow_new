@@ -2,11 +2,14 @@
 /*
  * Dispatch op.
  *
- * Each pass drains in fixed order. The own deadline queue moves
+ * Each pass drains in fixed order under one shared budget of 32
+ * across five phases. The own deadline queue moves
  * first with the header cap, then one peer steal moves a single task,
  * then the kernel global plus the shared overflow tail with a
  * shared cap at 4, and last a gated starvation pass over overflow
- * when throttling. Throttled parks share the overflow tail with
+ * when throttling. Visits plus moves plus skips share the budget
+ * with a miss cap at 4 per trip and a steal bound at 8 peers, and
+ * each phase adds its moves once with no lock. Throttled parks share the overflow tail with
  * mask wins on drain and a throttle recheck, so drained pools hold
  * tasks back with no bypass. Empty trips pay one queued read with no scan.
  * Steal never visits a peer deadline queue unless the local queue

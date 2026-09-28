@@ -91,8 +91,8 @@ s32 BPF_STRUCT_OPS(flow_cgroup_prep_move, struct task_struct *p,
 	(void)to;
 	return 0;
 }
-/* Commit one hierarchy move with deadline carry and cache drop. */
-/* The deadline stays, so order survives the move. The cache */
+/* Commit one hierarchy move with deadline plus runtime carry and cache drop. */
+/* The deadline plus the runtime stay, so order survives the move. The cache */
 /* clears, so the next enqueue walks the new ancestors. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	struct cgroup *from, struct cgroup *to)

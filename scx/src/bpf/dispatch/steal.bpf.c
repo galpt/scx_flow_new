@@ -153,7 +153,7 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 budget,
 		lim = budget;
 	if (base >= lim)
 		return 0;
-	got = flow_drain_one(cpu, steal_dsq, lim, base);
+	got = flow_drain_one(cpu, steal_dsq, lim, base, false);
 	if (got != 0)
 		__sync_fetch_and_add(&flow_stats.steal_moves,
 		    (u64)got);
