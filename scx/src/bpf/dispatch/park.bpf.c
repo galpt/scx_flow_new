@@ -80,12 +80,21 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 		allowed = bpf_cpumask_test_cpu((u32)cpu,
 		    task->cpus_ptr);
 		/* A blocked head rotates with the visit spent. */
-		/* The pop freed exactly one slot, so the push finds room */
-		/* with no fail open past it. Mask only rotates kick one */
-		/* idle allowed CPU with no preempt, and throttled heads */
-		/* wait on the timer refill instead. */
+		/* The pop freed one slot but a concurrent push can fill */
+		/* it first, so a full ring fails open to global with the */
+		/* flag cleared and no task left without a queue. Mask only */
+		/* rotates kick one idle allowed CPU with no preempt, and */
+		/* throttled heads wait on the timer refill instead. */
 		if (throttled || !allowed) {
-			flow_park_push(pid);
+			if (!flow_park_push(pid)) {
+				WRITE_ONCE(tctx->queued, (u8)0);
+				flow_global_insert(task);
+				bpf_task_release(task);
+				skips++;
+				__sync_fetch_and_add(&flow_stats.park_skipped,
+				    1);
+				continue;
+			}
 			if (!throttled && !allowed) {
 				s32 sel = task->scx.selected_cpu;
 				flow_kick_idle_allowed(task, sel);
