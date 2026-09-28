@@ -5,9 +5,10 @@
  * Running claims the segment start from zero and counts the on CPU
  * gauge once per claim. Stopping claims the start once and charges
  * the raw segment to total runtime and drains
- * the hierarchy pools, then counts one requeue per runnable stop
- * else one completion. Enable clears the deadline state plus the
- * share cache, and disable plus exit charge a leftover segment
+ * the hierarchy pools, then advances virtual runtime by scaled time
+ * with the cached share and bumps the CPU floor, then counts one requeue per runnable stop
+ * else one completion. Enable clears the deadline plus the runtime
+ * plus the share cache, and disable plus exit charge a leftover segment
  * at most once when stopping never ran. Release clears a stale
  * running view with no charge. See intf.h for the shared helpers
  * and enqueue.bpf.c for the deadline choice.
@@ -93,6 +94,20 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* Every segment counts raw time with no weight scaling. */
 	/* Order already carries weight through the deadline step. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	/* Runtime advances by scaled time with the cached share. */
+	/* A cold cache uses base share, and a zero share folds to base */
+	/* too, so the advance never divides by zero. The floor tracks */
+	/* the largest served runtime with no wrap use. */
+	{
+		u32 share = tctx->cached ? tctx->eweight :
+		    (u32)FLOW_WEIGHT_BASE;
+		if (!share)
+			share = (u32)FLOW_WEIGHT_BASE;
+		tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
+		    delta, share);
+		if (cpu >= 0)
+			flow_floor_max((u32)cpu, tctx->vruntime);
+	}
 	/* Pools drain by raw time with the tightest pool binding. */
 	/* Unlimited hierarchies pass with no charge. The lookup */
 	/* carries a reference with a paired release, and a null */
@@ -122,9 +137,10 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
-	/* Fresh tasks hold no deadline, no stamps, and no cache. */
-	/* The first enqueue anchors past now with one step. */
+	/* Fresh tasks hold no deadline, no runtime, no stamps, and no cache. */
+	/* The first enqueue anchors past now with one key. */
 	tctx->deadline = 0;
+	tctx->vruntime = 0;
 	tctx->wait_at = 0;
 	tctx->run_at = 0;
 	tctx->cgid = 0;
@@ -139,7 +155,7 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */
-	flow_charge_leftover(p, tctx);
+	flow_charge_leftover(p, tctx, cpu);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
@@ -151,7 +167,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */
-	flow_charge_leftover(p, tctx);
+	flow_charge_leftover(p, tctx, cpu);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,

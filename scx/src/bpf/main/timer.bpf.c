@@ -18,12 +18,13 @@
 /* The gauge drop follows the claim with no owner gate, the owner */
 /* check gates the pid clear in the caller only, so a migrated */
 /* stop still pairs. A backward clock charges zero time but still */
-/* pairs the gauge. */
+/* pairs the gauge. Runtime advances by scaled time with the cached */
+/* share beside the raw charge, and the floor tracks it. */
 /* The hierarchy lookup carries a reference with a paired release, */
 /* and a null lookup skips the pool charge with no trap. */
 /* Outlined to keep disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
-	struct flow_task_ctx *tctx)
+	struct flow_task_ctx *tctx, s32 cpu)
 {
 	u64 start;
 	u64 now;
@@ -45,6 +46,20 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	if (got != start)
 		return;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	/* Runtime advances by scaled time with the cached share. */
+	/* A cold cache uses base share, and a zero share folds to base */
+	/* too, so the advance never divides by zero. The floor tracks */
+	/* the largest served runtime with no wrap use. */
+	{
+		u32 share = tctx->cached ? tctx->eweight :
+		    (u32)FLOW_WEIGHT_BASE;
+		if (!share)
+			share = (u32)FLOW_WEIGHT_BASE;
+		tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
+		    delta, share);
+		if (cpu >= 0)
+			flow_floor_max((u32)cpu, tctx->vruntime);
+	}
 	flow_on_cpu_dec();
 	cgrp = flow_task_cgrp(p);
 	if (cgrp) {
