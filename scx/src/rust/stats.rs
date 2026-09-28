@@ -22,6 +22,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, preempt, and steal detail.
+/// BPF holds 17 counters, Rust adds display-only uptime for 18.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -29,6 +30,8 @@ pub struct Metrics {
     #[stat(desc = "Total runtime in nanoseconds")]
     #[serde(default)]
     pub total_runtime: u64,
+    /// Display-only uptime since attach in nanos with no BPF use.
+    /// Filled from the start instant, never from the BPF counters.
     #[stat(desc = "Uptime since attach in nanoseconds")]
     #[serde(default)]
     pub uptime_ns: u64,
@@ -219,7 +222,7 @@ impl Metrics {
     }
 
     /// Interval delta.
-    /// Counters move forward. Gauges pass through unchanged.
+    /// Counters move forward. Gauges plus display-only uptime pass through unchanged.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             on_cpu: self.on_cpu,

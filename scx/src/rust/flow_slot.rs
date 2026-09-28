@@ -168,10 +168,8 @@ pub fn slot_drain_over_throttled_model(
     let mut kept = std::collections::VecDeque::new();
     let mut rest = std::collections::VecDeque::new();
     std::mem::swap(queue, &mut rest);
-    let mut idx = 0usize;
-    for task in rest.drain(..) {
+    for (idx, task) in rest.drain(..).enumerate() {
         let is_thr = throttled.get(idx).copied().unwrap_or(false);
-        idx += 1;
         if moved + base >= cap || miss >= SLOT_MISS_CAP {
             kept.push_back(task);
             continue;
@@ -209,12 +207,10 @@ fn slot_drain_inner(
     let mut kept = std::collections::VecDeque::new();
     let mut rest = std::collections::VecDeque::new();
     std::mem::swap(queue, &mut rest);
-    let mut idx = 0usize;
-    for task in rest.drain(..) {
+    for (idx, task) in rest.drain(..).enumerate() {
         let is_thr = throttled
             .map(|t| t.get(idx).copied().unwrap_or(false))
             .unwrap_or(false);
-        idx += 1;
         if moved + base >= cap || miss >= SLOT_MISS_CAP {
             kept.push_back(task);
             continue;
@@ -313,11 +309,8 @@ mod tests {
         assert_eq!(gated_cap(32), 6);
         assert_eq!(gated_cap(1), 1);
         assert_eq!(SLOT_GATED_CAP, 6);
-        assert!(SLOT_GATED_CAP > SLOT_OVER_CAP);
-        assert_eq!(
-            SLOT_GATED_CAP,
-            crate::bpf_intf::flow_consts_FLOW_GATED_CAP as u32
-        );
+        const { assert!(SLOT_GATED_CAP > SLOT_OVER_CAP) }
+        assert_eq!(SLOT_GATED_CAP, crate::bpf_intf::flow_consts_FLOW_GATED_CAP);
         assert_eq!(SLOT_MISS_CAP, 4);
         assert_eq!(SLOT_OVER_CAP, 4);
         assert_eq!(SLOT_OWN_CAP, 12);
@@ -390,7 +383,7 @@ mod tests {
     fn gated_cap_runs_larger_than_tail() {
         assert_eq!(gated_cap(32), 6);
         assert_eq!(tail_cap(32), 4);
-        assert!(SLOT_GATED_CAP > SLOT_OVER_CAP);
+        const { assert!(SLOT_GATED_CAP > SLOT_OVER_CAP) }
         let now = 10_000_000u64;
         let mut q = std::collections::VecDeque::new();
         for _ in 0..6 {
@@ -450,5 +443,74 @@ mod tests {
             0
         );
         assert_eq!(q2.len(), 2);
+    }
+
+    #[test]
+    fn cold_fail_open_costs_one_quantum_then_parks() {
+        let mut q = std::collections::VecDeque::from(vec![crate::flow_select::PendingTask {
+            allowed: vec![true],
+            exiting: false,
+            live: true,
+            fail: false,
+            wait_at: 10,
+        }]);
+        assert_eq!(
+            slot_drain_over_throttled_model(&mut q, 0, 4, 0, &[false]),
+            1
+        );
+        assert!(q.is_empty());
+        let mut pools = vec![crate::flow_cgrp::PoolState {
+            quota_us: 1000,
+            burst_us: 0,
+            period_us: 1000,
+            pool_ns: 1_000_000,
+            updated_at: 0,
+        }];
+        crate::flow_cgrp::pools_consume(&mut pools, 1_000_000);
+        assert!(crate::flow_cgrp::pools_throttled(&mut pools, 0));
+        let mut q2 = std::collections::VecDeque::from(vec![crate::flow_select::PendingTask {
+            allowed: vec![true],
+            exiting: false,
+            live: true,
+            fail: false,
+            wait_at: 10,
+        }]);
+        assert_eq!(
+            slot_drain_over_throttled_model(&mut q2, 0, 4, 0, &[true]),
+            0
+        );
+        assert_eq!(q2.len(), 1);
+    }
+
+    #[test]
+    fn null_lookup_counts_miss_in_both_drains() {
+        let mk_null = || crate::flow_select::PendingTask {
+            allowed: vec![true],
+            exiting: false,
+            live: false,
+            fail: false,
+            wait_at: 10,
+        };
+        let mut q = std::collections::VecDeque::from(vec![
+            mk_null(),
+            mk_null(),
+            mk_null(),
+            mk_null(),
+            mk_null(),
+        ]);
+        assert_eq!(slot_drain_model(&mut q, 0, 4, 0), 0);
+        assert_eq!(q.len(), 5);
+        let mut g = std::collections::VecDeque::from(vec![
+            mk_null(),
+            mk_null(),
+            mk_null(),
+            mk_null(),
+            mk_null(),
+        ]);
+        assert_eq!(
+            slot_drain_over_throttled_model(&mut g, 0, 4, 0, &[false; 5]),
+            0
+        );
+        assert_eq!(g.len(), 5);
     }
 }

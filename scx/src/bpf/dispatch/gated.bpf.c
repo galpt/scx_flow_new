@@ -5,10 +5,12 @@
  * Throttled parks check the leaf flag with no walk and keep
  * order, so the soft park stays a hard gate. Unthrottled parks
  * move at once with no wait, so pinned work never stalls under
- * throttling. Disallowed, failed, unstamped, and throttled tasks
- * count one miss each with the miss cap at 4. Serves overflow only
- * under throttling. Shares the move gate with the plain drain with
- * the park check on. Runs under the caller RCU read lock.
+ * throttling. Null, disallowed, failed, unstamped, and throttled
+ * visits count one miss each with the miss cap at 4, matching the
+ * plain drain. Each visit pays one pid lookup plus one state lookup
+ * through the shared gate. Serves overflow only under throttling.
+ * Shares the move gate with the plain drain with the park check on.
+ * Runs under the caller RCU read lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -27,8 +29,10 @@ static __noinline u32 flow_drain_gated(s32 cpu,
 		if (miss >= (u32)FLOW_MISS_CAP)
 			break;
 		p = bpf_task_from_pid(p->pid);
-		if (!p)
+		if (!p) {
+			miss++;
 			continue;
+		}
 		tctx = flow_lookup(p);
 		if (!tctx) {
 			bpf_task_release(p);

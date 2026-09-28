@@ -112,9 +112,9 @@ pub fn bw_max_ns(quota_us: u64, burst_us: u64) -> u64 {
 
 /// Cached share entry for one task.
 /// Cgid holds the last hierarchy id, eweight holds the share,
-/// cached marks a valid entry, and generation holds the low bits
-/// of the global generation for validation. The low bits wrap past
-/// 64k bumps, so a wrap needs 64k bumps with no move to falsely hit.
+/// cached marks a valid entry, and generation holds the u16 low bits
+/// of the global generation for validation. The u16 wraps every
+/// 65536 bumps, so a false hit needs 65536 bumps with no move.
 /// Moves clear the cache and share changes bump the generation, so
 /// the window stays huge with no false hit in practice.
 #[cfg(test)]
@@ -134,8 +134,8 @@ pub struct TaskCache {
 /// Needs a set flag with matching id and generation, so a move
 /// or a share change misses past with a fresh walk. Moves clear the
 /// cache at once, so a stale id never validates past a move. The
-/// generation compares only the low bits, so 64k bumps wrap with a
-/// huge window and no false hit in practice.
+/// u16 low bits wrap every 65536 bumps with a huge window and no
+/// false hit in practice.
 #[cfg(test)]
 pub fn cache_valid(cache: &TaskCache, cur_id: u64, cur_generation: u64) -> bool {
     cache.cached && cache.cgid == cur_id && cache.generation == cur_generation as u16

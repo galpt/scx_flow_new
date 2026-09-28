@@ -103,15 +103,15 @@ mod tests {
     fn consts_match_header() {
         assert_eq!(
             crate::flow_slice::WEIGHT_BASE,
-            crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE as u32
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE
         );
         assert_eq!(
             crate::flow_slice::WEIGHT_MIN,
-            crate::bpf_intf::flow_consts_FLOW_WEIGHT_MIN as u32
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT_MIN
         );
         assert_eq!(
             crate::flow_slice::WEIGHT_MAX,
-            crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX as u32
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX
         );
         assert_eq!(
             crate::flow_edf::STARVE_NS,
@@ -119,7 +119,7 @@ mod tests {
         );
         assert_eq!(
             crate::flow_select::MAX_CPUS,
-            crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as u32
+            crate::bpf_intf::flow_consts_FLOW_MAX_CPUS
         );
         assert_eq!(crate::flow_select::MAX_CPUS, 1024);
     }

@@ -10,10 +10,10 @@
  * scaled execution at stop, and each CPU tracks a floor of served
  * runtime. Open inserts key past the later of runtime and floor
  * with a slack capped at twice the quantum, so a long sleep never
- * earns credit and a light task never leaps in one arrival. The effective share folds the task weight with the
- * hierarchy weights along the ancestors, so a task under a light
- * parent waits longer. Bandwidth pools cap runtime per period with
- * lazy refill, and throttled work parks in overflow. Service runs
+ * earns credit and a light task never leaps in one arrival. The
+ * effective share folds the task weight with the hierarchy weights
+ * along the ancestors, so a task under a light parent waits longer.
+ * Bandwidth pools cap runtime per period with lazy refill, and throttled work parks in overflow. Service runs
  * one fixed quantum, so placement and steal stay independent of
  * weight except through deadline order. See enqueue.bpf.c for the
  * deadline choice, cgroup.bpf.c for the hierarchy state,
@@ -86,7 +86,7 @@ enum flow_consts {
 /* Unlimited quota value with no cap use and zero pool. */
 #define FLOW_RUNTIME_INF (~0ULL)
 /* Per task state at 48B with deadline plus runtime plus stamps plus share cache. */
-/* Deadline holds the last assigned deadline for the next max. A zero */
+/* Deadline holds the last assigned deadline for the next key. A zero */
 /* deadline means no order yet, so preempt compares skip with no kick. */
 /* Vruntime holds the scaled runtime served so far for the next key. */
 /* A zero runtime means no service yet, so fresh tasks key past now. */
@@ -97,12 +97,12 @@ enum flow_consts {
 /* claims from zero only with a compare and swap, so a second running */
 /* without a stop keeps the first start with no second count. */
 /* Stopping versus disable or exit claims once with atomics, so each */
-/* counted start meets exactly one gauge drop with no owner gate. Cgid holds the */
-/* last hierarchy id for the cache, eweight holds the hierarchy */
+/* counted start meets exactly one gauge drop with no owner gate. Cgid holds */
+/* the last hierarchy id for the cache, eweight holds the hierarchy */
 /* share with base 100, cached marks a valid entry, and generation */
-/* holds the low bits of the global generation for validation. The low */
-/* bits wrap past 64k bumps, so a wrap needs 64k bumps with no move to */
-/* falsely hit. Moves clear the cache, so the window stays huge. Stamps stay */
+/* holds the u16 low bits of the global generation for validation. */
+/* The u16 wraps every 65536 bumps, so a false hit needs 65536 bumps */
+/* with no move. Moves clear the cache, so the window stays huge. Stamps stay */
 /* per task owned with no atomics except the run claim, only counters */
 /* plus pool plus pid rows use atomics. Cursor, miss, and steal scans */
 /* stay best effort with no atomic order. */
@@ -217,15 +217,6 @@ static __always_inline bool flow_time_before(u64 a,
 {
 	return (s64)(a - b) < 0;
 }
-/* Later of two times with wrap safety. */
-/* The later time wins, so a fresh deadline never trails the clock. */
-static __always_inline u64 flow_time_max(u64 a,
-	u64 b)
-{
-	if (flow_time_before(a, b))
-		return b;
-	return a;
-}
 /* Clamped weight in 1 to 10000 with base 100. */
 /* Zero or oversize weights fail closed to the nearer bound. */
 /* The kernel already folds nice into the task weight, and the */
@@ -256,26 +247,20 @@ static __always_inline u32 flow_eff_weight(u32 task_w,
 /* Deadline step for one weight as quantum times base over weight. */
 /* Base weight waits one quantum, heavy weights wait less, light */
 /* weights wait more, so shares stay proportional through order. */
+/* The step feeds the slack only; the saturated key below is live. */
 static __always_inline u64 flow_deadline_step(u32 weight)
 {
 	u32 w = flow_weight_clamp(weight);
 	return (u64)FLOW_QUANTUM_NS * (u64)FLOW_WEIGHT_BASE /
 	    (u64)w;
 }
-/* Next deadline from the later of now and the last deadline. */
-/* A long sleep never earns credit, and a back to back arrival */
-/* queues behind its own last deadline with one step per arrival. */
-static __always_inline u64 flow_deadline_next(u64 last,
-	u64 now, u32 weight)
-{
-	return flow_time_max(last, now) + flow_deadline_step(weight);
-}
 /* Advanced runtime after one execution segment. */
 /* Scales raw time by base over the effective share with a split */
 /* divide, so heavy shares advance slowly and light shares advance */
 /* fast. The split keeps every intermediate small for real segments, */
 /* a segment past the scale bound saturates at once, and both adds */
-/* saturate too, so huge inputs clamp instead of wrapping. */
+/* saturate too, so huge inputs clamp instead of wrapping. One stop */
+/* per quantum keeps the two divides cheap beside the slice. */
 static __always_inline u64 flow_vruntime_advance(u64 vruntime,
 	u64 delta, u32 eff)
 {
@@ -311,7 +296,8 @@ static __always_inline u64 flow_deadline_slack(u32 weight)
 /* Later of two saturated times with a plain compare. */
 /* Saturated values never wrap, so the plain order keeps the */
 /* largest value with no signed diff use. Real times far below */
-/* the bound order the same either way. */
+/* the bound order the same either way. The wrap max retired here, */
+/* the saturated key below is the live path. */
 static __always_inline u64 flow_later(u64 a,
 	u64 b)
 {

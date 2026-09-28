@@ -48,8 +48,9 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	/* Runtime advances by scaled time with the cached share. */
 	/* A cold cache uses base share, and a zero share folds to base */
-	/* too, so the advance never divides by zero. The floor tracks */
-	/* the largest served runtime with no wrap use. */
+	/* too, so the advance never divides by zero. Two divides per stop */
+	/* stay cheap beside one quantum. The floor tracks the largest */
+	/* served runtime with no wrap use. */
 	{
 		u32 share = tctx->cached ? tctx->eweight :
 		    (u32)FLOW_WEIGHT_BASE;

@@ -366,6 +366,17 @@ mod tests {
     }
 
     #[test]
+    fn live_recheck_closes_offline_window() {
+        assert!(may_run_on_live(1, &[false, true], 4));
+        assert!(!may_run_on_live(1, &[false, true], 1));
+        assert!(!may_run_on_live(
+            5,
+            &[true, true, true, true, true, true],
+            4
+        ));
+    }
+
+    #[test]
     fn select_prefers_idle_then_scan() {
         let allowed = vec![true, true, true];
         let idle = vec![false, true, false];

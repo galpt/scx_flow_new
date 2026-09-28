@@ -16,8 +16,11 @@
 /* True when one overflow task is still throttled via its leaf flag. */
 /* Takes cached plus id scalars with no struct pass, so the caller */
 /* stays small and the check verifies once. A cold cache or a missing */
-/* leaf moves fail open, so a move while parked costs one quantum at */
-/* most. A flagged hit re-arms the timer flag for the next tick. */
+/* leaf moves fail open on purpose, so a move while parked costs one */
+/* quantum at most. The moved task runs one slice, the stop path still */
+/* charges the pools, and the next enqueue walks and parks with pending */
+/* armed, so no pool bypass survives past one quantum. A flagged hit */
+/* re-arms the timer flag for the next tick. */
 static __noinline bool flow_over_throttled_scalar(bool cached,
 	u64 cgid)
 {
@@ -35,17 +38,20 @@ static __noinline bool flow_over_throttled_scalar(bool cached,
 }
 /* True when one queued task may move to the dispatching CPU. */
 /* Takes the task plus its state with no walk, so every drain */
-/* verifies once. The mask wins first, then a zero stamp fails */
-/* closed, and a stale generation reads as cold with a fail open */
-/* move. Park moves add the throttle check with the timer behind */
-/* the wait, admitted moves skip it with admission plus overflow */
-/* cover. Exiting tasks never reach here, they run at once on the */
-/* enqueue path with no queue wait. */
+/* verifies once. The live check repeats the dispatch check, so an */
+/* offline during the pass fails closed with no move. The mask wins */
+/* next, then a zero stamp fails closed, and a stale generation reads */
+/* as cold with a fail open move for one quantum only. Park moves add */
+/* the throttle check with the timer behind the wait, admitted moves */
+/* skip it with admission plus overflow cover. Exiting tasks never */
+/* reach here, they run at once on the enqueue path with no queue wait. */
 static __noinline bool flow_gate_ok(s32 cpu,
 	struct task_struct *p, struct flow_task_ctx *tctx, bool park)
 {
 	bool eff;
 	if (cpu < 0 || !tctx)
+		return false;
+	if (!flow_cpu_live((u32)cpu))
 		return false;
 	if (!bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr))
 		return false;
@@ -56,6 +62,10 @@ static __noinline bool flow_gate_ok(s32 cpu,
 		return false;
 	return true;
 }
+/* One drain trip over a queue with a shared gate. */
+/* Each visit pays one pid lookup plus one state lookup, and a null, */
+/* disallowed, unstamped, failed, or throttled visit counts one miss */
+/* with the miss cap at 4, so one bad head never stalls the pass. */
 static __noinline u32 flow_drain_one(s32 cpu,
 	u64 dsq, u32 budget, u32 base, bool open)
 {

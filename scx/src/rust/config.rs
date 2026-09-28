@@ -27,19 +27,19 @@ use anyhow::bail;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
-/// Default tasks moved in one dispatch pass.
+/// Default dispatch batch for the ops table.
 const DEF_BATCH: u32 = DISPATCH_BATCH;
-/// Default tasks moved by one dispatch pass.
+/// Default drain budget for one dispatch pass.
 const DEF_SLOT_BUDGET: u32 = SLOT_BUDGET;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos.
+    /// Fixed slice in nanos. Always 1ms with no knob.
     pub quantum_ns: u64,
-    /// Tasks moved in one dispatch pass.
+    /// Dispatch batch for the ops table.
     pub dispatch_batch: u32,
-    /// Tasks moved by one dispatch pass.
+    /// Drain budget for one dispatch pass.
     pub slot_budget: u32,
 }
 
@@ -58,7 +58,8 @@ impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
     /// The quantum stays fixed at 1ms with base weight 100 in range
-    /// 1 to 10000. The batch stays fixed at 32 and the budget at 32.
+    /// 1 to 10000. Rust only validates the header, BPF owns the live
+    /// quantum with no knob. The batch stays fixed at 32 and the budget at 32.
     /// The own trip stays at 12 with the shared tail at 4 and a miss
     /// cap at 4. The gated cap runs bounded but larger at 6, so old
     /// tasks behind young heads still surface. Steal scans bound

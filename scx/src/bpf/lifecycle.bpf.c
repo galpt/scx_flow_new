@@ -47,7 +47,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		__sync_lock_test_and_set(&st->running_pid,
 		    (u32)p->pid);
 inc:
-	/* Count once per claimed start with no double count. */
+	/* Count the on CPU gauge once per claimed start with no second count. */
 	/* Tasks without state hold no claim, so they hold no count. */
 	if (claimed)
 		__sync_fetch_and_add(&flow_stats.on_cpu, 1);
@@ -96,8 +96,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	/* Runtime advances by scaled time with the cached share. */
 	/* A cold cache uses base share, and a zero share folds to base */
-	/* too, so the advance never divides by zero. The floor tracks */
-	/* the largest served runtime with no wrap use. */
+	/* too, so the advance never divides by zero. Two divides per stop */
+	/* stay cheap beside one quantum. The floor tracks the largest */
+	/* served runtime with no wrap use. */
 	{
 		u32 share = tctx->cached ? tctx->eweight :
 		    (u32)FLOW_WEIGHT_BASE;

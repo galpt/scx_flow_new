@@ -20,15 +20,17 @@ pub fn time_before(a: u64, b: u64) -> bool {
 }
 
 /// Later of two times with wrap safety.
-/// The later time wins, so a fresh deadline never trails the clock.
+/// Legacy wrap path kept for tests only. BPF retired it for the
+/// saturated later below, which never wraps by design.
 #[cfg(test)]
 pub fn time_max(a: u64, b: u64) -> u64 {
     if time_before(a, b) { b } else { a }
 }
 
 /// Next deadline from the later of now and the last deadline.
-/// A long sleep never earns credit, and a back to back arrival queues
-/// behind its own last deadline with one step per arrival.
+/// Legacy wrap path kept for tests only. BPF inserts now key past
+/// runtime plus floor with saturating slack, so this helper only
+/// documents the old wrap order.
 #[cfg(test)]
 pub fn deadline_next(last: u64, now: u64, weight: u32) -> u64 {
     time_max(last, now).wrapping_add(crate::flow_slice::deadline_step(weight))
