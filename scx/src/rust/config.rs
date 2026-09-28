@@ -16,9 +16,11 @@ use crate::flow::DISPATCH_BATCH;
 use crate::flow::GLOBAL_SCAN;
 use crate::flow::LLC_MAX;
 use crate::flow::NODE_MAX;
+use crate::flow::PARK_BATCH;
 use crate::flow::PARK_HINT_NR;
 use crate::flow::PARK_NR;
 use crate::flow::SCAN_BOUND;
+use crate::flow::SSF_SCALE;
 use crate::flow::STARVE_NS;
 use crate::flow::WEIGHT_BASE;
 use crate::flow::WEIGHT_MAX;
@@ -48,13 +50,15 @@ impl Default for Config {
 impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
-    /// The batch stays fixed at 16 with the homeless scan at 4. Base
+    /// The batch stays fixed at 16 with the homeless scan at 4 and
+    /// the park recycle at 4. Base
     /// weight stays 100 in range 1 to 10000 with a 2ms starvation
     /// floor. The tree holds 32768 nodes with a 4096 park ring.
     /// Frequency keeps 64 domain slots with a 16ms gap inside the
     /// 10ms to 32ms window. Placement scans bound 8 peers.
     /// Hierarchies hold 2048 rows with depth 8 and base
     /// share 100 plus a 1ms pool floor and 64 hint slots.
+    /// The paper share scale stays 1024 with no knob.
     pub fn validate(&self) -> Result<()> {
         if self.dispatch_batch != DISPATCH_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
@@ -70,6 +74,9 @@ impl Config {
         }
         if GLOBAL_SCAN != 4 {
             bail!("global scan bad");
+        }
+        if PARK_BATCH != 4 {
+            bail!("park batch bad");
         }
         if NODE_MAX != 32768 {
             bail!("node bound bad");
@@ -106,6 +113,9 @@ impl Config {
         }
         if PARK_HINT_NR != 64 {
             bail!("hint bound bad");
+        }
+        if SSF_SCALE != 1024 {
+            bail!("share scale bad");
         }
         Ok(())
     }
@@ -182,6 +192,8 @@ mod tests {
         assert_eq!(crate::flow_edf::STARVE_NS, 2_000_000);
         assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
         assert_eq!(crate::flow_tree::GLOBAL_SCAN, 4);
+        assert_eq!(crate::flow_tree::PARK_BATCH, 4);
+        assert_eq!(crate::flow_ssf::SSF_SCALE, 1024);
     }
 
     #[test]
@@ -245,6 +257,10 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PARK_HINT_NR as u64,
             crate::flow_cgrp::PARK_HINT_NR
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_SSF_SCALE,
+            crate::flow_ssf::SSF_SCALE
         );
     }
 }

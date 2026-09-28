@@ -21,6 +21,8 @@ mod flow_edf;
 mod flow_preempt;
 #[path = "rust/flow_select.rs"]
 mod flow_select;
+#[path = "rust/flow_ssf.rs"]
+mod flow_ssf;
 #[path = "rust/flow_tree.rs"]
 mod flow_tree;
 #[path = "rust/flow_vruntime.rs"]

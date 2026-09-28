@@ -184,12 +184,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 	}
 	flow_cgrp_put(cgrp);
-	/* Key past the later of runtime and floor with one fresh tick. */
-	/* Order carries weight through the stop advance with no step */
-	/* here. The floor clamp drops sleeper credit, and the sequence */
-	/* keeps equal deadlines first in first out. Moves carry the */
-	/* runtime. The share caches above for the stop advance, so the */
-	/* hot insert needs no weight math. The key plus the node */
+	/* Key past the later of runtime and floor with paper slack. */
+	/* Order carries weight through the stop advance plus the slack */
+	/* bend here. The floor clamp drops sleeper credit, and the */
+	/* sequence keeps equal deadlines first in first out. Moves carry */
+	/* the runtime. The share caches above for the stop advance and */
+	/* for the estimate below, so the hot insert pays three small */
+	/* dividers with no loop. Heavy shares estimate past the window */
+	/* and lose slack, light shares keep slack, so the key bends with */
+	/* weight while order stays deadline first. The key plus the node */
 	/* fetch both run before the lock, so the locked section holds */
 	/* add only. A null fetch with a live entry means on tree or in */
 	/* flight, so the arrival refreshes its deadline and still kicks */
@@ -197,9 +200,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* here, so a concurrent pop still matches with no live reap. */
 	/* A null fetch with no entry means the alloc failed, so the */
 	/* arrival fails open to the global queue with no loss. */
-	(void)hier;
-	deadline = flow_deadline_clamp(tctx->vruntime,
-	    READ_ONCE(flow_floor));
+	{
+		u64 base;
+		u64 exec;
+		u32 util;
+		u32 dens;
+		u64 slack;
+		u32 eff_w = flow_eff_weight((u32)p->scx.weight, hier);
+		base = flow_deadline_clamp(tctx->vruntime,
+		    READ_ONCE(flow_floor));
+		exec = (u64)FLOW_STARVE_NS * (u64)eff_w /
+		    (u64)FLOW_WEIGHT_BASE;
+		util = flow_ssf_util(exec, (u64)FLOW_STARVE_NS);
+		dens = flow_ssf_density(exec, (u64)FLOW_STARVE_NS);
+		slack = flow_ssf_slack((u64)FLOW_STARVE_NS, exec);
+		if (util > (u32)FLOW_SSF_SCALE ||
+		    dens > (u32)FLOW_SSF_SCALE)
+			slack = 0;
+		deadline = flow_ssf_deadline(base, now, slack);
+	}
 	seq = flow_seq_next();
 	tctx->deadline = deadline;
 	tctx->wait_at = now;

@@ -6,14 +6,16 @@
  * resolves its owner with no cgroup walk, then lands local or
  * rotates. A parked mark gates every serve, so a stale ring pid
  * from an earlier park drops with the live tree node left alone.
- * Blocked heads rotate to the tail with the scan continuing, so
- * one unservable head never stalls servable tails and order churns
- * only while blocked. Throttled heads wait on the timer refill,
- * and masked heads wait on a compatible pass with the arrival kick
- * aimed at allowed idle CPUs. Gone tasks drop their ring slot with
- * no node touch, since exit already freed the node. Each phase
- * takes scalars only and verifies once. Runs under the caller RCU
- * read lock with no tree lock held here.
+ * A blocked head rotates to the tail with the phase stopped, so
+ * one unservable head never spins the pass and the rotation keeps
+ * depth cycling across dispatches. Throttled heads wait on the
+ * timer refill, and masked heads wait on a compatible pass with
+ * the arrival kick aimed at allowed idle CPUs. Gone tasks drop
+ * their ring slot with no node touch, since exit already freed
+ * the node. The stop on block keeps the jump sequences small
+ * enough to load. Each phase takes scalars only and verifies
+ * once. Runs under the caller RCU read lock with no tree lock
+ * held here.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,7 +26,7 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 {
 	u32 moved = 0;
 	u32 i;
-	bpf_for(i, 0, FLOW_DISPATCH_BATCH) {
+	bpf_for(i, 0, FLOW_PARK_BATCH) {
 		u32 pid;
 		struct task_struct *task;
 		struct flow_task_ctx *tctx;
@@ -51,7 +53,7 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 		}
 		cached = tctx->cached;
 		cgid = tctx->cgid;
-		/* A blocked head rotates with the scan continuing. */
+		/* A blocked head rotates with the phase stopped. */
 		/* The push cannot fail past a pop, since the pop freed */
 		/* exactly one slot, so no fail open runs here. */
 		if (flow_tree_throttled_scalar(cached, cgid) ||
@@ -59,7 +61,7 @@ static __noinline u32 flow_phase_park(s32 cpu, u32 budget,
 		    task->cpus_ptr)) {
 			flow_park_push(pid);
 			bpf_task_release(task);
-			continue;
+			break;
 		}
 		WRITE_ONCE(tctx->queued, (u8)0);
 		flow_local_insert(task, cpu, 0);

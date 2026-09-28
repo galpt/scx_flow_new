@@ -7,6 +7,8 @@
 
 /// Homeless scan visits at most 4 per pass. Fixed with no knob.
 pub const GLOBAL_SCAN: u32 = 4;
+/// Park recycle visits at most 4 per pass. Fixed with no knob.
+pub const PARK_BATCH: u32 = 4;
 /// Live task nodes at most. Fixed with no knob.
 pub const NODE_MAX: u64 = 32768;
 /// Park ring slots at most. Fixed with no knob.
@@ -153,6 +155,7 @@ mod tests {
     #[test]
     fn consts_are_fixed() {
         assert_eq!(crate::flow_edf::DISPATCH_BATCH, 16);
+        assert_eq!(PARK_BATCH, 4);
         assert_eq!(GLOBAL_SCAN, 4);
         assert_eq!(NODE_MAX, 32768);
         assert_eq!(PARK_NR, 4096);

@@ -9,5 +9,6 @@
 pub use crate::flow_cgrp::*;
 pub use crate::flow_edf::*;
 pub use crate::flow_select::*;
+pub use crate::flow_ssf::*;
 pub use crate::flow_tree::*;
 pub use crate::flow_vruntime::*;

@@ -59,6 +59,10 @@ enum flow_consts {
 	FLOW_WEIGHT_MAX = 10000ULL,
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_DISPATCH_BATCH = 16ULL,
+	FLOW_PARK_BATCH = 4ULL,
+	/* Park recycle visits at most 4 per pass. Parks are exceptional */
+	/* beside the tree flow, so a short bound keeps the jump chains */
+	/* loadable with no head stall past the bound. */
 	/* Homeless scan visits at most 4 per pass. Homeless tasks are */
 	/* exceptional, so a short iterator bound keeps the pass small */
 	/* with no head stall past the bound. */
@@ -78,6 +82,10 @@ enum flow_consts {
 	FLOW_CGRP_WEIGHT_DFL = 100ULL,
 	FLOW_BW_PERIOD_MIN_US = 1000ULL,
 	FLOW_BW_TIMER_NS = 10000000ULL,
+	/* Fixed point scale for the paper share math at 1024. */
+	/* Utilization plus density keep one unit here, so a value */
+	/* past 1024 means overload with no extra table. */
+	FLOW_SSF_SCALE = 1024ULL,
 	/* Parked chain ring slots at 64. Each slot holds one park chain */
 	/* of 8 ancestor ids with the leaf first. The timer refills each */
 	/* listed pool, and enqueue refills cover active groups past it. */
@@ -234,6 +242,9 @@ _Static_assert(sizeof(struct flow_sched_stats) == 128,
 /* Timer ticks at 10ms, always covering the 1ms floor. */
 _Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
     "timer stays at 10ms");
+/* Share scale stays at 1024 with no knob. */
+_Static_assert(FLOW_SSF_SCALE == 1024ULL,
+    "share scale stays at 1024");
 /* Frequency gap stays inside the 10ms to 32ms window. */
 _Static_assert(FLOW_CPUFREQ_MIN_NS >= 10000000ULL &&
     FLOW_CPUFREQ_MIN_NS <= 32000000ULL,
@@ -376,5 +387,66 @@ static __always_inline bool flow_starved(u64 wait_at,
 	if (flow_time_before(now, wait_at))
 		return false;
 	return now - wait_at > (u64)FLOW_STARVE_NS;
+}
+/* Paper share math in the live path with the rest out of scope. */
+/* Demand bound plus load with lambda, mu, and beta need per task */
+/* period plus deadline plus suspension terms with loops and extra */
+/* dividers that do not fit the verifier budget yet, so they stay */
+/* out of scope for this slice with no frozen stubs. The live subset */
+/* keeps utilization plus density plus slack plus deadline with one */
+/* divider each, and every helper below runs on the enqueue path. */
+/* Share of one period used by execution in scale units. */
+/* Zero period fails closed to full with no divide, huge execution */
+/* saturates with no wrap, so overload reads past scale. One divider. */
+static __always_inline u32 flow_ssf_util(u64 exec,
+	u64 period)
+{
+	u64 scaled;
+	if (period == 0)
+		return (u32)FLOW_SSF_SCALE;
+	if (exec > 18014398509481983ULL)
+		return 0xffffffffU;
+	scaled = exec * (u64)FLOW_SSF_SCALE / period;
+	if (scaled > 0xffffffffULL)
+		return 0xffffffffU;
+	return (u32)scaled;
+}
+/* Share of one span used by execution in scale units. */
+/* Zero span fails closed to full with no divide, huge execution */
+/* saturates with no wrap, so overload reads past scale. One divider. */
+static __always_inline u32 flow_ssf_density(u64 exec,
+	u64 span)
+{
+	u64 scaled;
+	if (span == 0)
+		return (u32)FLOW_SSF_SCALE;
+	if (exec > 18014398509481983ULL)
+		return 0xffffffffU;
+	scaled = exec * (u64)FLOW_SSF_SCALE / span;
+	if (scaled > 0xffffffffULL)
+		return 0xffffffffU;
+	return (u32)scaled;
+}
+/* Remaining span past execution with floor at zero. */
+/* A short span fails closed to zero with no divide, so overload */
+/* carries no slack and the key holds the base. */
+static __always_inline u64 flow_ssf_slack(u64 span,
+	u64 exec)
+{
+	if (span > exec)
+		return span - exec;
+	return 0;
+}
+/* Key deadline past the later of base and now with slack. */
+/* The later time wins with wrap safety, then slack adds with */
+/* saturation, so a long sleep never earns credit and overload */
+/* holds the base with no wrap. No divider. */
+static __always_inline u64 flow_ssf_deadline(u64 base,
+	u64 now, u64 slack)
+{
+	u64 at = flow_time_max(base, now);
+	if (slack > (u64)~0ULL - at)
+		return (u64)~0ULL;
+	return at + slack;
 }
 #endif

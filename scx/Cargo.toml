@@ -4,7 +4,7 @@ version = "4.4.6"
 authors = ["Galih Tama <galpt@v.recipes>"]
 edition = "2024"
 rust-version = "1.91"
-description = "A global deadline tree scheduler for sched_ext."
+description = "The scx_flow CPU scheduler."
 license = "GPL-2.0-only"
 
 [dependencies]

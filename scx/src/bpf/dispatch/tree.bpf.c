@@ -58,69 +58,67 @@ static __noinline void flow_tree_reap(u32 pid,
 
 /* Tree phase with narrow inputs. Returns the tree moves. */
 /* Takes CPU plus budget plus base scalars with no struct pass. */
-/* Pops until the first live disposition with dead nodes reaped */
-/* along the way, so one pass serves one live head with no deep */
-/* scan and no stall. CPUs re-dispatch as they consume, so order */
-/* holds globally with the tree staying the single source. */
+/* Pops one head per pass with no loop, so the jump chains stay */
+/* short enough to load. A dead head reaps with the pass spent, */
+/* and the next pass pops the next head with monotonic progress. */
+/* A live head lands local, parks, or re-trees with the pass */
+/* spent. CPUs re-dispatch as they consume, so order holds */
+/* globally with the tree staying the single source. */
 static __noinline u32 flow_phase_tree(s32 cpu, u32 budget,
 	u32 base)
 {
-	u32 i;
+	struct flow_node *node;
+	struct task_struct *task;
+	struct flow_task_ctx *tctx;
+	u32 pid;
+	bool cached;
+	u64 cgid;
 	if (base >= budget)
 		return 0;
-	bpf_for(i, 0, FLOW_DISPATCH_BATCH) {
-		struct flow_node *node;
-		struct task_struct *task;
-		struct flow_task_ctx *tctx;
-		u32 pid;
-		bool cached;
-		u64 cgid;
-		node = flow_tree_pop();
-		if (!node)
-			break;
-		pid = node->pid;
-		task = bpf_task_from_pid((s32)pid);
-		if (!task) {
-			flow_tree_reap(pid, node);
-			continue;
-		}
-		tctx = flow_lookup(task);
-		if (!tctx || READ_ONCE(tctx->queued) != 1 ||
-		    READ_ONCE(tctx->seq) != node->seq) {
-			bpf_task_release(task);
-			flow_tree_reap(pid, node);
-			continue;
-		}
-		cached = tctx->cached;
-		cgid = tctx->cgid;
-		if (!bpf_cpumask_test_cpu((u32)cpu,
-		    task->cpus_ptr) ||
-		    flow_tree_throttled_scalar(cached, cgid)) {
-			/* A full ring re-trees with the same key, so */
-			/* order holds with no spin and the node never */
-			/* touches the stash mid flight. */
-			WRITE_ONCE(tctx->queued, (u8)0);
-			if (!flow_park_push(pid)) {
-				bpf_spin_lock(&edf_lock);
-				bpf_rbtree_add(&edf_tree, &node->rb,
-				    flow_edf_less_cb);
-				WRITE_ONCE(tctx->queued, (u8)1);
-				bpf_spin_unlock(&edf_lock);
-				bpf_task_release(task);
-				break;
-			}
-			flow_tree_give(pid, node);
-			WRITE_ONCE(tctx->queued, (u8)2);
-			__sync_fetch_and_add(&flow_stats.parked,
-			    1);
-			bpf_task_release(task);
-			break;
-		}
-		WRITE_ONCE(tctx->queued, (u8)0);
-		flow_tree_give(pid, node);
-		flow_local_insert(task, cpu, 0);
-		bpf_task_release(task);
-		return 1;
+	node = flow_tree_pop();
+	if (!node)
+		return 0;
+	pid = node->pid;
+	task = bpf_task_from_pid((s32)pid);
+	if (!task) {
+		flow_tree_reap(pid, node);
+		return 0;
 	}
-	return 0;
+	tctx = flow_lookup(task);
+	if (!tctx || READ_ONCE(tctx->queued) != 1 ||
+	    READ_ONCE(tctx->seq) != node->seq) {
+		bpf_task_release(task);
+		flow_tree_reap(pid, node);
+		return 0;
+	}
+	cached = tctx->cached;
+	cgid = tctx->cgid;
+	if (!bpf_cpumask_test_cpu((u32)cpu,
+	    task->cpus_ptr) ||
+	    flow_tree_throttled_scalar(cached, cgid)) {
+		/* A full ring re-trees with the same key, so */
+		/* order holds with no spin and the node never */
+		/* touches the stash mid flight. */
+		WRITE_ONCE(tctx->queued, (u8)0);
+		if (!flow_park_push(pid)) {
+			bpf_spin_lock(&edf_lock);
+			bpf_rbtree_add(&edf_tree, &node->rb,
+			    flow_edf_less_cb);
+			WRITE_ONCE(tctx->queued, (u8)1);
+			bpf_spin_unlock(&edf_lock);
+			bpf_task_release(task);
+			return 0;
+		}
+		flow_tree_give(pid, node);
+		WRITE_ONCE(tctx->queued, (u8)2);
+		__sync_fetch_and_add(&flow_stats.parked,
+		    1);
+		bpf_task_release(task);
+		return 0;
+	}
+	WRITE_ONCE(tctx->queued, (u8)0);
+	flow_tree_give(pid, node);
+	flow_local_insert(task, cpu, 0);
+	bpf_task_release(task);
+	return 1;
 }
