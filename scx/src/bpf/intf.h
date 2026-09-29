@@ -118,6 +118,10 @@ enum flow_consts {
 	/* symmetric host offers the same units, so the slowest */
 	/* sufficient pick falls to the lowest sufficient id. */
 	FLOW_CAP_BASE = 1024ULL,
+	/* CPU performance levels at half plus max with no knob. Any own */
+	/* plus local plus running picks max else half with no shared use. */
+	FLOW_CPU_PERF_HALF = 512ULL,
+	FLOW_CPU_PERF_MAX = 1024ULL,
 };
 /* Per task state at 72B with release plus period plus deadline plus */
 /* runtime plus stamps plus hint plus miss count plus admit share. */

@@ -17,13 +17,15 @@
  * to one with no nesting. See intf.h for the caps and enqueue.bpf.c
  * for admission plus the deadline choice.
  *
- * The pass splits the tier drains into dispatch/drain.bpf.c with one
+ * The pass splits the tier drains into dispatch/drain plus perf with one
  * RCU section here. Each drain stays noinline with scalar inputs, so
- * the verifier stays small.
+ * the verifier stays small. Level follows after the lock from per CPU
+ * depth with no call on steady.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include "dispatch/drain.bpf.c"
+#include "dispatch/perf.bpf.c"
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
@@ -138,6 +140,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		}
 	}
 	bpf_rcu_read_unlock();
+	/* Level follows after the lock with the same CPU only. */
+	flow_perf_update(cpu);
 	if (local_moved != 0)
 		__sync_fetch_and_add(&flow_stats.local_moves,
 		    (u64)local_moved);
