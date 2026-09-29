@@ -84,6 +84,13 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    /* SMT mark on the second thread cards. Warning color */
+    /* names the sibling with no extra text, so single */
+    /* thread cards stay plain. */
+    .core-card .core-smt {
+      font-size: 0.5625rem;
+      color: var(--warning);
+    }
     .core-card .core-pid {
       font-size: 0.6rem;
       color: var(--text-secondary);
@@ -414,9 +421,10 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per CPU cards with fixed slice plus pid. They show */
-    /* the pid plus the slice with no rate sampling. Slice stays */
-    /* single line with full text in the title. */
+    /* Per CPU cards with fixed slice plus pid plus SMT. They show */
+    /* the pid plus the slice with no rate sampling plus the SMT mark */
+    /* on the second thread. Slice stays single line with full text */
+    /* in the title. */
     function renderCoreCards(data) {
       var container = el('core-cards');
       var perCpu = data.per_cpu || [];
@@ -434,6 +442,9 @@
         if (pid < 0) pid = 0;
         var slice = (Number(cpu.slice_ns) || 0);
         if (slice < 0) slice = 0;
+        var smtLabel = cpu.smt
+          ? ' <span class="core-smt">SMT</span>'
+          : '';
         var idle = !pid;
         var badge = idle
           ? '<span class="run-badge run-idle">idle</span>'
@@ -446,7 +457,7 @@
           sliceText + '">' + sliceText + '</div>';
         return '<div class="card core-card">' +
           '<div class="core-id">CPU ' + id +
-          '</div>' +
+          smtLabel + '</div>' +
           '<div>' + badge + '</div>' +
           pidLabel + sliceLabel +
           '</div>';

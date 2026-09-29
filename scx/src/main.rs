@@ -123,6 +123,8 @@ pub(crate) struct Scheduler<'a> {
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
     /* Online ids once at init in rank order. */
     online_cpus: Vec<u32>,
+    /* SMT flag per online CPU in rank order for the cards. */
+    smt: Vec<bool>,
     /* One line topology summary for the page. */
     topology: String,
 }
@@ -164,6 +166,11 @@ impl<'a> Scheduler<'a> {
             Some(tx)
         };
         let online_cpus: Vec<u32> = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+        /* SMT flags cache the sibling view with no sysfs use on poll. */
+        let smt: Vec<bool> = rows
+            .iter()
+            .map(|(cpu, sib, _)| topology::is_smt_thread(*cpu, *sib))
+            .collect();
         let topology = topology::describe_topology(&rows);
         info!("Topology: {topology}");
         Ok(Self {
@@ -173,6 +180,7 @@ impl<'a> Scheduler<'a> {
             started_at: std::time::Instant::now(),
             webui_tx,
             online_cpus,
+            smt,
             topology,
         })
     }

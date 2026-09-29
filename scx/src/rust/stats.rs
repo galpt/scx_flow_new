@@ -82,13 +82,19 @@ pub struct Metrics {
 }
 
 /// One card of the per CPU grid.
-/// Id stays fixed while pid plus slice refresh on each poll.
+/// Id plus SMT stay fixed while pid plus slice refresh on each poll.
 /// Pid holds zero when idle and slice holds the shared quantum.
+/// SMT marks the second thread of one core for display only with
+/// no placement use and false on old JSON.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
     /// CPU id.
     #[serde(default)]
     pub id: u32,
+    /// True for the second thread of one core with false on single thread.
+    /// Display only with no placement use plus false on old JSON.
+    #[serde(default)]
+    pub smt: bool,
     /// Pid now on the CPU with zero when idle.
     #[serde(default)]
     pub running_pid: u32,

@@ -35,6 +35,14 @@ pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
     format!("cpus={} seeded", rows.len())
 }
 
+/// True when the CPU is the second thread of one core.
+/// Sibling holds all ones on single thread, so single thread stays
+/// false with no panic. A lower sibling marks the second thread, so
+/// only one card per core shows SMT with no extra sysfs use.
+pub fn is_smt_thread(cpu: u32, sib: u32) -> bool {
+    sib != u32::MAX && sib < cpu
+}
+
 /// Parse a kernel CPU list like 0-3 plus 5 into ids.
 /// Ranges clamp to the CPU bound before the walk, so a faulty list
 /// never loops the full u32 range. Ids past the bound never seed.
@@ -143,5 +151,15 @@ mod tests {
         assert_eq!(parse_cpu_list("511-600"), vec![511]);
         assert_eq!(parse_cpu_list("600"), Vec::<u32>::new());
         assert_eq!(parse_cpu_list("600-700"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn smt_marks_only_second_thread() {
+        assert!(!is_smt_thread(0, u32::MAX));
+        assert!(!is_smt_thread(0, 1));
+        assert!(is_smt_thread(1, 0));
+        assert!(!is_smt_thread(4, 5));
+        assert!(is_smt_thread(5, 4));
+        assert!(!is_smt_thread(7, u32::MAX));
     }
 }

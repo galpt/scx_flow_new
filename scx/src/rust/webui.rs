@@ -181,6 +181,11 @@ mod tests {
         assert_eq!(m.version, "4.5.1");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
+        let old = "{\"id\":1,\"running_pid\":5,\"slice_ns\":2000000}";
+        let card: crate::stats::PerCpuMetrics = serde_json::from_str(old).unwrap();
+        assert_eq!(card.id, 1);
+        assert!(!card.smt);
+        assert_eq!(card.running_pid, 5);
         let v = merged(&m);
         assert_eq!(v.as_object().map(|o| o.len()), Some(5));
         let back: WebMetrics = serde_json::from_value(v).unwrap();
@@ -211,11 +216,20 @@ mod tests {
                 parks: 2,
                 gate_rejects: 0,
             },
-            per_cpu: vec![crate::stats::PerCpuMetrics {
-                id: 0,
-                running_pid: 7,
-                slice_ns: 2_000_000,
-            }],
+            per_cpu: vec![
+                crate::stats::PerCpuMetrics {
+                    id: 0,
+                    smt: false,
+                    running_pid: 7,
+                    slice_ns: 2_000_000,
+                },
+                crate::stats::PerCpuMetrics {
+                    id: 1,
+                    smt: true,
+                    running_pid: 0,
+                    slice_ns: 2_000_000,
+                },
+            ],
             version: "4.5.1".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "cpus=4 seeded".to_string(),
@@ -233,6 +247,8 @@ mod tests {
         assert!(txt.contains("gate_rejects"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
+        assert!(txt.contains("\"smt\":false"));
+        assert!(txt.contains("\"smt\":true"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("timestamp_ns"));
@@ -245,6 +261,9 @@ mod tests {
         assert!(!txt.contains("enq_no_tctx"));
         assert!(!txt.contains("preempt_kicks"));
         assert!(!txt.contains("preempt_skipped"));
+        assert!(!txt.contains("freq_khz"));
+        assert!(!txt.contains("cur_freq"));
+        assert!(!txt.contains("llc_id"));
         assert!(!txt.contains("governor"));
         assert!(!txt.contains("energy"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
@@ -258,8 +277,12 @@ mod tests {
         assert_eq!(back.stats.misses, 2);
         assert_eq!(back.stats.parks, 2);
         assert_eq!(back.stats.gate_rejects, 0);
+        assert_eq!(back.per_cpu.len(), 2);
+        assert!(!back.per_cpu[0].smt);
+        assert!(back.per_cpu[1].smt);
         assert_eq!(back.per_cpu[0].running_pid, 7);
         assert_eq!(back.per_cpu[0].slice_ns, 2_000_000);
+        assert_eq!(back.per_cpu[1].id, 1);
         assert_eq!(back.version, "4.5.1");
         assert_eq!(back.topology, "cpus=4 seeded");
         let v = merged(&snap);
@@ -335,6 +358,11 @@ mod tests {
         assert!(!html.contains("enq_no_tctx"));
         assert!(!html.contains("preempt_kicks"));
         assert!(!html.contains("preempt_skipped"));
+        assert!(!html.contains("freq_khz"));
+        assert!(!html.contains("cur_freq"));
+        assert!(!html.contains("llc_id"));
+        assert!(!html.contains("core-freq"));
+        assert!(!html.contains("core-llc"));
         assert!(!html.contains("governor"));
         assert!(!html.contains("energy"));
         assert!(!html.contains("id=\"energy-since\""));
@@ -342,6 +370,17 @@ mod tests {
         assert!(!html.contains("no-tctx"));
         assert!(!html.contains("id=\"steal\""));
         assert!(!html.contains("id=\"throttled-ns\""));
+    }
+
+    /* Dashboard marks the second thread cards with SMT. */
+    #[test]
+    fn dashboard_shows_smt_badge() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("core-smt"));
+        assert!(html.contains("smtLabel"));
+        assert!(html.contains("cpu.smt"));
+        assert!(html.contains(">SMT<"));
+        assert!(html.contains("var(--warning)"));
     }
 
     /* Dashboard clamps on CPU plus shows the live pid count. */

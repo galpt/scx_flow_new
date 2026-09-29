@@ -68,15 +68,19 @@ impl<'a> Scheduler<'a> {
 
     /// Dashboard snapshot with raw counters plus live pid cards.
     /// Counters stay raw with no deltas and the on CPU gauge passes
-    /// through with the live pid view. Offline stays out, so per CPU
-    /// count matches the cached online count. Version plus timestamp
-    /// plus topology join the counters for the page plus the log.
+    /// through with the live pid view. SMT comes from the cached init
+    /// flags with no sysfs use on poll and stays display only. Offline
+    /// stays out, so per CPU count matches the cached online count.
+    /// Version plus timestamp plus topology join the counters for the
+    /// page plus the log.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
-        for &id in &self.online_cpus {
+        for (rank, &id) in self.online_cpus.iter().enumerate() {
             let st = self.read_cpu(id as usize);
+            let smt = self.smt.get(rank).copied().unwrap_or(false);
             per_cpu.push(stats::PerCpuMetrics {
                 id,
+                smt,
                 running_pid: st.running_pid,
                 slice_ns: crate::flow_slice::QUANTUM_NS,
             });
