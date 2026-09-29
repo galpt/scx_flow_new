@@ -84,13 +84,17 @@ static __noinline u32 flow_drain_checked(s32 cpu,
 }
 /* One homeless trip over global to local with fail open moves. */
 /* Tasks without state move with mask wins, so homeless work never */
-/* stalls. All other visits count one miss with the same miss cap. */
+/* stalls. The live check repeats the dispatch check, so an offline */
+/* CPU during the pass moves nothing. All other visits count one */
+/* miss with the same miss cap. */
 static __noinline u32 flow_drain_global(s32 cpu,
 	u32 lim, u32 base)
 {
 	struct task_struct *p;
 	u32 moved = 0;
 	u32 miss = 0;
+	if (cpu < 0 || !flow_cpu_live((u32)cpu))
+		return 0;
 	bpf_for_each(scx_dsq, p, SCX_DSQ_GLOBAL, 0) {
 		struct task_struct *trusted;
 		bool ok;

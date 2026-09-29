@@ -64,7 +64,10 @@ static __always_inline bool flow_cpu_meets(u32 cpu,
 	return false;
 }
 /* Add one admitted share to a CPU row with saturation. */
-/* The add clamps, so a huge hint never wraps the row to idle. */
+/* The add clamps, so a huge hint never wraps the row to idle. The */
+/* store races best effort with last writer winning, and the stored */
+/* share on the task adds once plus drops once, so concurrent passes */
+/* never drift the row past one transient share. */
 static __noinline void flow_admit_add(u32 cpu,
 	u64 share)
 {
@@ -87,6 +90,8 @@ static __noinline void flow_admit_add(u32 cpu,
 }
 /* Drop one admitted share from a CPU row with floor at zero. */
 /* A share past the row floors to zero, so a double drop never wraps. */
+/* The store races best effort the same way, so a lost race leaves at */
+/* most one transient share the next pass repairs. */
 static __noinline void flow_admit_drop(u32 cpu,
 	u64 share)
 {

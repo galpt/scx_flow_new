@@ -16,8 +16,8 @@
  */
 /* Init one flat hint row with zero period and no hint. */
 /* Sleepable only, so map create runs here. A full table keeps the */
-/* miss to the default period with no fail, so init stays best */
-/* effort with no eviction. */
+/* miss to the default period with no fail, so the update stays */
+/* unchecked and init returns zero on purpose with no eviction. */
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	struct scx_cgroup_init_args *args)
 {
@@ -57,17 +57,13 @@ s32 BPF_STRUCT_OPS(flow_cgroup_prep_move, struct task_struct *p,
 /* Commit one flat move with release plus deadline plus runtime carry. */
 /* The release plus the period plus the deadline plus the runtime */
 /* stay, so order survives the move. The hint stays per id with no */
-/* carry, so the next enqueue reads the new hint. */
+/* carry, so the next enqueue reads the new hint with no id read here. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	struct cgroup *from, struct cgroup *to)
 {
-	u64 nid;
 	(void)from;
 	(void)p;
 	if (!to)
-		return;
-	nid = flow_cgrp_id(to);
-	if (!nid)
 		return;
 }
 /* Cancel one flat move with no state change. */

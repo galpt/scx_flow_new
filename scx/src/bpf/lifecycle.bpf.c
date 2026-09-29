@@ -12,8 +12,10 @@
  * the release plus the period plus the deadline plus the runtime
  * plus the hint plus the miss count plus the stored share, and
  * disable plus exit charge a leftover segment at most once when
- * stopping never ran plus drop a stored share with no leak. Release
- * clears a stale running view with no charge. The gate runs first in every op except the
+ * stopping never ran plus drop a stored share with no leak. A closed
+ * gate in stopping plus disable still drops a stored share, so a
+ * stale CPU never leaks its debit and enable meets zero by design.
+ * Release clears a stale running view with no charge. The gate runs first in every op except the
  * exiting paths, so a stale CPU fails closed with one counter. See
  * intf.h for the shared helpers and enqueue.bpf.c for admission plus
  * the deadline choice.
@@ -78,6 +80,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 start;
 	cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
+		/* A closed gate still drops a stored share, so a stale CPU */
+		/* never leaks its debit. */
+		flow_admit_drop_stored(flow_lookup(p));
 		flow_gate_reject();
 		return;
 	}
@@ -165,6 +170,9 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
+		/* A closed gate still drops a stored share, so a stale CPU */
+		/* never leaks its debit. */
+		flow_admit_drop_stored(flow_lookup(p));
 		flow_gate_reject();
 		return;
 	}

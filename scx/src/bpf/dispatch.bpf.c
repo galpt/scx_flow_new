@@ -12,8 +12,8 @@
  * and each tier adds its moves once with no lock. Overflow parks move
  * only past the backstop interval, so fresh parks keep order while
  * old parks surface. Homeless tasks move fail open with mask wins on
- * the global turn only. Empty trips pay one queued read with no scan.
- * One RCU read section covers both tiers, so the lock pairs collapse
+ * the global turn only. Empty trips pay up to four queued reads with
+ * no scan. One RCU read section covers both tiers, so the lock pairs collapse
  * to one with no nesting. See intf.h for the caps and enqueue.bpf.c
  * for admission plus the deadline choice.
  *
@@ -53,7 +53,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	}
 	own_local = flow_local_dsq((u32)cpu);
 	node = flow_cpu_node((u32)cpu);
-	if (node >= (u32)FLOW_MAX_NODES)
+	/* Fold past the derived count to zero like enqueue, so the node */
+	/* turn always names a created queue with no stale id. */
+	if (node >= (u32)FLOW_MAX_NODES ||
+	    (u64)node >= nr_node_ids)
 		node = 0;
 	bpf_rcu_read_lock();
 	/* Local tier first with the local cap. */

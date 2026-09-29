@@ -109,9 +109,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 	/* One release plus one period plus one absolute deadline. */
-	/* The hint tunes the period only with no group use. A miss on */
-	/* the last release counts before the new release, so the miss */
-	/* count tracks wall completion past release plus deadline. */
+	/* The hint tunes the period only with no group use. The period */
+	/* keeps the stored hint for one release while admission already */
+	/* uses the fresh hint, so the share stays exact and the period */
+	/* lags one release on purpose. A miss on the last release counts */
+	/* before the new release, so the miss count tracks wall */
+	/* completion past release plus deadline. */
 	hint = flow_task_hint(p);
 	period = flow_task_period(tctx->hint_us ? tctx->hint_us : hint);
 	tctx->hint_us = hint;

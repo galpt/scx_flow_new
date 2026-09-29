@@ -8,6 +8,9 @@
 //! Node reads use the kernel NUMA view with zero on fault and a cap
 //! at eight, so large hosts fold to the machine queue with no panic.
 
+/// CPU ids past this bound never seed, mirroring FLOW_MAX_CPUS.
+const CPU_BOUND: u32 = 512;
+
 /// Online CPU ids in rank order with empty on read fault.
 pub fn online_cpus() -> Vec<u32> {
     read_cpu_list_file("/sys/devices/system/cpu/online")
@@ -34,6 +37,8 @@ pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
 }
 
 /// Parse a kernel CPU list like 0-3 plus 5 into ids.
+/// Ranges clamp to the CPU bound before the walk, so a faulty list
+/// never loops the full u32 range. Ids past the bound never seed.
 pub fn parse_cpu_list(s: &str) -> Vec<u32> {
     let mut out = Vec::new();
     for part in s.split(',') {
@@ -44,12 +49,17 @@ pub fn parse_cpu_list(s: &str) -> Vec<u32> {
         if let Some((a, b)) = part.split_once('-')
             && let (Ok(lo), Ok(hi)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>())
         {
-            for cpu in lo..=hi {
-                out.push(cpu);
+            let hi = hi.min(CPU_BOUND - 1);
+            if lo <= hi {
+                for cpu in lo..=hi {
+                    out.push(cpu);
+                }
             }
             continue;
         }
-        if let Ok(cpu) = part.parse::<u32>() {
+        if let Ok(cpu) = part.parse::<u32>()
+            && cpu < CPU_BOUND
+        {
             out.push(cpu);
         }
     }
@@ -124,5 +134,15 @@ mod tests {
         let node = 12u32;
         let capped = if node < 8 { node } else { 0 };
         assert_eq!(capped, 0);
+    }
+
+    #[test]
+    fn clamps_ranges_and_ids_to_cpu_bound() {
+        let wide = parse_cpu_list("0-600");
+        assert_eq!(wide.len(), 512);
+        assert!(wide.iter().all(|c| *c < 512));
+        assert_eq!(parse_cpu_list("511-600"), vec![511]);
+        assert_eq!(parse_cpu_list("600"), Vec::<u32>::new());
+        assert_eq!(parse_cpu_list("600-700"), Vec::<u32>::new());
     }
 }

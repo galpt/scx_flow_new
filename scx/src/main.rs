@@ -104,7 +104,9 @@ struct Opts {
     /* Generate shell completions and exit. */
     #[clap(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
-    /* No-op kept for command line stability. Serving stays off always. */
+    /* Stability shim with no serve. Older launch lines pass this flag, */
+    /* so it parses and stays inert. Serving stays off always with */
+    /* counters through the stats server only. */
     #[clap(long = "no-webui", action = clap::ArgAction::SetTrue)]
     no_webui: bool,
     #[clap(flatten, next_help_heading = "Libbpf Options")]
@@ -147,7 +149,10 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         /* Energy reads stay disabled with the probe parked. */
         let _ = crate::rapl::RaplReader::open_default();
-        /* Dashboard serving stays disabled with no port use. */
+        /* Dashboard stays parked with no port use. The thread only drains */
+        /* the stop flag, so startup order stays stable for older harnesses */
+        /* while serving stays off always. Remove both together if the */
+        /* spawn ever goes. */
         let sd = Arc::new(AtomicBool::new(true));
         std::thread::spawn(move || {
             webui::start(sd);

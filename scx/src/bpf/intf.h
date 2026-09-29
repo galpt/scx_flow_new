@@ -57,7 +57,10 @@ enum flow_consts {
 	/* within half a default period, so a miss never waits a full */
 	/* period for another chance. */
 	FLOW_BACKSTOP_NS = 8000000ULL,
-	/* Timer period matches the backstop interval with no knob. */
+	/* Timer period matches the backstop interval with no knob. Kept */
+	/* as its own name on purpose: the interval drives the park check */
+	/* while the timer drives the wake tick, and the assert below pins */
+	/* both at 8ms so every park meets a tick. */
 	FLOW_BACKSTOP_TIMER_NS = 8000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
@@ -230,6 +233,8 @@ _Static_assert(sizeof(struct flow_sched_stats) == 128,
 /* Backstop tick matches the backstop interval. */
 _Static_assert(FLOW_BACKSTOP_TIMER_NS == 8000000ULL,
 	"timer stays at 8ms");
+_Static_assert(FLOW_BACKSTOP_TIMER_NS == FLOW_BACKSTOP_NS,
+	"tick matches the backstop interval");
 /* Queue count holds local plus node plus machine plus overflow. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
