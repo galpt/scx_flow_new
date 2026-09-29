@@ -3,12 +3,15 @@
  * Performance level helper for the dispatch pass.
  *
  * Holds the queue depth check plus the transition only set with
- * no knob and no extra walk. More than one runnable picks max
+ * no knob and no drain walk. More than one runnable picks max
  * else half, and a steady level makes no call. Runs after the
  * caller lock with the dispatch CPU only and no remote use, so
  * the same CPU proof holds with no extra guard. Old kernels skip
- * with no call, and unknown CPUs skip with no call. Levels stay
- * in the allowlist with a cap clamp, so no trap fires.
+ * with no call, and unknown CPUs skip with no call. The choice
+ * stays in the allowlist before the cap, the cap may step outside
+ * it within range, so no trap fires. Shared queues boost on purpose
+ * when the system stays busy, and the counts re-read what dispatch
+ * already probed to keep the helper apart.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -22,12 +25,15 @@ struct {
 } cpu_perf_last SEC(".maps");
 /* Update one CPU level from queue depth with no call on steady. */
 /* More than one runnable picks max else half with the running */
-/* view plus own plus local plus global plus overflow. The kfunc */
-/* check runs first, so old kernels skip with no call. The live */
-/* check runs next, so unknown CPUs skip with no call. The */
-/* allowlist holds plus the cap clamps, so no trap fires. The last */
-/* level check holds, so a steady level makes no call. Runs after */
-/* the caller lock with the dispatch CPU only and no remote use. */
+/* view plus own plus local plus global plus overflow. Shared queues */
+/* boost on purpose, so a busy system favors max with no per task */
+/* split. The kfunc check runs first, so old kernels skip with no */
+/* call. The live check runs next, so unknown CPUs skip with no call. */
+/* The allowlist guards the pre cap choice only, the cap may step */
+/* outside it within range, so no trap fires. The last level check */
+/* holds, so a steady level makes no call. Runs after the caller lock */
+/* with the dispatch CPU only and no remote use. Counts re-read the */
+/* probed queues to keep inputs scalar with no wider caller pass. */
 static __noinline void flow_perf_update(s32 cpu)
 {
 	s32 own;
@@ -49,7 +55,10 @@ static __noinline void flow_perf_update(s32 cpu)
 	if (!flow_cpu_live((u32)cpu))
 		return;
 	/* Own plus local plus global plus overflow shape the depth. */
-	/* A missing queue reads zero, so a bad read drops with no boost. */
+	/* Counts re-read the dispatch probes on purpose, so the helper */
+	/* stays apart with scalar inputs and no wider caller pass. */
+	/* A missing queue returns minus ENOENT, so a bad read drops */
+	/* with no boost. Shared queues boost on purpose when busy. */
 	own = scx_bpf_dsq_nr_queued(flow_vtime_dsq((u32)cpu));
 	if (own > 0)
 		depth += (u64)own;
@@ -68,15 +77,20 @@ static __noinline void flow_perf_update(s32 cpu)
 	if (st && READ_ONCE(st->running_pid) != 0)
 		depth += 1;
 	/* More than one runnable picks max else half with no knob. */
+	/* Shared queues count too, so the boost stays wide on purpose. */
 	if (depth > 1)
 		want = (u32)FLOW_CPU_PERF_MAX;
 	else
 		want = (u32)FLOW_CPU_PERF_HALF;
-	/* The allowlist holds half plus max with no other level. */
+	/* The allowlist guards the pre cap choice with half plus max. */
+	/* Dead by build here with no other level, kept fail closed. */
 	if (want != (u32)FLOW_CPU_PERF_HALF &&
 	    want != (u32)FLOW_CPU_PERF_MAX)
 		return;
-	/* The cap clamps the want, so a small CPU never overasks. */
+	/* The cap clamps the want within range, so want stays at or */
+	/* below cap at or below one. A zero cap never arrives here, */
+	/* the check stays backstop only. Past the clamp the want may */
+	/* sit outside the allowlist, still in range, so the set is safe. */
 	if (bpf_ksym_exists(scx_bpf_cpuperf_cap)) {
 		cap = scx_bpf_cpuperf_cap(cpu);
 		if (cap == 0)
@@ -84,14 +98,18 @@ static __noinline void flow_perf_update(s32 cpu)
 		if (want > cap)
 			want = cap;
 	}
-	/* Past bound CPUs hold no row, so skip with no call. */
+	/* Past bound CPUs hold no row, so skip with no call. Live */
+	/* already covers this bound, the check keeps the helper safe */
+	/* apart with no caller trust. */
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return;
 	key = (u32)cpu;
 	last = bpf_map_lookup_elem(&cpu_perf_last, &key);
 	if (!last)
 		return;
-	/* A steady level holds, so skip the set with no call. */
+	/* A steady level holds, so skip the set with no call. The store */
+	/* uses the tree atomic to match the pid plus cursor rows with */
+	/* no torn write, the load pairs relaxed with no order need. */
 	if (READ_ONCE(*last) == want)
 		return;
 	__sync_lock_test_and_set(last, want);
