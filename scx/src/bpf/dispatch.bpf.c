@@ -61,7 +61,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	lim = moved + flow_local_cap(budget);
 	if (lim > budget)
 		lim = budget;
-	got = flow_drain_gated(cpu, own_local, lim, moved, false);
+	got = flow_drain_checked(cpu, own_local, lim, moved, false);
 	moved += got;
 	local_moved += got;
 	/* Shared tier next with one rotating queued member. */
@@ -122,7 +122,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				moved += got;
 				global_moved += got;
 			} else {
-				got = flow_drain_gated(cpu, dsq, lim,
+				got = flow_drain_checked(cpu, dsq, lim,
 				    moved, backstop);
 				moved += got;
 				if (hit == 0)

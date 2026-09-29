@@ -6,13 +6,14 @@
 //! Holds the flat period hint table shared by BPF and userspace tests.
 //! The flat view tunes the period only, and no group or pool shapes
 //! order. The BPF hints live in cgroup.bpf.c with rows in hint_stor,
-//! and this file mirrors the table with no map use.
+//! and this file mirrors the table with no map use. Full tables miss
+//! to the default period with no eviction.
 
 /// Max hint rows bound shared with the BPF header.
-pub const HINT_MAX: u64 = 512;
+pub const HINT_MAX: u64 = 4096;
 /// Backstop timer in nanos at 8ms. Matches the BPF backstop tick.
 #[cfg(test)]
-pub const BW_TIMER_NS: u64 = 8_000_000;
+pub const BACKSTOP_TIMER_NS: u64 = 8_000_000;
 
 /// Period hint in micros for one weight with a fixed table.
 /// Light shares map to long periods and heavy shares map to short

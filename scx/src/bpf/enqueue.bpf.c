@@ -74,10 +74,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* The gate runs before any queue join with fail closed. */
 	/* A stale CPU plus a moved task counts one reject and parks in */
-	/* global with mask wins on drain. */
+	/* global with mask wins on drain. A stale stored share drops */
+	/* here too, so a double enqueue never holds two shares. */
 	if (!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
 	    scx_bpf_task_cpu(p), p, 0)) {
 		flow_gate_reject();
+		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_global_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -85,7 +87,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* Pinned tasks rest in overflow with wait set and one idle kick. */
 	/* The share walk never runs here, so pinned parks stay cheap. */
+	/* A stale stored share drops here too with no new share. */
 	if (pinned) {
+		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -93,8 +97,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	cpu = flow_pick_target(p, sel);
 	/* No live CPU keeps the kernel global queue with an idle kick. */
+	/* A stale stored share drops here too with no new share. */
 	if (!flow_cpu_ok(p, cpu)) {
 		flow_gate_reject();
+		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_global_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -109,6 +115,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	hint = flow_task_hint(p);
 	period = flow_task_period(tctx->hint_us ? tctx->hint_us : hint);
 	tctx->hint_us = hint;
+	/* A stale stored share drops before the miss check, so a double */
+	/* enqueue without a stop never holds two shares. The normal pass */
+	/* sees zero here with no extra debit. */
+	flow_admit_drop_stored(tctx);
 	if (tctx->release && tctx->deadline &&
 	    flow_missed(tctx->release, tctx->deadline, now)) {
 		flow_count_miss(tctx);
@@ -129,7 +139,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx->wait_at = now;
 	/* Admission holds declared use under the bound per CPU. */
 	/* The share is one slice in the task period, and a reject parks */
-	/* in overflow with no kick and the backstop behind it. */
+	/* in overflow with no kick and the backstop behind it. The added */
+	/* share stores on the task, so the stop drops the stored value */
+	/* with no drift on hint change and no wrong CPU debit on move. */
 	share = flow_admit_share(hint);
 	if (share && !flow_admit_ok(flow_cpu_admitted((u32)cpu),
 	    share)) {
@@ -140,8 +152,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    &flow_backstop_pending, 1);
 		return;
 	}
-	if (share)
+	if (share) {
 		flow_admit_add((u32)cpu, share);
+		__sync_lock_test_and_set(&tctx->admit_share, share);
+		__sync_lock_test_and_set(&tctx->admit_cpu,
+		    (u32)cpu);
+	}
 	__sync_fetch_and_add(&flow_stats.admits, 1);
 	/* Direct join when the target drains before the deadline. */
 	/* Else the shared home takes the task, node first then machine, */

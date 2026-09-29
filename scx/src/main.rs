@@ -364,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_56() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 56);
+    fn task_size_is_72() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
     }
 
     #[test]
@@ -401,10 +401,10 @@ mod tests {
     fn hint_matches_header() {
         assert_eq!(
             crate::flow_cgrp::HINT_MAX,
-            crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as u64
+            crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
         );
         assert_eq!(
-            crate::flow_cgrp::BW_TIMER_NS,
+            crate::flow_cgrp::BACKSTOP_TIMER_NS,
             crate::bpf_intf::flow_consts_FLOW_BACKSTOP_TIMER_NS as u64
         );
     }

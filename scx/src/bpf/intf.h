@@ -68,6 +68,11 @@ enum flow_consts {
 	/* Node bound of 8 rows with no knob. Covers the largest test */
 	/* host with wide margin while keeping the node scan small. */
 	FLOW_MAX_NODES = 8ULL,
+	/* Hint bound of 4096 rows with no knob. Keys are hierarchy ids */
+	/* with no dense use, so the table holds large hosts with room */
+	/* for churn. Full tables fail closed to the default period */
+	/* with no eviction and no stall. */
+	FLOW_HINT_MAX = 4096ULL,
 	/* Local queue region base. Holds 512 ids, one per CPU. */
 	FLOW_LOCAL_BASE = 0x5100ULL,
 	/* Node queue region base. Holds 8 ids, one per node. */
@@ -111,8 +116,8 @@ enum flow_consts {
 	/* sufficient pick falls to the lowest sufficient id. */
 	FLOW_CAP_BASE = 1024ULL,
 };
-/* Per task state at 56B with release plus period plus deadline plus */
-/* runtime plus stamps plus hint plus miss count. */
+/* Per task state at 72B with release plus period plus deadline plus */
+/* runtime plus stamps plus hint plus miss count plus admit share. */
 /* Release holds the last release time for the miss check. A zero */
 /* release means no release yet, so the miss check skips with no count. */
 /* Period holds the relative period in nanos for the next deadline. */
@@ -135,6 +140,11 @@ enum flow_consts {
 /* hint means no hint, so the default period applies. Misses holds */
 /* the count of deadline misses for the life of the task with */
 /* saturating adds, so a huge miss count clamps instead of wrapping. */
+/* Admit share holds the added per mille share with zero for none, */
+/* so the stop drops the stored value with no drift on hint change. */
+/* Admit CPU holds the CPU where the share was added, so a moved task */
+/* still debits the right row with no wrong CPU drop. Only admitted */
+/* inserts touch the admitted rows, parks and homeless work never do. */
 /* Stamps stay per task owned with no atomics except the run claim, */
 /* only counters use atomics. Cursor and miss scans stay best effort */
 /* with no atomic order. */
@@ -147,6 +157,9 @@ struct flow_task_ctx {
 	u64 run_at;
 	u32 hint_us;
 	u32 misses;
+	u64 admit_share;
+	u32 admit_cpu;
+	u32 __pad;
 };
 /* Per CPU state at 8B with running pid plus drain cursor. */
 /* Pid holds the task now on the CPU else zero. Owner clears use a */
@@ -202,9 +215,9 @@ struct flow_sched_stats {
 	u64 gate_rejects;
 };
 /* Task state holds release plus period plus deadline plus runtime */
-/* plus stamps plus hint plus misses in 56 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 56,
-	"task state stays at 56B");
+/* plus stamps plus hint plus misses plus admit share in 72 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 72,
+	"task state stays at 72B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");

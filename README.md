@@ -18,7 +18,6 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/rust/topology.rs` online plus node view for the seed
 - `scx/src/rust/rapl.rs` disabled energy probe with no reads
 - `scx/src/rust/webui.rs` disabled dashboard entry with no serve
-- `scx/ui/index.html` retained page with no server behind it
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/edf_harness/` load probe with its own README
 

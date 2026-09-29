@@ -3,7 +3,7 @@
  * Tier drains for the dispatch pass.
  *
  * Moves one queue to local with a shared gate plus mask plus stamp
- * checks. The gated trip serves local plus node plus machine plus
+ * checks. The checked trip serves local plus node plus machine plus
  * overflow with an optional backstop wait, and the homeless trip
  * serves global only with fail open moves. Overflow parks younger
  * than the backstop interval count one miss and keep order, so fresh
@@ -34,11 +34,11 @@ static __noinline bool flow_gate_ok(s32 cpu,
 		return false;
 	return true;
 }
-/* One gated trip over a queue to local with an optional backstop. */
+/* One checked trip over a queue to local with an optional backstop. */
 /* Takes CPU plus queue plus limit plus base plus backstop scalars */
 /* with no struct pass, so every tier verifies through this one loop. */
 /* A set backstop holds parks younger than the interval with one miss. */
-static __noinline u32 flow_drain_gated(s32 cpu,
+static __noinline u32 flow_drain_checked(s32 cpu,
 	u64 dsq, u32 lim, u32 base, bool backstop)
 {
 	struct task_struct *p;

@@ -106,3 +106,22 @@ static __noinline void flow_admit_drop(u32 cpu,
 		want = 0;
 	__sync_lock_test_and_set(v, want);
 }
+/* Drop the stored admit share of one task with floor at zero. */
+/* Clears the stored share plus CPU, so a second drop stays empty */
+/* with no double debit. Runs on stop plus disable plus exit, so a */
+/* hint change between enqueue and stop never drifts the row. */
+static __noinline void flow_admit_drop_stored(
+	struct flow_task_ctx *tctx)
+{
+	u64 share;
+	u32 cpu;
+	if (!tctx)
+		return;
+	share = READ_ONCE(tctx->admit_share);
+	cpu = READ_ONCE(tctx->admit_cpu);
+	if (!share)
+		return;
+	flow_admit_drop(cpu, share);
+	__sync_lock_test_and_set(&tctx->admit_share, 0);
+	__sync_lock_test_and_set(&tctx->admit_cpu, 0);
+}

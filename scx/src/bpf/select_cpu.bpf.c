@@ -105,6 +105,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				if ((u64)off >= (u64)n)
 					break;
 				peer = (start + off) % n;
+				/* The busy waker stays out on purpose. */
+				/* An idle waker already returned above, */
+				/* so a busy waker here would only stack */
+				/* on its own depth with no warmth win. */
+				/* The previous CPU below keeps warmth. */
 				if (peer == (u32)this_cpu)
 					continue;
 				if (!flow_cpu_ok(p, (s32)peer))

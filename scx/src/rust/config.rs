@@ -63,7 +63,7 @@ impl Config {
     /// overflow at 2 and a miss cap at 3. Admission holds use under
     /// 950 per mille with base capacity 1024. Queues hold 512 local
     /// plus 8 node plus machine plus overflow with ids in the 0x5100
-    /// region. Hints hold 512 flat rows with an 8ms timer.
+    /// region. Hints hold 4096 flat rows with an 8ms timer.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -107,7 +107,7 @@ impl Config {
         if CAP_BASE != 1024 {
             bail!("capacity base bad");
         }
-        if HINT_MAX != 512 {
+        if HINT_MAX != 4096 {
             bail!("hint bound bad");
         }
         Ok(())
@@ -229,7 +229,11 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_BACKSTOP_TIMER_NS as u64,
-            crate::flow_cgrp::BW_TIMER_NS
+            crate::flow_cgrp::BACKSTOP_TIMER_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
+            crate::flow_cgrp::HINT_MAX
         );
     }
 }

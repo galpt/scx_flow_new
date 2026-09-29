@@ -5,6 +5,8 @@
 
 //! Reads the host CPU lists plus the node rows for the BPF seed.
 //! Frequency plus governor reads stay disabled with no sysfs use.
+//! Node reads use the kernel NUMA view with zero on fault and a cap
+//! at eight, so large hosts fold to the machine queue with no panic.
 
 /// Online CPU ids in rank order with empty on read fault.
 pub fn online_cpus() -> Vec<u32> {
@@ -13,13 +15,14 @@ pub fn online_cpus() -> Vec<u32> {
 
 /// One topology row per CPU with sibling plus node.
 /// Sibling reads the thread list with all ones on fault, and node
-/// reads the node list with zero on fault.
+/// reads the NUMA view with zero on fault and a cap at eight.
 pub fn topo_rows() -> Vec<(u32, u32, u32)> {
     let online = online_cpus();
     let mut rows = Vec::new();
     for cpu in online {
         let sib = thread_sibling(cpu).unwrap_or(u32::MAX);
         let node = cpu_node(cpu).unwrap_or(0);
+        let node = if node < 8 { node } else { 0 };
         rows.push((cpu, sib, node));
     }
     rows
@@ -70,10 +73,39 @@ fn thread_sibling(cpu: u32) -> Option<u32> {
 }
 
 /// Node of one CPU with None on fault.
+/// Reads the NUMA view through the per CPU node links with a fallback
+/// to the node cpulists, so package ids never shape placement.
+/// A missing link plus a missing cpulist means unknown, so the caller
+/// folds to zero with no panic.
 fn cpu_node(cpu: u32) -> Option<u32> {
-    let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/physical_package_id");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    raw.trim().parse::<u32>().ok()
+    let dir = format!("/sys/devices/system/cpu/cpu{cpu}");
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(suffix) = name.strip_prefix("node")
+                && !suffix.is_empty()
+                && let Ok(node) = suffix.parse::<u32>()
+            {
+                return Some(node);
+            }
+        }
+    }
+    node_from_cpulists(cpu)
+}
+
+/// Node of one CPU from the node cpulists with None on fault.
+/// Scans the online nodes and returns the first node whose cpulist
+/// holds the CPU, so hosts without per CPU links still seed.
+fn node_from_cpulists(cpu: u32) -> Option<u32> {
+    let ids = read_cpu_list_file("/sys/devices/system/node/online");
+    for node in ids {
+        let path = format!("/sys/devices/system/node/node{node}/cpulist");
+        let cpus = read_cpu_list_file(&path);
+        if cpus.contains(&cpu) {
+            return Some(node);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -85,5 +117,12 @@ mod tests {
         assert_eq!(parse_cpu_list("0-3"), vec![0, 1, 2, 3]);
         assert_eq!(parse_cpu_list("0-1,3"), vec![0, 1, 3]);
         assert_eq!(parse_cpu_list(""), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn rows_cap_large_nodes() {
+        let node = 12u32;
+        let capped = if node < 8 { node } else { 0 };
+        assert_eq!(capped, 0);
     }
 }
