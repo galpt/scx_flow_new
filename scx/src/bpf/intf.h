@@ -82,6 +82,10 @@ enum flow_consts {
 	FLOW_PARK_HINT_NR = 64ULL,
 	/* Throttle bit in the hierarchy flags. Set means gated skip. */
 	FLOW_CGRP_THROTTLED = 1ULL,
+	/* CPU performance levels at half plus max. More than one */
+	/* runnable picks max else half with no knob and no extra walk. */
+	FLOW_CPU_PERF_HALF = 512ULL,
+	FLOW_CPU_PERF_MAX = 1024ULL,
 };
 /* Unlimited quota value with no cap use and zero pool. */
 #define FLOW_RUNTIME_INF (~0ULL)
