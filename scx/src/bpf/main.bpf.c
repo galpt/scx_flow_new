@@ -2,15 +2,16 @@
 /*
  * Flow scheduler BPF core.
  *
- * Maps hold task deadlines, CPU pid plus cursor rows, the runtime
- * floor per CPU, the topology view, and the hierarchy share plus pool rows. Init
- * creates one deadline queue per CPU plus one overflow tail, and
- * it fails loudly when an id reaches the local range. Ops split
- * across select_cpu, enqueue plus enqueue/, dispatch plus
- * dispatch/, lifecycle, and hierarchy files. Shared helpers split
- * across main/task, hier, bw, cpu, and timer files with maps plus
+ * Maps hold task releases, CPU pid plus cursor rows, the topology
+ * view, the capacity view, the admitted use rows, and the flat hint
+ * rows. Init creates one local queue per CPU plus one shared queue
+ * per node plus one machine queue plus one overflow tail, and it
+ * fails loudly when an id reaches the local range. Ops split across
+ * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
+ * lifecycle, and flat hierarchy files. Shared helpers split across
+ * main/task, deadline, hier, cpu, and timer files with maps plus
  * init here. Hotplug needs a restart, and the watchdog stays at
- * 30 seconds.
+ * 20 seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -20,74 +21,57 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/* Per task deadline for the life of the task. */
+/* Per task release for the life of the task. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU pid with steal cursor. */
+/* Per CPU pid with placement cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
-/* Per CPU floor of served runtime with live use only. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_MAX_CPUS);
-	__type(key, u32);
-	__type(value, u64);
-} vruntime_floor SEC(".maps");
-/* Per CPU topology view with sibling plus domain. */
+/* Per CPU topology view with sibling plus node. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_topo);
 } topo_stor SEC(".maps");
-/* Per hierarchy share plus pool by id with miss default. */
+/* Per CPU capacity view with one units row. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_cpu_cap);
+} cap_stor SEC(".maps");
+/* Per CPU admitted use with one per mille row. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_cpu_admit);
+} admit_stor SEC(".maps");
+/* Flat period hint by id with miss default. Keys are hierarchy ids */
+/* with a bound at 4096, so large hosts hold churn with no stall. */
+/* Full tables fail closed to the default period with no eviction. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLOW_CGRP_MAX);
+	__uint(max_entries, FLOW_HINT_MAX);
 	__type(key, u64);
-	__type(value, struct flow_cgrp_ctx);
-} cgrp_stor SEC(".maps");
-/* Single kicking timer for throttled work with lazy refill. */
-struct flow_bw_timer {
-	struct bpf_timer timer;
-};
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct flow_bw_timer);
-} bw_timer SEC(".maps");
-/* Ring of lately parked chains for the timer refill scan. */
-/* Each slot holds 8 ancestor ids with the leaf first and zero pad. */
-/* Parks record the walked chain with a wrapping counter, and the */
-/* timer refills each listed pool with cap. Stale or reused ids refill */
-/* harmlessly, so no cleanup runs. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_PARK_HINT_NR);
-	__type(key, u32);
-	__type(value, struct flow_park_chain);
-} park_hint SEC(".maps");
+	__type(value, struct flow_hint);
+} hint_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
+volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
-volatile u64 flow_cgrp_gen = 1;
-volatile u64 flow_bw_limited = 0;
-volatile u64 flow_bw_pending = 0;
-/* Wrapping counter for the parked hint ring. */
-volatile u64 flow_hint_idx = 0;
 #include "main/task.bpf.c"
-#include "main/hier.bpf.c"
-#include "main/bw.bpf.c"
 #include "main/cpu.bpf.c"
-#include "main/floor.bpf.c"
+#include "main/hier.bpf.c"
+#include "main/deadline.bpf.c"
 #include "main/timer.bpf.c"
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
@@ -99,9 +83,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	s32 ret;
 	u64 n;
 	s32 cpu;
-	u32 tkey = 0;
-	u64 fzero = 0;
-	struct flow_bw_timer *tm;
+	u64 want = 1;
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
 		scx_bpf_error("CPU count over bound");
@@ -112,9 +94,46 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
+	/* Node count derives from the seeded NUMA view with a cap */
+	/* at eight. Seeded rows arrive before attach, so the scan */
+	/* sees the host view. Unseeded rows read as zero, so the */
+	/* fallback stays at one with no panic on large hosts. */
+	{
+		s32 c;
+		u32 hi = 0;
+		bool seen = false;
+		bpf_for(c, 0, FLOW_MAX_CPUS) {
+			u32 key;
+			struct flow_topo *tp;
+			u32 nd;
+			if (c < 0)
+				continue;
+			if ((u64)c >= n)
+				break;
+			key = (u32)c;
+			tp = bpf_map_lookup_elem(&topo_stor,
+			    &key);
+			if (!tp)
+				continue;
+			nd = READ_ONCE(tp->node);
+			if (nd >= (u32)FLOW_MAX_NODES)
+				continue;
+			if (!seen || nd > hi) {
+				hi = nd;
+				seen = true;
+			}
+		}
+		if (seen)
+			want = (u64)hi + 1;
+		if (want < 1)
+			want = 1;
+		if (want > (u64)FLOW_MAX_NODES)
+			want = (u64)FLOW_MAX_NODES;
+		nr_node_ids = want;
+	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		struct flow_cpu_state *st;
-		struct flow_topo *tp;
+		struct flow_cpu_cap *cp;
 		u32 key;
 		if (cpu < 0)
 			continue;
@@ -128,57 +147,70 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			st->running_pid = 0;
 			st->cursor = (u32)cpu;
 		}
-		if (bpf_map_update_elem(&vruntime_floor, &key,
-		    &fzero, BPF_ANY) < 0) {
-			scx_bpf_error("floor init failed");
-			return -ENOMEM;
-		}
-		tp = bpf_map_lookup_elem(&topo_stor, &key);
-		if (tp) {
-			tp->smt_sib = 0xffffffffU;
-			tp->llc = 0;
-		}
+		cp = bpf_map_lookup_elem(&cap_stor, &key);
+		if (cp)
+			cp->units = (u32)FLOW_CAP_BASE;
 	}
-	/* One deadline queue per CPU plus one overflow tail. */
-	/* Deadline holds 0x6800 plus id and overflow holds 0x7000. */
-	/* Count holds one per CPU plus one with one bounded pass at init. */
+	/* One local queue per CPU plus one shared queue per node plus */
+	/* one machine queue plus one overflow tail. Local ids cover */
+	/* 0x5100 plus id and node ids cover 0x5900 plus id. The node */
+	/* loop covers the derived count with a cap at eight. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		u64 vtime;
+		u64 local;
 		if (cpu < 0)
 			continue;
 		if ((u64)cpu >= n)
 			break;
-		vtime = flow_vtime_dsq((u32)cpu);
-		if (vtime >= (u64)SCX_DSQ_LOCAL_ON) {
+		local = flow_local_dsq((u32)cpu);
+		if (!flow_dsq_valid(local)) {
 			scx_bpf_error("dsq id over bound");
 			return -EINVAL;
 		}
-		ret = scx_bpf_create_dsq(vtime, -1);
+		ret = scx_bpf_create_dsq(local, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("dsq create failed");
 			return ret;
 		}
 	}
-	if (flow_overflow_dsq() >= (u64)SCX_DSQ_LOCAL_ON) {
+	/* One shared queue per node from the derived count. */
+	/* The bound stays at eight, so large hosts fold to machine. */
+	{
+		u32 node;
+		u64 nn = nr_node_ids;
+		if (nn > (u64)FLOW_MAX_NODES)
+			nn = (u64)FLOW_MAX_NODES;
+		bpf_for(node, 0, FLOW_MAX_NODES) {
+			u64 nd;
+			if ((u64)node >= nn)
+				break;
+			nd = flow_node_dsq(node);
+			if (!flow_dsq_valid(nd)) {
+				scx_bpf_error("dsq id over bound");
+				return -EINVAL;
+			}
+			ret = scx_bpf_create_dsq(nd, -1);
+			if (ret < 0 && ret != -EEXIST) {
+				scx_bpf_error("dsq create failed");
+				return ret;
+			}
+		}
+	}
+	if (!flow_dsq_valid(flow_machine_dsq())) {
+		scx_bpf_error("dsq id over bound");
+		return -EINVAL;
+	}
+	ret = scx_bpf_create_dsq(flow_machine_dsq(), -1);
+	if (ret < 0 && ret != -EEXIST) {
+		scx_bpf_error("dsq create failed");
+		return ret;
+	}
+	if (!flow_dsq_valid(flow_overflow_dsq())) {
 		scx_bpf_error("dsq id over bound");
 		return -EINVAL;
 	}
 	ret = scx_bpf_create_dsq(flow_overflow_dsq(), -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
-		return ret;
-	}
-	/* Single timer wakes throttled parks with no pool scan. */
-	tm = bpf_map_lookup_elem(&bw_timer, &tkey);
-	if (!tm) {
-		scx_bpf_error("timer lookup failed");
-		return -EINVAL;
-	}
-	bpf_timer_init(&tm->timer, &bw_timer, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(&tm->timer, flow_bw_timer_cb);
-	ret = bpf_timer_start(&tm->timer, (u64)FLOW_BW_TIMER_NS, 0);
-	if (ret < 0) {
-		scx_bpf_error("timer start failed");
 		return ret;
 	}
 	return 0;
@@ -204,7 +236,6 @@ SCX_OPS_DEFINE(flow_ops,
 	       .cgroup_move		= (void *)flow_cgroup_move,
 	       .cgroup_cancel_move	= (void *)flow_cgroup_cancel_move,
 	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
-	       .cgroup_set_bandwidth	= (void *)flow_cgroup_set_bandwidth,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |

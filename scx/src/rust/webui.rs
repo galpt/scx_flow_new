@@ -3,13 +3,8 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Serves the embedded page and the live snapshot as JSON on loopback.
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Write;
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+//! Serves the embedded page plus the live snapshot as JSON on loopback.
+
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
@@ -28,8 +23,6 @@ use crate::stats::WebMetrics;
 
 /* Loopback TCP port of the dashboard. */
 const PORT: u16 = 50005;
-/* Unix socket path used when TCP is blocked. */
-const SOCK: &str = "/tmp/scx_flow.sock";
 /* Poll bound of the snapshot channel. */
 const POLL: Duration = Duration::from_millis(200);
 /* JSON content type value. */
@@ -47,84 +40,33 @@ fn jv<T: Serialize>(v: &T) -> Value {
     serde_json::to_value(v).unwrap_or_default()
 }
 
-/* JSON text of a value. Empty object on failure. */
+/* JSON text of a value with an empty object on failure. */
 fn jt(v: &Value) -> String {
     serde_json::to_string(v).unwrap_or("{}".into())
 }
 
 /* Merged dashboard object for one snapshot. */
-/* Full log with version, timestamp, topology, governor, energy, stats, */
-/* and per-CPU. Same object serves stats polling and snapshot download */
-/* on loopback with no new exposure. */
+/* Full log with version plus timestamp plus topology plus stats */
+/* plus per CPU. Same object serves stats polling plus snapshot */
+/* download on loopback with no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
         "timestamp_ns": snap.timestamp_ns,
         "topology": snap.topology.clone(),
-        "governor": snap.governor.clone(),
-        "energy": jv(&snap.energy),
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
     })
 }
 
-/*
- * Serve one unix client. Routes mirror the TCP server. The root serves the
- * page. The stats and snapshot paths serve the same full JSON with loopback
- * only. Unknown paths get a short not found reply.
- */
-fn unix_client(
-    mut stream: std::os::unix::net::UnixStream,
-    state: &Arc<Mutex<WebState>>,
-    html: &str,
-) {
-    let dup = match stream.try_clone() {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    let mut rd = BufReader::new(dup);
-    let mut line = String::new();
-    if rd.read_line(&mut line).is_err() {
-        return;
-    }
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 {
-        return;
-    }
-    let path = parts[1];
-    let snap = match state.lock() {
-        Ok(v) => v.metrics.clone(),
-        Err(_) => return,
-    };
-    let (body, ctype) = match path {
-        "/" => (html.as_bytes().to_vec(), HTML),
-        "/api/stats" | "/api/snapshot" => {
-            let txt = jt(&merged(&snap));
-            (txt.into_bytes(), JSON)
-        }
-        _ => {
-            let _ = write!(
-                stream,
-                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
-            );
-            return;
-        }
-    };
-    let len = body.len();
-    let _ = write!(
-        stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
-        ctype, len
-    );
-    let _ = stream.write_all(&body);
-    let _ = stream.flush();
-}
-
-/*
- * Start the dashboard thread. Consumes snapshots and
- * exits when the shutdown flag is set or the channel
- * closes.
- */
+/* Start the dashboard thread. */
+/* Consumes snapshots plus exits when the shutdown flag is set */
+/* or the channel closes. Serves the page on the root plus the */
+/* same JSON on the stats plus snapshot paths with loopback only */
+/* plus no store plus unknown paths get not found. Binds one */
+/* loopback only with IPv6 first plus IPv4 fallback plus no */
+/* serve when both fail. One thread plus one lock per poll */
+/* stays cheap beside the page poll with no backlog. */
 pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     log::info!("web thread started");
     let html = include_str!("../../ui/index.html").to_string();
@@ -146,7 +88,6 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
             }
         }
     });
-    let unix_html = html.clone();
     let mut server: Option<Server> = None;
     let mut addr = String::new();
     if let Ok(s) = Server::http(format!("[::1]:{PORT}")) {
@@ -159,77 +100,50 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
         addr = format!("127.0.0.1:{PORT}");
         server = Some(s);
     }
-    if let Some(server) = server {
-        log::info!("web on port {addr}");
-        let nocache = Header::from_bytes("Cache-Control", "no-store").unwrap();
-        let htype = Header::from_bytes("Content-Type", HTML).unwrap();
-        let jtype = Header::from_bytes("Content-Type", JSON).unwrap();
-        while !shutdown.load(Ordering::Relaxed) {
-            let got = server.recv_timeout(Duration::from_millis(200));
-            let req = match got {
-                Ok(Some(v)) => v,
-                _ => continue,
-            };
-            let snap = match state.lock() {
-                Ok(v) => v.metrics.clone(),
-                Err(_) => continue,
-            };
-            match req.url() {
-                "/" => {
-                    let resp = Response::from_string(&html);
-                    let resp = resp.with_header(htype.clone());
-                    let resp = resp.with_header(nocache.clone());
-                    let _ = req.respond(resp);
-                }
-                "/api/stats" | "/api/snapshot" => {
-                    let txt = jt(&merged(&snap));
-                    let resp = Response::from_string(txt);
-                    let resp = resp.with_header(jtype.clone());
-                    let resp = resp.with_header(nocache.clone());
-                    let _ = req.respond(resp);
-                }
-                _ => {
-                    let _ = req.respond(Response::empty(404));
-                }
-            }
-        }
-    } else {
-        log::warn!("web TCP blocked, unix fallback");
-        if let Ok(m) = std::fs::symlink_metadata(SOCK)
-            && m.file_type().is_socket()
-        {
-            let _ = std::fs::remove_file(SOCK);
-        }
-        let lis = match UnixListener::bind(SOCK) {
-            Ok(v) => v,
-            Err(e) => {
-                log::warn!("unix bind failed: {e}");
-                return;
-            }
+    let Some(server) = server else {
+        log::warn!("web TCP blocked with no serve");
+        return;
+    };
+    log::info!("web on port {addr}");
+    let nocache = Header::from_bytes("Cache-Control", "no-store").unwrap();
+    let nosniff = Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap();
+    let frame = Header::from_bytes("X-Frame-Options", "DENY").unwrap();
+    let htype = Header::from_bytes("Content-Type", HTML).unwrap();
+    let jtype = Header::from_bytes("Content-Type", JSON).unwrap();
+    while !shutdown.load(Ordering::Relaxed) {
+        let got = server.recv_timeout(Duration::from_millis(200));
+        let req = match got {
+            Ok(Some(v)) => v,
+            _ => continue,
         };
-        let mode = PermissionsExt::from_mode(0o600);
-        if std::fs::set_permissions(SOCK, mode).is_err() {
-            log::warn!("socket mode failed");
-        }
-        log::info!("web on unix socket");
-        if lis.set_nonblocking(true).is_err() {
-            log::warn!("nonblock failed");
-            return;
-        }
-        while !shutdown.load(Ordering::Relaxed) {
-            match lis.accept() {
-                Ok((s, _)) => {
-                    let st = state.clone();
-                    let h = unix_html.clone();
-                    std::thread::spawn(move || unix_client(s, &st, &h));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    log::warn!("accept failed: {e}");
-                    std::thread::sleep(Duration::from_millis(100));
-                }
+        let snap = match state.lock() {
+            Ok(v) => v.metrics.clone(),
+            Err(_) => continue,
+        };
+        match req.url() {
+            "/" => {
+                let resp = Response::from_string(&html);
+                let resp = resp.with_header(htype.clone());
+                let resp = resp.with_header(nocache.clone());
+                let resp = resp.with_header(nosniff.clone());
+                let resp = resp.with_header(frame.clone());
+                let _ = req.respond(resp);
+            }
+            "/api/stats" | "/api/snapshot" => {
+                let txt = jt(&merged(&snap));
+                let resp = Response::from_string(txt);
+                let resp = resp.with_header(jtype.clone());
+                let resp = resp.with_header(nocache.clone());
+                let resp = resp.with_header(nosniff.clone());
+                let resp = resp.with_header(frame.clone());
+                let _ = req.respond(resp);
+            }
+            _ => {
+                let resp = Response::empty(404)
+                    .with_header(nocache.clone())
+                    .with_header(nosniff.clone())
+                    .with_header(frame.clone());
+                let _ = req.respond(resp);
             }
         }
     }
@@ -240,9 +154,9 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Dashboard keeps the per-CPU array names. */
+    /* Merged keeps the five live keys with no stale keys. */
     #[test]
-    fn merged_keeps_per_cpu_fields() {
+    fn merged_keeps_live_keys() {
         let snap = WebMetrics::default();
         let v = merged(&snap);
         assert!(v.get("stats").is_some());
@@ -250,250 +164,128 @@ mod tests {
         assert!(v.get("version").is_some());
         assert!(v.get("timestamp_ns").is_some());
         assert!(v.get("topology").is_some());
-        assert!(v.get("governor").is_some());
-        assert!(v.get("energy").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(7));
-        assert_eq!(
-            v.get("energy")
-                .and_then(|e| e.get("state"))
-                .and_then(|s| s.as_str()),
-            Some("unavailable")
-        );
-    }
-
-    /* One fixture per energy mode for the page. */
-    fn energy_fixture(state: &str, watts: f64) -> WebMetrics {
-        WebMetrics {
-            energy: crate::stats::EnergyMetrics {
-                state: state.to_string(),
-                since_running_kwh: 0.001,
-                live_watts: watts,
-                countdown_s: 12,
-                trace: format!("state {state} test trace"),
-            },
-            ..Default::default()
-        }
-    }
-
-    /* Merged carries all five energy modes to the page. */
-    #[test]
-    fn merged_carries_all_five_energy_modes() {
-        for (state, watts) in [
-            ("unavailable", 0.0),
-            ("baseline", 42.0),
-            ("collecting", 50.0),
-            ("waiting", 7.0),
-            ("backoff", 30.0),
-        ] {
-            let snap = energy_fixture(state, watts);
-            let v = merged(&snap);
-            assert_eq!(v.as_object().map(|o| o.len()), Some(7));
-            let e = v.get("energy").expect("energy key");
-            assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
-            assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
-            assert_eq!(
-                e.get("since_running_kwh").and_then(|n| n.as_f64()),
-                Some(0.001)
-            );
-            assert!(e.get("trace").and_then(|s| s.as_str()).is_some());
-            assert!(e.get("countdown_s").is_some());
-            assert!(e.get("accepted_pairs").is_none());
-            assert!(e.get("rejected_pairs").is_none());
-            assert!(e.get("headline_pct").is_none());
-            assert!(e.get("has_headline").is_none());
-            let back: WebMetrics = serde_json::from_value(v).unwrap();
-            assert_eq!(back.energy.state, state);
-            assert_eq!(back.energy.live_watts, watts);
-        }
-    }
-
-    /* Baseline carries the meter with live watts. */
-    #[test]
-    fn merged_carries_baseline_with_meter() {
-        let snap = WebMetrics {
-            energy: crate::stats::EnergyMetrics {
-                state: "baseline".to_string(),
-                since_running_kwh: 0.001,
-                live_watts: 42.0,
-                countdown_s: 0,
-                trace: "state baseline test trace".to_string(),
-            },
-            ..Default::default()
-        };
-        let v = merged(&snap);
-        let e = v.get("energy").expect("energy key");
-        assert_eq!(e.get("state").and_then(|s| s.as_str()), Some("baseline"));
-        assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(42.0));
-        assert_eq!(
-            e.get("since_running_kwh").and_then(|n| n.as_f64()),
-            Some(0.001)
-        );
-        let back: WebMetrics = serde_json::from_value(v).unwrap();
-        assert_eq!(back.energy.state, "baseline");
-        assert_eq!(back.energy.live_watts, 42.0);
-    }
-
-    /* Old snapshots without energy still decode unavailable. */
-    #[test]
-    fn web_metrics_missing_energy_is_unavailable() {
-        let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.2.24\"}";
-        let m: WebMetrics = serde_json::from_str(txt).unwrap();
-        assert_eq!(m.energy.state, "unavailable");
-        assert_eq!(m.energy.since_running_kwh, 0.0);
-        assert_eq!(m.energy.live_watts, 0.0);
-        let v = merged(&m);
-        assert_eq!(
-            v.get("energy")
-                .and_then(|e| e.get("state"))
-                .and_then(|s| s.as_str()),
-            Some("unavailable")
-        );
-    }
-
-    /* Waiting carries the meter and eleven keys for the page. */
-    #[test]
-    fn merged_carries_waiting_with_meter() {
-        for (state, watts) in [
-            ("unavailable", 0.0),
-            ("baseline", 42.0),
-            ("collecting", 50.0),
-            ("waiting", 7.0),
-            ("backoff", 30.0),
-        ] {
-            let snap = energy_fixture(state, watts);
-            let v = merged(&snap);
-            assert_eq!(v.as_object().map(|o| o.len()), Some(7));
-            let e = v.get("energy").expect("energy key");
-            assert_eq!(e.get("state").and_then(|s| s.as_str()), Some(state));
-            assert_eq!(e.get("live_watts").and_then(|n| n.as_f64()), Some(watts));
-            let back: WebMetrics = serde_json::from_value(v).unwrap();
-            assert_eq!(back.energy.state, state);
-        }
-        let wait = energy_fixture("waiting", 7.0);
-        assert_eq!(wait.energy.state, "waiting");
-        assert_eq!(merged(&wait)["energy"]["state"], "waiting");
+        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert!(v.get("governor").is_none());
+        assert!(v.get("energy").is_none());
     }
 
     /* Old snapshots without new fields still decode. */
     #[test]
     fn web_metrics_missing_fields_default() {
-        let txt = "{\"stats\":{\"on_cpu\":1,\"total_runtime\":0,\
-            \"uptime_ns\":0,\"inserts\":0,\
-            \"requeues\":0,\"completions\":0,\
-            \"park_moves\":0,\"steal_moves\":0,\
-            \"kicks\":0,\"enq_no_tctx\":0}}";
+        let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.5.1\"}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.stats.preempt_kicks, 0);
-        assert_eq!(m.stats.preempt_skipped, 0);
-        assert_eq!(m.stats.slot_moves, 0);
-        assert_eq!(m.stats.global_moves, 0);
-        assert_eq!(m.stats.throttled_ns, 0);
-        assert_eq!(m.stats.nr_throttled, 0);
-        assert_eq!(m.stats.parked, 0);
-        assert_eq!(m.stats.bw_moves, 0);
+        assert_eq!(m.stats.local_moves, 0);
+        assert_eq!(m.stats.gate_rejects, 0);
         assert!(m.per_cpu.is_empty());
-        assert_eq!(m.version, "");
+        assert_eq!(m.version, "4.5.1");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
-        assert_eq!(m.governor, "");
-        let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
-        let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
-        assert_eq!(m2.per_cpu[0].id, 0);
-        assert_eq!(m2.per_cpu[0].slice_ns, 0);
-        assert_eq!(m2.per_cpu[0].running_pid, 0);
-        let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
-        let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
-        assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
+        let old = "{\"id\":1,\"running_pid\":5,\"slice_ns\":2000000}";
+        let card: crate::stats::PerCpuMetrics = serde_json::from_str(old).unwrap();
+        assert_eq!(card.id, 1);
+        assert!(!card.smt);
+        assert_eq!(card.running_pid, 5);
+        let v = merged(&m);
+        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        let back: WebMetrics = serde_json::from_value(v).unwrap();
+        assert_eq!(back.stats.on_cpu, 1);
+        assert_eq!(back.version, "4.5.1");
     }
 
-    /* Full snapshot round trips through JSON. */
+    /* Full snapshot round trips through JSON with live counters. */
     #[test]
     fn web_metrics_round_trip() {
         let snap = WebMetrics {
             stats: crate::stats::Metrics {
+                on_cpu: 2,
+                total_runtime: 1_000_000,
+                uptime_ns: 2_000_000,
                 inserts: 3,
                 requeues: 1,
                 completions: 2,
-                park_moves: 1,
-                steal_moves: 2,
-                kicks: 4,
-                preempt_kicks: 6,
-                preempt_skipped: 7,
-                slot_moves: 40,
-                global_moves: 6,
-                throttled_ns: 1_000_000,
-                nr_throttled: 2,
-                parked: 2,
-                bw_moves: 1,
-                ..Default::default()
+                local_moves: 10,
+                node_moves: 4,
+                machine_moves: 2,
+                over_moves: 1,
+                kicks: 5,
+                admits: 3,
+                rejects: 1,
+                misses: 2,
+                parks: 2,
+                gate_rejects: 0,
             },
-            per_cpu: vec![crate::stats::PerCpuMetrics {
-                id: 0,
-                slice_ns: 1_000_000,
-                running_pid: 7,
-                ..Default::default()
-            }],
-            version: "4.4.7".to_string(),
+            per_cpu: vec![
+                crate::stats::PerCpuMetrics {
+                    id: 0,
+                    smt: false,
+                    running_pid: 7,
+                    slice_ns: 2_000_000,
+                },
+                crate::stats::PerCpuMetrics {
+                    id: 1,
+                    smt: true,
+                    running_pid: 0,
+                    slice_ns: 2_000_000,
+                },
+            ],
+            version: "4.5.1".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
-            topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
-            governor: "performance (epp:performance)".to_string(),
-            energy: crate::stats::EnergyMetrics::default(),
+            topology: "cpus=4 seeded".to_string(),
         };
         let txt = serde_json::to_string(&snap).unwrap();
+        assert!(txt.contains("local_moves"));
+        assert!(txt.contains("node_moves"));
+        assert!(txt.contains("machine_moves"));
+        assert!(txt.contains("over_moves"));
+        assert!(txt.contains("admits"));
+        assert!(txt.contains("rejects"));
+        assert!(txt.contains("misses"));
+        assert!(txt.contains("parks"));
+        assert!(txt.contains("gate_rejects"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
-        assert!(txt.contains("preempt_kicks"));
-        assert!(txt.contains("preempt_skipped"));
-        assert!(txt.contains("slot_moves"));
-        assert!(txt.contains("global_moves"));
-        assert!(txt.contains("throttled_ns"));
-        assert!(txt.contains("nr_throttled"));
-        assert!(txt.contains("parked"));
-        assert!(txt.contains("bw_moves"));
+        assert!(txt.contains("\"smt\":false"));
+        assert!(txt.contains("\"smt\":true"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
-        assert!(txt.contains("governor"));
-        assert!(txt.contains("energy"));
-        assert!(txt.contains("since_running_kwh"));
-        assert!(txt.contains("live_watts"));
-        assert!(!txt.contains("group_demote"));
-        assert!(!txt.contains("light_depth"));
-        assert!(!txt.contains("perf_mode"));
-        assert!(!txt.contains("accepted_pairs"));
-        assert!(!txt.contains("rejected_pairs"));
-        assert!(!txt.contains("headline"));
-        assert!(!txt.contains("fast_admits"));
-        assert!(!txt.contains("fast_bounds"));
-        assert!(!txt.contains("vtime_admits"));
-        assert!(!txt.contains("duty_gates"));
-        assert!(!txt.contains("prob_holds"));
-        assert!(!txt.contains("elev_moves"));
-        assert!(!txt.contains("steal_penalties"));
-        assert!(!txt.contains("min_vruntime"));
+        assert!(txt.contains("timestamp_ns"));
+        assert!(!txt.contains("steal_moves"));
+        assert!(!txt.contains("slot_moves"));
+        assert!(!txt.contains("throttled_ns"));
+        assert!(!txt.contains("nr_throttled"));
+        assert!(!txt.contains("bw_moves"));
+        assert!(!txt.contains("park_moves"));
+        assert!(!txt.contains("enq_no_tctx"));
+        assert!(!txt.contains("preempt_kicks"));
+        assert!(!txt.contains("preempt_skipped"));
+        assert!(!txt.contains("freq_khz"));
+        assert!(!txt.contains("cur_freq"));
+        assert!(!txt.contains("llc_id"));
+        assert!(!txt.contains("governor"));
+        assert!(!txt.contains("energy"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
-        assert_eq!(back.stats.inserts, 3);
-        assert_eq!(back.stats.preempt_kicks, 6);
-        assert_eq!(back.stats.preempt_skipped, 7);
-        assert_eq!(back.stats.slot_moves, 40);
-        assert_eq!(back.stats.global_moves, 6);
-        assert_eq!(back.stats.steal_moves, 2);
-        assert_eq!(back.stats.throttled_ns, 1_000_000);
-        assert_eq!(back.stats.nr_throttled, 2);
-        assert_eq!(back.stats.parked, 2);
-        assert_eq!(back.stats.bw_moves, 1);
-        assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
+        assert_eq!(back.stats.local_moves, 10);
+        assert_eq!(back.stats.node_moves, 4);
+        assert_eq!(back.stats.machine_moves, 2);
+        assert_eq!(back.stats.over_moves, 1);
+        assert_eq!(back.stats.admits, 3);
+        assert_eq!(back.stats.rejects, 1);
+        assert_eq!(back.stats.misses, 2);
+        assert_eq!(back.stats.parks, 2);
+        assert_eq!(back.stats.gate_rejects, 0);
+        assert_eq!(back.per_cpu.len(), 2);
+        assert!(!back.per_cpu[0].smt);
+        assert!(back.per_cpu[1].smt);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.7");
-        assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
-        assert_eq!(back.governor, "performance (epp:performance)");
-        assert_eq!(back.energy.state, "unavailable");
-        assert_eq!(back.energy.since_running_kwh, 0.0);
+        assert_eq!(back.per_cpu[0].slice_ns, 2_000_000);
+        assert_eq!(back.per_cpu[1].id, 1);
+        assert_eq!(back.version, "4.5.1");
+        assert_eq!(back.topology, "cpus=4 seeded");
         let v = merged(&snap);
-        assert_eq!(
-            v.get("governor").and_then(|x| x.as_str()),
-            Some("performance (epp:performance)")
-        );
+        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert!(v.get("governor").is_none());
+        assert!(v.get("energy").is_none());
     }
 
     /* Dashboard keeps live ids without stale cards. */
@@ -502,14 +294,6 @@ mod tests {
         let html = include_str!("../../ui/index.html");
         assert!(!html.contains("stale-pill"));
         assert!(!html.contains("core-stale"));
-        assert!(!html.contains("Last slice CPU idle"));
-        assert!(!html.contains("fast-admits"));
-        assert!(!html.contains("fast-bound"));
-        assert!(!html.contains("vtime-admits"));
-        assert!(!html.contains("duty-gates"));
-        assert!(!html.contains("prob-holds"));
-        assert!(!html.contains("elev-moves"));
-        assert!(!html.contains("steal-pen"));
         assert!(html.contains("text-overflow: ellipsis"));
         assert!(html.contains("tabular-nums"));
     }
@@ -526,76 +310,77 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the preempt cells. */
+    /* Dashboard shows the fifteen live counters plus uptime. */
     #[test]
-    fn dashboard_shows_preempt_cells() {
+    fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"pkick\""));
-        assert!(html.contains("id=\"pskip\""));
-        assert!(html.contains("preempt_kicks"));
-        assert!(html.contains("preempt_skipped"));
+        assert!(html.contains("id=\"on-cpu\""));
+        assert!(html.contains("id=\"runtime\""));
+        assert!(html.contains("id=\"uptime\""));
+        assert!(html.contains("id=\"inserts\""));
+        assert!(html.contains("id=\"requeues\""));
+        assert!(html.contains("id=\"completions\""));
+        assert!(html.contains("id=\"local-moves\""));
+        assert!(html.contains("id=\"node-moves\""));
+        assert!(html.contains("id=\"machine-moves\""));
+        assert!(html.contains("id=\"over-moves\""));
+        assert!(html.contains("id=\"kicks\""));
+        assert!(html.contains("id=\"admits\""));
+        assert!(html.contains("id=\"rejects\""));
+        assert!(html.contains("id=\"misses\""));
+        assert!(html.contains("id=\"parks\""));
+        assert!(html.contains("id=\"gate-rejects\""));
+        assert!(html.contains("on_cpu"));
+        assert!(html.contains("total_runtime"));
+        assert!(html.contains("uptime_ns"));
+        assert!(html.contains("local_moves"));
+        assert!(html.contains("node_moves"));
+        assert!(html.contains("machine_moves"));
+        assert!(html.contains("over_moves"));
+        assert!(html.contains("gate_rejects"));
+        assert!(!html.contains("global_moves"));
+        assert!(!html.contains("global-moves"));
     }
 
-    /* Dashboard shows the slot cell. */
+    /* Dashboard hides stale wire fields plus heavy sections. */
     #[test]
-    fn dashboard_shows_slot_cells() {
+    fn dashboard_hides_stale_fields() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"slot-moves\""));
-        assert!(html.contains("slot_moves"));
-        assert!(!html.contains("fast_admits"));
-        assert!(!html.contains("fast_bounds"));
-        assert!(!html.contains("vtime_admits"));
+        assert!(!html.contains("steal_moves"));
+        assert!(!html.contains("slot_moves"));
+        assert!(!html.contains("throttled_ns"));
+        assert!(!html.contains("nr_throttled"));
+        assert!(!html.contains("bw_moves"));
+        assert!(!html.contains("park_moves"));
+        assert!(!html.contains("enq_no_tctx"));
+        assert!(!html.contains("preempt_kicks"));
+        assert!(!html.contains("preempt_skipped"));
+        assert!(!html.contains("freq_khz"));
+        assert!(!html.contains("cur_freq"));
+        assert!(!html.contains("llc_id"));
+        assert!(!html.contains("core-freq"));
+        assert!(!html.contains("core-llc"));
+        assert!(!html.contains("governor"));
+        assert!(!html.contains("energy"));
+        assert!(!html.contains("id=\"energy-since\""));
+        assert!(!html.contains("id=\"mode-badge\""));
+        assert!(!html.contains("no-tctx"));
+        assert!(!html.contains("id=\"steal\""));
+        assert!(!html.contains("id=\"throttled-ns\""));
     }
 
-    /* Dashboard hides prior lane cells. */
+    /* Dashboard marks the second thread cards with SMT. */
     #[test]
-    fn dashboard_hides_prior_cells() {
+    fn dashboard_shows_smt_badge() {
         let html = include_str!("../../ui/index.html");
-        assert!(!html.contains("id=\"fast-admits\""));
-        assert!(!html.contains("id=\"fast-bound\""));
-        assert!(!html.contains("id=\"vtime-admits\""));
-        assert!(!html.contains("id=\"duty-gates\""));
-        assert!(!html.contains("id=\"prob-holds\""));
-        assert!(!html.contains("id=\"elev-moves\""));
-        assert!(!html.contains("id=\"steal-pen\""));
-        assert!(!html.contains("duty_gates"));
-        assert!(!html.contains("prob_holds"));
-        assert!(!html.contains("elev_moves"));
-        assert!(!html.contains("steal_penalties"));
+        assert!(html.contains("core-smt"));
+        assert!(html.contains("smtLabel"));
+        assert!(html.contains("cpu.smt"));
+        assert!(html.contains(">SMT<"));
+        assert!(html.contains("var(--warning)"));
     }
 
-    /* Dashboard shows the global moves cell. */
-    #[test]
-    fn dashboard_shows_global_cell() {
-        let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"global-moves\""));
-        assert!(html.contains("global_moves"));
-        assert!(!html.contains("steal_penalties"));
-    }
-
-    /* Dashboard shows the steal cell. */
-    #[test]
-    fn dashboard_shows_steal_cell() {
-        let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"steal\""));
-        assert!(html.contains("steal_moves"));
-    }
-
-    /* Dashboard shows the four hierarchy cells. */
-    #[test]
-    fn dashboard_shows_hierarchy_cells() {
-        let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"throttled-ns\""));
-        assert!(html.contains("throttled_ns"));
-        assert!(html.contains("id=\"nr-throttled\""));
-        assert!(html.contains("nr_throttled"));
-        assert!(html.contains("id=\"parked\""));
-        assert!(html.contains("parked"));
-        assert!(html.contains("id=\"bw-moves\""));
-        assert!(html.contains("bw_moves"));
-    }
-
-    /* Dashboard clamps on CPU and shows the live pid count. */
+    /* Dashboard clamps on CPU plus shows the live pid count. */
     #[test]
     fn dashboard_shows_live_pids_cell() {
         let html = include_str!("../../ui/index.html");
@@ -610,7 +395,6 @@ mod tests {
     #[test]
     fn dashboard_centers_header_capsules() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("#mode-badge"));
         assert!(html.contains("#status-badge"));
         assert!(html.contains("#download"));
         assert!(html.contains(".run-badge"));
@@ -618,72 +402,16 @@ mod tests {
         assert!(html.contains("align-items: center"));
         assert!(html.contains("justify-content: center"));
         assert!(html.contains("line-height: 1.4"));
+        assert!(!html.contains("#mode-badge"));
     }
 
-    /* Dashboard shows the governor mode cell. */
+    /* Dashboard polls once per second with no stored history. */
     #[test]
-    fn dashboard_shows_mode_cell() {
+    fn dashboard_polls_once_per_second() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"mode-badge\""));
-        assert!(html.contains("governor"));
-        assert!(!html.contains("perf_mode"));
-    }
-
-    /* Dashboard shows the calm meter-only energy section. */
-    #[test]
-    fn dashboard_shows_energy_section() {
-        let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"energy-since\""));
-        assert!(html.contains("id=\"energy-watts\""));
-        assert!(html.contains("id=\"energy-note\""));
-        assert!(html.contains("Consumed since launch"));
-        assert!(html.contains("Live watts"));
-        assert!(html.contains("Section shows energy consumed since launch"));
-        assert!(html.contains("Note numbers for manual compare"));
-        assert!(html.contains("Placement follows the governor only"));
-        assert!(html.contains("unavailable"));
-        assert!(html.contains("data.energy"));
-        assert!(html.contains("since_running_kwh"));
-        assert!(html.contains("live_watts"));
-        assert!(html.contains("energy-meter"));
-        assert!(html.contains("energy-label"));
-        assert!(!html.contains("id=\"energy-state\""));
-        assert!(!html.contains("id=\"energy-countdown\""));
-        assert!(!html.contains("id=\"energy-trace\""));
-        assert!(!html.contains("energy-legend"));
-        assert!(!html.contains("legend-row"));
-        assert!(!html.contains("legend-sym"));
-        assert!(!html.contains("trace-row"));
-        assert!(!html.contains("trace-key"));
-        assert!(!html.contains("trace-val"));
-        assert!(!html.contains("trace-meter"));
-        assert!(!html.contains("renderTrace"));
-        assert!(!html.contains("traceClass"));
-        assert!(!html.contains("fmtCountdown"));
-        assert!(!html.contains("countdown_s"));
-        assert!(!html.contains("energy.trace"));
-        assert!(!html.contains("Countdown:</span>"));
-        assert!(!html.contains("State:</span>"));
-        assert!(!html.contains("Waiting for load"));
-        assert!(!html.contains("Cooling down"));
-        assert!(!html.contains("Paused while the governor"));
-        assert!(!html.contains("No package counter found"));
-        assert!(!html.contains("'waiting'"));
-        assert!(!html.contains("'collecting'"));
-        assert!(!html.contains("'baseline'"));
-        assert!(!html.contains("'backoff'"));
-        assert!(!html.contains("E_used"));
-        assert!(!html.contains("E_saved"));
-        assert!(!html.contains("energy-pairs"));
-        assert!(!html.contains("energy-daily"));
-        assert!(!html.contains("energy-yearly"));
-        assert!(!html.contains("rejected_pairs"));
-        assert!(!html.contains("accepted_pairs"));
-        assert!(!html.contains("headline"));
-        let energy_at = html.find("id=\"energy-since\"").unwrap();
-        let system_at = html.find("id=\"on-cpu\"").unwrap();
-        assert!(energy_at < system_at);
         assert_eq!(html.matches("setInterval").count(), 1);
         assert!(!html.contains("localStorage"));
+        assert!(html.contains("/api/stats"));
+        assert!(html.contains("slice_ns"));
     }
 }

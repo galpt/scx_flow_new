@@ -3,7 +3,9 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Loads the BPF object, wires stats and the dashboard, then drives the loop.
+//! Loads the BPF object, seeds the topology view, then drives the loop.
+//! Observability is counters through the stats server plus the loopback
+//! dashboard with per CPU cards plus a JSON snapshot for debugging.
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -25,10 +27,11 @@ mod flow_runtime;
 mod flow_select;
 #[path = "rust/flow_slice.rs"]
 mod flow_slice;
+/* Test-only queue id mirror with no production use, so it stays out of */
+/* the binary and only builds for tests. */
+#[cfg(test)]
 #[path = "rust/flow_slot.rs"]
 mod flow_slot;
-#[path = "rust/rapl.rs"]
-mod rapl;
 #[path = "rust/snapshot.rs"]
 mod snapshot;
 #[path = "rust/stats.rs"]
@@ -68,6 +71,7 @@ use stats::Metrics;
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
 /* CPU bound shared with the BPF header. */
+#[cfg(test)]
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
 
 fn full_version() -> String {
@@ -110,35 +114,22 @@ struct Opts {
 
 /*
  * Scheduler owns the skeleton, the link, the stats
- * server and the dashboard channel. It drives the run
+ * server plus the dashboard channel. It drives the run
  * loop until shutdown or exit.
  */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-    /* Dashboard sender. None when disabled. */
+    started_at: std::time::Instant,
+    /* Dashboard sender with None when disabled. */
     webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
-    /* Static per-CPU cards seeded at attach. */
-    cpu_static: Vec<stats::PerCpuMetrics>,
     /* Online ids once at init in rank order. */
     online_cpus: Vec<u32>,
-    /* Live frequency cache by online rank. */
-    cur_freq_khz: Vec<u64>,
-    freq_read_at: Option<std::time::Instant>,
-    started_at: std::time::Instant,
-    /* Governor display with EPP and platform suffix. */
-    governor: String,
-    /* Last governor poll for the 1s tick writer. */
-    governor_read_at: Option<std::time::Instant>,
-    /* Package energy reader. None parks the probe. */
-    rapl: Option<crate::rapl::RaplReader>,
-    /* Strict only probe over package joules on the 1s tick. */
-    probe: crate::snapshot::EnergyProbe,
-    /* Latest energy view for the dashboard. */
-    energy: crate::stats::EnergyMetrics,
-    /* Last RAPL sample for the 1s tick cadence. */
-    rapl_read_at: Option<std::time::Instant>,
+    /* SMT flag per online CPU in rank order for the cards. */
+    smt: Vec<bool>,
+    /* One line topology summary for the page. */
+    topology: String,
 }
 
 impl<'a> Scheduler<'a> {
@@ -158,34 +149,12 @@ impl<'a> Scheduler<'a> {
         info!("Config: {}", cfg.describe());
         /* Ops flags live in the BPF object for kernel 7.2 and up. */
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
-        /* Static cards seed the start log and the cards. Live frequency */
-        /* stays display only and never shapes placement. */
-        let cards = topology::web_cpu_static();
-        /* Online ids once at init in rank order. Snapshot reads online CPUs */
-        /* again each tick for hotplug. */
-        let mut online = topology::online_cpus();
-        if online.is_empty() {
-            online = cards.iter().map(|c| c.id).collect();
-            online.sort_unstable();
-            online.dedup();
-        }
-        let mut possible = topology::possible_nr();
-        if possible == 0 {
-            possible = online
-                .iter()
-                .max()
-                .map(|m| *m as usize + 1)
-                .unwrap_or(0)
-                .min(MAX_CPUS);
-        }
-        /* Governor poll once at init over online only for display. */
-        let governors = topology::collect_governors(&online);
-        let governor = topology::display_governor(&governors);
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         let _ = &mut skel;
-        /* Seed the BPF topology view with sibling plus domain rows. */
-        /* Failures keep the BPF defaults with cursor order steal. */
-        Self::seed_topo(&mut skel);
+        /* Seed the BPF topology view with sibling plus node rows. */
+        /* Failures keep the BPF defaults with node zero. */
+        let rows = topology::topo_rows();
+        Self::seed_topo_with(&mut skel, &rows);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         /* Bounded dashboard channel drops a frame when full. */
@@ -199,35 +168,23 @@ impl<'a> Scheduler<'a> {
             });
             Some(tx)
         };
-        /* Static cards seed the start log and the cards. */
-        /* Frequency stays display only here. */
-        info!("Topology: {}", topology::describe_topology(&cards));
-        info!("online: {} cpus over possible {}", online.len(), possible,);
-        info!("governor: {}", governor);
-        let rapl = crate::rapl::RaplReader::open_default();
-        if rapl.is_some() {
-            info!("RAPL package zone open for the energy probe");
-        } else {
-            log::warn!("RAPL unavailable, energy probe parked");
-        }
-        let cpu_static = if opts.no_webui { Vec::new() } else { cards };
-        let freq_cap = online.len().min(MAX_CPUS);
+        let online_cpus: Vec<u32> = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+        /* SMT flags cache the sibling view with no sysfs use on poll. */
+        let smt: Vec<bool> = rows
+            .iter()
+            .map(|(cpu, sib, _)| topology::is_smt_thread(*cpu, *sib))
+            .collect();
+        let topology = topology::describe_topology(&rows);
+        info!("Topology: {topology}");
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
-            webui_tx,
-            cpu_static,
-            online_cpus: online,
-            cur_freq_khz: Vec::with_capacity(freq_cap),
-            freq_read_at: None,
             started_at: std::time::Instant::now(),
-            governor,
-            governor_read_at: None,
-            rapl,
-            probe: crate::snapshot::EnergyProbe::new(),
-            energy: crate::stats::EnergyMetrics::default(),
-            rapl_read_at: None,
+            webui_tx,
+            online_cpus,
+            smt,
+            topology,
         })
     }
 
@@ -236,15 +193,15 @@ impl<'a> Scheduler<'a> {
     }
 
     /* Seed one topology row per CPU into the BPF view. */
-    /* Each row carries the thread sibling and the cache domain. */
+    /* Each row carries the thread sibling and the node id. */
     /* A failed update keeps the BPF default with no trap. */
-    fn seed_topo(skel: &mut BpfSkel<'_>) {
+    fn seed_topo_with(skel: &mut BpfSkel<'_>, rows: &[(u32, u32, u32)]) {
         use libbpf_rs::MapCore;
-        for (cpu, sib, llc) in topology::topo_rows() {
+        for (cpu, sib, node) in rows {
             let key = cpu.to_ne_bytes();
             let mut val = [0u8; 8];
             val[0..4].copy_from_slice(&sib.to_ne_bytes());
-            val[4..8].copy_from_slice(&llc.to_ne_bytes());
+            val[4..8].copy_from_slice(&node.to_ne_bytes());
             if let Err(e) = skel
                 .maps
                 .topo_stor
@@ -257,18 +214,31 @@ impl<'a> Scheduler<'a> {
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
+        /* Short tick keeps stats polls prompt while the page polls */
+        /* once per second, so most ticks only refresh the bound */
+        /* channel when the dashboard is on plus the queue has room. */
+        /* One BPF read serves both the stats reply plus the page. */
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(100)) {
                 Ok(()) => {
-                    let web = self.get_web_metrics();
                     if let Some(ref tx) = self.webui_tx {
-                        let _ = tx.try_send(web);
+                        if !tx.is_full() {
+                            let web = self.get_web_metrics();
+                            let stats = web.stats.clone();
+                            let _ = tx.try_send(web);
+                            res_ch.send(stats)?
+                        } else {
+                            res_ch.send(self.get_metrics())?
+                        }
+                    } else {
+                        res_ch.send(self.get_metrics())?
                     }
-                    res_ch.send(self.get_metrics())?
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let web = self.get_web_metrics();
-                    if let Some(ref tx) = self.webui_tx {
+                    if let Some(ref tx) = self.webui_tx
+                        && !tx.is_full()
+                    {
+                        let web = self.get_web_metrics();
                         let _ = tx.try_send(web);
                     }
                 }
@@ -276,31 +246,23 @@ impl<'a> Scheduler<'a> {
             }
         }
         let m = self.get_metrics();
-        let (runtime, oncpu) = (m.total_runtime, m.on_cpu);
         info!(
-            "exit ins={} req={} done={} park={} steal={} \
-            kick={} noctx={} \
-            pkick={} pskip={} \
-            smoves={} global={} \
-            thr={} nthr={} parked={} bw={} \
-            runtime={} oncpu={}",
+            "exit ins={} req={} done={} local={} node={} machine={} over={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
-            m.park_moves,
-            m.steal_moves,
+            m.local_moves,
+            m.node_moves,
+            m.machine_moves,
+            m.over_moves,
             m.kicks,
-            m.enq_no_tctx,
-            m.preempt_kicks,
-            m.preempt_skipped,
-            m.slot_moves,
-            m.global_moves,
-            m.throttled_ns,
-            m.nr_throttled,
-            m.parked,
-            m.bw_moves,
-            runtime,
-            oncpu,
+            m.admits,
+            m.rejects,
+            m.misses,
+            m.parks,
+            m.gate_rejects,
+            m.total_runtime,
+            m.on_cpu,
         );
         let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
@@ -383,9 +345,10 @@ mod tests {
     #[test]
     fn batch_matches_header() {
         assert_eq!(
-            crate::flow_edf::DISPATCH_BATCH as u64,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
+            crate::config::Config::default().dispatch_batch,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
         );
+        assert_eq!(crate::config::Config::default().dispatch_batch, 16);
     }
 
     #[test]
@@ -394,10 +357,10 @@ mod tests {
             crate::flow_slice::QUANTUM_NS,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(crate::flow_slice::QUANTUM_NS, 1_000_000);
-        assert_eq!(crate::flow_slice::WEIGHT_BASE, 100);
+        assert_eq!(crate::flow_slice::QUANTUM_NS, 2_000_000);
+        assert_eq!(crate::flow_slice::WEIGHT_BASE, 128);
         assert_eq!(crate::flow_slice::WEIGHT_MIN, 1);
-        assert_eq!(crate::flow_slice::WEIGHT_MAX, 10_000);
+        assert_eq!(crate::flow_slice::WEIGHT_MAX, 16_384);
     }
 
     #[test]
@@ -406,59 +369,30 @@ mod tests {
             crate::flow_slot::SLOT_OVERFLOW,
             crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
         );
-        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x7000);
+        assert_eq!(crate::flow_slot::SLOT_OVERFLOW, 0x5A01);
         assert_eq!(
-            crate::flow_slot::SLOT_BUDGET,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET
+            crate::flow_slot::SLOT_MACHINE,
+            crate::bpf_intf::flow_consts_FLOW_MACHINE as u64
         );
         assert_eq!(
             crate::flow_slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 1025);
-        assert_eq!(
-            crate::flow_slot::VTIME_BASE,
-            crate::bpf_intf::flow_consts_FLOW_VTIME_BASE as u64
-        );
-        assert_eq!(
-            crate::flow_slot::SLOT_OWN_CAP,
-            crate::bpf_intf::flow_consts_FLOW_OWN_VTIME_CAP
-        );
-        assert_eq!(
-            crate::flow_slot::SLOT_OVER_CAP,
-            crate::bpf_intf::flow_consts_FLOW_OVER_CAP
-        );
-        assert_eq!(
-            crate::flow_slot::SLOT_GATED_CAP,
-            crate::bpf_intf::flow_consts_FLOW_GATED_CAP
-        );
-        assert_eq!(crate::flow_slot::SLOT_GATED_CAP, 6);
+        assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 522);
     }
 
     #[test]
-    fn starve_matches_header() {
+    fn period_matches_header() {
         assert_eq!(
-            crate::flow_edf::STARVE_NS,
-            crate::bpf_intf::flow_consts_FLOW_STARVE_NS as u64
+            crate::flow_edf::PERIOD_NS,
+            crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
         );
-        assert_eq!(crate::flow_edf::STARVE_NS, 2_000_000);
+        assert_eq!(crate::flow_edf::PERIOD_NS, 16_000_000);
     }
 
     #[test]
-    fn steal_matches_header() {
-        assert_eq!(
-            crate::flow_select::STEAL_MIN_DEPTH,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_DEPTH as u64
-        );
-        assert_eq!(
-            crate::flow_select::STEAL_BOUND as u64,
-            crate::bpf_intf::flow_consts_FLOW_STEAL_BOUND as u64
-        );
-    }
-
-    #[test]
-    fn task_size_is_48() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 48);
+    fn task_size_is_72() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
     }
 
     #[test]
@@ -472,34 +406,29 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_136() {
+    fn sched_stats_size_is_120() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            136
+            120
         );
     }
 
     #[test]
-    fn cgrp_matches_header() {
-        assert_eq!(
-            crate::flow_cgrp::CGRP_MAX as u64,
-            crate::bpf_intf::flow_consts_FLOW_CGRP_MAX as u64
-        );
-        assert_eq!(
-            crate::flow_cgrp::CGRP_DEPTH_MAX as u64,
-            crate::bpf_intf::flow_consts_FLOW_CGRP_DEPTH_MAX as u64
-        );
-        assert_eq!(
-            crate::flow_cgrp::BW_PERIOD_MIN_US,
-            crate::bpf_intf::flow_consts_FLOW_BW_PERIOD_MIN_US as u64
-        );
-        assert_eq!(crate::flow_cgrp::CGRP_MAX, 2048);
-        assert_eq!(crate::flow_cgrp::CGRP_DEPTH_MAX, 8);
-        assert_eq!(crate::flow_cgrp::BW_PERIOD_MIN_US, 1000);
+    fn kick_rule_matches_header() {
+        assert!(crate::flow::arrival_kicks(10, 20));
+        assert!(!crate::flow::arrival_kicks(20, 20));
     }
 
     #[test]
-    fn cgrp_size_is_48() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cgrp_ctx>(), 48);
+    fn runtime_advance_matches_base() {
+        assert_eq!(crate::flow::runtime_advance(0, 2_000_000, 128), 2_000_000);
+    }
+
+    #[test]
+    fn hint_matches_header() {
+        assert_eq!(
+            crate::flow_cgrp::HINT_MAX,
+            crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
+        );
     }
 }

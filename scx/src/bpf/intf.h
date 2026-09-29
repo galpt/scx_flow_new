@@ -2,23 +2,23 @@
 /*
  * Shared constants and helpers for the flow scheduler.
  *
- * The scheduler keeps one deadline queue per CPU plus one shared
- * overflow tail, and it uses the kernel global queue for homeless
- * work. Every task carries a deadline shaped by the task weight
- * through the effective share, and each queue orders by that
- * deadline. Every task also carries virtual runtime advanced by
- * scaled execution at stop, and each CPU tracks a floor of served
- * runtime. Open inserts key past the later of runtime and floor
- * with a slack capped at twice the quantum, so a long sleep never
- * earns credit and a light task never leaps in one arrival. The
- * effective share folds the task weight with the hierarchy weights
- * along the ancestors, so a task under a light parent waits longer.
- * Bandwidth pools cap runtime per period with lazy refill, and throttled work parks in overflow. Service runs
- * one fixed quantum, so placement and steal stay independent of
- * weight except through deadline order. See enqueue.bpf.c for the
- * deadline choice, cgroup.bpf.c for the hierarchy state,
- * lifecycle.bpf.c for the runtime count, dispatch.bpf.c for the
- * drain order, and select_cpu.bpf.c for placement.
+ * The scheduler keeps one local queue per CPU plus one shared queue
+ * per node plus one shared queue per machine plus one overflow tail.
+ * Homeless work parks in the overflow tail with all other parks.
+ * Every task carries a release plus a period plus an absolute
+ * deadline, and each queue orders by that deadline. Admission holds
+ * total declared use under ninety five percent of the machine, so
+ * admitted work can meet its deadlines. A miss counts when wall
+ * completion passes release plus deadline, and a miss parks the task
+ * in overflow with a direct kick and no wait. Placement takes the
+ * slowest sufficient CPU among the allowed set that can meet the
+ * deadline, so light work never takes a fast CPU that other work
+ * needs. Hints from the flat view tune the period only, and no group
+ * or pool shapes order. See select_cpu.bpf.c for placement and
+ * enqueue.bpf.c for admission plus the deadline choice and
+ * dispatch.bpf.c for the four single moves and lifecycle.bpf.c for
+ * the miss count and timer.bpf.c for the leftover charge plus the
+ * miss count.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -45,175 +45,175 @@ typedef int pid_t;
 #ifndef READ_ONCE
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
 #endif
-/* Fixed quantum of 1ms with no knob. Every insert uses this slice. */
+/* Fixed slice of 2ms with no knob. Every insert uses this slice. */
+/* Two ms covers two 1ms wakeups, so one slice always spans the */
+/* cheapest wakeup granularity with margin for one late wakeup. */
 enum flow_consts {
-	FLOW_QUANTUM_NS = 1000000ULL,
-	FLOW_WEIGHT_BASE = 100ULL,
+	FLOW_QUANTUM_NS = 2000000ULL,
+	/* Default period of 16ms with no knob. Holds eight slices, */
+	/* so a fully used task still leaves room for one park plus */
+	/* one retry inside the period. */
+	FLOW_PERIOD_NS = 16000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
-	FLOW_WEIGHT_MAX = 10000ULL,
-	FLOW_MAX_CPUS = 1024ULL,
-	FLOW_VTIME_BASE = 0x6800ULL,
-	FLOW_OVERFLOW = 0x7000ULL,
-	FLOW_MAX_DSQS = 1025ULL,
-	FLOW_SLOT_BUDGET = 32ULL,
-	FLOW_DISPATCH_MAX_BATCH = 32ULL,
-	FLOW_OWN_VTIME_CAP = 12ULL,
-	FLOW_OVER_CAP = 4ULL,
-	/* Gated starvation cap at 6 under the dispatch budget. Runs bounded */
-	/* but larger than the shared tail, so old tasks behind young heads */
-	/* still surface with a finite scan. */
-	FLOW_GATED_CAP = 6ULL,
-	FLOW_MISS_CAP = 4ULL,
-	FLOW_STEAL_BOUND = 8ULL,
-	FLOW_STEAL_MIN_DEPTH = 2ULL,
-	FLOW_OPS_TIMEOUT_MS = 30000ULL,
-	FLOW_STARVE_NS = 2000000ULL,
-	FLOW_POL_NORMAL = 0ULL,
-	FLOW_POL_BATCH = 3ULL,
-	FLOW_POL_IDLE = 5ULL,
-	FLOW_CGRP_MAX = 2048ULL,
-	FLOW_CGRP_DEPTH_MAX = 8ULL,
-	FLOW_CGRP_WEIGHT_DFL = 100ULL,
-	FLOW_BW_PERIOD_MIN_US = 1000ULL,
-	FLOW_BW_TIMER_NS = 10000000ULL,
-	/* Parked chain ring slots at 64. Each slot holds one park chain */
-	/* of 8 ancestor ids with the leaf first. The timer refills each */
-	/* listed pool, and enqueue refills cover active groups past it. */
-	FLOW_PARK_HINT_NR = 64ULL,
-	/* Throttle bit in the hierarchy flags. Set means gated skip. */
-	FLOW_CGRP_THROTTLED = 1ULL,
-	/* CPU performance levels at half plus max. More than one */
-	/* runnable picks max else half with no knob and no extra walk. */
+	FLOW_WEIGHT_BASE = 128ULL,
+	FLOW_WEIGHT_MAX = 16384ULL,
+	/* CPU bound of 512 rows with no knob. Covers the largest test */
+	/* host with wide margin while halving array memory. */
+	FLOW_MAX_CPUS = 512ULL,
+	/* Node bound of 8 rows with no knob. Covers the largest test */
+	/* host with wide margin while keeping the node scan small. */
+	FLOW_MAX_NODES = 8ULL,
+	/* Hint bound of 4096 rows with no knob. Keys are hierarchy ids */
+	/* with no dense use, so the table holds large hosts with room */
+	/* for churn. Full tables fail closed to the default period */
+	/* with no eviction and no stall. */
+	FLOW_HINT_MAX = 4096ULL,
+	/* Local queue region base. Holds 512 ids, one per CPU. */
+	FLOW_LOCAL_BASE = 0x5100ULL,
+	/* Node queue region base. Holds 8 ids, one per node. */
+	FLOW_NODE_BASE = 0x5900ULL,
+	/* Machine queue id shared by every CPU. */
+	FLOW_MACHINE = 0x5A00ULL,
+	/* Overflow tail id shared by every CPU. */
+	FLOW_OVERFLOW = 0x5A01ULL,
+	/* Queue count of 522. Holds 512 local plus 8 node plus one */
+	/* machine plus one overflow. */
+	FLOW_MAX_DSQS = 522ULL,
+	/* Dispatch batch of 16 moves per pass with no knob. One pass */
+	/* moves one task per tier for four moves at most, so the ops */
+	/* table holds every pass with room and no shared math. */
+	FLOW_DISPATCH_MAX_BATCH = 16ULL,
+	FLOW_OPS_TIMEOUT_MS = 20000ULL,
+	/* Admission bound of 950 per mille with no knob. Holds use */
+	/* under ninety five percent, so admitted work keeps idle time */
+	/* for late wakeups. */
+	FLOW_ADMIT_PERMILLE = 950ULL,
+	/* Base capacity of 1024 units with no knob. Every CPU on a */
+	/* symmetric host offers the same units, so the slowest */
+	/* sufficient pick falls to the lowest sufficient id. */
+	FLOW_CAP_BASE = 1024ULL,
+	/* CPU performance levels at half plus max with no knob. Any own */
+	/* plus local plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
 };
-/* Unlimited quota value with no cap use and zero pool. */
-#define FLOW_RUNTIME_INF (~0ULL)
-/* Per task state at 48B with deadline plus runtime plus stamps plus share cache. */
-/* Deadline holds the last assigned deadline for the next key. A zero */
-/* deadline means no order yet, so preempt compares skip with no kick. */
-/* Vruntime holds the scaled runtime served so far for the next key. */
-/* A zero runtime means no service yet, so fresh tasks key past now. */
-/* Wait holds the last enqueue time for the starvation check. Pinned */
-/* parks set wait too, so the gated backstop sees them. */
+/* Per task state at 72B with release plus period plus deadline plus */
+/* runtime plus stamps plus hint plus miss count plus admit share. */
+/* Release holds the last release time for the miss check. A zero */
+/* release means no release yet, so the miss check skips with no count. */
+/* Period holds the relative period in nanos for the next deadline. */
+/* A zero period means no hint yet, so the default period applies. */
+/* Deadline holds the absolute deadline for queue order and the miss */
+/* check. A zero deadline means no order yet, so preempt compares skip */
+/* with no kick and the miss check skips with no count. */
+/* Vruntime holds the scaled runtime served so far for order ties. */
+/* A zero runtime means no service yet, so fresh tasks order by */
+/* deadline alone. */
+/* Wait holds the last enqueue time. A zero wait means the task */
+/* never queued. Every queue join stamps the task, so queued work */
+/* always carries a stamp. */
 /* Run holds the segment start while on CPU else zero, so a claimed */
 /* start pairs the on CPU gauge with the stopping charge. Running */
 /* claims from zero only with a compare and swap, so a second running */
 /* without a stop keeps the first start with no second count. */
 /* Stopping versus disable or exit claims once with atomics, so each */
-/* counted start meets exactly one gauge drop with no owner gate. Cgid holds */
-/* the last hierarchy id for the cache, eweight holds the hierarchy */
-/* share with base 100, cached marks a valid entry, and generation */
-/* holds the u16 low bits of the global generation for validation. */
-/* The u16 wraps every 65536 bumps, so a false hit needs 65536 bumps */
-/* with no move. Moves clear the cache, so the window stays huge. Stamps stay */
-/* per task owned with no atomics except the run claim, only counters */
-/* plus pool plus pid rows use atomics. Cursor, miss, and steal scans */
-/* stay best effort with no atomic order. */
+/* counted start meets exactly one gauge drop with no owner gate. */
+/* Hint holds the flat period hint in micros for admission. A zero */
+/* hint means no hint, so the default period applies. Misses holds */
+/* the count of deadline misses for the life of the task with */
+/* saturating adds, so a huge miss count clamps instead of wrapping. */
+/* Admit share holds the added per mille share with zero for none, */
+/* so the stop drops the stored value with no drift on hint change. */
+/* Admit CPU holds the CPU where the share was added, so a moved task */
+/* still debits the right row with no wrong CPU drop. Only admitted */
+/* inserts touch the admitted rows, parks and homeless work never do. */
+/* Stamps stay per task owned with no atomics except the run claim, */
+/* only counters use atomics. Cursor and miss scans stay best effort */
+/* with no atomic order. */
 struct flow_task_ctx {
+	u64 release;
+	u64 period;
 	u64 deadline;
 	u64 vruntime;
 	u64 wait_at;
 	u64 run_at;
-	u64 cgid;
-	u32 eweight;
-	bool cached;
-	u8 __pad;
-	u16 generation;
+	u32 hint_us;
+	u32 misses;
+	u64 admit_share;
+	u32 admit_cpu;
+	u32 __pad;
 };
-/* Per CPU state at 8B with running pid plus steal cursor. */
+/* Per CPU state at 8B with running pid plus placement cursor. */
 /* Pid holds the task now on the CPU else zero. Owner clears use a */
 /* compare and swap, so a stale exit never clears a new owner. */
-/* Release clears with a compare and swap loop, so concurrent runs */
-/* pair without a torn zero. Cursor spreads */
-/* the placement and steal scans with no hotspot. The cursor races */
-/* best effort with no atomic order. */
+/* Cursor spreads the placement scans with no hotspot. The cursor races */
+/* best effort with no atomic order. Dispatch uses a fixed tier order */
+/* with no cursor use. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
 };
-/* Per CPU topology view at 8B with sibling plus domain. */
+/* Per CPU topology view at 8B with sibling plus node. */
 /* Smt sib holds the thread sibling or all ones when unknown. */
-/* Llc holds the cache domain used by placement and steal. */
+/* Node holds the node id used by placement and dispatch. */
 struct flow_topo {
 	u32 smt_sib;
-	u32 llc;
+	u32 node;
 };
-/* Per hierarchy state at 48B with share plus bandwidth pool. */
-/* Weight holds the share in 1 to 10000 with base 100. */
-/* Flags holds the throttle bit with atomic updates, so parks never */
-/* bypass a drained ancestor. Bit 0 set means throttled with a gated */
-/* skip, clear means admittable. Full walks plus consume set it, full */
-/* passes plus the timer chain refill clear it. */
-/* Period holds the floor clamped period in microseconds. */
-/* Quota holds zero for unlimited else the quota in microseconds. */
-/* Burst holds the burst in microseconds for the pool cap. */
-/* Pool holds the remaining runtime in nanos, zero when drained. Pool */
-/* plus updated use atomic updates, so refill versus consume versus */
-/* bandwidth set never tears. */
-/* Updated holds the last refill time in nanos for lazy refill. */
-struct flow_cgrp_ctx {
-	u32 weight;
-	u32 flags;
+/* Per CPU capacity view at 4B with one units row. */
+/* Units hold the capacity in base units for the slowest sufficient */
+/* pick. A zero row means unknown, so the base applies. */
+struct flow_cpu_cap {
+	u32 units;
+};
+/* Per CPU admitted use at 8B with one per mille row. */
+/* Admitted holds the sum of admitted per mille shares on the CPU */
+/* with saturating math, so a huge hint clamps instead of wrapping. */
+struct flow_cpu_admit {
+	u64 permille;
+};
+/* Flat period hint at 8B with one micros row per id. */
+/* Hint holds the period in micros with zero for no hint. The flat */
+/* view tunes the period only, and no group or pool shapes order. */
+struct flow_hint {
 	u64 period_us;
-	u64 quota_us;
-	u64 burst_us;
-	u64 pool_ns;
-	u64 updated_at;
 };
-/* Scheduler counters with 17 live fields. */
-/* enq_no_tctx counts missing state plus homeless with no route, */
-/* the name stays for the wire with no split. Throttled ns counts */
-/* quanta at 1ms per hit with no wall use, nr throttled plus parked */
-/* count the same hits with the names kept for the wire. Parked */
-/* counts the overflow parks from bandwidth, and bw moves */
-/* counts the hierarchy moves. */
+/* Scheduler counters with 15 fields. Homeless parks count in the */
+/* overflow moves, so every tier move has a live counter. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
 	u64 inserts;
 	u64 requeues;
 	u64 completions;
-	u64 park_moves;
-	u64 steal_moves;
+	u64 local_moves;
+	u64 node_moves;
+	u64 machine_moves;
+	u64 over_moves;
 	u64 kicks;
-	u64 enq_no_tctx;
-	u64 preempt_kicks;
-	u64 preempt_skipped;
-	u64 slot_moves;
-	u64 global_moves;
-	u64 throttled_ns;
-	u64 nr_throttled;
-	u64 parked;
-	u64 bw_moves;
+	u64 admits;
+	u64 rejects;
+	u64 misses;
+	u64 parks;
+	u64 gate_rejects;
 };
-/* Task state holds deadline plus runtime plus stamps plus cache in 48 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 48,
-    "task state stays at 48B");
+/* Task state holds release plus period plus deadline plus runtime */
+/* plus stamps plus hint plus misses plus admit share in 72 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 72,
+	"task state stays at 72B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
-    "cpu state stays at 8B");
-/* Topology view holds sibling plus domain in 8 bytes. */
+	"cpu state stays at 8B");
+/* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
-    "topology view stays at 8B");
-/* Hierarchy state holds share plus pool in 48 bytes. */
-_Static_assert(sizeof(struct flow_cgrp_ctx) == 48,
-    "hierarchy state stays at 48B");
-/* Stats hold 17 counters in 136 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 136,
-    "stats stay at 136B");
-/* Timer ticks at 10ms, always covering the 1ms floor. */
-_Static_assert(FLOW_BW_TIMER_NS == 10000000ULL,
-    "timer stays at 10ms");
-/* Parked chain holds 8 ancestor ids with the leaf first. */
-struct flow_park_chain {
-	u64 ids[8];
-};
-_Static_assert(sizeof(struct flow_park_chain) == 64,
-    "park chain stays at 64B");
-/* One deadline queue per CPU plus one overflow tail. */
-_Static_assert(FLOW_MAX_DSQS == FLOW_MAX_CPUS + 1,
-    "dsq count stays nr plus one");
+	"topology view stays at 8B");
+/* Stats hold 15 counters in 120 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 120,
+	"stats stay at 120B");
+/* Queue count holds local plus node plus machine plus overflow. */
+_Static_assert(FLOW_MAX_DSQS ==
+	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
+	"dsq count stays local plus node plus two");
 /* True when the first time is before the second with wrap safety. */
 /* The signed diff keeps order across the u64 wrap with no branch. */
 static __always_inline bool flow_time_before(u64 a,
@@ -221,10 +221,18 @@ static __always_inline bool flow_time_before(u64 a,
 {
 	return (s64)(a - b) < 0;
 }
-/* Clamped weight in 1 to 10000 with base 100. */
+/* Saturated add of two times with clamp on wrap. */
+/* A wrap clamps to max, so a huge sum never falls to the front. */
+static __always_inline u64 flow_sat_add(u64 a,
+	u64 b)
+{
+	u64 out = a + b;
+	if (out < a)
+		return (u64)~0ULL;
+	return out;
+}
+/* Clamped weight in 1 to 16384 with base 128. */
 /* Zero or oversize weights fail closed to the nearer bound. */
-/* The kernel already folds nice into the task weight, and the */
-/* hierarchy share folds above through the effective helper. */
 static __always_inline u32 flow_weight_clamp(u32 w)
 {
 	if (w < (u32)FLOW_WEIGHT_MIN)
@@ -233,42 +241,17 @@ static __always_inline u32 flow_weight_clamp(u32 w)
 		return (u32)FLOW_WEIGHT_MAX;
 	return w;
 }
-/* Effective weight from task weight and hierarchy share. */
-/* Both inputs clamp to range, and the product scales by base 100. */
-/* A missing hierarchy entry uses base, so the task weight stands. */
-static __always_inline u32 flow_eff_weight(u32 task_w,
-	u32 hier_w)
-{
-	u64 t = (u64)flow_weight_clamp(task_w);
-	u64 h = (u64)flow_weight_clamp(hier_w);
-	u64 eff = t * h / (u64)FLOW_WEIGHT_BASE;
-	if (eff < (u64)FLOW_WEIGHT_MIN)
-		return (u32)FLOW_WEIGHT_MIN;
-	if (eff > (u64)FLOW_WEIGHT_MAX)
-		return (u32)FLOW_WEIGHT_MAX;
-	return (u32)eff;
-}
-/* Deadline step for one weight as quantum times base over weight. */
-/* Base weight waits one quantum, heavy weights wait less, light */
-/* weights wait more, so shares stay proportional through order. */
-/* The step feeds the slack only; the saturated key below is live. */
-static __always_inline u64 flow_deadline_step(u32 weight)
-{
-	u32 w = flow_weight_clamp(weight);
-	return (u64)FLOW_QUANTUM_NS * (u64)FLOW_WEIGHT_BASE /
-	    (u64)w;
-}
 /* Advanced runtime after one execution segment. */
-/* Scales raw time by base over the effective share with a split */
-/* divide, so heavy shares advance slowly and light shares advance */
-/* fast. The split keeps every intermediate small for real segments, */
-/* a segment past the scale bound saturates at once, and both adds */
-/* saturate too, so huge inputs clamp instead of wrapping. One stop */
-/* per quantum keeps the two divides cheap beside the slice. */
+/* Scales raw time by base over weight with a split divide, so heavy */
+/* weights advance slowly and light weights advance fast. The split */
+/* keeps every intermediate small for real segments, a segment past */
+/* the scale bound saturates at once, and both adds saturate too, so */
+/* huge inputs clamp instead of wrapping. One stop per slice keeps */
+/* the two divides cheap beside the slice. */
 static __always_inline u64 flow_vruntime_advance(u64 vruntime,
-	u64 delta, u32 eff)
+	u64 delta, u32 weight)
 {
-	u64 w = (u64)flow_weight_clamp(eff);
+	u64 w = (u64)flow_weight_clamp(weight);
 	u64 q = delta / w;
 	u64 head;
 	u64 tail;
@@ -278,139 +261,113 @@ static __always_inline u64 flow_vruntime_advance(u64 vruntime,
 		return (u64)~0ULL;
 	head = q * (u64)FLOW_WEIGHT_BASE;
 	tail = delta % w * (u64)FLOW_WEIGHT_BASE / w;
-	adv = head + tail;
-	if (adv < head)
+	adv = flow_sat_add(head, tail);
+	if (adv == (u64)~0ULL)
 		return (u64)~0ULL;
-	out = vruntime + adv;
-	if (out < vruntime)
-		return (u64)~0ULL;
+	out = flow_sat_add(vruntime, adv);
 	return out;
 }
-/* Slack for one open insert as the step capped at 2ms. */
-/* Base weight keeps one quantum, heavy weights keep less, and light */
-/* weights stop at twice the quantum, so a light task never leaps */
-/* past the starvation floor in one arrival. */
-static __always_inline u64 flow_deadline_slack(u32 weight)
+/* Absolute deadline from release plus relative period. */
+/* The add saturates, so a huge release clamps instead of wrapping */
+/* to the front. */
+static __always_inline u64 flow_deadline_at(u64 release,
+	u64 period)
 {
-	u64 step = flow_deadline_step(weight);
-	if (step > (u64)FLOW_STARVE_NS)
-		return (u64)FLOW_STARVE_NS;
-	return step;
+	return flow_sat_add(release, period);
 }
-/* Later of two saturated times with a plain compare. */
-/* Saturated values never wrap, so the plain order keeps the */
-/* largest value with no signed diff use. Real times far below */
-/* the bound order the same either way. The wrap max retired here, */
-/* the saturated key below is the live path. */
-static __always_inline u64 flow_later(u64 a,
-	u64 b)
+/* Period for one task from hint else default. */
+/* A zero hint means no hint, so the default period applies. The hint */
+/* converts from micros to nanos with saturation, so a huge hint */
+/* clamps instead of wrapping to a short period. */
+static __always_inline u64 flow_task_period(u32 hint_us)
 {
-	if (a >= b)
-		return a;
-	return b;
-}
-/* Key deadline from a base past the floor with slack. */
-/* The later of base and floor wins, so a long sleep never earns */
-/* credit past served work, and the add saturates, so a huge floor */
-/* clamps instead of wrapping to the front. */
-static __always_inline u64 flow_deadline_key(u64 base,
-	u64 floor, u64 slack)
-{
-	u64 at = flow_later(base, floor);
-	u64 out = at + slack;
-	if (out < at)
+	u64 hint;
+	if (!hint_us)
+		return (u64)FLOW_PERIOD_NS;
+	hint = (u64)hint_us;
+	if (hint > 18446744073709551ULL)
 		return (u64)~0ULL;
-	return out;
+	return hint * 1000ULL;
 }
-/* Floored period in microseconds with a 1ms floor. */
-/* Short periods fail closed to the floor with no trap. */
-static __always_inline u64 flow_bw_period_floor(u64 period_us)
+/* True when one task missed its deadline at the given time. */
+/* A zero deadline means no order yet, so the check skips. A zero */
+/* release means no release yet, so the check skips too. A time that */
+/* falls before the deadline passes, so only a time past the deadline */
+/* counts a miss. */
+static __always_inline bool flow_missed(u64 release,
+	u64 deadline, u64 now)
 {
-	if (period_us < (u64)FLOW_BW_PERIOD_MIN_US)
-		return (u64)FLOW_BW_PERIOD_MIN_US;
-	return period_us;
+	if (release == 0)
+		return false;
+	if (deadline == 0)
+		return false;
+	if (flow_time_before(now, deadline))
+		return false;
+	if (now == deadline)
+		return false;
+	return true;
 }
-/* Normalized quota with unlimited mapped to zero. */
-/* The unlimited value means no cap, so zero means no check. */
-static __always_inline u64 flow_bw_quota_norm(u64 quota_us)
-{
-	if (quota_us == (u64)FLOW_RUNTIME_INF)
-		return 0;
-	return quota_us;
-}
-/* True when one pool has no cap and never throttles. */
-/* Zero quota means unlimited with no pool use. */
-static __always_inline bool flow_bw_unlimited(u64 quota_us)
-{
-	return quota_us == 0;
-}
-/* Pool cap in nanos from quota plus burst with burst cap. */
-/* Unlimited pools hold zero with no cap use, limited pools cap */
-/* at quota plus burst converted to nanos with saturating math, */
-/* so huge inputs clamp instead of wrapping to a small cap. */
-/* Mirrors the Rust saturating helper with no wrap. */
-static __always_inline u64 flow_bw_max_ns(u64 quota_us,
-	u64 burst_us)
-{
-	u64 total;
-	if (flow_bw_unlimited(quota_us))
-		return 0;
-	if (quota_us > 18446744073709551ULL ||
-	    burst_us > 18446744073709551ULL)
-		return (u64)~0ULL;
-	total = quota_us + burst_us;
-	if (total < quota_us)
-		return (u64)~0ULL;
-	if (total > 18446744073709551ULL)
-		return (u64)~0ULL;
-	return total * 1000ULL;
-}
-/* Deadline queue id of one CPU from base plus id. */
+/* Local queue id of one CPU from base plus id. */
 /* One ordered queue per CPU keeps deadline order local. */
-static __always_inline u64 flow_vtime_dsq(u32 cpu)
+static __always_inline u64 flow_local_dsq(u32 cpu)
 {
-	return (u64)FLOW_VTIME_BASE + (u64)cpu;
+	return (u64)FLOW_LOCAL_BASE + (u64)cpu;
+}
+/* Shared queue id of one node from base plus id. */
+/* One ordered queue per node shares work inside the node. */
+static __always_inline u64 flow_node_dsq(u32 node)
+{
+	return (u64)FLOW_NODE_BASE + (u64)node;
+}
+/* Id of the machine queue shared by every CPU. */
+/* Work with no node home rests here with mask wins on drain. */
+static __always_inline u64 flow_machine_dsq(void)
+{
+	return (u64)FLOW_MACHINE;
 }
 /* Id of the overflow tail shared by every CPU. */
-/* Pinned and foreign tasks rest here with mask wins on drain. */
-/* Throttled tasks park here too with no kick and lazy refill. */
+/* Missed parks plus pinned tasks rest here with mask wins on drain. */
 static __always_inline u64 flow_overflow_dsq(void)
 {
 	return (u64)FLOW_OVERFLOW;
 }
-/* True when one queued task waited past the starvation floor. */
-/* Unknown stamps never count, so fresh tasks miss past. */
-static __always_inline bool flow_starved(u64 wait_at,
-	u64 now)
+/* True when one id names a live scheduler queue. */
+/* Local plus node plus machine plus overflow pass, and all other */
+/* ids fail, so a stale id never moves work. */
+static __always_inline bool flow_dsq_valid(u64 dsq)
 {
-	if (wait_at == 0)
+	if (dsq >= (u64)FLOW_LOCAL_BASE &&
+	    dsq < (u64)FLOW_LOCAL_BASE + (u64)FLOW_MAX_CPUS)
+		return true;
+	if (dsq >= (u64)FLOW_NODE_BASE &&
+	    dsq < (u64)FLOW_NODE_BASE + (u64)FLOW_MAX_NODES)
+		return true;
+	if (dsq == (u64)FLOW_MACHINE)
+		return true;
+	if (dsq == (u64)FLOW_OVERFLOW)
+		return true;
+	return false;
+}
+/* Per mille share of one slice in one period with saturation. */
+/* A zero period means no bound, so the share stays zero. The math */
+/* scales slice times 1000 over period, so a 2ms slice in a 16ms */
+/* period takes 125 per mille. */
+static __always_inline u64 flow_slice_permillle(u64 period)
+{
+	if (!period)
+		return 0;
+	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
+}
+/* True when one CPU can admit one more per mille share. */
+/* The admitted sum plus the new share must stay under the bound, so */
+/* admitted work keeps idle time for late wakeups. Saturated sums */
+/* fail closed, so a wrapped sum never admits. */
+static __always_inline bool flow_admit_ok(u64 admitted,
+	u64 share)
+{
+	u64 sum = admitted + share;
+	if (sum < admitted)
 		return false;
-	if (flow_time_before(now, wait_at))
-		return false;
-	return now - wait_at > (u64)FLOW_STARVE_NS;
-}
-/* Own deadline queue cap under budget 32. */
-/* Holds the header cap so overflow and steal keep room. */
-static __always_inline u32 flow_own_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_OWN_VTIME_CAP)
-		return (u32)FLOW_OWN_VTIME_CAP;
-	return budget;
-}
-/* Shared tail cap under the dispatch budget. */
-/* Returns the min of budget and the header cap with no head stall. */
-static __always_inline u32 flow_tail_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_OVER_CAP)
-		return (u32)FLOW_OVER_CAP;
-	return budget;
-}
-/* Gated starvation cap under the dispatch budget. */
-/* Returns the min of budget and the header cap with no head stall. */
-static __always_inline u32 flow_gated_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_GATED_CAP)
-		return (u32)FLOW_GATED_CAP;
-	return budget;
+	return sum <= (u64)FLOW_ADMIT_PERMILLE;
 }
 #endif

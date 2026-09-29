@@ -2,21 +2,22 @@
 /*
  * Idle kick for the enqueue pass.
  *
- * Holds the one idle allowed kick for overflow and global parks with
- * no preempt. Outlined to keep enqueue small with no duplicate walk.
- * Runs under the caller with no lock.
+ * Holds the one idle allowed kick for shared and overflow parks with
+ * no preempt. Each park sends one idle kick at most with no storm, so
+ * the cost stays bounded by parks and only an idle CPU wakes. Outlined
+ * to keep enqueue small with no duplicate walk. Runs under the caller
+ * with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Kick one idle allowed CPU for overflow or global parks. */
+/* Kick one idle allowed CPU for shared or overflow parks with one kick at most, */
+/* so the cost stays bounded by parks with no storm. */
 /* Tries the selected CPU first, then the kernel idle pick, then */
-/* the first allowed live CPU. The selected CPU often names the */
-/* placement pick, so a hit skips the idle scan with no second */
-/* scan. Kicks only when the target runs nothing, with the idle */
-/* flag cleared first so the kick sticks. Never sends a preempt */
-/* kick, so pinned parks stay idle only. A kick miss stays fail */
-/* closed with mask wins on drain and the timer or a later kicking */
-/* enqueue wakes the park. */
+/* the first allowed live CPU. Kicks only when the target runs */
+/* nothing, with the idle flag cleared first so the kick sticks. */
+/* Never sends a preempt kick, so shared parks stay idle only. A kick */
+/* miss stays fail closed with mask wins on drain and the next pass */
+/* still meets the park with no wait. */
 static __noinline void flow_kick_idle_allowed(
 	const struct task_struct *p, s32 sel)
 {

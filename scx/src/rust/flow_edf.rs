@@ -1,49 +1,79 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Deadline helpers for the flow scheduler.
+//! Deadline plus admission helpers for the flow scheduler.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the wrap safe deadline helpers shared by tests and docs.
-//! The BPF deadline lives in enqueue.bpf.c with the step in
-//! intf.h, and this file mirrors the order predicates.
+//! Holds the release plus period plus deadline plus admission plus miss
+//! models shared by BPF and userspace tests. The BPF deadline lives in
+//! intf.h with the admission rows in main/deadline.bpf.c, and this file
+//! mirrors the math with no map use.
 
-/// Bound of moved tasks in one pass.
-pub const DISPATCH_BATCH: u32 = 32;
-/// Starvation floor in nanos at 2ms, twice the fixed quantum.
-pub const STARVE_NS: u64 = 2_000_000;
+/// Default period in nanos at 16ms. Holds eight slices.
+pub const PERIOD_NS: u64 = 16_000_000;
+/// Admission bound in per mille at 950. Holds use under ninety five percent.
+pub const ADMIT_PERMILLE: u64 = 950;
+/// Base capacity in units at 1024. Every symmetric CPU offers the same units.
+pub const CAP_BASE: u32 = 1024;
 
-/// True when the first time is before the second with wrap safety.
-/// The signed diff keeps order across the u64 wrap with no extra branch.
+/// Period for one task from hint micros else default.
+/// A zero hint means no hint, so the default period applies. The hint
+/// converts from micros to nanos with saturation, so a huge hint
+/// clamps instead of wrapping to a short period.
 #[cfg(test)]
-pub fn time_before(a: u64, b: u64) -> bool {
-    (a.wrapping_sub(b) as i64) < 0
+pub fn task_period(hint_us: u32) -> u64 {
+    if hint_us == 0 {
+        return PERIOD_NS;
+    }
+    (hint_us as u64).saturating_mul(1000)
 }
 
-/// Later of two times with wrap safety.
-/// Legacy wrap path kept for tests only. BPF retired it for the
-/// saturated later below, which never wraps by design.
+/// Absolute deadline from release plus relative period.
+/// The add saturates, so a huge release clamps instead of wrapping
+/// to the front.
 #[cfg(test)]
-pub fn time_max(a: u64, b: u64) -> u64 {
-    if time_before(a, b) { b } else { a }
+pub fn deadline_at(release: u64, period: u64) -> u64 {
+    release.saturating_add(period)
 }
 
-/// Next deadline from the later of now and the last deadline.
-/// Legacy wrap path kept for tests only. BPF inserts now key past
-/// runtime plus floor with saturating slack, so this helper only
-/// documents the old wrap order.
+/// Per mille share of one slice in one period with saturation.
+/// A zero period means no bound, so the share stays zero. A 2ms slice
+/// in a 16ms period takes 125 per mille.
 #[cfg(test)]
-pub fn deadline_next(last: u64, now: u64, weight: u32) -> u64 {
-    time_max(last, now).wrapping_add(crate::flow_slice::deadline_step(weight))
+pub fn slice_permillle(period: u64) -> u64 {
+    if period == 0 {
+        return 0;
+    }
+    crate::flow_slice::QUANTUM_NS * 1000 / period
 }
 
-/// True when one queued task waited past the 2ms floor.
-/// Unknown stamps never count, so fresh tasks miss past.
+/// True when one CPU can admit one more per mille share.
+/// The admitted sum plus the new share must stay under the bound, so
+/// admitted work keeps idle time for late wakeups. Saturated sums
+/// fail closed, so a wrapped sum never admits.
 #[cfg(test)]
-pub fn starved(wait_at: u64, now: u64) -> bool {
-    if wait_at == 0 || time_before(now, wait_at) {
+pub fn admit_ok(admitted: u64, share: u64) -> bool {
+    let sum = admitted.saturating_add(share);
+    if sum < admitted {
         return false;
     }
-    now - wait_at > STARVE_NS
+    sum <= ADMIT_PERMILLE
+}
+
+/// True when one task missed its deadline at the given time.
+/// A zero deadline means no order yet, so the check skips. A zero
+/// release means no release yet, so the check skips too.
+#[cfg(test)]
+pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
+    if release == 0 {
+        return false;
+    }
+    if deadline == 0 {
+        return false;
+    }
+    if now <= deadline {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -51,38 +81,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn max_holds_later_time() {
-        assert_eq!(time_max(10, 20), 20);
-        assert_eq!(time_max(20, 10), 20);
+    fn period_defaults_and_hints() {
+        assert_eq!(task_period(0), 16_000_000);
+        assert_eq!(task_period(8000), 8_000_000);
+        assert_eq!(deadline_at(1_000, 16_000_000), 16_001_000);
+        assert_eq!(deadline_at(u64::MAX, 16_000_000), u64::MAX);
     }
 
     #[test]
-    fn fresh_arrival_anchors_past_now() {
-        assert_eq!(deadline_next(0, 10_000_000, 100), 11_000_000);
+    fn admission_holds_bound() {
+        assert_eq!(slice_permillle(16_000_000), 125);
+        assert_eq!(slice_permillle(0), 0);
+        assert!(admit_ok(825, 125));
+        assert!(!admit_ok(826, 125));
+        assert!(!admit_ok(u64::MAX, 125));
     }
 
     #[test]
-    fn sleep_earns_no_credit() {
-        assert_eq!(deadline_next(1_000, 10_000_000, 100), 11_000_000);
-    }
-
-    #[test]
-    fn back_to_back_queues_behind_last() {
-        assert_eq!(deadline_next(10_000_000, 9_000_000, 100), 11_000_000);
-        assert_eq!(deadline_next(10_000_000, 9_000_000, 1000), 10_100_000);
-    }
-
-    #[test]
-    fn wrap_keeps_order() {
-        assert!(time_before(u64::MAX, 1));
-        assert_eq!(time_max(u64::MAX, 1), 1);
-    }
-
-    #[test]
-    fn starve_needs_old_stamp() {
-        assert!(starved(100, 100 + STARVE_NS + 1));
-        assert!(!starved(100, 100 + STARVE_NS));
-        assert!(!starved(0, u64::MAX));
-        assert!(!starved(200, 100));
+    fn miss_checks() {
+        assert!(!missed(0, 100, 200));
+        assert!(!missed(10, 0, 200));
+        assert!(!missed(10, 100, 100));
+        assert!(missed(10, 100, 101));
     }
 }

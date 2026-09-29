@@ -2,13 +2,13 @@
 /*
  * Task and map helpers for the core.
  *
- * Holds the clock plus task, CPU, topology, hierarchy, and atomic
- * loads shared by every op. Runs inline with no walk, so the
+ * Holds the clock plus task, CPU, topology, capacity, admission, and
+ * hint loads shared by every op. Runs inline with no walk, so the
  * verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Monotonic clock in nanos for deadlines and starvation. */
+/* Monotonic clock in nanos for releases and deadlines. */
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -44,15 +44,56 @@ static struct flow_topo *flow_topo(u32 cpu)
 		return NULL;
 	return bpf_map_lookup_elem(&topo_stor, &key);
 }
-/* Hierarchy entry or null on miss with default share. */
-static struct flow_cgrp_ctx *flow_cgrp(u64 cgid)
+/* Capacity units of one CPU with base on miss. */
+/* A zero row means unknown, so the base applies. */
+static __always_inline u32 flow_cpu_units(u32 cpu)
 {
-	return bpf_map_lookup_elem(&cgrp_stor, &cgid);
+	u32 key = cpu;
+	u32 *v;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return (u32)FLOW_CAP_BASE;
+	v = bpf_map_lookup_elem(&cap_stor, &key);
+	if (!v || *v == 0)
+		return (u32)FLOW_CAP_BASE;
+	return READ_ONCE(*v);
+}
+/* Admitted per mille of one CPU with zero on miss. */
+static __always_inline u64 flow_cpu_admitted(u32 cpu)
+{
+	u32 key = cpu;
+	u64 *v;
+	if (cpu >= (u32)FLOW_MAX_CPUS)
+		return 0;
+	v = bpf_map_lookup_elem(&admit_stor, &key);
+	if (!v)
+		return 0;
+	return READ_ONCE(*v);
+}
+/* Node of one CPU with zero on miss. */
+static __always_inline u32 flow_cpu_node(u32 cpu)
+{
+	struct flow_topo *tp = flow_topo(cpu);
+	if (!tp)
+		return 0;
+	if (tp->node >= (u32)FLOW_MAX_NODES)
+		return 0;
+	return READ_ONCE(tp->node);
+}
+/* Flat period hint in micros for one id with zero for no hint. */
+static __always_inline u32 flow_hint_us(u64 cgid)
+{
+	struct flow_hint *h;
+	if (!cgid)
+		return 0;
+	h = bpf_map_lookup_elem(&hint_stor, &cgid);
+	if (!h)
+		return 0;
+	return READ_ONCE(h->period_us);
 }
 /* Acquired hierarchy of one task with paired release. */
 /* Uses the scheduler view with a reference, so the caller releases */
 /* with release when non null. A null return means the root with */
-/* miss defaults and no hierarchy use. */
+/* the default period and no hint use. */
 static __always_inline struct cgroup *flow_task_cgrp(
 	struct task_struct *p)
 {
@@ -65,22 +106,4 @@ static __always_inline void flow_cgrp_put(
 {
 	if (cgrp)
 		bpf_cgroup_release(cgrp);
-}
-/* Relaxed load of the hierarchy generation to match the bumps. */
-/* Pairs with the fetch and add stores with no torn read. */
-static __always_inline u64 flow_load_gen(void)
-{
-	return READ_ONCE(flow_cgrp_gen);
-}
-/* Relaxed load of the limited count to match the fixups. */
-/* Pairs with the fetch and add stores with no torn read. */
-static __always_inline u64 flow_load_limited(void)
-{
-	return READ_ONCE(flow_bw_limited);
-}
-/* Relaxed load of the pending flag to match the enqueue store. */
-/* Pairs with the fetch and add stores with no torn read. */
-static __always_inline u64 flow_load_pending(void)
-{
-	return READ_ONCE(flow_bw_pending);
 }
