@@ -4,8 +4,8 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Loads the BPF object, seeds the topology view, then drives the loop.
-//! Observability is counters only through the stats server with no
-//! dashboard and no bulk path and no energy reads.
+//! Observability is counters through the stats server plus the loopback
+//! dashboard with per CPU cards plus a JSON snapshot for debugging.
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -29,8 +29,6 @@ mod flow_select;
 mod flow_slice;
 #[path = "rust/flow_slot.rs"]
 mod flow_slot;
-#[path = "rust/rapl.rs"]
-mod rapl;
 #[path = "rust/snapshot.rs"]
 mod snapshot;
 #[path = "rust/stats.rs"]
@@ -104,9 +102,7 @@ struct Opts {
     /* Generate shell completions and exit. */
     #[clap(long, value_name = "SHELL", hide = true)]
     completions: Option<Shell>,
-    /* Stability shim with no serve. Older launch lines pass this flag, */
-    /* so it parses and stays inert. Serving stays off always with */
-    /* counters through the stats server only. */
+    /* Disable the loopback dashboard thread. */
     #[clap(long = "no-webui", action = clap::ArgAction::SetTrue)]
     no_webui: bool,
     #[clap(flatten, next_help_heading = "Libbpf Options")]
@@ -114,20 +110,28 @@ struct Opts {
 }
 
 /*
- * Scheduler owns the skeleton, the link, and the stats
- * server. It drives the run loop until shutdown or exit.
+ * Scheduler owns the skeleton, the link, the stats
+ * server plus the dashboard channel. It drives the run
+ * loop until shutdown or exit.
  */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
     started_at: std::time::Instant,
+    /* Dashboard sender with None when disabled. */
+    webui_tx: Option<crossbeam::channel::Sender<stats::WebMetrics>>,
+    /* Online ids once at init in rank order. */
+    online_cpus: Vec<u32>,
+    /* One line topology summary for the page. */
+    topology: String,
 }
 
 impl<'a> Scheduler<'a> {
     fn init(
         opts: &'a Opts,
         open_object: &'a mut MaybeUninit<libbpf_rs::OpenObject>,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<Self> {
         try_set_rlimit_infinity();
         let mut bld = BpfSkelBuilder::default();
@@ -144,28 +148,32 @@ impl<'a> Scheduler<'a> {
         let _ = &mut skel;
         /* Seed the BPF topology view with sibling plus node rows. */
         /* Failures keep the BPF defaults with node zero. */
-        Self::seed_topo(&mut skel);
+        let rows = topology::topo_rows();
+        Self::seed_topo_with(&mut skel, &rows);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
-        /* Energy reads stay disabled with the probe parked. */
-        let _ = crate::rapl::RaplReader::open_default();
-        /* Dashboard stays parked with no port use. The thread only drains */
-        /* the stop flag, so startup order stays stable for older harnesses */
-        /* while serving stays off always. Remove both together if the */
-        /* spawn ever goes. */
-        let sd = Arc::new(AtomicBool::new(true));
-        std::thread::spawn(move || {
-            webui::start(sd);
-        });
-        info!(
-            "Topology: {}",
-            topology::describe_topology(&topology::topo_rows())
-        );
+        /* Bounded dashboard channel drops a frame when full. */
+        let webui_tx = if opts.no_webui {
+            None
+        } else {
+            let (tx, rx) = crossbeam::channel::bounded::<stats::WebMetrics>(16);
+            let sd = shutdown.clone();
+            std::thread::spawn(move || {
+                webui::start(rx, sd);
+            });
+            Some(tx)
+        };
+        let online_cpus: Vec<u32> = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+        let topology = topology::describe_topology(&rows);
+        info!("Topology: {topology}");
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
             started_at: std::time::Instant::now(),
+            webui_tx,
+            online_cpus,
+            topology,
         })
     }
 
@@ -176,9 +184,9 @@ impl<'a> Scheduler<'a> {
     /* Seed one topology row per CPU into the BPF view. */
     /* Each row carries the thread sibling and the node id. */
     /* A failed update keeps the BPF default with no trap. */
-    fn seed_topo(skel: &mut BpfSkel<'_>) {
+    fn seed_topo_with(skel: &mut BpfSkel<'_>, rows: &[(u32, u32, u32)]) {
         use libbpf_rs::MapCore;
-        for (cpu, sib, node) in topology::topo_rows() {
+        for (cpu, sib, node) in rows {
             let key = cpu.to_ne_bytes();
             let mut val = [0u8; 8];
             val[0..4].copy_from_slice(&sib.to_ne_bytes());
@@ -197,8 +205,19 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(100)) {
-                Ok(()) => res_ch.send(self.get_metrics())?,
-                Err(RecvTimeoutError::Timeout) => {}
+                Ok(()) => {
+                    let web = self.get_web_metrics();
+                    if let Some(ref tx) = self.webui_tx {
+                        let _ = tx.try_send(web);
+                    }
+                    res_ch.send(self.get_metrics())?
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    let web = self.get_web_metrics();
+                    if let Some(ref tx) = self.webui_tx {
+                        let _ = tx.try_send(web);
+                    }
+                }
                 Err(e) => Err(e)?,
             }
         }
@@ -277,7 +296,7 @@ fn main() -> Result<()> {
         }
     }
     let mut open_object = MaybeUninit::<libbpf_rs::OpenObject>::uninit();
-    let mut sched = Scheduler::init(&opts, &mut open_object)?;
+    let mut sched = Scheduler::init(&opts, &mut open_object, shutdown.clone())?;
     sched.run(shutdown)?;
     info!("Scheduler exited");
     Ok(())

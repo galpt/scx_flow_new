@@ -13,8 +13,8 @@ pub const PERIOD_NS: u64 = 16_000_000;
 /// Backstop interval in nanos at 8ms. Holds four slices.
 pub const BACKSTOP_NS: u64 = 8_000_000;
 /// Backstop timer in nanos at 8ms. Matches the backstop interval.
-/// Kept as its own name beside the interval on purpose: the interval
-/// drives the park check while the timer drives the wake tick, and the
+/// Kept as its own name beside the interval on purpose with the interval
+/// driving the park check while the timer drives the wake tick, and the
 /// header assert plus the config test pin both at 8ms.
 pub const BACKSTOP_TIMER_NS: u64 = 8_000_000;
 /// Admission bound in per mille at 950. Holds use under ninety five percent.

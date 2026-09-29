@@ -4,7 +4,6 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Reads the host CPU lists plus the node rows for the BPF seed.
-//! Frequency plus governor reads stay disabled with no sysfs use.
 //! Node reads use the kernel NUMA view with zero on fault and a cap
 //! at eight, so large hosts fold to the machine queue with no panic.
 

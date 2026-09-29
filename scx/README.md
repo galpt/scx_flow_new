@@ -1,3 +1,37 @@
 # scx_flow
 
-scx_flow is a deadline scheduler with a BPF core and a 2ms slice. One local queue per CPU plus one shared queue per node plus one shared queue per machine plus one overflow tail order work by deadline. Every release sets release plus period plus deadline, and admission holds declared use under ninety five percent of the machine. Placement takes idle first, then the previous CPU, then the shared home, keeping the slowest sufficient CPU. Enqueue joins direct when the target drains in time, else it joins shared. Dispatch drains local first, then shared work, under a budget of sixteen moves. A miss past deadline counts and parks the task, and one timer wakes parked work every eight milliseconds. Hints tune the period only. Reporting is counters only. Hotplug needs a restart, and releases need a restart. Needs kernels, 7.2 series and up.
+scx_flow is a Linux deadline scheduler in Rust with a BPF core and a 2ms slice.
+
+### Queues
+
+One local queue per CPU plus one shared queue per node plus one queue per machine plus one overflow tail order by deadline with global for homeless work. Drain takes local first then one shared queue per pass with a budget of 16. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+
+### Keys
+
+Every release sets release plus period plus deadline with virtual runtime for ties. Hints tune the period only with placement taking idle then the previous CPU then the home. See `src/bpf/select_cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
+
+### Admission
+
+Admission holds use under ninety five percent per CPU with 4096 hints. Rejects plus misses park in overflow with one wake every 8ms. See `src/bpf/cgroup.bpf.c` and `src/bpf/main/deadline.bpf.c`.
+
+### Gates
+
+A gate runs first in every op with fail closed. Stale CPUs plus moved tasks count one gate reject with exiting work exempt. See `src/bpf/main/cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
+
+### Reporting
+
+Scheduling stays fixed. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with counters plus per CPU pids plus a snapshot download. Counters cover on CPU plus runtime plus inserts plus requeues plus completions plus local plus node plus machine plus over plus global plus kicks plus admits plus rejects plus misses plus parks plus gate rejects with display uptime. See `src/rust/stats.rs`.
+
+## Code map
+
+- Rules live in `src/bpf/intf.h`.
+- Maps live in `src/bpf/main.bpf.c` with splits in `main/`, `enqueue/`, and `dispatch/`.
+- Mirrors live in `flow*.rs` with facade in `flow.rs` and checks in `config.rs`.
+- Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, and `ui/index.html`.
+
+## Limitations
+
+- Hotplug needs a restart.
+- Releases need a restart.
+- State is `72B` plus `8B` plus `8B` plus `128B`.
+- Needs kernels, `7.2` series and up.

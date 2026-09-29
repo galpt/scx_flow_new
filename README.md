@@ -13,11 +13,11 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
 - `scx/src/rust/config.rs` constant validation
 - `scx/src/rust/flow*.rs` scheduling mirrors and facade
-- `scx/src/rust/snapshot.rs` counters read with no bulk path
-- `scx/src/rust/stats.rs` counters server with no web payload
+- `scx/src/rust/snapshot.rs` counters plus dashboard view with per CPU pids
+- `scx/src/rust/stats.rs` counters plus dashboard view with raw counters
 - `scx/src/rust/topology.rs` online plus node view for the seed
-- `scx/src/rust/rapl.rs` disabled energy probe with no reads
-- `scx/src/rust/webui.rs` disabled dashboard entry with no serve
+- `scx/src/rust/webui.rs` loopback dashboard with page plus JSON
+- `scx/ui/index.html` dashboard page with counters plus cards plus download
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/edf_harness/` load probe with its own README
 

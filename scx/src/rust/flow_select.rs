@@ -74,10 +74,10 @@ pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
 /// Idle wins first, then the previous CPU when it drains before the
 /// deadline, then the first sufficient shared CPU in id order. The
 /// first sufficient id is the slowest sufficient pick on a symmetric
-/// host. Test-only mirror with no map use: the BPF pass scans at most
-/// eight peers from a cursor, while this mirror walks the passed live
-/// slice in order. Callers pass host-sized slices within the 512 CPU
-/// bound, so the walk stays short with no extra cap here. Returns
+/// host. Test-only mirror with no map use where the BPF pass scans at
+/// most eight peers from a cursor, while this mirror walks the passed
+/// live slice in order. Callers pass host-sized slices within the 512
+/// CPU bound, so the walk stays short with no extra cap here. Returns
 /// minus one when no allowed CPU is live.
 #[cfg(test)]
 pub fn place(

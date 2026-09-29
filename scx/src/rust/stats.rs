@@ -3,7 +3,9 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Exports the counters view only with no web payload and no snapshot bulk.
+//! Exports the counters view plus the dashboard view from the BPF maps.
+//! The stats server carries deltas while the dashboard carries raw
+//! counters plus per CPU cards for the loopback page.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -79,8 +81,46 @@ pub struct Metrics {
     pub gate_rejects: u64,
 }
 
+/// One card of the per CPU grid.
+/// Id stays fixed while pid plus slice refresh on each poll.
+/// Pid holds zero when idle and slice holds the shared quantum.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PerCpuMetrics {
+    /// CPU id.
+    #[serde(default)]
+    pub id: u32,
+    /// Pid now on the CPU with zero when idle.
+    #[serde(default)]
+    pub running_pid: u32,
+    /// Fixed slice in nanos with the shared quantum.
+    #[serde(default)]
+    pub slice_ns: u64,
+}
+
+/// Snapshot for the web dashboard.
+/// Counters stay raw with the on CPU gauge plus the live pid view.
+/// The run loop pushes one per poll and the web thread keeps the
+/// newest behind a lock for the page plus the JSON routes.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WebMetrics {
+    /// Scheduler wide counters with raw values.
+    pub stats: Metrics,
+    /// One entry per online CPU in rank order.
+    #[serde(default)]
+    pub per_cpu: Vec<PerCpuMetrics>,
+    /// Scheduler version for the page plus the log.
+    #[serde(default)]
+    pub version: String,
+    /// Wall time in nanos since epoch for the log.
+    #[serde(default)]
+    pub timestamp_ns: u64,
+    /// One line topology summary for the page.
+    #[serde(default)]
+    pub topology: String,
+}
+
 /// Stats printer loop for the monitor flag.
-/// Polls the stats server on the interval with no web use.
+/// Polls the stats server on the interval with plain text lines.
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
         &[],
@@ -90,7 +130,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     )
 }
 
-/// Server data for the stats server with no web payload.
+/// Server data for the stats server.
 /// A single top op reports interval deltas of the counters.
 pub fn server_data() -> StatsServerData<(), Metrics> {
     let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {

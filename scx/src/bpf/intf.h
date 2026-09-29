@@ -58,9 +58,9 @@ enum flow_consts {
 	/* period for another chance. */
 	FLOW_BACKSTOP_NS = 8000000ULL,
 	/* Timer period matches the backstop interval with no knob. Kept */
-	/* as its own name on purpose: the interval drives the park check */
-	/* while the timer drives the wake tick, and the assert below pins */
-	/* both at 8ms so every park meets a tick. */
+	/* as its own name on purpose with the interval driving the park */
+	/* check while the timer drives the wake tick, and the assert below */
+	/* pins both at 8ms so every park meets a tick. */
 	FLOW_BACKSTOP_TIMER_NS = 8000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
