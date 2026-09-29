@@ -19,10 +19,11 @@
  * at least two, and stolen tasks pay no extra charge. See intf.h
  * for the caps and enqueue.bpf.c for the deadline choice.
  *
- * The pass splits across dispatch/drain, gated, steal, and tail
+ * The pass splits across dispatch/drain, gated, steal, tail, and perf
  * files with one RCU section here. Each helper stays noinline
  * with scalar inputs and no duplicate walks, so the verifier
- * stays small.
+ * stays small. Level follows after the lock from queue depth
+ * with no call on steady.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -30,6 +31,7 @@
 #include "dispatch/gated.bpf.c"
 #include "dispatch/steal.bpf.c"
 #include "dispatch/tail.bpf.c"
+#include "dispatch/perf.bpf.c"
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
@@ -75,6 +77,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	moved += got;
 	over_moved += got;
 	bpf_rcu_read_unlock();
+	/* Level follows after the lock with the same CPU only. */
+	flow_perf_update(cpu);
 	if (moved != 0)
 		__sync_fetch_and_add(&flow_stats.slot_moves,
 		    (u64)moved);
