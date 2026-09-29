@@ -12,45 +12,6 @@
 #[cfg(test)]
 pub const SHARED_SCAN_BOUND: u32 = 8;
 
-/// One pending task in the placement plus drain models.
-/// Live means the task may move, fail means the move always misses,
-/// allowed holds the CPU mask in id order, deadline holds the absolute
-/// deadline with zero for no order yet.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingTask {
-    /// True when the task may move.
-    pub live: bool,
-    /// True when the move always misses.
-    pub fail: bool,
-    /// Allowed CPU ids in any order.
-    pub allowed: Vec<i32>,
-    /// Absolute deadline with zero for no order yet.
-    pub deadline: u64,
-    /// Queued depth ahead in slices for the drain estimate.
-    pub depth_ahead: u64,
-}
-
-#[cfg(test)]
-impl PendingTask {
-    /// One live task with the given mask and deadline.
-    pub fn live(allowed: &[i32], deadline: u64) -> Self {
-        Self {
-            live: true,
-            fail: false,
-            allowed: allowed.to_vec(),
-            deadline,
-            depth_ahead: 0,
-        }
-    }
-}
-
-/// True when one CPU id sits in the allowed mask.
-#[cfg(test)]
-pub fn may_run_on(cpu: i32, allowed: &[i32]) -> bool {
-    allowed.contains(&cpu)
-}
-
 /// Drain nanos of one queue depth as slices times the quantum.
 /// Saturates on wrap, so a huge depth clamps instead of wrapping to
 /// an idle view.

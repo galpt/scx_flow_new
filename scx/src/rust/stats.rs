@@ -58,7 +58,7 @@ pub struct Metrics {
     #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub over_moves: u64,
-    #[stat(desc = "Moves from the kernel global queue")]
+    #[stat(desc = "Legacy global moves, always zero")]
     #[serde(default)]
     pub global_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]

@@ -388,10 +388,6 @@ mod tests {
             crate::flow_slot::SLOT_OVER_CAP,
             crate::bpf_intf::flow_consts_FLOW_OVER_CAP
         );
-        assert_eq!(
-            crate::flow_slot::SLOT_MISS_CAP,
-            crate::bpf_intf::flow_consts_FLOW_MISS_CAP
-        );
     }
 
     #[test]
@@ -401,11 +397,6 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
         );
         assert_eq!(crate::flow_edf::PERIOD_NS, 16_000_000);
-        assert_eq!(
-            crate::flow_edf::BACKSTOP_NS,
-            crate::bpf_intf::flow_consts_FLOW_BACKSTOP_NS as u64
-        );
-        assert_eq!(crate::flow_edf::BACKSTOP_NS, 8_000_000);
     }
 
     #[test]
@@ -447,10 +438,6 @@ mod tests {
         assert_eq!(
             crate::flow_cgrp::HINT_MAX,
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
-        );
-        assert_eq!(
-            crate::flow_cgrp::BACKSTOP_TIMER_NS,
-            crate::bpf_intf::flow_consts_FLOW_BACKSTOP_TIMER_NS as u64
         );
     }
 }

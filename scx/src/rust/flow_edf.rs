@@ -10,13 +10,6 @@
 
 /// Default period in nanos at 16ms. Holds eight slices.
 pub const PERIOD_NS: u64 = 16_000_000;
-/// Backstop interval in nanos at 8ms. Holds four slices.
-pub const BACKSTOP_NS: u64 = 8_000_000;
-/// Backstop timer in nanos at 8ms. Matches the backstop interval.
-/// Kept as its own name beside the interval on purpose with the interval
-/// driving the park check while the timer drives the wake tick, and the
-/// header assert plus the config test pin both at 8ms.
-pub const BACKSTOP_TIMER_NS: u64 = 8_000_000;
 /// Admission bound in per mille at 950. Holds use under ninety five percent.
 pub const ADMIT_PERMILLE: u64 = 950;
 /// Base capacity in units at 1024. Every symmetric CPU offers the same units.
@@ -83,19 +76,6 @@ pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
     true
 }
 
-/// True when one queued task waited past the backstop interval.
-/// Unknown stamps never count, so fresh tasks wait out the interval.
-#[cfg(test)]
-pub fn parked(wait_at: u64, now: u64) -> bool {
-    if wait_at == 0 {
-        return false;
-    }
-    if now < wait_at {
-        return false;
-    }
-    now - wait_at > BACKSTOP_NS
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,13 +98,10 @@ mod tests {
     }
 
     #[test]
-    fn miss_and_park_checks() {
+    fn miss_checks() {
         assert!(!missed(0, 100, 200));
         assert!(!missed(10, 0, 200));
         assert!(!missed(10, 100, 100));
         assert!(missed(10, 100, 101));
-        assert!(!parked(0, 200));
-        assert!(!parked(100, 100));
-        assert!(parked(100, 100 + BACKSTOP_NS + 1));
     }
 }

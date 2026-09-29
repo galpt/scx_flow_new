@@ -28,7 +28,7 @@ struct {
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU pid with drain cursor. */
+/* Per CPU pid with placement cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
@@ -65,20 +65,9 @@ struct {
 	__type(key, u64);
 	__type(value, struct flow_hint);
 } hint_stor SEC(".maps");
-/* Single backstop timer for parked work. */
-struct flow_backstop_timer {
-	struct bpf_timer timer;
-};
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct flow_backstop_timer);
-} backstop_timer SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
-volatile u64 flow_backstop_pending = 0;
 #include "main/task.bpf.c"
 #include "main/cpu.bpf.c"
 #include "main/hier.bpf.c"
@@ -94,8 +83,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	s32 ret;
 	u64 n;
 	s32 cpu;
-	u32 tkey = 0;
-	struct flow_backstop_timer *tm;
 	u64 want = 1;
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
@@ -224,20 +211,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	ret = scx_bpf_create_dsq(flow_overflow_dsq(), -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
-		return ret;
-	}
-	/* Single timer wakes parked work with no queue scan. */
-	tm = bpf_map_lookup_elem(&backstop_timer, &tkey);
-	if (!tm) {
-		scx_bpf_error("timer lookup failed");
-		return -EINVAL;
-	}
-	bpf_timer_init(&tm->timer, &backstop_timer, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(&tm->timer, flow_backstop_cb);
-	ret = bpf_timer_start(&tm->timer,
-	    (u64)FLOW_BACKSTOP_TIMER_NS, 0);
-	if (ret < 0) {
-		scx_bpf_error("timer start failed");
 		return ret;
 	}
 	return 0;

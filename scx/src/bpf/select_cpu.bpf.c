@@ -11,7 +11,7 @@
  * stays open. Capacities stay symmetric on test hosts, so the lowest
  * sufficient id is the slowest sufficient pick. Pinned tasks stay
  * where the mask allows with no scan, and the task mask always wins.
- * An empty mask falls through to the global queue at enqueue. See
+ * An empty mask falls through to the overflow tail at enqueue. See
  * enqueue.bpf.c for admission plus the deadline choice after select.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

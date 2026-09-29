@@ -2,9 +2,11 @@
 /*
  * Queue inserts for the enqueue pass.
  *
- * Holds the local, node, machine, overflow, and global inserts with
- * a fixed slice. Runs inline with no walk, so the verifier stays
- * small. Runs under the caller with no lock.
+ * Holds the local, node, machine, and overflow inserts with
+ * a fixed slice. Homeless tasks park in the overflow tail with all
+ * other parks, so no insert touches the kernel global queue. Runs
+ * inline with no walk, so the verifier stays small. Runs under the
+ * caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -30,19 +32,12 @@ static __always_inline void flow_machine_insert(
 	    (u64)FLOW_QUANTUM_NS, deadline, 0);
 }
 /* Insert one task into the shared overflow tail. */
-/* Pinned tasks plus missed parks rest here with mask wins on drain. */
+/* Pinned tasks plus missed parks plus rejected parks plus homeless */
+/* tasks rest here with one direct kick on insert, so every park meets */
+/* a dispatch pass with no wait. */
 static __always_inline void flow_over_insert(
 	struct task_struct *p)
 {
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
-	    (u64)FLOW_QUANTUM_NS, 0);
-}
-/* Insert one homeless task into the kernel global queue. */
-/* Tasks without state or without a live CPU rest here with */
-/* mask wins on drain, and the drain counts the global moves. */
-static __always_inline void flow_global_insert(
-	struct task_struct *p)
-{
-	scx_bpf_dsq_insert(p, (u64)SCX_DSQ_GLOBAL,
 	    (u64)FLOW_QUANTUM_NS, 0);
 }

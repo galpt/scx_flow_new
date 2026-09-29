@@ -3,21 +3,22 @@
  * Shared constants and helpers for the flow scheduler.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
- * per node plus one shared queue per machine plus one overflow tail,
- * and it uses the kernel global queue for homeless work. Every task
- * carries a release plus a period plus an absolute deadline, and each
- * queue orders by that deadline. Admission holds total declared use
- * under ninety five percent of the machine, so admitted work can meet
- * its deadlines. A miss counts when wall completion passes release
- * plus deadline, and a miss parks the task for the backstop pass. One
- * timer wakes parked work on a fixed backstop interval. Placement
- * takes the slowest sufficient CPU among the allowed set that can
- * meet the deadline, so light work never takes a fast CPU that other
- * work needs. Hints from the flat view tune the period only, and no
- * group or pool shapes order. See select_cpu.bpf.c for placement and
+ * per node plus one shared queue per machine plus one overflow tail.
+ * Homeless work parks in the overflow tail with all other parks.
+ * Every task carries a release plus a period plus an absolute
+ * deadline, and each queue orders by that deadline. Admission holds
+ * total declared use under ninety five percent of the machine, so
+ * admitted work can meet its deadlines. A miss counts when wall
+ * completion passes release plus deadline, and a miss parks the task
+ * in overflow with a direct kick and no wait. Placement takes the
+ * slowest sufficient CPU among the allowed set that can meet the
+ * deadline, so light work never takes a fast CPU that other work
+ * needs. Hints from the flat view tune the period only, and no group
+ * or pool shapes order. See select_cpu.bpf.c for placement and
  * enqueue.bpf.c for admission plus the deadline choice and
- * dispatch.bpf.c for the two tier drain and lifecycle.bpf.c for the
- * miss count and timer.bpf.c for the backstop wake.
+ * dispatch.bpf.c for the four single moves and lifecycle.bpf.c for
+ * the miss count and timer.bpf.c for the leftover charge plus the
+ * miss count.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -50,18 +51,9 @@ typedef int pid_t;
 enum flow_consts {
 	FLOW_QUANTUM_NS = 2000000ULL,
 	/* Default period of 16ms with no knob. Holds eight slices, */
-	/* so a fully used task still leaves room for one backstop */
-	/* pass inside the period. */
+	/* so a fully used task still leaves room for one park plus */
+	/* one retry inside the period. */
 	FLOW_PERIOD_NS = 16000000ULL,
-	/* Backstop interval of 8ms with no knob. Wakes parked work */
-	/* within half a default period, so a miss never waits a full */
-	/* period for another chance. */
-	FLOW_BACKSTOP_NS = 8000000ULL,
-	/* Timer period matches the backstop interval with no knob. Kept */
-	/* as its own name on purpose with the interval driving the park */
-	/* check while the timer drives the wake tick, and the assert below */
-	/* pins both at 8ms so every park meets a tick. */
-	FLOW_BACKSTOP_TIMER_NS = 8000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
 	FLOW_WEIGHT_MAX = 16384ULL,
@@ -87,9 +79,9 @@ enum flow_consts {
 	/* Queue count of 522. Holds 512 local plus 8 node plus one */
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
-	/* Drain budget of 16 moves per pass with no knob. Holds eight */
-	/* local moves plus eight shared moves, so one pass always */
-	/* serves both tiers without starving either tier. */
+	/* Drain bound of 16 moves per pass with no knob. One move */
+	/* per tier keeps every pass under the bound with no shared */
+	/* math, so one pass always serves all four tiers. */
 	FLOW_SLOT_BUDGET = 16ULL,
 	/* Dispatch batch of 16 moves with no knob. Matches the drain */
 	/* budget, so the ops table and the drain agree on one pass. */
@@ -106,9 +98,6 @@ enum flow_consts {
 	/* Overflow tier cap of 2 under budget 16. Holds a bounded */
 	/* share, so one bad head never fills the pass. */
 	FLOW_OVER_CAP = 2ULL,
-	/* Miss cap of 3 per trip with no knob. Three bad heads end one */
-	/* trip, so one bad head never stalls the pass. */
-	FLOW_MISS_CAP = 3ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Admission bound of 950 per mille with no knob. Holds use */
 	/* under ninety five percent, so admitted work keeps idle time */
@@ -135,8 +124,9 @@ enum flow_consts {
 /* Vruntime holds the scaled runtime served so far for order ties. */
 /* A zero runtime means no service yet, so fresh tasks order by */
 /* deadline alone. */
-/* Wait holds the last enqueue time for the backstop check. A zero */
-/* wait means the task never queued, so the gate fails closed. */
+/* Wait holds the last enqueue time. A zero wait means the task */
+/* never queued. Every queue join stamps the task, so queued work */
+/* always carries a stamp. */
 /* Run holds the segment start while on CPU else zero, so a claimed */
 /* start pairs the on CPU gauge with the stopping charge. Running */
 /* claims from zero only with a compare and swap, so a second running */
@@ -168,11 +158,12 @@ struct flow_task_ctx {
 	u32 admit_cpu;
 	u32 __pad;
 };
-/* Per CPU state at 8B with running pid plus drain cursor. */
+/* Per CPU state at 8B with running pid plus placement cursor. */
 /* Pid holds the task now on the CPU else zero. Owner clears use a */
 /* compare and swap, so a stale exit never clears a new owner. */
-/* Cursor spreads the shared scans with no hotspot. The cursor races */
-/* best effort with no atomic order. */
+/* Cursor spreads the placement scans with no hotspot. The cursor races */
+/* best effort with no atomic order. Dispatch uses a fixed tier order */
+/* with no cursor use. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
@@ -202,7 +193,8 @@ struct flow_cpu_admit {
 struct flow_hint {
 	u64 period_us;
 };
-/* Scheduler counters with 16 live fields. */
+/* Scheduler counters with 16 fields. Global moves stay zero with */
+/* homeless parks in overflow, and the field stays for a stable wire. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -234,11 +226,6 @@ _Static_assert(sizeof(struct flow_topo) == 8,
 /* Stats hold 16 counters in 128 bytes. */
 _Static_assert(sizeof(struct flow_sched_stats) == 128,
 	"stats stay at 128B");
-/* Backstop tick matches the backstop interval. */
-_Static_assert(FLOW_BACKSTOP_TIMER_NS == 8000000ULL,
-	"timer stays at 8ms");
-_Static_assert(FLOW_BACKSTOP_TIMER_NS == FLOW_BACKSTOP_NS,
-	"tick matches the backstop interval");
 /* Queue count holds local plus node plus machine plus overflow. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
@@ -336,17 +323,6 @@ static __always_inline bool flow_missed(u64 release,
 		return false;
 	return true;
 }
-/* True when one queued task waited past the backstop interval. */
-/* Unknown stamps never count, so fresh tasks wait out the interval. */
-static __always_inline bool flow_parked(u64 wait_at,
-	u64 now)
-{
-	if (wait_at == 0)
-		return false;
-	if (flow_time_before(now, wait_at))
-		return false;
-	return now - wait_at > (u64)FLOW_BACKSTOP_NS;
-}
 /* Local queue id of one CPU from base plus id. */
 /* One ordered queue per CPU keeps deadline order local. */
 static __always_inline u64 flow_local_dsq(u32 cpu)
@@ -409,37 +385,5 @@ static __always_inline bool flow_admit_ok(u64 admitted,
 	if (sum < admitted)
 		return false;
 	return sum <= (u64)FLOW_ADMIT_PERMILLE;
-}
-/* Local tier cap under budget 16. */
-/* Holds the header cap so the shared tier keeps room. */
-static __always_inline u32 flow_local_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_LOCAL_CAP)
-		return (u32)FLOW_LOCAL_CAP;
-	return budget;
-}
-/* Node tier cap under the dispatch budget. */
-/* Returns the min of budget and the header cap with no head stall. */
-static __always_inline u32 flow_node_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_NODE_CAP)
-		return (u32)FLOW_NODE_CAP;
-	return budget;
-}
-/* Machine tier cap under the dispatch budget. */
-/* Returns the min of budget and the header cap with no head stall. */
-static __always_inline u32 flow_machine_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_MACHINE_CAP)
-		return (u32)FLOW_MACHINE_CAP;
-	return budget;
-}
-/* Overflow tier cap under the dispatch budget. */
-/* Returns the min of budget and the header cap with no head stall. */
-static __always_inline u32 flow_over_cap(u32 budget)
-{
-	if (budget > (u32)FLOW_OVER_CAP)
-		return (u32)FLOW_OVER_CAP;
-	return budget;
 }
 #endif

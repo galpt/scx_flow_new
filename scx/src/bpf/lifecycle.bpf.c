@@ -8,7 +8,8 @@
  * scaled time with the task weight, then drops the stored admitted
  * share, then counts one requeue per runnable stop else one
  * completion. A wall completion past release plus deadline counts
- * one miss with one park and arms the backstop timer. Enable clears
+ * one miss with one park and no kick, since the task already left
+ * the CPU. Enable clears
  * the release plus the period plus the deadline plus the runtime
  * plus the hint plus the miss count plus the stored share, and
  * disable plus exit charge a leftover segment at most once when
@@ -126,13 +127,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	/* A wall completion past the deadline counts one miss with one */
-	/* park and arms the backstop timer for the next tick. */
+	/* park and no kick, since the task already left the CPU. */
 	if (!runnable && tctx->release &&
 	    !flow_deadline_ok(tctx->deadline, now)) {
 		flow_count_miss(tctx);
-		if (!READ_ONCE(flow_backstop_pending))
-			__sync_lock_test_and_set(
-			    &flow_backstop_pending, 1);
 	}
 	if (runnable) {
 		__sync_fetch_and_add(&flow_stats.requeues, 1);

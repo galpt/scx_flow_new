@@ -6,8 +6,6 @@
 //! Holds the validated constants with defaults that match intf.h.
 
 use crate::flow::ADMIT_PERMILLE;
-use crate::flow::BACKSTOP_NS;
-use crate::flow::BACKSTOP_TIMER_NS;
 use crate::flow::CAP_BASE;
 use crate::flow::HINT_MAX;
 use crate::flow::PERIOD_NS;
@@ -15,7 +13,6 @@ use crate::flow::QUANTUM_NS;
 use crate::flow::SLOT_BUDGET;
 use crate::flow::SLOT_LOCAL_CAP;
 use crate::flow::SLOT_MACHINE_CAP;
-use crate::flow::SLOT_MISS_CAP;
 use crate::flow::SLOT_NODE_CAP;
 use crate::flow::SLOT_OVER_CAP;
 use crate::flow::WEIGHT_BASE;
@@ -57,13 +54,13 @@ impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 2ms with base weight 128 in range
-    /// 1 to 16384. The period stays at 16ms with the backstop at 8ms.
-    /// The batch stays fixed at 16 and the budget at 16. The local
-    /// tier stays at 8 with the node tier at 4 plus machine at 2 plus
-    /// overflow at 2 and a miss cap at 3. Admission holds use under
-    /// 950 per mille with base capacity 1024. Queues hold 512 local
-    /// plus 8 node plus machine plus overflow with ids in the 0x5100
-    /// region. Hints hold 4096 flat rows with an 8ms timer.
+    /// 1 to 16384. The period stays at 16ms. The batch stays fixed
+    /// at 16 and the budget at 16. The local tier stays at 8 with
+    /// the node tier at 4 plus machine at 2 plus overflow at 2.
+    /// Admission holds use under 950 per mille with base capacity
+    /// 1024. Queues hold 512 local plus 8 node plus machine plus
+    /// overflow with ids in the 0x5100 region. Hints hold 4096 flat
+    /// rows with no timer wait.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -76,9 +73,6 @@ impl Config {
         }
         if PERIOD_NS != 16_000_000 {
             bail!("period bounds bad");
-        }
-        if BACKSTOP_NS != 8_000_000 || BACKSTOP_TIMER_NS != 8_000_000 {
-            bail!("backstop bounds bad");
         }
         if self.dispatch_batch != DEF_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
@@ -97,9 +91,6 @@ impl Config {
         }
         if SLOT_MACHINE_CAP != 2 || SLOT_OVER_CAP != 2 {
             bail!("drain caps bad");
-        }
-        if SLOT_MISS_CAP != 3 {
-            bail!("miss cap bad");
         }
         if ADMIT_PERMILLE != 950 {
             bail!("admission bound bad");
@@ -227,10 +218,6 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_LOCAL_BASE as u64, 0x5100);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_BACKSTOP_TIMER_NS as u64,
-            crate::flow_cgrp::BACKSTOP_TIMER_NS
-        );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
             crate::flow_cgrp::HINT_MAX

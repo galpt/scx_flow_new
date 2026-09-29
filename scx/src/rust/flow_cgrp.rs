@@ -11,12 +11,6 @@
 
 /// Max hint rows bound shared with the BPF header.
 pub const HINT_MAX: u64 = 4096;
-/// Backstop timer in nanos at 8ms. Matches the BPF backstop tick.
-/// Duplicates the deadline tick on purpose so this file stays free of
-/// the deadline mirror, and the config test asserts both copies match
-/// the header.
-#[cfg(test)]
-pub const BACKSTOP_TIMER_NS: u64 = 8_000_000;
 
 /// Period hint in micros for one weight with a fixed table.
 /// Light shares map to long periods and heavy shares map to short

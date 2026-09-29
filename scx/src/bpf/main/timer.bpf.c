@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Charge and timer helpers for the core.
+ * Charge and miss helpers for the core.
  *
- * Holds the leftover charge plus the single backstop timer that wakes
- * parked work on a fixed interval. Each helper stays noinline with
- * scalar inputs, so the verifier stays small.
+ * Holds the leftover charge plus the miss count. Parks wake by direct
+ * kick on insert with no timer wait, so no timer lives here. Each
+ * helper stays noinline with scalar inputs, so the verifier stays
+ * small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -63,52 +64,4 @@ static __noinline void flow_count_miss(
 		__sync_fetch_and_add(&tctx->misses, 1);
 	__sync_fetch_and_add(&flow_stats.misses, 1);
 	__sync_fetch_and_add(&flow_stats.parks, 1);
-}
-/* Single backstop timer for parked work on a fixed interval. */
-/* The tick arms pending when parked work waits, then kicks the first */
-/* live CPU, so a parked task meets a dispatch pass soon. The kick */
-/* targets the first live CPU with mask wins on drain, so a parked */
-/* mask mismatch stays best effort with no task scan here. Idle ticks */
-/* with no parked work stay quiet with no kick and no storm. Pending */
-/* uses an atomic exchange to match the enqueue store with no torn */
-/* flag. The live scan stays bound at 8, so the tick never sweeps the */
-/* full CPU range. */
-static int flow_backstop_cb(void *map, int *key,
-	struct bpf_timer *timer)
-{
-	u32 found = 0xffffffffU;
-	u64 was;
-	u64 kicks;
-	u64 n;
-	u32 start = 0;
-	u32 off;
-	(void)map;
-	(void)key;
-	if (!READ_ONCE(flow_backstop_pending))
-		goto arm;
-	was = __sync_lock_test_and_set(&flow_backstop_pending, 0);
-	if (!was)
-		goto arm;
-	n = nr_cpu_ids;
-	if (n == 0 || n > (u64)FLOW_MAX_CPUS)
-		goto arm;
-	kicks = READ_ONCE(flow_stats.kicks);
-	start = (u32)(kicks % n);
-	bpf_for(off, 0, 8) {
-		u32 peer;
-		if ((u64)off >= n)
-			break;
-		peer = (start + off) % (u32)n;
-		if (flow_cpu_live(peer)) {
-			found = peer;
-			break;
-		}
-	}
-	if (found != 0xffffffffU) {
-		scx_bpf_kick_cpu((s32)found, SCX_KICK_IDLE);
-		__sync_fetch_and_add(&flow_stats.kicks, 1);
-	}
-arm:
-	bpf_timer_start(timer, (u64)FLOW_BACKSTOP_TIMER_NS, 0);
-	return 0;
 }

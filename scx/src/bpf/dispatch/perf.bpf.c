@@ -73,7 +73,7 @@ static __noinline void flow_perf_update(s32 cpu)
 	    want != (u32)FLOW_CPU_PERF_MAX)
 		return;
 	/* The cap clamps the want within range, so want stays at or */
-	/* below cap. A zero cap skips with no call as backstop only. */
+	/* below cap. A zero cap skips with no call as a guard. */
 	/* Past the clamp the want may sit outside the allowlist, still */
 	/* in range, so the set stays safe. */
 	if (bpf_ksym_exists(scx_bpf_cpuperf_cap)) {
