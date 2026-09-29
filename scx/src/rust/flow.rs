@@ -15,5 +15,7 @@ pub use crate::flow_runtime::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
 pub use crate::flow_slice::*;
+// Test-only queue id mirror with no production use, so it stays out of
+// the binary and only builds for tests.
 #[cfg(test)]
 pub use crate::flow_slot::*;

@@ -34,6 +34,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 node;
 
 	(void)prev;
+	/* A negative CPU is a core idle call with no queue work, so it */
+	/* returns with no gate count. A stale live CPU fails closed with */
+	/* one count below, so only real rejects count. */
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu)) {

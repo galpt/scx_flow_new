@@ -49,8 +49,9 @@ static __noinline void flow_perf_update(s32 cpu)
 		return;
 	if (!flow_cpu_live((u32)cpu))
 		return;
-	/* Own plus local shape the depth with no shared use. */
-	/* A bad read drops with no boost, so a missing queue stays idle. */
+	/* Own plus local shape the depth with two polls only and no tier */
+	/* pre scan, so the pass pays no shared walk. A bad read drops */
+	/* with no boost, so a missing queue stays idle. */
 	own = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
 	if (own > 0)
 		depth += (u64)own;

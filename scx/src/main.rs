@@ -27,6 +27,9 @@ mod flow_runtime;
 mod flow_select;
 #[path = "rust/flow_slice.rs"]
 mod flow_slice;
+/* Test-only queue id mirror with no production use, so it stays out of */
+/* the binary and only builds for tests. */
+#[cfg(test)]
 #[path = "rust/flow_slot.rs"]
 mod flow_slot;
 #[path = "rust/snapshot.rs"]

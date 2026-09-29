@@ -18,7 +18,9 @@ use anyhow::bail;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
-/// Default dispatch batch for the ops table with no knob.
+/// Default dispatch batch for the ops table with no knob. Mirrors
+/// FLOW_DISPATCH_MAX_BATCH in intf.h, so the ops table holds every
+/// pass with room and no shared math.
 const DEF_BATCH: u32 = 16;
 
 /// Validated scheduling constants.
@@ -168,6 +170,11 @@ mod tests {
     #[test]
     /// Defaults match the shared header with local plus shared queues.
     fn defaults_match_intf_h() {
+        assert_eq!(
+            DEF_BATCH,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
+        );
+        assert_eq!(DEF_BATCH, 16);
         assert_eq!(
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64

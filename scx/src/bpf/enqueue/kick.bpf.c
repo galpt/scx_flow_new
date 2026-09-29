@@ -3,12 +3,15 @@
  * Idle kick for the enqueue pass.
  *
  * Holds the one idle allowed kick for shared and overflow parks with
- * no preempt. Outlined to keep enqueue small with no duplicate walk.
- * Runs under the caller with no lock.
+ * no preempt. Each park sends one idle kick at most with no storm, so
+ * the cost stays bounded by parks and only an idle CPU wakes. Outlined
+ * to keep enqueue small with no duplicate walk. Runs under the caller
+ * with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Kick one idle allowed CPU for shared or overflow parks. */
+/* Kick one idle allowed CPU for shared or overflow parks with one kick at most, */
+/* so the cost stays bounded by parks with no storm. */
 /* Tries the selected CPU first, then the kernel idle pick, then */
 /* the first allowed live CPU. Kicks only when the target runs */
 /* nothing, with the idle flag cleared first so the kick sticks. */

@@ -96,7 +96,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		return;
 	}
 	cpu = flow_pick_target(p, sel);
-	/* No live CPU parks in overflow with an idle kick. */
+	/* No live CPU parks homeless work in overflow with an idle kick. */
 	/* A stale stored share drops here too with no new share. */
 	if (!flow_cpu_ok(p, cpu)) {
 		flow_gate_reject();
