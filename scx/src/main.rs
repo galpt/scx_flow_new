@@ -224,11 +224,11 @@ impl<'a> Scheduler<'a> {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if let Some(ref tx) = self.webui_tx {
-                        if !tx.is_full() {
-                            let web = self.get_web_metrics();
-                            let _ = tx.try_send(web);
-                        }
+                    if let Some(ref tx) = self.webui_tx
+                        && !tx.is_full()
+                    {
+                        let web = self.get_web_metrics();
+                        let _ = tx.try_send(web);
                     }
                 }
                 Err(e) => Err(e)?,
