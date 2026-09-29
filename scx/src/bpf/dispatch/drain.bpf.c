@@ -1,55 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Plain drain for the dispatch pass.
+ * Tier drains for the dispatch pass.
  *
- * Moves gated tasks to local with a miss cap at 4.
- * One bad head never blocks later work with no full scan.
- * Serves deadline, global, overflow, and steal trips. Every move
- * shares one gate helper with mask plus stamp plus generation
- * checks, and park moves add the throttle check. Admitted work
- * moves without a throttle recheck, since admission plus the gated
- * overflow pass already hold throttled parks with a timer wake.
- * Runs under the caller RCU read lock.
+ * Moves one queue to local with a shared gate plus mask plus stamp
+ * checks. The gated trip serves local plus node plus machine plus
+ * overflow with an optional backstop wait, and the homeless trip
+ * serves global only with fail open moves. Overflow parks younger
+ * than the backstop interval count one miss and keep order, so fresh
+ * parks never jump the queue. Each visit pays one pid lookup plus one
+ * state lookup, and a null, disallowed, unstamped, young, or failed
+ * visit counts one miss with the miss cap at 3, so one bad head never
+ * stalls the pass. Runs under the caller RCU read lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one overflow task is still throttled via its leaf flag. */
-/* Takes cached plus id scalars with no struct pass, so the caller */
-/* stays small and the check verifies once. A cold cache or a missing */
-/* leaf moves fail open on purpose, so a move while parked costs one */
-/* quantum at most. The moved task runs one slice, the stop path still */
-/* charges the pools, and the next enqueue walks and parks with pending */
-/* armed, so no pool bypass survives past one quantum. A flagged hit */
-/* re-arms the timer flag for the next tick. */
-static __noinline bool flow_over_throttled_scalar(bool cached,
-	u64 cgid)
-{
-	struct flow_cgrp_ctx *e;
-
-	if (!cached)
-		return false;
-	e = flow_cgrp(cgid);
-	if (!e)
-		return false;
-	if (!(flow_load_flags(e) & (u32)FLOW_CGRP_THROTTLED))
-		return false;
-	__sync_lock_test_and_set(&flow_bw_pending, 1);
-	return true;
-}
 /* True when one queued task may move to the dispatching CPU. */
-/* Takes the task plus its state with no walk, so every drain */
-/* verifies once. The live check repeats the dispatch check, so an */
-/* offline during the pass fails closed with no move. The mask wins */
-/* next, then a zero stamp fails closed, and a stale generation reads */
-/* as cold with a fail open move for one quantum only. Park moves add */
-/* the throttle check with the timer behind the wait, admitted moves */
-/* skip it with admission plus overflow cover. Exiting tasks never */
+/* The live check repeats the dispatch check, so an offline CPU */
+/* during the pass fails closed with no move. The mask wins next, */
+/* then a zero stamp fails closed with one miss. Exiting tasks never */
 /* reach here, they run at once on the enqueue path with no queue wait. */
 static __noinline bool flow_gate_ok(s32 cpu,
-	struct task_struct *p, struct flow_task_ctx *tctx, bool park)
+	struct task_struct *p, struct flow_task_ctx *tctx)
 {
-	bool eff;
 	if (cpu < 0 || !tctx)
+		return false;
+	if (!p)
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
@@ -57,57 +32,86 @@ static __noinline bool flow_gate_ok(s32 cpu,
 		return false;
 	if (tctx->wait_at == 0)
 		return false;
-	eff = tctx->cached && tctx->generation == (u16)flow_load_gen();
-	if (park && flow_over_throttled_scalar(eff, tctx->cgid))
-		return false;
 	return true;
 }
-/* One drain trip over a queue with a shared gate. */
-/* Each visit pays one pid lookup plus one state lookup, and a null, */
-/* disallowed, unstamped, failed, or throttled visit counts one miss */
-/* with the miss cap at 4, so one bad head never stalls the pass. */
-static __noinline u32 flow_drain_one(s32 cpu,
-	u64 dsq, u32 budget, u32 base, bool open)
+/* One gated trip over a queue to local with an optional backstop. */
+/* Takes CPU plus queue plus limit plus base plus backstop scalars */
+/* with no struct pass, so every tier verifies through this one loop. */
+/* A set backstop holds parks younger than the interval with one miss. */
+static __noinline u32 flow_drain_gated(s32 cpu,
+	u64 dsq, u32 lim, u32 base, bool backstop)
 {
 	struct task_struct *p;
 	u32 moved = 0;
 	u32 miss = 0;
-
+	u64 now = 0;
+	if (backstop)
+		now = flow_now();
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		struct flow_task_ctx *tctx;
+		struct task_struct *trusted;
 		bool ok;
-		if (moved + base >= budget)
+		if (moved + base >= lim)
 			break;
 		if (miss >= (u32)FLOW_MISS_CAP)
 			break;
-		p = bpf_task_from_pid(p->pid);
-		if (!p) {
+		trusted = bpf_task_from_pid(p->pid);
+		if (!trusted) {
 			miss++;
 			continue;
 		}
-		/* Liveness holds through the trusted lookup above. */
-		/* Missing state moves fail open on the homeless path */
-		/* with mask wins, else fail closed with one miss. */
-		/* The park check stays off here with no flag use, the */
-		/* gated drain covers throttled parks with the timer. */
-		tctx = flow_lookup(p);
-		if (!tctx && !open) {
-			bpf_task_release(p);
+		tctx = flow_lookup(trusted);
+		if (!tctx) {
+			bpf_task_release(trusted);
 			miss++;
 			continue;
 		}
-		if (tctx)
-			ok = flow_gate_ok(cpu, p, tctx, false);
-		else
-			ok = bpf_cpumask_test_cpu((u32)cpu,
-			    p->cpus_ptr);
-		if (ok && scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
-			bpf_task_release(p);
+		ok = flow_gate_ok(cpu, trusted, tctx);
+		if (ok && backstop && !flow_parked(tctx->wait_at,
+		    now))
+			ok = false;
+		if (ok && scx_bpf_dsq_move(BPF_FOR_EACH_ITER,
+		    trusted, (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(trusted);
 			moved++;
 			miss = 0;
 		} else {
-			bpf_task_release(p);
+			bpf_task_release(trusted);
+			miss++;
+		}
+	}
+	return moved;
+}
+/* One homeless trip over global to local with fail open moves. */
+/* Tasks without state move with mask wins, so homeless work never */
+/* stalls. All other visits count one miss with the same miss cap. */
+static __noinline u32 flow_drain_global(s32 cpu,
+	u32 lim, u32 base)
+{
+	struct task_struct *p;
+	u32 moved = 0;
+	u32 miss = 0;
+	bpf_for_each(scx_dsq, p, SCX_DSQ_GLOBAL, 0) {
+		struct task_struct *trusted;
+		bool ok;
+		if (moved + base >= lim)
+			break;
+		if (miss >= (u32)FLOW_MISS_CAP)
+			break;
+		trusted = bpf_task_from_pid(p->pid);
+		if (!trusted) {
+			miss++;
+			continue;
+		}
+		ok = bpf_cpumask_test_cpu((u32)cpu,
+		    trusted->cpus_ptr);
+		if (ok && scx_bpf_dsq_move(BPF_FOR_EACH_ITER,
+		    trusted, (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			bpf_task_release(trusted);
+			moved++;
+			miss = 0;
+		} else {
+			bpf_task_release(trusted);
 			miss++;
 		}
 	}

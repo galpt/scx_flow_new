@@ -20,7 +20,7 @@ static __always_inline bool flow_task_pinned(
 }
 /* Target CPU for one enqueue with trust in select. */
 /* Open tasks keep select when allowed, else the first allowed CPU. */
-/* Pinned tasks never reach here, they rest in overflow above. */
+/* Pinned tasks never reach here, they rest in overflow. */
 static __always_inline s32 flow_pick_target(
 	struct task_struct *p, s32 sel)
 {

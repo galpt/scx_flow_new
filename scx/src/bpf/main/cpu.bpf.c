@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * CPU view helpers for the core.
+ * CPU view plus entry gate helpers for the core.
  *
  * Holds the live plus mask checks plus the running pid and gauge
- * helpers with no charge. Runs inline with no walk, so the verifier
- * stays small.
+ * helpers plus the universal entry gate with no charge. The gate
+ * runs first in every op, so bad CPUs plus bad queues plus bad tasks
+ * fail closed with one counter. Runs inline with no walk, so the
+ * verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* True when the id is a live CPU below nr and the bound. */
 /* Live means below the nr snapshot at init with no kernel online read. */
-/* Hotplug needs a restart with fail closed to overflow. */
+/* Hotplug needs a restart with fail closed to global. */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	if ((u64)cpu >= nr_cpu_ids)
@@ -20,9 +22,7 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 	return true;
 }
 /* True when the CPU is live and inside the task mask. */
-/* Live is the init snapshot with no hotplug read, so an offlined CPU */
-/* past init still reads live here and needs a restart to drain. */
-/* Unknown CPUs fail closed to overflow with mask wins on drain. */
+/* Unknown CPUs fail closed to global with mask wins on drain. */
 static __always_inline bool flow_cpu_ok(
 	const struct task_struct *p, s32 cpu)
 {
@@ -36,13 +36,13 @@ static __always_inline bool flow_cpu_ok(
 }
 /* Drop the on CPU gauge by one with no wrap and no clear. */
 /* Retries the compare and swap to pair every counted start, and a lost */
-/* race retries with no silent drop. The bound stays at 32 for the */
-/* verifier, and the window is one swap, so 32 covers the worst burst */
+/* race retries with no silent drop. The bound stays at 16 for the */
+/* verifier, and the window is one swap, so 16 covers the worst burst */
 /* with no growing leak past it. */
 static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
-	bpf_for(i, 0, 32) {
+	bpf_for(i, 0, 16) {
 		u64 cur = flow_stats.on_cpu;
 		u64 nxt;
 		u64 old;
@@ -99,4 +99,32 @@ static __always_inline void flow_clear_running_if_owner(
 	if (!st)
 		return;
 	__sync_val_compare_and_swap(&st->running_pid, pid, 0);
+}
+/* True when one task may enter an op on the given CPU. */
+/* Checks the CPU live view plus the task mask plus the queue id, so */
+/* a stale CPU plus a moved task plus a stale queue fail closed with */
+/* one counter. Exiting tasks skip the gate at the caller, so they */
+/* never count here. A null task fails closed with one count. */
+static __always_inline bool flow_entry_ok(s32 cpu,
+	const struct task_struct *p, u64 dsq)
+{
+	if (!p)
+		return false;
+	if (cpu >= 0 && !flow_cpu_live((u32)cpu))
+		return false;
+	if (cpu >= 0 && !bpf_cpumask_test_cpu((u32)cpu,
+	    p->cpus_ptr))
+		return false;
+	if (dsq && !flow_dsq_valid(dsq))
+		return false;
+	return true;
+}
+/* Count one closed gate rejection with saturation. */
+/* The add saturates, so a huge count clamps instead of wrapping. */
+static __always_inline void flow_gate_reject(void)
+{
+	u64 cur = READ_ONCE(flow_stats.gate_rejects);
+	if (cur == (u64)~0ULL)
+		return;
+	__sync_fetch_and_add(&flow_stats.gate_rejects, 1);
 }
