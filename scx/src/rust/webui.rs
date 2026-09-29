@@ -380,15 +380,15 @@ mod tests {
         let txt = "{\"stats\":{\"on_cpu\":1,\"total_runtime\":0,\
             \"uptime_ns\":0,\"inserts\":0,\
             \"requeues\":0,\"completions\":0,\
-            \"park_moves\":0,\"tree_moves\":0,\
+            \"park_moves\":0,\"steal_moves\":0,\
             \"kicks\":0,\"enq_no_tctx\":0}}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
-        assert_eq!(m.stats.tree_moves, 0);
+        assert_eq!(m.stats.slot_moves, 0);
         assert_eq!(m.stats.global_moves, 0);
-        assert_eq!(m.stats.cpuperf_sets, 0);
+        assert_eq!(m.stats.throttled_ns, 0);
         assert_eq!(m.stats.nr_throttled, 0);
         assert_eq!(m.stats.parked, 0);
         assert_eq!(m.stats.bw_moves, 0);
@@ -400,7 +400,11 @@ mod tests {
         let txt2 = "{\"stats\":{},\"per_cpu\":[{\"id\":0}]}";
         let m2: WebMetrics = serde_json::from_str(txt2).unwrap();
         assert_eq!(m2.per_cpu[0].id, 0);
+        assert_eq!(m2.per_cpu[0].slice_ns, 0);
         assert_eq!(m2.per_cpu[0].running_pid, 0);
+        let txt3 = "{\"stats\":{},\"per_cpu\":[{\"id\":0,\"tq_ns\":1000000}]}";
+        let m3: WebMetrics = serde_json::from_str(txt3).unwrap();
+        assert_eq!(m3.per_cpu[0].slice_ns, 1_000_000);
     }
 
     /* Full snapshot round trips through JSON. */
@@ -412,38 +416,41 @@ mod tests {
                 requeues: 1,
                 completions: 2,
                 park_moves: 1,
-                tree_moves: 40,
+                steal_moves: 2,
                 kicks: 4,
                 preempt_kicks: 6,
                 preempt_skipped: 7,
+                slot_moves: 40,
                 global_moves: 6,
+                throttled_ns: 1_000_000,
                 nr_throttled: 2,
                 parked: 2,
                 bw_moves: 1,
-                cpuperf_sets: 5,
                 ..Default::default()
             },
             per_cpu: vec![crate::stats::PerCpuMetrics {
                 id: 0,
+                slice_ns: 1_000_000,
                 running_pid: 7,
                 ..Default::default()
             }],
-            version: "4.4.6".to_string(),
+            version: "4.4.7".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "topology: 4 CPUs, no SMT, freq known".to_string(),
             governor: "performance (epp:performance)".to_string(),
             energy: crate::stats::EnergyMetrics::default(),
         };
         let txt = serde_json::to_string(&snap).unwrap();
+        assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
-        assert!(txt.contains("tree_moves"));
+        assert!(txt.contains("slot_moves"));
         assert!(txt.contains("global_moves"));
+        assert!(txt.contains("throttled_ns"));
         assert!(txt.contains("nr_throttled"));
         assert!(txt.contains("parked"));
         assert!(txt.contains("bw_moves"));
-        assert!(txt.contains("cpuperf_sets"));
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("governor"));
@@ -468,14 +475,16 @@ mod tests {
         assert_eq!(back.stats.inserts, 3);
         assert_eq!(back.stats.preempt_kicks, 6);
         assert_eq!(back.stats.preempt_skipped, 7);
-        assert_eq!(back.stats.tree_moves, 40);
+        assert_eq!(back.stats.slot_moves, 40);
         assert_eq!(back.stats.global_moves, 6);
-        assert_eq!(back.stats.cpuperf_sets, 5);
+        assert_eq!(back.stats.steal_moves, 2);
+        assert_eq!(back.stats.throttled_ns, 1_000_000);
         assert_eq!(back.stats.nr_throttled, 2);
         assert_eq!(back.stats.parked, 2);
         assert_eq!(back.stats.bw_moves, 1);
+        assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.version, "4.4.6");
+        assert_eq!(back.version, "4.4.7");
         assert_eq!(back.topology, "topology: 4 CPUs, no SMT, freq known");
         assert_eq!(back.governor, "performance (epp:performance)");
         assert_eq!(back.energy.state, "unavailable");
@@ -527,12 +536,12 @@ mod tests {
         assert!(html.contains("preempt_skipped"));
     }
 
-    /* Dashboard shows the tree cell. */
+    /* Dashboard shows the slot cell. */
     #[test]
-    fn dashboard_shows_tree_cells() {
+    fn dashboard_shows_slot_cells() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"tree-moves\""));
-        assert!(html.contains("tree_moves"));
+        assert!(html.contains("id=\"slot-moves\""));
+        assert!(html.contains("slot_moves"));
         assert!(!html.contains("fast_admits"));
         assert!(!html.contains("fast_bounds"));
         assert!(!html.contains("vtime_admits"));
@@ -564,18 +573,20 @@ mod tests {
         assert!(!html.contains("steal_penalties"));
     }
 
-    /* Dashboard shows the frequency cell. */
+    /* Dashboard shows the steal cell. */
     #[test]
-    fn dashboard_shows_cpuperf_cell() {
+    fn dashboard_shows_steal_cell() {
         let html = include_str!("../../ui/index.html");
-        assert!(html.contains("id=\"cpuperf\""));
-        assert!(html.contains("cpuperf_sets"));
+        assert!(html.contains("id=\"steal\""));
+        assert!(html.contains("steal_moves"));
     }
 
-    /* Dashboard shows the hierarchy cells. */
+    /* Dashboard shows the four hierarchy cells. */
     #[test]
     fn dashboard_shows_hierarchy_cells() {
         let html = include_str!("../../ui/index.html");
+        assert!(html.contains("id=\"throttled-ns\""));
+        assert!(html.contains("throttled_ns"));
         assert!(html.contains("id=\"nr-throttled\""));
         assert!(html.contains("nr_throttled"));
         assert!(html.contains("id=\"parked\""));

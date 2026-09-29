@@ -18,19 +18,18 @@
 /* The gauge drop follows the claim with no owner gate, the owner */
 /* check gates the pid clear in the caller only, so a migrated */
 /* stop still pairs. A backward clock charges zero time but still */
-/* pairs the gauge. Runtime advances virtual time by the cached */
-/* share, so the next key queues past the served segment. */
+/* pairs the gauge. Runtime advances by scaled time with the cached */
+/* share beside the raw charge, and the floor tracks it. */
 /* The hierarchy lookup carries a reference with a paired release, */
 /* and a null lookup skips the pool charge with no trap. */
 /* Outlined to keep disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
-	struct flow_task_ctx *tctx)
+	struct flow_task_ctx *tctx, s32 cpu)
 {
 	u64 start;
 	u64 now;
 	u64 delta;
 	u64 got;
-	u32 eff;
 	struct cgroup *cgrp;
 	if (!tctx)
 		return;
@@ -47,11 +46,21 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	if (got != start)
 		return;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
-	eff = tctx->cached ? tctx->eweight :
-	    (u32)FLOW_WEIGHT_BASE;
-	tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
-	    delta, flow_eff_weight(p->scx.weight, eff));
-	flow_llc_note_stop(tctx->run_llc);
+	/* Runtime advances by scaled time with the cached share. */
+	/* A cold cache uses base share, and a zero share folds to base */
+	/* too, so the advance never divides by zero. Two divides per stop */
+	/* stay cheap beside one quantum. The floor tracks the largest */
+	/* served runtime with no wrap use. */
+	{
+		u32 share = tctx->cached ? tctx->eweight :
+		    (u32)FLOW_WEIGHT_BASE;
+		if (!share)
+			share = (u32)FLOW_WEIGHT_BASE;
+		tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
+		    delta, share);
+		if (cpu >= 0)
+			flow_floor_max((u32)cpu, tctx->vruntime);
+	}
 	flow_on_cpu_dec();
 	cgrp = flow_task_cgrp(p);
 	if (cgrp) {
@@ -111,26 +120,25 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 /* Scans from a rotated live start instead of a fixed id, so an offlined */
 /* boot CPU never parks the kick and passes spread with no hotspot. */
 /* The start rotates by the kick count, so consecutive ticks visit */
-/* different CPUs first. Frequency ticks first on every pass with at */
-/* most one domain transition, so idle domains rest even with no */
-/* parked work. When a park waits, the timer refills one */
+/* different CPUs first. When a park waits, the timer refills one */
 /* chunk of 8 hint slots per tick rotating over the 64 ring, so time */
 /* based refill unparks tasks with no new enqueue and the scan stays */
 /* bounded. Hints record drained ids at park time with a wrapping */
 /* counter, and stale or reused ids refill harmlessly with cap and no */
 /* cleanup. Active groups past the ring still refill on the enqueue */
-/* path. The kick is refill gated and fires only when refill added */
+/* path. The kick is refill gated: it fires only when refill added */
 /* pool or no limit remains, so idle ticks and still throttled ticks */
 /* stay quiet with no storm. A cleared limited count still kicks once, */
 /* so parks from a removed limit drain soon. When still throttled with */
 /* no refill yet, pending re-arms for the next tick with no stall. The */
 /* kick targets the first live CPU with mask wins on drain, so a parked */
-/* mask mismatch stays best effort with no task scan here. The park */
+/* mask mismatch stays best effort with no task scan here. The dispatch */
 /* recheck uses loads only with no walk refill, and the 10ms tick always */
 /* covers the 1ms floor, so a gated kick finds fresh pools. Pending uses */
 /* an atomic exchange to match the enqueue store with no torn flag. */
 /* The live scan stays bound at 8: the rotated start is always live, so */
-/* the first peer hits with no 1024 sweep. */static int flow_bw_timer_cb(void *map, int *key,
+/* the first peer hits with no 1024 sweep. */
+static int flow_bw_timer_cb(void *map, int *key,
 	struct bpf_timer *timer)
 {
 	u32 found = 0xffffffffU;
@@ -145,8 +153,6 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 	u32 hint_start = 0;
 	(void)map;
 	(void)key;
-	now = flow_now();
-	flow_cpufreq_tick(now);
 	if (!flow_load_pending())
 		goto arm;
 	was = __sync_lock_test_and_set(&flow_bw_pending, 0);
@@ -156,6 +162,7 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 	/* Each slot holds 8 ancestor ids with the leaf first. The chunk */
 	/* start steps by 8 per 10ms tick, so the full ring covers in 8 */
 	/* ticks with a bounded scan. */
+	now = flow_now();
 	hint_start = (u32)(((now / (u64)FLOW_BW_TIMER_NS) % 8ULL) * 8ULL);
 	bpf_for(i, 0, 8) {
 		u32 hkey = (hint_start + i) % (u32)FLOW_PARK_HINT_NR;
@@ -172,7 +179,7 @@ static __noinline u32 flow_refill_hint_slot(u32 hkey,
 		goto arm;
 	kicks = READ_ONCE(flow_stats.kicks);
 	start = (u32)(kicks % n);
-	bpf_for(off, 0, FLOW_SCAN_BOUND) {
+	bpf_for(off, 0, FLOW_STEAL_BOUND) {
 		u32 peer;
 		if ((u64)off >= n)
 			break;

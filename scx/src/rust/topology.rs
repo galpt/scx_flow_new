@@ -44,6 +44,7 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
             llc_id: cpu.llc_id as u32,
             smt,
             running_pid: 0,
+            slice_ns: crate::flow_slice::QUANTUM_NS,
         });
     }
     out.sort_by_key(|e| e.id);
@@ -53,12 +54,12 @@ pub fn web_cpu_static() -> Vec<crate::stats::PerCpuMetrics> {
 /// Sibling and domain rows for the BPF topology view.
 /// Each row holds the CPU, the thread sibling or all ones when unknown,
 /// and the cache domain. Failures yield an empty list, so the scheduler
-/// keeps running with hint order placement.
+/// keeps running with cursor order steal.
 pub fn topo_rows() -> Vec<(u32, u32, u32)> {
     let topo = match Topology::new() {
         Ok(v) => v,
         Err(e) => {
-            warn!("topology failed, hint keeps placement order: {e}");
+            warn!("topology failed, steal keeps cursor order: {e}");
             return Vec::new();
         }
     };
@@ -361,6 +362,7 @@ pub fn filter_allowed(
 
 /// Synthetic card for tests.
 /// Builds one display only card with the given id and frequency.
+/// Slice shows the fixed 1ms quantum.
 #[cfg(test)]
 pub fn synthetic_card(
     id: u32,
@@ -375,6 +377,7 @@ pub fn synthetic_card(
         llc_id,
         smt,
         running_pid: 0,
+        slice_ns: crate::flow_slice::QUANTUM_NS,
     }
 }
 

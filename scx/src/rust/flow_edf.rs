@@ -4,12 +4,12 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the wrap safe deadline helpers shared by tests and docs.
-//! The BPF key lives in enqueue.bpf.c with the clamp in
+//! The BPF deadline lives in enqueue.bpf.c with the step in
 //! intf.h, and this file mirrors the order predicates.
 
 /// Bound of moved tasks in one pass.
-pub const DISPATCH_BATCH: u32 = 16;
-/// Starvation floor in nanos at 2ms with the wait backstop.
+pub const DISPATCH_BATCH: u32 = 32;
+/// Starvation floor in nanos at 2ms, twice the fixed quantum.
 pub const STARVE_NS: u64 = 2_000_000;
 
 /// True when the first time is before the second with wrap safety.
@@ -20,10 +20,20 @@ pub fn time_before(a: u64, b: u64) -> bool {
 }
 
 /// Later of two times with wrap safety.
-/// The later time wins, so a fresh key never trails the clock.
+/// Legacy wrap path kept for tests only. BPF retired it for the
+/// saturated later below, which never wraps by design.
 #[cfg(test)]
 pub fn time_max(a: u64, b: u64) -> u64 {
     if time_before(a, b) { b } else { a }
+}
+
+/// Next deadline from the later of now and the last deadline.
+/// Legacy wrap path kept for tests only. BPF inserts now key past
+/// runtime plus floor with saturating slack, so this helper only
+/// documents the old wrap order.
+#[cfg(test)]
+pub fn deadline_next(last: u64, now: u64, weight: u32) -> u64 {
+    time_max(last, now).wrapping_add(crate::flow_slice::deadline_step(weight))
 }
 
 /// True when one queued task waited past the 2ms floor.
@@ -47,27 +57,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_arrival_anchors_at_floor() {
-        assert_eq!(
-            crate::flow_vruntime::deadline_clamp(0, 10_000_000),
-            10_000_000
-        );
+    fn fresh_arrival_anchors_past_now() {
+        assert_eq!(deadline_next(0, 10_000_000, 100), 11_000_000);
     }
 
     #[test]
     fn sleep_earns_no_credit() {
-        assert_eq!(
-            crate::flow_vruntime::deadline_clamp(1_000, 10_000_000),
-            10_000_000
-        );
+        assert_eq!(deadline_next(1_000, 10_000_000, 100), 11_000_000);
     }
 
     #[test]
-    fn runtime_past_floor_holds() {
-        assert_eq!(
-            crate::flow_vruntime::deadline_clamp(11_000_000, 10_000_000),
-            11_000_000
-        );
+    fn back_to_back_queues_behind_last() {
+        assert_eq!(deadline_next(10_000_000, 9_000_000, 100), 11_000_000);
+        assert_eq!(deadline_next(10_000_000, 9_000_000, 1000), 10_100_000);
     }
 
     #[test]

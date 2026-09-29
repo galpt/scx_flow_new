@@ -25,22 +25,20 @@ pub const BW_TIMER_NS: u64 = 10_000_000;
 /// never reads kernel quotas, so this const only checks the norm in tests.
 #[cfg(test)]
 pub const RUNTIME_INF: u64 = u64::MAX;
-/// Throttle bit in the hierarchy flags. Set means the park gate
-/// holds the task. Mirrors the BPF header.
+/// Throttle bit in the hierarchy flags. Set means the gated pass
+/// skips with a miss. Mirrors the BPF header.
 #[cfg(test)]
 pub const CGRP_THROTTLED: u32 = 1;
 /// Parked chain ring slots at 64. Each slot holds one park chain of
 /// 8 ancestor ids with the leaf first. Mirrors the BPF header.
+#[cfg(test)]
 pub const PARK_HINT_NR: u64 = 64;
 
 /// Clamp one share into 1 to 10000.
 /// Zero or oversize shares fail closed to the nearer bound.
 #[cfg(test)]
 pub fn clamp_share(w: u32) -> u32 {
-    w.clamp(
-        crate::flow_vruntime::WEIGHT_MIN,
-        crate::flow_vruntime::WEIGHT_MAX,
-    )
+    w.clamp(crate::flow_slice::WEIGHT_MIN, crate::flow_slice::WEIGHT_MAX)
 }
 
 /// Effective weight from task weight and hierarchy share.
@@ -50,10 +48,10 @@ pub fn clamp_share(w: u32) -> u32 {
 pub fn eff_weight(task_w: u32, hier_w: u32) -> u32 {
     let t = clamp_share(task_w) as u64;
     let h = clamp_share(hier_w) as u64;
-    let eff = t * h / crate::flow_vruntime::WEIGHT_BASE as u64;
+    let eff = t * h / crate::flow_slice::WEIGHT_BASE as u64;
     eff.clamp(
-        crate::flow_vruntime::WEIGHT_MIN as u64,
-        crate::flow_vruntime::WEIGHT_MAX as u64,
+        crate::flow_slice::WEIGHT_MIN as u64,
+        crate::flow_slice::WEIGHT_MAX as u64,
     ) as u32
 }
 
@@ -68,10 +66,10 @@ pub fn hier_weight(weights: &[u32]) -> u32 {
     let mut hier = CGRP_WEIGHT_DFL as u64;
     for &w in weights.iter().take(CGRP_DEPTH_MAX) {
         let v = clamp_share(w) as u64;
-        hier = hier * v / crate::flow_vruntime::WEIGHT_BASE as u64;
+        hier = hier * v / crate::flow_slice::WEIGHT_BASE as u64;
         hier = hier.clamp(
-            crate::flow_vruntime::WEIGHT_MIN as u64,
-            crate::flow_vruntime::WEIGHT_MAX as u64,
+            crate::flow_slice::WEIGHT_MIN as u64,
+            crate::flow_slice::WEIGHT_MAX as u64,
         );
     }
     hier as u32
@@ -114,9 +112,9 @@ pub fn bw_max_ns(quota_us: u64, burst_us: u64) -> u64 {
 
 /// Cached share entry for one task.
 /// Cgid holds the last hierarchy id, eweight holds the share,
-/// cached marks a valid entry, and generation holds the low bits
-/// of the global generation for validation. The low bits wrap past
-/// 64k bumps, so a wrap needs 64k bumps with no move to falsely hit.
+/// cached marks a valid entry, and generation holds the u16 low bits
+/// of the global generation for validation. The u16 wraps every
+/// 65536 bumps, so a false hit needs 65536 bumps with no move.
 /// Moves clear the cache and share changes bump the generation, so
 /// the window stays huge with no false hit in practice.
 #[cfg(test)]
@@ -136,8 +134,8 @@ pub struct TaskCache {
 /// Needs a set flag with matching id and generation, so a move
 /// or a share change misses past with a fresh walk. Moves clear the
 /// cache at once, so a stale id never validates past a move. The
-/// generation compares only the low bits, so 64k bumps wrap with a
-/// huge window and no false hit in practice.
+/// u16 low bits wrap every 65536 bumps with a huge window and no
+/// false hit in practice.
 #[cfg(test)]
 pub fn cache_valid(cache: &TaskCache, cur_id: u64, cur_generation: u64) -> bool {
     cache.cached && cache.cgid == cur_id && cache.generation == cur_generation as u16
@@ -171,7 +169,7 @@ pub fn run_claim(run_at: &mut u64) -> u64 {
     start
 }
 
-/// True when one leaf flag parks the task in the ring.
+/// True when one leaf flag parks the task in the gated pass.
 /// Needs the throttle bit set, so full walks plus consume hold parks
 /// and full passes plus the timer chain refill release them.
 #[cfg(test)]
@@ -490,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn throttle_flag_parks_ring() {
+    fn throttle_flag_parks_gated_pass() {
         assert_eq!(CGRP_THROTTLED, 1);
         assert_eq!(
             CGRP_THROTTLED as u64,

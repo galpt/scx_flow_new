@@ -21,7 +21,8 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with placement, preempt, and tree detail.
+/// Counters with placement, preempt, and steal detail.
+/// BPF holds 17 counters, Rust adds display-only uptime for 18.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -29,6 +30,8 @@ pub struct Metrics {
     #[stat(desc = "Total runtime in nanoseconds")]
     #[serde(default)]
     pub total_runtime: u64,
+    /// Display-only uptime since attach in nanos with no BPF use.
+    /// Filled from the start instant, never from the BPF counters.
     #[stat(desc = "Uptime since attach in nanoseconds")]
     #[serde(default)]
     pub uptime_ns: u64,
@@ -41,12 +44,12 @@ pub struct Metrics {
     #[stat(desc = "Blocks and exits with release")]
     #[serde(default)]
     pub completions: u64,
-    #[stat(desc = "Moves from the park ring")]
+    #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub park_moves: u64,
-    #[stat(desc = "Moves from the deadline tree")]
+    #[stat(desc = "Moves from a peer deadline queue")]
     #[serde(default)]
-    pub tree_moves: u64,
+    pub steal_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
@@ -60,34 +63,30 @@ pub struct Metrics {
     #[stat(desc = "Busy arrivals held without an earlier deadline")]
     #[serde(default)]
     pub preempt_skipped: u64,
+    #[stat(desc = "Queue tasks moved via dispatch")]
+    #[serde(default)]
+    pub slot_moves: u64,
     #[stat(desc = "Moves from the kernel global queue")]
     #[serde(default)]
     pub global_moves: u64,
-    /// Counts throttle hits on limited hierarchies.
+    /// Counts quanta at 1ms per throttle hit with no wall use.
+    /// Keeps the wire name with the quantum semantic.
+    #[stat(desc = "Throttled quanta in nanoseconds at 1ms per hit")]
+    #[serde(default)]
+    pub throttled_ns: u64,
+    /// Counts throttle hits, same hits as parked below.
     /// Keeps the wire name with no split.
     #[stat(desc = "Throttle hits on limited hierarchies")]
     #[serde(default)]
     pub nr_throttled: u64,
-    /// Counts every park ring arrival.
+    /// Counts overflow parks from throttling, same hits as above.
     /// Keeps the wire name with no split.
-    #[stat(desc = "Park ring arrivals")]
+    #[stat(desc = "Overflow parks from throttling")]
     #[serde(default)]
     pub parked: u64,
     #[stat(desc = "Hierarchy moves with deadline carry")]
     #[serde(default)]
     pub bw_moves: u64,
-    #[stat(desc = "Cache domain frequency transitions applied")]
-    #[serde(default)]
-    pub cpuperf_sets: u64,
-    #[stat(desc = "Tree heads parked for CPU mask mismatch")]
-    #[serde(default)]
-    pub mask_mismatch: u64,
-    #[stat(desc = "Park heads rotated past a block")]
-    #[serde(default)]
-    pub park_skipped: u64,
-    #[stat(desc = "Global visits with no move on this pass")]
-    #[serde(default)]
-    pub global_skipped: u64,
 }
 
 /// One card of the per-CPU grid.
@@ -115,6 +114,9 @@ pub struct PerCpuMetrics {
     /// Pid now on the CPU. Zero when idle.
     #[serde(default)]
     pub running_pid: u32,
+    /// Fixed quantum in nanos. Always 1ms.
+    #[serde(default, alias = "tq_ns")]
+    pub slice_ns: u64,
 }
 
 /// Default state text of the energy object.
@@ -191,12 +193,11 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime={} uptime={} \
-            ins={} req={} done={} park={} tree={} \
+            ins={} req={} done={} park={} steal={} \
             kick={} noctx={} \
             pkick={} pskip={} \
-            global={} \
-            nthr={} parked={} bw={} cpuperf={} \
-            mmask={} pskipped={} gskipped={}",
+            smoves={} global={} \
+            thr={} nthr={} parked={} bw={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -205,25 +206,23 @@ impl Metrics {
             self.requeues,
             self.completions,
             self.park_moves,
-            self.tree_moves,
+            self.steal_moves,
             self.kicks,
             self.enq_no_tctx,
             self.preempt_kicks,
             self.preempt_skipped,
+            self.slot_moves,
             self.global_moves,
+            self.throttled_ns,
             self.nr_throttled,
             self.parked,
             self.bw_moves,
-            self.cpuperf_sets,
-            self.mask_mismatch,
-            self.park_skipped,
-            self.global_skipped,
         )?;
         Ok(())
     }
 
     /// Interval delta.
-    /// Counters move forward. Gauges pass through unchanged.
+    /// Counters move forward. Gauges plus display-only uptime pass through unchanged.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             on_cpu: self.on_cpu,
@@ -233,19 +232,17 @@ impl Metrics {
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             completions: self.completions.wrapping_sub(rhs.completions),
             park_moves: self.park_moves.wrapping_sub(rhs.park_moves),
-            tree_moves: self.tree_moves.wrapping_sub(rhs.tree_moves),
+            steal_moves: self.steal_moves.wrapping_sub(rhs.steal_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             enq_no_tctx: self.enq_no_tctx.wrapping_sub(rhs.enq_no_tctx),
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
+            slot_moves: self.slot_moves.wrapping_sub(rhs.slot_moves),
             global_moves: self.global_moves.wrapping_sub(rhs.global_moves),
+            throttled_ns: self.throttled_ns.wrapping_sub(rhs.throttled_ns),
             nr_throttled: self.nr_throttled.wrapping_sub(rhs.nr_throttled),
             parked: self.parked.wrapping_sub(rhs.parked),
             bw_moves: self.bw_moves.wrapping_sub(rhs.bw_moves),
-            cpuperf_sets: self.cpuperf_sets.wrapping_sub(rhs.cpuperf_sets),
-            mask_mismatch: self.mask_mismatch.wrapping_sub(rhs.mask_mismatch),
-            park_skipped: self.park_skipped.wrapping_sub(rhs.park_skipped),
-            global_skipped: self.global_skipped.wrapping_sub(rhs.global_skipped),
         }
     }
 }
@@ -281,56 +278,4 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         || shutdown.load(Ordering::Relaxed),
         |m| m.format(&mut std::io::stdout()),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn old_wire_without_new_fields_decodes() {
-        let old = serde_json::json!({
-            "on_cpu": 2,
-            "total_runtime": 9,
-            "inserts": 3,
-            "requeues": 1,
-            "completions": 1,
-            "park_moves": 0,
-            "tree_moves": 4,
-            "kicks": 5,
-            "enq_no_tctx": 0,
-            "preempt_kicks": 1,
-            "preempt_skipped": 2,
-            "global_moves": 0,
-            "nr_throttled": 0,
-            "parked": 1,
-            "bw_moves": 0,
-            "cpuperf_sets": 0
-        });
-        let m: Metrics = serde_json::from_value(old).unwrap();
-        assert_eq!(m.on_cpu, 2);
-        assert_eq!(m.tree_moves, 4);
-        assert_eq!(m.mask_mismatch, 0);
-        assert_eq!(m.park_skipped, 0);
-        assert_eq!(m.global_skipped, 0);
-    }
-
-    #[test]
-    fn new_fields_round_trip_with_delta() {
-        let prev = Metrics::default();
-        let cur = Metrics {
-            mask_mismatch: 7,
-            park_skipped: 3,
-            global_skipped: 5,
-            ..Default::default()
-        };
-        let d = cur.delta(&prev);
-        assert_eq!(d.mask_mismatch, 7);
-        assert_eq!(d.park_skipped, 3);
-        assert_eq!(d.global_skipped, 5);
-        let back: Metrics = serde_json::from_value(serde_json::to_value(&cur).unwrap()).unwrap();
-        assert_eq!(back.mask_mismatch, 7);
-        assert_eq!(back.park_skipped, 3);
-        assert_eq!(back.global_skipped, 5);
-    }
 }

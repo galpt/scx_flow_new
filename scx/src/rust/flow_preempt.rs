@@ -5,12 +5,11 @@
 
 //! Holds the busy kick rule shared by tests and docs.
 //! The BPF busy path validates the occupant CPU before the compare,
-//! then compares the arrival key against the occupant key
+//! then compares the arrival deadline against the occupant deadline
 //! under one RCU pass, then kicks at once for a strictly earlier
 //! arrival. Equal or later arrivals pace at slice expiry with no
 //! window and no shorten. A zero occupant deadline means no order
-//! yet, so the arrival paces with no kick. Parked arrivals send
-//! idle kicks only with no busy kick ever. Rust mirrors are read only
+//! yet, so the arrival paces with no kick. Rust mirrors are read only
 //! predicates. See enqueue.bpf.c for the kick order.
 
 /// True when one arrival preempts the busy occupant.
@@ -31,24 +30,6 @@ pub fn preempt_earlier(new_deadline: u64, occ_deadline: u64) -> bool {
 #[cfg(test)]
 pub fn preempt_cpu_valid(trusted_cpu: i32, target: i32) -> bool {
     trusted_cpu == target
-}
-
-/// True when one arrival may kick a busy CPU.
-/// Open arrivals compare keys for a strictly earlier win, while
-/// parked arrivals stay idle only with no busy kick ever.
-#[cfg(test)]
-pub fn may_kick_busy(parked: bool) -> bool {
-    !parked
-}
-
-/// True when one parked head kicks an idle CPU.
-/// Mask only parks kick with idle only and no preempt, so a
-/// compatible pass wakes at once. Throttled heads wait on the timer
-/// refill instead, and served heads need no kick. Pinned heads kick
-/// too when their single CPU idles.
-#[cfg(test)]
-pub fn park_kick_idle(throttled: bool, allowed: bool) -> bool {
-    !throttled && !allowed
 }
 
 #[cfg(test)]
@@ -89,19 +70,5 @@ mod tests {
         assert!(!preempt_cpu_valid(2, 3));
         assert!(!preempt_cpu_valid(-1, 3));
         assert!(!preempt_cpu_valid(3, -1));
-    }
-
-    #[test]
-    fn parks_stay_idle_only() {
-        assert!(may_kick_busy(false));
-        assert!(!may_kick_busy(true));
-    }
-
-    #[test]
-    fn mask_only_parks_kick_idle() {
-        assert!(park_kick_idle(false, false));
-        assert!(!park_kick_idle(true, false));
-        assert!(!park_kick_idle(false, true));
-        assert!(!park_kick_idle(true, true));
     }
 }

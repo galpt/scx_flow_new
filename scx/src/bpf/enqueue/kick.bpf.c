@@ -2,20 +2,19 @@
 /*
  * Idle kick for the enqueue pass.
  *
- * Holds the one idle allowed kick for park and global arrivals with
+ * Holds the one idle allowed kick for overflow and global parks with
  * no preempt. Outlined to keep enqueue small with no duplicate walk.
- * Runs under the caller with no lock and past the tree unlock, so
- * no kick ever nests inside the tree section.
+ * Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Kick one idle allowed CPU for park or global arrivals. */
+/* Kick one idle allowed CPU for overflow or global parks. */
 /* Tries the selected CPU first, then the kernel idle pick, then */
 /* the first allowed live CPU. The selected CPU often names the */
 /* placement pick, so a hit skips the idle scan with no second */
 /* scan. Kicks only when the target runs nothing, with the idle */
 /* flag cleared first so the kick sticks. Never sends a preempt */
-/* kick, so parked arrivals stay idle only. A kick miss stays fail */
+/* kick, so pinned parks stay idle only. A kick miss stays fail */
 /* closed with mask wins on drain and the timer or a later kicking */
 /* enqueue wakes the park. */
 static __noinline void flow_kick_idle_allowed(

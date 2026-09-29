@@ -1,34 +1,33 @@
 # scx_flow
 
-scx_flow is a Linux deadline scheduler in Rust with a BPF core and one global tree.
+scx_flow is a Linux deadline scheduler in Rust with a BPF core and one fixed quantum.
 
 ### Ordering
 
-One global tree orders queued tasks by deadline then sequence. Arrivals key past virtual runtime or the dispatch floor with one tick, and runtime grows by scaled execution at stop, so order carries weight. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
+One deadline queue per CPU plus one shared overflow tail orders by deadline. Global holds homeless tasks. Arrivals key past runtime, last deadline, now, and the served floor with a slack capped at twice the quantum, so order carries weight. Runtime grows by scaled time at stop. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
 
 ### Hierarchy
 
-Hierarchy rows hold share plus pool by id with lazy refill and a FIFO ring for throttled parks. See `src/bpf/cgroup.bpf.c`.
+Hierarchy rows hold share plus pool by id with lazy refill and overflow parks for throttled work. One timer refills hinted pools and wakes parks. The gated pass moves starved parks with a leaf flag check. See `src/bpf/cgroup.bpf.c`.
 
 ### Placement
 
-Placement is a hint over waker idle, any idle, idlest cache peer, previous, then first. Dispatch drains tree, park ring, then global in one batch at `16`. A busy CPU kicks only for an earlier deadline, and parks kick idle CPUs only. See `src/bpf/select_cpu.bpf.c`, `src/bpf/dispatch.bpf.c`, and `src/rust/stats.rs`.
+Placement prefers idle, then the shallowest same cache peer, then the previous CPU. Dispatch drains own, then steal, then global plus overflow, then gated in one batch at `32`. Steal runs only with an empty local queue. See `src/bpf/select_cpu.bpf.c`, `src/bpf/dispatch.bpf.c`, and `src/rust/stats.rs`.
 
 ### Reporting
 
-The `10ms` timer applies one cache domain transition past a `16ms` gap. Scheduling stays fixed without options. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. `--no-webui` disables it.
+Scheduling stays fixed without options. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with rates, per CPU pids, and a snapshot download. `--no-webui` disables it.
 
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
 - Maps plus helpers plus ops table live in `src/bpf/main.bpf.c` with splits in `src/bpf/main/`, `src/bpf/enqueue/`, and `src/bpf/dispatch/`, plus `select_cpu`, `lifecycle`, and `cgroup` ops files.
-- Rust mirrors with tests live in `src/rust/flow_*.rs` with facade in `flow.rs` and validation in `config.rs`.
+- Runtime mirrors with tests live in `src/rust/flow_runtime.rs` plus mirrors in `flow_edf.rs`, `flow_select.rs`, `flow_slice.rs`, `flow_slot.rs`, `flow_preempt.rs`, and `flow_cgrp.rs`, with facade in `flow.rs` and validation in `config.rs`.
 - Snapshots plus stats plus dashboard live in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, and `ui/index.html`.
 
 ## Limitations
 
-- Live set stays below attach snapshot, so hotplug needs a restart.
+- Hotplug needs a restart.
 - Releases need a restart.
-- State is `64B` plus `8B` plus `8B` plus `48B` plus `24B` plus `152B` across task, CPU, topology, hierarchy, frequency, and counters.
-- Frequency hints need a switching governor, else counts rise with no clock move.
+- State is `48B` plus `8B` plus `8B` plus `48B` plus `136B` across task, CPU, topology, hierarchy, and counters.
 - Needs kernels, `7.2` series and up.
