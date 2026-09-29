@@ -343,10 +343,6 @@
           <span class="stat-value" id="over-moves">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Global moves:</span>
-          <span class="stat-value" id="global-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           Kicks:</span>
           <span class="stat-value" id="kicks">0</span>
         </div>
@@ -497,14 +493,13 @@
       var node = s.node_moves || 0;
       var machine = s.machine_moves || 0;
       var over = s.over_moves || 0;
-      var global = s.global_moves || 0;
       var adm = s.admits || 0;
       var rej = s.rejects || 0;
       var miss = s.misses || 0;
       var park = s.parks || 0;
       var gate = s.gate_rejects || 0;
       var placed = ins + req;
-      var shared = node + machine + over + global;
+      var shared = node + machine + over;
       var tldr, explanation;
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
@@ -595,8 +590,6 @@
         fmt(s.machine_moves || 0);
       el('over-moves').textContent =
         fmt(s.over_moves || 0);
-      el('global-moves').textContent =
-        fmt(s.global_moves || 0);
       el('kicks').textContent =
         fmt(s.kicks || 0);
       el('admits').textContent =

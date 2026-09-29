@@ -4,8 +4,8 @@
  *
  * Holds the per CPU depth check plus the transition only set with
  * no knob and no extra walk. Any own plus local plus running picks
- * max else half, and a steady level makes no call. Runs after the
- * caller lock with the dispatch CPU only and no remote use, so
+ * max else half, and a steady level makes no call. Runs with the
+ * dispatch CPU only and no remote use, so
  * the same CPU proof holds with no extra guard. Old kernels skip
  * with no call, and unknown CPUs skip with no call. The choice
  * stays in the allowlist before the cap, the cap may step outside
@@ -29,8 +29,8 @@ struct {
 /* live check runs next, so unknown CPUs skip with no call. The */
 /* allowlist guards the pre cap choice only, the cap may step outside */
 /* it within range, so no trap fires. The last level check holds, so */
-/* a steady level makes no call. Runs after the caller lock with the */
-/* dispatch CPU only and no remote use. */
+/* a steady level makes no call. Runs with the dispatch CPU only and */
+/* no remote use. */
 static __noinline void flow_perf_update(s32 cpu)
 {
 	s32 own;

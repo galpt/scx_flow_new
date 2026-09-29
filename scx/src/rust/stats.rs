@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 16 counters, Rust adds display-only uptime for 17.
+/// BPF holds 15 counters, Rust adds display-only uptime for 16.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -58,9 +58,6 @@ pub struct Metrics {
     #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub over_moves: u64,
-    #[stat(desc = "Legacy global moves, always zero")]
-    #[serde(default)]
-    pub global_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
@@ -161,7 +158,7 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
-             local={} node={} machine={} over={} global={} kick={} adm={} rej={} \
+             local={} node={} machine={} over={} kick={} adm={} rej={} \
              miss={} park={} gate={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
@@ -174,7 +171,6 @@ impl Metrics {
             self.node_moves,
             self.machine_moves,
             self.over_moves,
-            self.global_moves,
             self.kicks,
             self.admits,
             self.rejects,
@@ -199,7 +195,6 @@ impl Metrics {
             node_moves: self.node_moves.wrapping_sub(rhs.node_moves),
             machine_moves: self.machine_moves.wrapping_sub(rhs.machine_moves),
             over_moves: self.over_moves.wrapping_sub(rhs.over_moves),
-            global_moves: self.global_moves.wrapping_sub(rhs.global_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             admits: self.admits.wrapping_sub(rhs.admits),
             rejects: self.rejects.wrapping_sub(rhs.rejects),

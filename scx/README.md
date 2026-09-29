@@ -20,7 +20,7 @@ Gate runs first in every op with fail closed. Stale CPUs plus moved tasks count 
 
 ### Reporting
 
-Scheduling stays fixed. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with one IPv6 first bind plus counters plus per CPU pids plus SMT plus a snapshot download. Counters cover on CPU plus runtime plus inserts plus requeues plus completions plus local plus node plus machine plus over plus global plus kicks plus admits plus rejects plus misses plus parks plus gate rejects. See `src/rust/stats.rs`.
+Scheduling stays fixed. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with one IPv6 first bind plus counters plus per CPU pids plus SMT plus a snapshot download. Counters cover on CPU plus runtime plus inserts plus requeues plus completions plus local plus node plus machine plus over plus kicks plus admits plus rejects plus misses plus parks plus gate rejects. See `src/rust/stats.rs`.
 
 ## Code map
 
@@ -33,5 +33,5 @@ Scheduling stays fixed. Reporting uses `--stats`, `--monitor`, and `--no-webui`.
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `72B` plus `8B` plus `8B` plus `128B`.
+- State is `72B` plus `8B` plus `8B` plus `120B`.
 - Needs kernels, `7.2` series and up.

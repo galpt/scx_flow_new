@@ -10,11 +10,6 @@ use crate::flow::CAP_BASE;
 use crate::flow::HINT_MAX;
 use crate::flow::PERIOD_NS;
 use crate::flow::QUANTUM_NS;
-use crate::flow::SLOT_BUDGET;
-use crate::flow::SLOT_LOCAL_CAP;
-use crate::flow::SLOT_MACHINE_CAP;
-use crate::flow::SLOT_NODE_CAP;
-use crate::flow::SLOT_OVER_CAP;
 use crate::flow::WEIGHT_BASE;
 use crate::flow::WEIGHT_MAX;
 use crate::flow::WEIGHT_MIN;
@@ -23,20 +18,16 @@ use anyhow::bail;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
-/// Default dispatch batch for the ops table.
-const DEF_BATCH: u32 = SLOT_BUDGET;
-/// Default drain budget for one dispatch pass.
-const DEF_SLOT_BUDGET: u32 = SLOT_BUDGET;
+/// Default dispatch batch for the ops table with no knob.
+const DEF_BATCH: u32 = 16;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Fixed slice in nanos. Always 2ms with no knob.
     pub quantum_ns: u64,
-    /// Dispatch batch for the ops table.
+    /// Dispatch batch for the ops table. Always 16 with no knob.
     pub dispatch_batch: u32,
-    /// Drain budget for one dispatch pass.
-    pub slot_budget: u32,
 }
 
 impl Default for Config {
@@ -45,7 +36,6 @@ impl Default for Config {
         Self {
             quantum_ns: DEF_QUANTUM_NS,
             dispatch_batch: DEF_BATCH,
-            slot_budget: DEF_SLOT_BUDGET,
         }
     }
 }
@@ -55,9 +45,7 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 2ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms. The batch stays fixed
-    /// at 16 and the budget at 16. The local tier stays at 8 with
-    /// the node tier at 4 plus machine at 2 plus overflow at 2.
-    /// Admission holds use under 950 per mille with base capacity
+    /// at 16. Admission holds use under 950 per mille with base capacity
     /// 1024. Queues hold 512 local plus 8 node plus machine plus
     /// overflow with ids in the 0x5100 region. Hints hold 4096 flat
     /// rows with no timer wait.
@@ -79,18 +67,6 @@ impl Config {
         }
         if self.dispatch_batch != 16 {
             bail!("batch bad {}", self.dispatch_batch);
-        }
-        if self.slot_budget != SLOT_BUDGET {
-            bail!("slot budget bad {}", self.slot_budget);
-        }
-        if self.slot_budget != 16 {
-            bail!("slot budget bad {}", self.slot_budget);
-        }
-        if SLOT_LOCAL_CAP != 8 || SLOT_NODE_CAP != 4 {
-            bail!("drain caps bad");
-        }
-        if SLOT_MACHINE_CAP != 2 || SLOT_OVER_CAP != 2 {
-            bail!("drain caps bad");
         }
         if ADMIT_PERMILLE != 950 {
             bail!("admission bound bad");
@@ -122,7 +98,6 @@ impl Config {
 pub struct ConfigBuilder {
     quantum_ns: Option<u64>,
     dispatch_batch: Option<u32>,
-    slot_budget: Option<u32>,
 }
 
 #[cfg(test)]
@@ -137,18 +112,12 @@ impl ConfigBuilder {
         self.dispatch_batch = Some(v);
         self
     }
-    /// Set the fixed dispatch budget. Only 16 passes.
-    pub fn slot_budget(mut self, v: u32) -> Self {
-        self.slot_budget = Some(v);
-        self
-    }
     /// Assemble and validate the result.
     pub fn build(self) -> Result<Config> {
         let d = Config::default();
         let cfg = Config {
             quantum_ns: self.quantum_ns.unwrap_or(d.quantum_ns),
             dispatch_batch: self.dispatch_batch.unwrap_or(d.dispatch_batch),
-            slot_budget: self.slot_budget.unwrap_or(d.slot_budget),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -168,16 +137,6 @@ mod tests {
     fn builder_defaults_match_config() {
         let cfg = ConfigBuilder::default().build().unwrap();
         assert_eq!(cfg, Config::default());
-    }
-
-    #[test]
-    fn rejects_non_fixed_slot() {
-        for bad in [0, 4, 8, 15, 17, 32] {
-            let got = ConfigBuilder::default().slot_budget(bad).build();
-            assert!(got.is_err(), "slot budget {bad} must fail");
-        }
-        let ok = ConfigBuilder::default().slot_budget(16).build();
-        assert!(ok.is_ok());
     }
 
     #[test]

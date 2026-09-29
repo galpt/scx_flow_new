@@ -244,7 +244,7 @@ impl<'a> Scheduler<'a> {
         }
         let m = self.get_metrics();
         info!(
-            "exit ins={} req={} done={} local={} node={} machine={} over={} global={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
+            "exit ins={} req={} done={} local={} node={} machine={} over={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -252,7 +252,6 @@ impl<'a> Scheduler<'a> {
             m.node_moves,
             m.machine_moves,
             m.over_moves,
-            m.global_moves,
             m.kicks,
             m.admits,
             m.rejects,
@@ -343,9 +342,10 @@ mod tests {
     #[test]
     fn batch_matches_header() {
         assert_eq!(
-            crate::flow_slot::SLOT_BUDGET,
+            crate::config::Config::default().dispatch_batch,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
         );
+        assert_eq!(crate::config::Config::default().dispatch_batch, 16);
     }
 
     #[test]
@@ -372,22 +372,10 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_MACHINE as u64
         );
         assert_eq!(
-            crate::flow_slot::SLOT_BUDGET,
-            crate::bpf_intf::flow_consts_FLOW_SLOT_BUDGET
-        );
-        assert_eq!(
             crate::flow_slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
         assert_eq!(crate::flow_slot::SLOT_MAX_DSQS, 522);
-        assert_eq!(
-            crate::flow_slot::SLOT_LOCAL_CAP,
-            crate::bpf_intf::flow_consts_FLOW_LOCAL_CAP
-        );
-        assert_eq!(
-            crate::flow_slot::SLOT_OVER_CAP,
-            crate::bpf_intf::flow_consts_FLOW_OVER_CAP
-        );
     }
 
     #[test]
@@ -415,10 +403,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_128() {
+    fn sched_stats_size_is_120() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            128
+            120
         );
     }
 

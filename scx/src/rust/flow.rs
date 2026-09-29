@@ -15,4 +15,5 @@ pub use crate::flow_runtime::*;
 #[cfg(test)]
 pub use crate::flow_select::*;
 pub use crate::flow_slice::*;
+#[cfg(test)]
 pub use crate::flow_slot::*;

@@ -3,13 +3,13 @@
  * Dispatch op.
  *
  * Each pass moves one task per tier to local in fixed order across
- * local plus node plus machine plus overflow. One move per tier keeps
- * the pass under the bound with no shared math and no pre scan, and
- * an empty tier moves nothing with no scan. The overflow tail holds
+ * local plus node plus machine plus overflow. One move per tier moves
+ * four tasks at most with no shared math and no pre scan, and an
+ * empty tier moves nothing with no scan. The overflow tail holds
  * homeless parks plus missed parks plus rejected parks plus pinned
  * tasks, and every park arrives with a direct kick and no wait, so no
  * timer wakes the pass. Per tier moves count once with no lock.
- * Level follows with the same CPU only. See intf.h for the caps and
+ * Level follows with the same CPU only. See intf.h for the batch and
  * enqueue.bpf.c for admission plus the deadline choice.
  *
  * The pass splits the tier moves into dispatch/drain plus perf with
@@ -24,7 +24,7 @@
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
-	/* One move per tier bounds one pass with no stall. */
+	/* One move per tier moves four tasks at most with no stall. */
 	/* Tiers take scalars only and verify once with no cross inline. */
 	u32 local_moved = 0;
 	u32 node_moved = 0;

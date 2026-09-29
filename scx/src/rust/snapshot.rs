@@ -29,7 +29,6 @@ impl<'a> Scheduler<'a> {
             node_moves: s.node_moves,
             machine_moves: s.machine_moves,
             over_moves: s.over_moves,
-            global_moves: s.global_moves,
             kicks: s.kicks,
             admits: s.admits,
             rejects: s.rejects,

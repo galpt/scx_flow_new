@@ -79,25 +79,10 @@ enum flow_consts {
 	/* Queue count of 522. Holds 512 local plus 8 node plus one */
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
-	/* Drain bound of 16 moves per pass with no knob. One move */
-	/* per tier keeps every pass under the bound with no shared */
-	/* math, so one pass always serves all four tiers. */
-	FLOW_SLOT_BUDGET = 16ULL,
-	/* Dispatch batch of 16 moves with no knob. Matches the drain */
-	/* budget, so the ops table and the drain agree on one pass. */
+	/* Dispatch batch of 16 moves per pass with no knob. One pass */
+	/* moves one task per tier for four moves at most, so the ops */
+	/* table holds every pass with room and no shared math. */
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
-	/* Local tier cap of 8 under budget 16. Holds half the pass, */
-	/* so the shared tier keeps room in every pass. */
-	FLOW_LOCAL_CAP = 8ULL,
-	/* Node tier cap of 4 under budget 16. Holds half the shared */
-	/* half, so machine plus overflow keep room in every pass. */
-	FLOW_NODE_CAP = 4ULL,
-	/* Machine tier cap of 2 under budget 16. Holds a bounded */
-	/* share, so overflow keeps room in every pass. */
-	FLOW_MACHINE_CAP = 2ULL,
-	/* Overflow tier cap of 2 under budget 16. Holds a bounded */
-	/* share, so one bad head never fills the pass. */
-	FLOW_OVER_CAP = 2ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Admission bound of 950 per mille with no knob. Holds use */
 	/* under ninety five percent, so admitted work keeps idle time */
@@ -193,8 +178,8 @@ struct flow_cpu_admit {
 struct flow_hint {
 	u64 period_us;
 };
-/* Scheduler counters with 16 fields. Global moves stay zero with */
-/* homeless parks in overflow, and the field stays for a stable wire. */
+/* Scheduler counters with 15 fields. Homeless parks count in the */
+/* overflow moves, so every tier move has a live counter. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -205,7 +190,6 @@ struct flow_sched_stats {
 	u64 node_moves;
 	u64 machine_moves;
 	u64 over_moves;
-	u64 global_moves;
 	u64 kicks;
 	u64 admits;
 	u64 rejects;
@@ -223,9 +207,9 @@ _Static_assert(sizeof(struct flow_cpu_state) == 8,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 16 counters in 128 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 128,
-	"stats stay at 128B");
+/* Stats hold 15 counters in 120 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 120,
+	"stats stay at 120B");
 /* Queue count holds local plus node plus machine plus overflow. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,

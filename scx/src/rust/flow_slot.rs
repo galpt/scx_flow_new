@@ -9,16 +9,6 @@
 //! global queue. Dispatch moves one task per tier in local plus node
 //! plus machine plus overflow order with no scan on empty.
 
-/// Tasks moved by one dispatch pass at most. Fixed at 16 with no knob.
-pub const SLOT_BUDGET: u32 = 16;
-/// Local tier cap at 8 under budget 16. Fixed with no knob.
-pub const SLOT_LOCAL_CAP: u32 = 8;
-/// Node tier cap at 4 under budget 16. Fixed with no knob.
-pub const SLOT_NODE_CAP: u32 = 4;
-/// Machine tier cap at 2 under budget 16. Fixed with no knob.
-pub const SLOT_MACHINE_CAP: u32 = 2;
-/// Overflow tier cap at 2 under budget 16. Fixed with no knob.
-pub const SLOT_OVER_CAP: u32 = 2;
 /// Base id of the per CPU local queues.
 #[cfg(test)]
 pub const LOCAL_BASE: u64 = 0x5100;
@@ -95,34 +85,6 @@ pub fn slot_nr_dsqs() -> u64 {
     SLOT_MAX_DSQS
 }
 
-/// Local tier cap at 8 under budget 16.
-/// Holds 8 with budget 16, so the shared tier keeps room.
-#[cfg(test)]
-pub fn slot_local_cap(budget: u32) -> u32 {
-    budget.min(SLOT_LOCAL_CAP)
-}
-
-/// Node tier cap at 4 under the dispatch budget.
-/// Returns the min of budget and 4 with no head stall.
-#[cfg(test)]
-pub fn slot_node_cap(budget: u32) -> u32 {
-    budget.min(SLOT_NODE_CAP)
-}
-
-/// Machine tier cap at 2 under the dispatch budget.
-/// Returns the min of budget and 2 with no head stall.
-#[cfg(test)]
-pub fn slot_machine_cap(budget: u32) -> u32 {
-    budget.min(SLOT_MACHINE_CAP)
-}
-
-/// Overflow tier cap at 2 under the dispatch budget.
-/// Returns the min of budget and 2 with no head stall.
-#[cfg(test)]
-pub fn slot_over_cap(budget: u32) -> u32 {
-    budget.min(SLOT_OVER_CAP)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,14 +107,5 @@ mod tests {
         assert!(dsq_valid(slot_overflow_dsq()));
         assert!(!dsq_valid(0));
         assert!(!dsq_valid(0x6000));
-    }
-
-    #[test]
-    fn caps_fit_budget() {
-        assert_eq!(SLOT_BUDGET, 16);
-        assert_eq!(slot_local_cap(16), 8);
-        assert_eq!(slot_node_cap(16), 4);
-        assert_eq!(slot_machine_cap(16), 2);
-        assert_eq!(slot_over_cap(16), 2);
     }
 }

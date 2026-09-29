@@ -208,7 +208,6 @@ mod tests {
                 node_moves: 4,
                 machine_moves: 2,
                 over_moves: 1,
-                global_moves: 6,
                 kicks: 5,
                 admits: 3,
                 rejects: 1,
@@ -239,7 +238,6 @@ mod tests {
         assert!(txt.contains("node_moves"));
         assert!(txt.contains("machine_moves"));
         assert!(txt.contains("over_moves"));
-        assert!(txt.contains("global_moves"));
         assert!(txt.contains("admits"));
         assert!(txt.contains("rejects"));
         assert!(txt.contains("misses"));
@@ -271,7 +269,6 @@ mod tests {
         assert_eq!(back.stats.node_moves, 4);
         assert_eq!(back.stats.machine_moves, 2);
         assert_eq!(back.stats.over_moves, 1);
-        assert_eq!(back.stats.global_moves, 6);
         assert_eq!(back.stats.admits, 3);
         assert_eq!(back.stats.rejects, 1);
         assert_eq!(back.stats.misses, 2);
@@ -313,7 +310,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the sixteen live counters plus uptime. */
+    /* Dashboard shows the fifteen live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -327,7 +324,6 @@ mod tests {
         assert!(html.contains("id=\"node-moves\""));
         assert!(html.contains("id=\"machine-moves\""));
         assert!(html.contains("id=\"over-moves\""));
-        assert!(html.contains("id=\"global-moves\""));
         assert!(html.contains("id=\"kicks\""));
         assert!(html.contains("id=\"admits\""));
         assert!(html.contains("id=\"rejects\""));
@@ -341,8 +337,9 @@ mod tests {
         assert!(html.contains("node_moves"));
         assert!(html.contains("machine_moves"));
         assert!(html.contains("over_moves"));
-        assert!(html.contains("global_moves"));
         assert!(html.contains("gate_rejects"));
+        assert!(!html.contains("global_moves"));
+        assert!(!html.contains("global-moves"));
     }
 
     /* Dashboard hides stale wire fields plus heavy sections. */
