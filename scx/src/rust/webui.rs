@@ -63,7 +63,10 @@ fn merged(snap: &WebMetrics) -> Value {
 /* Consumes snapshots plus exits when the shutdown flag is set */
 /* or the channel closes. Serves the page on the root plus the */
 /* same JSON on the stats plus snapshot paths with loopback only */
-/* plus no store plus unknown paths get not found. */
+/* plus no store plus unknown paths get not found. Binds one */
+/* loopback only with IPv6 first plus IPv4 fallback plus no */
+/* serve when both fail. One thread plus one lock per poll */
+/* stays cheap beside the page poll with no backlog. */
 pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     log::info!("web thread started");
     let html = include_str!("../../ui/index.html").to_string();
@@ -103,6 +106,8 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     };
     log::info!("web on port {addr}");
     let nocache = Header::from_bytes("Cache-Control", "no-store").unwrap();
+    let nosniff = Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap();
+    let frame = Header::from_bytes("X-Frame-Options", "DENY").unwrap();
     let htype = Header::from_bytes("Content-Type", HTML).unwrap();
     let jtype = Header::from_bytes("Content-Type", JSON).unwrap();
     while !shutdown.load(Ordering::Relaxed) {
@@ -120,6 +125,8 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
                 let resp = Response::from_string(&html);
                 let resp = resp.with_header(htype.clone());
                 let resp = resp.with_header(nocache.clone());
+                let resp = resp.with_header(nosniff.clone());
+                let resp = resp.with_header(frame.clone());
                 let _ = req.respond(resp);
             }
             "/api/stats" | "/api/snapshot" => {
@@ -127,10 +134,16 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
                 let resp = Response::from_string(txt);
                 let resp = resp.with_header(jtype.clone());
                 let resp = resp.with_header(nocache.clone());
+                let resp = resp.with_header(nosniff.clone());
+                let resp = resp.with_header(frame.clone());
                 let _ = req.respond(resp);
             }
             _ => {
-                let _ = req.respond(Response::empty(404));
+                let resp = Response::empty(404)
+                    .with_header(nocache.clone())
+                    .with_header(nosniff.clone())
+                    .with_header(frame.clone());
+                let _ = req.respond(resp);
             }
         }
     }

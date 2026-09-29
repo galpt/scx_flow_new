@@ -203,19 +203,32 @@ impl<'a> Scheduler<'a> {
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
+        /* Short tick keeps stats polls prompt while the page polls */
+        /* once per second, so most ticks only refresh the bound */
+        /* channel when the dashboard is on plus the queue has room. */
+        /* One BPF read serves both the stats reply plus the page. */
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(100)) {
                 Ok(()) => {
-                    let web = self.get_web_metrics();
                     if let Some(ref tx) = self.webui_tx {
-                        let _ = tx.try_send(web);
+                        if !tx.is_full() {
+                            let web = self.get_web_metrics();
+                            let stats = web.stats.clone();
+                            let _ = tx.try_send(web);
+                            res_ch.send(stats)?
+                        } else {
+                            res_ch.send(self.get_metrics())?
+                        }
+                    } else {
+                        res_ch.send(self.get_metrics())?
                     }
-                    res_ch.send(self.get_metrics())?
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let web = self.get_web_metrics();
                     if let Some(ref tx) = self.webui_tx {
-                        let _ = tx.try_send(web);
+                        if !tx.is_full() {
+                            let web = self.get_web_metrics();
+                            let _ = tx.try_send(web);
+                        }
                     }
                 }
                 Err(e) => Err(e)?,
