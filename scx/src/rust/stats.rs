@@ -3,9 +3,9 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Exports the counters view plus the dashboard view from the core.
+//! Exports the counters view and the dashboard view from the core.
 //! The stats server carries deltas while the dashboard carries raw
-//! counters plus per CPU cards for the loopback page.
+//! counters and per CPU cards for the loopback page.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with placement plus admission plus miss detail.
+/// Counters with placement, admission, miss detail.
 /// BPF holds twelve counters. Rust adds display-only uptime for thirteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
@@ -61,7 +61,7 @@ pub struct Metrics {
     #[stat(desc = "Monotonic completions past release plus deadline")]
     #[serde(default)]
     pub misses: u64,
-    #[stat(desc = "Overflow parks from misses plus rejects plus drops")]
+    #[stat(desc = "Overflow parks from misses, rejects, drops")]
     #[serde(default)]
     pub parks: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]

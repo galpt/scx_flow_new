@@ -28,7 +28,7 @@ pub const SLOT_MACHINE: u64 = 0x5A00;
 /// Identifier of the overflow tail shared by every CPU.
 #[cfg(test)]
 pub const SLOT_OVERFLOW: u64 = 0x5A01;
-/// Queue count at five hundred twelve local plus eight node plus two shared.
+/// Queue count at five hundred twelve local, eight node, two shared.
 #[cfg(test)]
 pub const SLOT_MAX_DSQS: u64 = 522;
 
@@ -61,7 +61,7 @@ pub fn slot_overflow_dsq() -> u64 {
 }
 
 /// True when one identifier names a live queue.
-/// Local plus node plus machine plus overflow pass. Stale identifiers fail.
+/// Local, node, machine, overflow pass. Stale identifiers fail.
 #[cfg(test)]
 pub fn dsq_valid(dsq: u64) -> bool {
     if (LOCAL_BASE..LOCAL_BASE + MAX_CPUS).contains(&dsq) {
@@ -79,7 +79,7 @@ pub fn dsq_valid(dsq: u64) -> bool {
     false
 }
 
-/// Queue count for one host with local plus node plus two shared.
+/// Queue count for one host with local, node, two shared.
 /// Holds five hundred twenty two on a full host.
 #[cfg(test)]
 pub fn slot_nr_dsqs() -> u64 {

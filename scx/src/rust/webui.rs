@@ -46,8 +46,8 @@ fn jt(v: &Value) -> String {
 }
 
 /* Merged dashboard object for one snapshot. */
-/* Full log with version plus timestamp plus topology plus stats */
-/* plus per CPU. Same object serves stats polling plus snapshot */
+/* Full log with version, timestamp, topology, stats, */
+/* per CPU. Same object serves stats polling plus snapshot */
 /* download on loopback through the same routes. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
@@ -61,9 +61,9 @@ fn merged(snap: &WebMetrics) -> Value {
 
 /* Start the dashboard thread. */
 /* Consumes snapshots plus exits when the shutdown flag is set */
-/* or the channel closes. Serves the page on the root plus the */
-/* same JSON on the stats plus snapshot paths with loopback solely */
-/* plus stored headers plus unknown paths get not found. Binds one */
+/* or the channel closes. Serves the page on the root, the */
+/* same JSON on the stats, snapshot paths with loopback solely, */
+/* stored headers, unknown paths get not found. Binds one */
 /* loopback solely with IPv6 first plus IPv4 fallback. One thread */
 /* plus one lock per poll stays cheap beside the page poll. */
 pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {

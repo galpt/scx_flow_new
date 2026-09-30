@@ -2,9 +2,9 @@
 /*
  * CPU view plus entry gate for the thin core.
  *
- * Holds the live plus mask checks plus the running pid helpers plus
- * the universal entry gate. The gate runs first in every op. Bad CPUs
- * plus bad tasks fail closed with one counter. Shared counters pair
+ * Holds the live, mask checks, running pid helpers,
+ * the universal entry gate. The gate runs first in every op.
+ * Bad CPUs plus bad tasks fail closed with one counter. Shared counters pair
  * volatile reads with atomic updates so observers see steady values.
  * Runs inline for a small verifier footprint.
  *

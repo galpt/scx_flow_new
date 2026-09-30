@@ -5,7 +5,7 @@
  * Policy lives in the daemon through weight derived hints keyed by
  * task identifier. The core keeps paired stubs so hierarchy
  * transitions stay balanced without hierarchy policy in the core.
- * Init plus move plus cancel pass. Exit plus weight hold empty. Hints
+ * Init, move, cancel pass. Exit plus weight hold empty. Hints
  * stay derived, not hierarchy tracked.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

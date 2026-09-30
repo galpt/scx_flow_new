@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the idle plus previous plus shared placement model. Idle CPUs
+//! Holds the idle, previous, shared placement model. Idle CPUs
 //! win first. The previous CPU wins next when it drains in time. The
 //! shared home takes the rest in identifier order. The first sufficient
 //! identifier is the slowest sufficient pick on symmetric hosts.
@@ -30,7 +30,7 @@ pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
     ready <= deadline
 }
 
-/// Placement pick among idle plus previous plus shared.
+/// Placement pick among idle, previous, shared.
 /// Idle wins first, then the previous CPU when it drains before the
 /// deadline, then the first sufficient shared CPU in identifier order.
 /// Callers pass host sized slices within the five hundred twelve CPU

@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the release plus period plus deadline plus admission models.
+//! Holds the release, period, deadline, admission models.
 //! The daemon orders through the quantized tree in veb. This file
 //! keeps the scalar math used by admission and by header checks.
 

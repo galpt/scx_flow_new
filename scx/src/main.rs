@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Loads the BPF object plus seeds the topology view plus drives the
+//! Loads the BPF object, seeds the topology view, drives the
 //! loop. Observability flows through counters plus the loopback
 //! dashboard with per CPU cards plus a JSON snapshot for debug.
 
@@ -105,8 +105,8 @@ struct Opts {
     libbpf: LibbpfOpts,
 }
 
-/* Scheduler owns the skeleton plus the link plus the stats server */
-/* plus the dashboard channel plus the daemon order. It drives the */
+/* Scheduler owns the skeleton, the link, the stats server, */
+/* the dashboard channel, the daemon order. It drives the */
 /* run loop until shutdown or exit. Backlog is the event channel */
 /* length and drop rate is the parks delta with zero wire change. */
 pub(crate) struct Scheduler<'a> {
@@ -279,8 +279,8 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    /* Decode one ring payload into kind plus sequence plus pid plus */
-    /* CPU plus weight plus runnable plus time. Short payloads drop. */
+    /* Decode one ring payload into kind, sequence, pid, */
+    /* CPU, weight, runnable, time. Short payloads drop. */
     /* Host endian passes through the ring with zero conversion as BPF */
     /* plus userspace share one host and the ring never crosses hosts. */
     fn decode_event(data: &[u8]) -> Option<(u64, u64, u32, u32, u32, u32, u64)> {

@@ -3,13 +3,13 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Builds the counters view plus the dashboard view from the core.
-//! Each poll reads the counters plus the per CPU pid view through
+//! Builds the counters view and the dashboard view from the core.
+//! Each poll reads the counters and the per CPU pid view through
 //! map reads. Counter reads stay cheap with one BSS view while per
 //! CPU reads cost one syscall per online CPU and run throttled at
 //! dashboard cadence on the hot thread. Policy counters merge from
 //! the daemon while mechanism counters come from the core. Parks sum
-//! core drops plus daemon parks plus userspace queue drops. Dispatch
+//! core drops, daemon parks, userspace queue drops. Dispatch
 //! drains the overflow tail solely with FIFO order and over moves
 //! count progress. Dashboard timestamps use wall time for logs plus
 //! file names while deadlines plus runtime use monotonic time, so the
@@ -74,7 +74,7 @@ impl<'a> Scheduler<'a> {
     /// Counters stay raw and the on CPU gauge passes through with the
     /// live pid view. SMT comes from the cached init flags and stays
     /// display solely. Offline CPUs stay out, so per CPU count matches
-    /// the cached online count. Version plus timestamp plus topology
+    /// the cached online count. Version, timestamp, topology
     /// join the counters for the page plus the log. Timestamp uses wall
     /// time for file names plus logs while runtime plus deadlines use
     /// monotonic time shared with the core.

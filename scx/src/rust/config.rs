@@ -48,8 +48,8 @@ impl Config {
     /// twenty eight in range one to sixteen thousand. The period stays
     /// at sixteen milliseconds. The batch stays at sixteen. Admission
     /// holds use under nine hundred fifty per mille with base capacity
-    /// one thousand twenty four. Queues hold five hundred twelve local
-    /// plus eight node plus machine plus overflow. Hints hold four
+    /// one thousand twenty four. Queues hold five hundred twelve local,
+    /// eight node, machine, overflow. Hints hold four
     /// thousand ninety six flat rows.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {

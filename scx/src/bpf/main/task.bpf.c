@@ -2,7 +2,7 @@
 /*
  * Task and map helpers for the thin core.
  *
- * Holds the clock plus task plus CPU loads used by every op. Runs
+ * Holds the clock, task, CPU loads used by every op. Runs
  * inline for a small verifier footprint.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

@@ -2,9 +2,9 @@
 /*
  * Flow thin core.
  *
- * Maps hold task run state plus CPU pid rows plus topology rows plus
- * two notify rings. Init reserves five hundred twelve local queues
- * plus eight node queues plus machine plus overflow as an ABI
+ * Maps hold task run state, CPU pid rows, topology rows,
+ * two notify rings. Init reserves five hundred twelve local queues,
+ * eight node queues, machine, overflow as an ABI
  * placeholder so identifiers stay stable. The core parks FIFO and
  * notifies. The daemon orders and admits. Hotplug needs a restart.
  * The watchdog stays at twenty seconds.

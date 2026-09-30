@@ -2,15 +2,15 @@
 
 ### What is it?
 
-scx_flow is a sched-ext scheduler that tries a Van Emde Boas tree for CPU order. The tree lives fully in Rust. BPF stays minimal with gate plus park plus notify plus execute. The slice stays fixed at 2ms. See `src/rust/flow/veb.rs` and `src/bpf/intf.h`.
+scx_flow is a sched-ext scheduler that tries a Van Emde Boas tree for CPU order. The tree lives fully in Rust. BPF stays minimal with gate, park, notify, execute. The slice stays fixed at 2ms. See `src/rust/flow/veb.rs` and `src/bpf/intf.h`.
 
 ### Why?
 
-The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree. A Van Emde Boas tree may beat priority queue plus BST plus rbtree for least deadline search. Rust keeps the tree accurate with tests for order plus FIFO. The benefits may outweigh the overhead when deadlines drive placement. See `src/rust/flow/veb.rs` and `src/rust/flow/runtime.rs`.
+The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree. A Van Emde Boas tree may beat priority queue, BST, rbtree for least deadline search. Rust keeps the tree accurate with tests for order plus FIFO. The benefits may outweigh the overhead when deadlines drive placement. See `src/rust/flow/veb.rs` and `src/rust/flow/runtime.rs`.
 
 ### Queues
 
-Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local plus node plus machine plus overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -18,7 +18,7 @@ Deadlines quantize to 16 bit keys at 1024 nanos per step. Each key holds one FIF
 
 ### Admission
 
-Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plus share stays within 950 per mille. Stored shares add once and drop once through enqueue plus complete plus disable plus exit. Lost completes collect past deadline plus 128ms grace. Task rows cap at 4096. Hints stay derived from weight keyed by task. Times stay monotonic. See `src/rust/flow/runtime.rs`.
+Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plus share stays within 950 per mille. Stored shares add once and drop once through enqueue, complete, disable, exit. Lost completes collect past deadline plus 128ms grace. Task rows cap at 4096. Hints stay derived from weight keyed by task. Times stay monotonic. See `src/rust/flow/runtime.rs`.
 
 ### Gates
 
@@ -26,7 +26,7 @@ Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter 
 
 ### Reporting
 
-Reporting uses `--stats` plus `--monitor` plus `--no-webui`. Dashboard serves loopback port `50005` with counters plus per CPU pid plus slice plus SMT plus version plus snapshot download. Rings poll each 10ms decoupled from 100ms dashboard cache. Parks sum core drops plus daemon parks plus queue drops. Misses use monotonic time and file names use wall time. See `src/rust/stats.rs`.
+Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback port `50005` with counters, per CPU pid, slice, SMT, version, snapshot download. Rings poll each 10ms decoupled from 100ms dashboard cache. Parks sum core drops, daemon parks, queue drops. Misses use monotonic time and file names use wall time. See `src/rust/stats.rs`.
 
 ## Code map
 
@@ -40,5 +40,5 @@ Reporting uses `--stats` plus `--monitor` plus `--no-webui`. Dashboard serves lo
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `16B` plus `8B` plus `8B` plus `96B`.
+- State is `16B`, `8B`, `8B`, `96B`.
 - Needs kernels, `7.2` series and up.

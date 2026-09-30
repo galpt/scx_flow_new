@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Daemon order plus admission plus protocol for the flow daemon.
+//! Daemon order, admission, protocol for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the daemon order plus the admission table plus the wire
-//! protocol. The daemon keeps one quantized queue plus one admitted
-//! row per CPU plus one hint table. Order follows deadlines solely
+//! Holds the daemon order, the admission table, the wire
+//! protocol. The daemon keeps one quantized queue, one admitted
+//! row per CPU, one hint table. Order follows deadlines solely
 //! through the quantized tree. The BPF core parks FIFO and notifies.
-//! The daemon order stays a shadow view for observability plus depth
-//! bound plus future dispatch while the core executes FIFO. Shadow
+//! The daemon order stays a shadow view for observability, depth
+//! bound, future dispatch while the core executes FIFO. Shadow
 //! cost stays on the userspace thread within five hundred twelve
 //! entries and stays off the BPF hot path. Times stay in the monotonic
-//! domain shared with the core. Parks include backpressure drops plus
-//! ring drops plus userspace queue drops. Queue backlog is the channel
+//! domain shared with the core. Parks include backpressure drops,
+//! ring drops, userspace queue drops. Queue backlog is the channel
 //! length and drop rate is the parks delta, so both stay visible with
 //! zero wire change. Hints stay derived from task weight keyed by task
 //! identifier. Lost completes collect past deadline plus grace.
@@ -157,7 +157,7 @@ pub struct Daemon {
     pub rejects: u64,
     /// Monotonic completions past release plus deadline.
     pub misses: u64,
-    /// Overflow parks from misses plus rejects plus drops.
+    /// Overflow parks from misses, rejects, drops.
     pub parks: u64,
     /// Userspace queue drops folded into parks. Internal gauge with
     /// zero wire change. Parks delta shows drop rate on the wire.
@@ -384,8 +384,8 @@ impl Daemon {
     }
 
     /// Note one observed wire sequence.
-    /// In order notifies advance the wire mark. Duplicates plus
-    /// reorder plus forward jumps report resync through the fail open
+    /// In order notifies advance the wire mark. Duplicates,
+    /// reorder, forward jumps report resync through the fail open
     /// matrix. Zero stays ignored. The first notify after attach
     /// accepts any sequence as a mid attach edge with zero resync, so
     /// tasks queued before attach never count a false gap. Callers
