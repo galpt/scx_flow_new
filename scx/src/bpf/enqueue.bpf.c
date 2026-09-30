@@ -6,21 +6,20 @@
  * tasks run at once on the task CPU. The gate runs first for other
  * arrivals. One idle kick follows each park. Order plus admission live
  * in the daemon as a shadow view. The core keeps progress with FIFO
- * parks. Ring reserve faults count one park.
+ * parks. Ring reserve faults count one park. One sequence allocation
+ * serves task state plus wire notify so the wire stays dense.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 static __noinline void flow_notify_enqueue(u32 pid,
-	u32 cpu, u32 weight)
+	u32 cpu, u32 weight, u64 seq)
 {
 	struct flow_event *ev;
-	u64 seq;
 	ev = bpf_ringbuf_reserve(&flow_enq_rb, sizeof(*ev), 0);
 	if (!ev) {
 		__sync_fetch_and_add(&flow_stats.parks, 1);
 		return;
 	}
-	seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	ev->kind = (u64)FLOW_PROTO_ENQUEUE;
 	ev->seq = seq;
 	ev->pid = pid;
@@ -53,12 +52,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	cpu = scx_bpf_task_cpu(p);
 	weight = p->scx.weight;
 	if (!tctx) {
+		u64 seq;
 		flow_gate_reject();
 		scx_bpf_dsq_insert(p, flow_overflow_dsq(),
 		    (u64)FLOW_QUANTUM_NS, enq_flags);
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
+		seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 		flow_notify_enqueue((u32)p->pid,
-		    cpu >= 0 ? (u32)cpu : 0, weight);
+		    cpu >= 0 ? (u32)cpu : 0, weight, seq);
 		if (flow_cpu_ok(p, sel)) {
 			scx_bpf_test_and_clear_cpu_idle(sel);
 			scx_bpf_kick_cpu(sel, SCX_KICK_IDLE);
@@ -68,13 +69,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	if (!flow_entry_ok(sel, p, 0) &&
 	    !flow_entry_ok(cpu, p, 0)) {
+		u64 seq;
 		flow_gate_reject();
-		tctx->seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		WRITE_ONCE(tctx->seq, seq);
 		scx_bpf_dsq_insert(p, flow_overflow_dsq(),
 		    (u64)FLOW_QUANTUM_NS, enq_flags);
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 		flow_notify_enqueue((u32)p->pid,
-		    cpu >= 0 ? (u32)cpu : 0, weight);
+		    cpu >= 0 ? (u32)cpu : 0, weight, seq);
 		if (flow_cpu_ok(p, sel)) {
 			scx_bpf_test_and_clear_cpu_idle(sel);
 			scx_bpf_kick_cpu(sel, SCX_KICK_IDLE);
@@ -87,19 +90,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	else if (!flow_cpu_ok(p, cpu))
 		cpu = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (!flow_cpu_ok(p, cpu)) {
+		u64 seq;
 		flow_gate_reject();
-		tctx->seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		WRITE_ONCE(tctx->seq, seq);
 		scx_bpf_dsq_insert(p, flow_overflow_dsq(),
 		    (u64)FLOW_QUANTUM_NS, enq_flags);
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
-		flow_notify_enqueue((u32)p->pid, 0, weight);
+		flow_notify_enqueue((u32)p->pid, 0, weight, seq);
 		return;
 	}
-	tctx->seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
-	    (u64)FLOW_QUANTUM_NS, enq_flags);
-	__sync_fetch_and_add(&flow_stats.inserts, 1);
-	flow_notify_enqueue((u32)p->pid, (u32)cpu, weight);
+	{
+		u64 seq;
+		seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		WRITE_ONCE(tctx->seq, seq);
+		scx_bpf_dsq_insert(p, flow_overflow_dsq(),
+		    (u64)FLOW_QUANTUM_NS, enq_flags);
+		__sync_fetch_and_add(&flow_stats.inserts, 1);
+		flow_notify_enqueue((u32)p->pid, (u32)cpu, weight, seq);
+	}
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		if (st && READ_ONCE(st->running_pid) == 0) {

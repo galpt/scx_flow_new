@@ -4,8 +4,9 @@
  *
  * Holds the live plus mask checks plus the running pid helpers plus
  * the universal entry gate. The gate runs first in every op. Bad CPUs
- * plus bad tasks fail closed with one counter. Runs inline for a
- * small verifier footprint.
+ * plus bad tasks fail closed with one counter. Shared counters pair
+ * volatile reads with atomic updates so observers see steady values.
+ * Runs inline for a small verifier footprint.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -32,7 +33,7 @@ static __always_inline void flow_on_cpu_dec(void)
 {
 	s32 i;
 	bpf_for(i, 0, 16) {
-		u64 cur = flow_stats.on_cpu;
+		u64 cur = READ_ONCE(flow_stats.on_cpu);
 		u64 nxt;
 		u64 old;
 		if (cur == 0)

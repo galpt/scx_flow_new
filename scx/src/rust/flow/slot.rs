@@ -5,9 +5,12 @@
 
 //! Holds the queue identifiers. One local queue serves each CPU. One
 //! shared queue serves each node. One machine queue serves the host.
-//! One overflow tail serves parks. Init reserves the full set while
+//! One overflow tail serves parks. Init reserves the full set as an
+//! ABI placeholder so identifiers stay stable across releases while
 //! dispatch drains the overflow tail solely with FIFO order, so tier
-//! counters for local plus node plus machine stay zero.
+//! counters for local plus node plus machine stay zero. A single tail
+//! avoids cross tier moves that would bounce cache and NUMA locality.
+//! Undrained queues hold zero tasks and cost solely at init.
 
 /// Bound for CPUs served. Mirrors the BPF header.
 pub const MAX_CPUS: u64 = 512;

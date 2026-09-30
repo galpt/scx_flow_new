@@ -102,8 +102,11 @@ pub struct PerCpuMetrics {
 
 /// Snapshot for the web dashboard.
 /// Counters stay raw with the on CPU gauge plus the live pid view.
-/// The run loop pushes one per poll and the web thread keeps the
-/// newest behind a lock for the page plus the JSON routes.
+/// The run loop pushes throttled snapshots at dashboard cadence and
+/// the web thread keeps the newest behind a lock for the page plus
+/// the JSON routes. Timestamp uses wall time for logs plus file names
+/// while runtime plus deadlines use monotonic time shared with the
+/// core, so the two domains stay separate by intent.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
     /// Scheduler wide counters with raw values.
@@ -114,7 +117,8 @@ pub struct WebMetrics {
     /// Scheduler version for the page plus the log.
     #[serde(default)]
     pub version: String,
-    /// Wall time in nanos since epoch for the log.
+    /// Wall time in nanos since epoch for the log plus file names.
+    /// Monotonic time serves deadlines plus runtime elsewhere.
     #[serde(default)]
     pub timestamp_ns: u64,
     /// One line topology summary for the page.

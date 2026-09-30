@@ -5,11 +5,15 @@
 
 //! Builds the counters view plus the dashboard view from the core.
 //! Each poll reads the counters plus the per CPU pid view through
-//! cheap map reads, so the page stays light beside the slice. Policy
-//! counters merge from the daemon while mechanism counters come from
-//! the core. Parks sum core drops plus daemon parks. Tier counters
-//! for local plus node plus machine stay zero while overflow counts
-//! progress.
+//! map reads. Counter reads stay cheap with one BSS view while per
+//! CPU reads cost one syscall per online CPU and run throttled at
+//! dashboard cadence on the hot thread. Policy counters merge from
+//! the daemon while mechanism counters come from the core. Parks sum
+//! core drops plus daemon parks plus userspace queue drops. Tier
+//! counters for local plus node plus machine stay zero while overflow
+//! counts progress. Dashboard timestamps use wall time for logs plus
+//! file names while deadlines plus runtime use monotonic time, so the
+//! two domains stay separate by intent.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -74,7 +78,9 @@ impl<'a> Scheduler<'a> {
     /// live pid view. SMT comes from the cached init flags and stays
     /// display solely. Offline CPUs stay out, so per CPU count matches
     /// the cached online count. Version plus timestamp plus topology
-    /// join the counters for the page plus the log.
+    /// join the counters for the page plus the log. Timestamp uses wall
+    /// time for file names plus logs while runtime plus deadlines use
+    /// monotonic time shared with the core.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
         for (rank, &id) in self.online_cpus.iter().enumerate() {

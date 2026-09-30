@@ -27,8 +27,10 @@ mod webui;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use clap::CommandFactory;
@@ -56,6 +58,14 @@ const SCHEDULER_NAME: &str = "scx_flow";
 /* CPU bound shared with the BPF header. */
 #[cfg(test)]
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
+/* Ring poll interval in millis decoupled from dashboard cadence. */
+const RING_POLL_MS: u64 = 10;
+/* Dashboard freshness in millis for cached per CPU cards. */
+const WEB_CACHE_MS: u64 = 100;
+/* Stale collection interval in millis for lost completes. */
+const GC_INTERVAL_MS: u64 = 1000;
+/* Event payload length in bytes matching the BPF event. */
+const EVENT_LEN: usize = 40;
 
 fn full_version() -> String {
     build_id::full_version(env!("CARGO_PKG_VERSION"))
@@ -97,7 +107,8 @@ struct Opts {
 
 /* Scheduler owns the skeleton plus the link plus the stats server */
 /* plus the dashboard channel plus the daemon order. It drives the */
-/* run loop until shutdown or exit. */
+/* run loop until shutdown or exit. Backlog is the event channel */
+/* length and drop rate is the parks delta with zero wire change. */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -113,10 +124,16 @@ pub(crate) struct Scheduler<'a> {
     topology: String,
     /* Daemon order plus admission state. */
     pub(crate) daemon: flow::Daemon,
-    /* Event channel from the ring buffers. */
-    ev_rx: crossbeam::channel::Receiver<Vec<u8>>,
+    /* Bounded event channel from the ring buffers. */
+    ev_rx: crossbeam::channel::Receiver<[u8; EVENT_LEN]>,
+    /* Userspace queue drops shared with ring callbacks. */
+    ev_drops: Arc<AtomicU64>,
     /* Ring polling handle with empty on fault. */
     rings: Option<libbpf_rs::RingBuffer<'a>>,
+    /* Last dashboard refresh for throttled per CPU reads. */
+    last_web: Instant,
+    /* Last stale collection for lost completes. */
+    last_gc: Instant,
 }
 
 impl<'a> Scheduler<'a> {
@@ -162,10 +179,13 @@ impl<'a> Scheduler<'a> {
             .collect();
         let topology = topology::describe_topology(&rows);
         info!("Topology: {topology}");
-        /* Ring buffers carry enqueue plus complete notifies. */
+        /* Bounded event queue drops with parks accounting when full. */
+        /* Stack copies avoid per event heap growth on the hot path. */
         /* Faulty setup keeps FIFO progress at the core. */
-        let (ev_tx, ev_rx) = crossbeam::channel::unbounded::<Vec<u8>>();
-        let rings = Self::build_rings(&skel, ev_tx);
+        let (ev_tx, ev_rx) = crossbeam::channel::bounded::<[u8; EVENT_LEN]>(flow::EV_CAP);
+        let ev_drops = Arc::new(AtomicU64::new(0));
+        let rings = Self::build_rings(&skel, ev_tx, ev_drops.clone());
+        let now = Instant::now();
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
@@ -177,7 +197,12 @@ impl<'a> Scheduler<'a> {
             topology,
             daemon: flow::Daemon::new(),
             ev_rx,
+            ev_drops,
             rings,
+            last_web: now
+                .checked_sub(Duration::from_millis(WEB_CACHE_MS))
+                .unwrap_or(now),
+            last_gc: now,
         })
     }
 
@@ -186,16 +211,27 @@ impl<'a> Scheduler<'a> {
     }
 
     /* Build one polling handle over both notify rings. */
+    /* Stack copies carry fixed payloads into the bounded queue. */
+    /* Full queues drop with drop accounting folded into parks. */
     /* Faulty maps yield empty with FIFO progress preserved. */
     fn build_rings(
         skel: &BpfSkel<'a>,
-        ev_tx: crossbeam::channel::Sender<Vec<u8>>,
+        ev_tx: crossbeam::channel::Sender<[u8; EVENT_LEN]>,
+        ev_drops: Arc<AtomicU64>,
     ) -> Option<libbpf_rs::RingBuffer<'a>> {
         let mut bld = libbpf_rs::RingBufferBuilder::new();
         let tx_a = ev_tx.clone();
+        let drops_a = ev_drops.clone();
         if bld
             .add(&skel.maps.flow_enq_rb, move |data| {
-                let _ = tx_a.send(data.to_vec());
+                if data.len() < EVENT_LEN {
+                    return 0;
+                }
+                let mut buf = [0u8; EVENT_LEN];
+                buf.copy_from_slice(&data[..EVENT_LEN]);
+                if tx_a.try_send(buf).is_err() {
+                    drops_a.fetch_add(1, Ordering::Relaxed);
+                }
                 0
             })
             .is_err()
@@ -203,9 +239,17 @@ impl<'a> Scheduler<'a> {
             return None;
         }
         let tx_b = ev_tx;
+        let drops_b = ev_drops;
         if bld
             .add(&skel.maps.flow_cmp_rb, move |data| {
-                let _ = tx_b.send(data.to_vec());
+                if data.len() < EVENT_LEN {
+                    return 0;
+                }
+                let mut buf = [0u8; EVENT_LEN];
+                buf.copy_from_slice(&data[..EVENT_LEN]);
+                if tx_b.try_send(buf).is_err() {
+                    drops_b.fetch_add(1, Ordering::Relaxed);
+                }
                 0
             })
             .is_err()
@@ -237,8 +281,10 @@ impl<'a> Scheduler<'a> {
 
     /* Decode one ring payload into kind plus sequence plus pid plus */
     /* CPU plus weight plus runnable plus time. Short payloads drop. */
+    /* Host endian passes through the ring with zero conversion as BPF */
+    /* plus userspace share one host and the ring never crosses hosts. */
     fn decode_event(data: &[u8]) -> Option<(u64, u64, u32, u32, u32, u32, u64)> {
-        if data.len() < 40 {
+        if data.len() < EVENT_LEN {
             return None;
         }
         let kind = u64::from_ne_bytes(data[0..8].try_into().ok()?);
@@ -274,11 +320,6 @@ impl<'a> Scheduler<'a> {
             let time = if at != 0 { at } else { Self::mono_ns() };
             self.daemon.handle_complete(pid, time, runnable);
         } else {
-            debug_assert!(
-                kind == flow::PROTO_ORDER
-                    || kind == flow::PROTO_DISPATCH
-                    || kind != flow::PROTO_ENQUEUE
-            );
             let action = flow::fail_open(&flow::FailReason::BadKey);
             debug_assert_eq!(action, flow::FailAction::HoldKick);
         }
@@ -301,9 +342,12 @@ impl<'a> Scheduler<'a> {
     }
 
     /* Drain available ring events into the daemon. */
-    /* Bounded per pass by the dispatch batch. Missing rings plus a */
-    /* full dashboard channel plus poll faults count one park with */
-    /* FIFO kept. */
+    /* Polls kernel rings then drains until empty or cap with remainder */
+    /* deferred to the next poll. Queue drops fold into parks plus the */
+    /* drop gauge. Missing rings plus poll faults count one park with */
+    /* FIFO kept. Dashboard backpressure counts solely at send time so */
+    /* one drop counts one park. Backlog is the channel length and drop */
+    /* rate is the parks delta with zero wire change. */
     fn drain_rings(&mut self) {
         if let Some(rb) = self.rings.as_ref() {
             if rb.consume().is_err() {
@@ -316,12 +360,11 @@ impl<'a> Scheduler<'a> {
             debug_assert_eq!(action, flow::FailAction::ParkFifo);
             self.daemon.parks = self.daemon.parks.saturating_add(1);
         }
-        if self.webui_tx.as_ref().is_some_and(|tx| tx.is_full()) {
-            let action = flow::fail_open(&flow::FailReason::RingFull);
-            debug_assert_eq!(action, flow::FailAction::ParkFifo);
-            self.daemon.parks = self.daemon.parks.saturating_add(1);
+        let dropped = self.ev_drops.swap(0, Ordering::Relaxed);
+        for _ in 0..dropped {
+            self.daemon.note_ev_drop();
         }
-        for _ in 0..flow::DISPATCH_BATCH {
+        for _ in 0..flow::DRAIN_CAP {
             match self.ev_rx.try_recv() {
                 Ok(data) => self.handle_event(&data),
                 Err(_) => break,
@@ -329,41 +372,53 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /* Push one dashboard snapshot when past freshness. */
+    /* Per CPU map reads run solely here so the hot thread stays cheap */
+    /* while the page stays fresh at dashboard cadence. One failed send */
+    /* counts one park with FIFO kept. */
+    fn push_web_if_due(&mut self) {
+        let Some(ref tx) = self.webui_tx else {
+            return;
+        };
+        if self.last_web.elapsed() < Duration::from_millis(WEB_CACHE_MS) {
+            return;
+        }
+        let web = self.get_web_metrics();
+        self.last_web = Instant::now();
+        if tx.try_send(web).is_err() {
+            self.daemon.parks = self.daemon.parks.saturating_add(1);
+        }
+    }
+
+    /* Collect stale rows past grace at a slow cadence. */
+    /* Lost completes return shares here so admitted sums never leak. */
+    fn maybe_gc(&mut self) {
+        if self.last_gc.elapsed() < Duration::from_millis(GC_INTERVAL_MS) {
+            return;
+        }
+        self.last_gc = Instant::now();
+        let now = Self::mono_ns();
+        self.daemon.gc_stale(now);
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        /* Short tick keeps stats polls prompt while the page polls */
-        /* once per second. Each tick drains ring events into the */
-        /* daemon then serves the stats reply plus the page. One BPF */
-        /* read serves both the stats reply plus the page. */
+        /* Ring polls run each short tick decoupled from dashboard */
+        /* cadence. Stats replies use cheap counter reads each request. */
+        /* Per CPU cards refresh through the cache at dashboard cadence. */
+        /* Stale rows collect at a slow cadence. One BPF read serves */
+        /* both the stats reply plus the page. */
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             self.drain_rings();
-            match req_ch.recv_timeout(Duration::from_millis(100)) {
+            self.maybe_gc();
+            match req_ch.recv_timeout(Duration::from_millis(RING_POLL_MS)) {
                 Ok(()) => {
-                    if let Some(ref tx) = self.webui_tx {
-                        if !tx.is_full() {
-                            let web = self.get_web_metrics();
-                            let stats = web.stats.clone();
-                            if tx.try_send(web).is_err() {
-                                self.daemon.parks = self.daemon.parks.saturating_add(1);
-                            }
-                            res_ch.send(stats)?
-                        } else {
-                            self.daemon.parks = self.daemon.parks.saturating_add(1);
-                            res_ch.send(self.get_metrics())?
-                        }
-                    } else {
-                        res_ch.send(self.get_metrics())?
-                    }
+                    let stats = self.get_metrics();
+                    self.push_web_if_due();
+                    res_ch.send(stats)?
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    if let Some(ref tx) = self.webui_tx
-                        && !tx.is_full()
-                    {
-                        let web = self.get_web_metrics();
-                        if tx.try_send(web).is_err() {
-                            self.daemon.parks = self.daemon.parks.saturating_add(1);
-                        }
-                    }
+                    self.push_web_if_due();
                 }
                 Err(e) => Err(e)?,
             }

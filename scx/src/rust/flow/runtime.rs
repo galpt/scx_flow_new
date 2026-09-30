@@ -7,10 +7,15 @@
 //! protocol. The daemon keeps one quantized queue plus one admitted
 //! row per CPU plus one hint table. Order follows deadlines solely
 //! through the quantized tree. The BPF core parks FIFO and notifies.
-//! The daemon order stays a shadow view for observability while the
-//! core executes FIFO. Times stay in the monotonic domain shared with
-//! the core. Parks include backpressure drops. Hints stay derived
-//! from task weight keyed by task identifier.
+//! The daemon order stays a shadow view for observability plus depth
+//! bound plus future dispatch while the core executes FIFO. Shadow
+//! cost stays on the userspace thread within five hundred twelve
+//! entries and stays off the BPF hot path. Times stay in the monotonic
+//! domain shared with the core. Parks include backpressure drops plus
+//! ring drops plus userspace queue drops. Queue backlog is the channel
+//! length and drop rate is the parks delta, so both stay visible with
+//! zero wire change. Hints stay derived from task weight keyed by task
+//! identifier. Lost completes collect past deadline plus grace.
 
 use std::collections::HashMap;
 
@@ -33,6 +38,31 @@ pub const SEQ_INIT: u64 = 1;
 pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
+/// Bound for the userspace event queue at twice order depth.
+/// Holds enqueue plus complete pairs per burst. Full queues drop with
+/// parks accounting and latest state reconciles on the next notify.
+pub const EV_CAP: usize = 1024;
+/// Cap for one userspace drain pass at twice order depth.
+/// Drains run until empty or cap with remainder deferred to the next
+/// poll. Twice depth absorbs one enqueue plus one complete per slot.
+pub const DRAIN_CAP: usize = ORDER_DEPTH_MAX * 2;
+/// Bound for live task rows matching the hint bound.
+/// Fresh identifiers park when full so the map stays capped.
+pub const TASKS_CAP: usize = 4096;
+/// Grace past deadline before lost complete collection in nanos.
+/// Eight periods cover slow wakeups while leaked shares still return.
+pub const STALE_GRACE_NS: u64 = 128_000_000;
+/// Guard that depth growth needs a position index for removal.
+/// Removal scans one key queue within depth, so deeper bounds need an
+/// index to stay cheap.
+const _: () = assert!(ORDER_DEPTH_MAX <= 512);
+/// Guard that reserved wire kinds stay stable for the daemon.
+/// Order plus dispatch never emit from the core and hold at the core.
+const _: () = assert!(PROTO_ORDER == 2 && PROTO_DISPATCH == 3);
+/// Guard that the dispatch batch mirrors the BPF header.
+/// Userspace drains use the deeper drain cap while the core moves one
+/// per pass.
+const _: () = assert!(DISPATCH_BATCH == 16);
 
 /// Admission decision for one enqueue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +141,9 @@ pub struct TaskState {
 /// stored share each. Adds pair with drops exactly once per admit.
 /// Wire sequence tracks notifies while order sequence tracks queued
 /// tasks. Disable plus exit notifies drop shares through complete.
+/// Task rows stay capped at the task bound. Stale rows collect past
+/// deadline plus grace. Queue drops fold into parks plus the drop
+/// gauge with zero wire change.
 pub struct Daemon {
     order: FlowVeb,
     hints: HintTable,
@@ -126,6 +159,9 @@ pub struct Daemon {
     pub misses: u64,
     /// Overflow parks from misses plus rejects plus drops.
     pub parks: u64,
+    /// Userspace queue drops folded into parks. Internal gauge with
+    /// zero wire change. Parks delta shows drop rate on the wire.
+    pub ev_drops: u64,
 }
 
 impl Daemon {
@@ -142,7 +178,24 @@ impl Daemon {
             rejects: 0,
             misses: 0,
             parks: 0,
+            ev_drops: 0,
         }
+    }
+
+    /// Live task row count now held.
+    #[cfg(test)]
+    pub fn task_len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Note one userspace queue drop with parks accounting.
+    /// Keeps the wire visible parks sum plus an internal drop gauge.
+    /// Ring pressure maps to park through the fail open matrix.
+    pub fn note_ev_drop(&mut self) {
+        let action = fail_open(&FailReason::RingFull);
+        debug_assert_eq!(action, FailAction::ParkFifo);
+        self.ev_drops = self.ev_drops.saturating_add(1);
+        self.parks = self.parks.saturating_add(1);
     }
 
     /// Hint table for weight derived updates.
@@ -211,8 +264,10 @@ impl Daemon {
     /// Fresh hints flow through the hint table. Stored shares add
     /// once and drop once. Rejects park FIFO at the core. Stale CPUs
     /// drop the stored share then park. Depth overflow drops the
-    /// stored share then parks. Order sequence advances solely on
-    /// admits while wire sequence stays untouched here.
+    /// stored share then parks. Table full parks fresh identifiers
+    /// with zero stored share so the map stays capped. Order sequence
+    /// advances solely on admits while wire sequence stays untouched
+    /// here.
     pub fn handle_enqueue(&mut self, pid: u32, hint_us: u32, cpu: u32, now: u64) -> AdmitDecision {
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
@@ -225,6 +280,12 @@ impl Daemon {
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
             self.drop_stored(pid);
+            self.order.remove(pid);
+            self.rejects += 1;
+            self.parks += 1;
+            return AdmitDecision::Park;
+        }
+        if !self.tasks.contains_key(&pid) && self.tasks.len() >= TASKS_CAP {
             self.order.remove(pid);
             self.rejects += 1;
             self.parks += 1;
@@ -280,7 +341,9 @@ impl Daemon {
     /// Handle one complete notify from the core.
     /// Drops the stored share exactly once. Misses count when
     /// monotonic time passes release plus deadline on a blocking
-    /// complete. Runtime charge stays in the core total.
+    /// complete. Runtime charge stays in the core total. Unknown
+    /// identifiers pass through after order cleanup, so a lost enqueue
+    /// never leaks a share.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         let (release, deadline) = match self.tasks.get(&pid) {
             Some(t) => (t.release, t.deadline),
@@ -298,10 +361,35 @@ impl Daemon {
         self.tasks.remove(&pid);
     }
 
+    /// Collect stale rows past deadline plus grace.
+    /// Drops stored shares then clears order plus task rows. Lost
+    /// completes return shares here so admitted sums never leak.
+    /// Callers pass monotonic now and poll at a slow cadence.
+    pub fn gc_stale(&mut self, now: u64) {
+        if self.tasks.is_empty() {
+            return;
+        }
+        let mut stale = Vec::new();
+        for (pid, task) in self.tasks.iter() {
+            let limit = task.deadline.saturating_add(STALE_GRACE_NS);
+            if task.release != 0 && task.deadline != 0 && now > limit {
+                stale.push(*pid);
+            }
+        }
+        for pid in stale {
+            self.drop_stored(pid);
+            self.order.remove(pid);
+            self.tasks.remove(&pid);
+        }
+    }
+
     /// Note one observed wire sequence.
     /// In order notifies advance the wire mark. Duplicates plus
     /// reorder plus forward jumps report resync through the fail open
-    /// matrix. Zero stays ignored. Callers execute the resync park.
+    /// matrix. Zero stays ignored. The first notify after attach
+    /// accepts any sequence as a mid attach edge with zero resync, so
+    /// tasks queued before attach never count a false gap. Callers
+    /// execute the resync park.
     pub fn note_seq(&mut self, seq: u64) -> FailAction {
         if seq == 0 {
             return FailAction::ParkFifo;
@@ -450,6 +538,11 @@ mod tests {
         assert_eq!(PROTO_DISPATCH, 3);
         assert_eq!(PROTO_COMPLETE, 4);
         assert_eq!(DISPATCH_BATCH, 16);
+        assert_eq!(ORDER_DEPTH_MAX, 512);
+        assert_eq!(DRAIN_CAP, 1024);
+        assert_eq!(EV_CAP, 1024);
+        assert_eq!(TASKS_CAP, 4096);
+        assert_eq!(STALE_GRACE_NS, 128_000_000);
     }
 
     #[test]
@@ -459,5 +552,39 @@ mod tests {
         assert!(d.should_kick(10, 20));
         assert_eq!(d.queue_for(0), crate::flow::slot::local_dsq(0));
         assert_eq!(d.queue_for(9999), crate::flow::slot::slot_overflow_dsq());
+    }
+
+    #[test]
+    fn task_table_caps_fresh_identifiers() {
+        let mut d = Daemon::new();
+        for pid in 1..=TASKS_CAP as u32 {
+            let _ = d.handle_enqueue(pid + 100000, 32000, 0, 1_000_000);
+        }
+        assert_eq!(d.task_len(), TASKS_CAP);
+        let got = d.handle_enqueue(9999999, 32000, 0, 1_000_000);
+        assert!(matches!(got, AdmitDecision::Park));
+        assert_eq!(d.task_len(), TASKS_CAP);
+    }
+
+    #[test]
+    fn stale_rows_collect_past_grace() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 4000, 0, 1_000_000);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.admitted(0), 500);
+        let late = 1_000_000 + 4_000_000 + STALE_GRACE_NS + 1;
+        d.gc_stale(late);
+        assert_eq!(d.admitted(0), 0);
+        assert_eq!(d.queue_len(), 0);
+        assert_eq!(d.task_len(), 0);
+    }
+
+    #[test]
+    fn queue_drop_folds_into_parks() {
+        let mut d = Daemon::new();
+        assert_eq!(d.ev_drops, 0);
+        d.note_ev_drop();
+        assert_eq!(d.ev_drops, 1);
+        assert_eq!(d.parks, 1);
     }
 }

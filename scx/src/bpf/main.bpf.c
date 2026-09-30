@@ -3,10 +3,11 @@
  * Flow thin core.
  *
  * Maps hold task run state plus CPU pid rows plus topology rows plus
- * two notify rings. Init creates five hundred twelve local queues
- * plus eight node queues plus machine plus overflow. The core parks
- * FIFO and notifies. The daemon orders and admits. Hotplug needs a
- * restart. The watchdog stays at twenty seconds.
+ * two notify rings. Init reserves five hundred twelve local queues
+ * plus eight node queues plus machine plus overflow as an ABI
+ * placeholder so identifiers stay stable. The core parks FIFO and
+ * notifies. The daemon orders and admits. Hotplug needs a restart.
+ * The watchdog stays at twenty seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -83,8 +84,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		key = (u32)cpu;
 		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
 		if (st) {
-			st->running_pid = 0;
-			st->pad = 0;
+			WRITE_ONCE(st->running_pid, 0);
+			WRITE_ONCE(st->pad, 0);
 		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {

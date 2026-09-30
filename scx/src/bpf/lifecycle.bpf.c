@@ -135,8 +135,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
-	tctx->run_at = 0;
-	tctx->seq = 0;
+	WRITE_ONCE(tctx->run_at, 0);
+	WRITE_ONCE(tctx->seq, 0);
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

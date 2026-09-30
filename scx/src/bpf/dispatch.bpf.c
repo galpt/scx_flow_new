@@ -5,8 +5,11 @@
  * Executes one FIFO move from the overflow tail to local. Empty
  * queues move nothing. The daemon holds order as a shadow view while
  * the core executes FIFO. Init reserves local plus node plus machine
- * plus overflow while dispatch drains overflow solely, so local plus
- * node plus machine counters stay zero and over moves count progress.
+ * plus overflow as an ABI placeholder while dispatch drains overflow
+ * solely, so local plus node plus machine counters stay zero and over
+ * moves count progress. A single tail keeps contention on one queue
+ * and avoids cross tier moves that would bounce cache and NUMA
+ * locality.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

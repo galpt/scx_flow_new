@@ -4,10 +4,18 @@
  *
  * The core parks FIFO at the overflow tail and notifies the daemon.
  * The daemon orders through the quantized tree and admits under the
- * bound. Init creates five hundred twelve local queues plus eight
- * node queues plus machine plus overflow. The watchdog stays at
- * twenty seconds. Policy lives in the daemon. The core holds gate
- * plus park plus notify plus execute.
+ * bound. Init reserves five hundred twelve local queues plus eight
+ * node queues plus machine plus overflow as an ABI placeholder so
+ * queue identifiers stay stable across releases. Dispatch drains the
+ * overflow tail solely with FIFO order. A single tail avoids cross
+ * tier moves that would bounce cache and NUMA locality. Undrained
+ * queues hold zero tasks and cost solely at init. Counters use atomic
+ * adds from every CPU and stay best effort for observability. Reads
+ * poll at dashboard cadence so line bouncing stays bounded by event
+ * rate. Shared fields pair reads with writes through atomics plus
+ * volatile access. The watchdog stays at twenty seconds. Policy lives
+ * in the daemon. The core holds gate plus park plus notify plus
+ * execute.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -33,6 +41,9 @@ typedef int pid_t;
 #endif
 #ifndef READ_ONCE
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
+#endif
+#ifndef WRITE_ONCE
+#define WRITE_ONCE(x, v) (*(volatile typeof(x) *)&(x) = (v))
 #endif
 enum flow_consts {
 	FLOW_QUANTUM_NS = 2000000ULL,

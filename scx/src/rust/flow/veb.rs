@@ -120,25 +120,42 @@ impl Veb {
     }
 
     /// Insert one key. Duplicate inserts pass through.
+    /// Corrupt state returns early in release plus asserts in debug.
     pub fn insert(&mut self, x: u16) {
         if self.min.is_none() {
             self.min = Some(x);
             self.max = Some(x);
             return;
         }
+        debug_assert!(self.min.is_some());
+        debug_assert!(self.max.is_some());
+        let Some(cur_min) = self.min else {
+            return;
+        };
+        let Some(cur_max) = self.max else {
+            return;
+        };
         let mut v = x;
-        if v < self.min.unwrap() {
-            let old = self.min.replace(v).unwrap();
-            v = old;
+        if v < cur_min {
+            let old = self.min.replace(v);
+            debug_assert!(old.is_some());
+            let Some(prev) = old else {
+                return;
+            };
+            v = prev;
         }
         if self.u == 2 {
-            if v > self.max.unwrap() {
+            if v > cur_max {
                 self.max = Some(v);
             }
             return;
         }
         let h = high(v, self.sq);
         let l = low(v, self.sq);
+        if h >= self.clusters.len() {
+            debug_assert!(false);
+            return;
+        }
         let need = match &self.clusters[h] {
             None => true,
             Some(c) => c.is_empty(),
@@ -147,18 +164,31 @@ impl Veb {
             if self.clusters[h].is_none() {
                 self.clusters[h] = Some(Box::new(Veb::new(self.sq)));
             }
-            self.summary.as_mut().unwrap().insert(h as u16);
-            self.clusters[h].as_mut().unwrap().insert(l as u16);
+            debug_assert!(self.summary.is_some());
+            let Some(sum) = self.summary.as_mut() else {
+                return;
+            };
+            sum.insert(h as u16);
+            let Some(cluster) = self.clusters[h].as_mut() else {
+                debug_assert!(false);
+                return;
+            };
+            cluster.insert(l as u16);
         } else {
-            self.clusters[h].as_mut().unwrap().insert(l as u16);
+            let Some(cluster) = self.clusters[h].as_mut() else {
+                debug_assert!(false);
+                return;
+            };
+            cluster.insert(l as u16);
         }
-        if v > self.max.unwrap() {
+        if v > cur_max {
             self.max = Some(v);
         }
     }
 
     /// Remove one key. Missing keys pass through.
     /// Returns true when the key was held.
+    /// Corrupt state returns false in release plus asserts in debug.
     pub fn remove(&mut self, x: u16) -> bool {
         if self.min.is_none() {
             return false;
@@ -184,11 +214,27 @@ impl Veb {
         }
         let mut v = x;
         if Some(v) == self.min {
-            let first = match self.summary.as_ref().unwrap().min() {
+            debug_assert!(self.summary.is_some());
+            let Some(sum) = self.summary.as_ref() else {
+                debug_assert!(false);
+                return false;
+            };
+            let first = match sum.min() {
                 Some(f) => f as usize,
                 None => return false,
             };
-            let inner = self.clusters[first].as_ref().unwrap().min().unwrap();
+            if first >= self.clusters.len() {
+                debug_assert!(false);
+                return false;
+            }
+            let Some(cluster) = self.clusters[first].as_ref() else {
+                debug_assert!(false);
+                return false;
+            };
+            let Some(inner) = cluster.min() else {
+                debug_assert!(false);
+                return false;
+            };
             let nxt = index(first, inner as usize, self.sq);
             self.min = Some(nxt);
             v = nxt;
@@ -205,22 +251,48 @@ impl Veb {
         if !present && Some(x) != self.max {
             return false;
         }
-        let empty = match &self.clusters[h] {
+        let empty = match self.clusters.get(h) {
             None => true,
-            Some(c) => c.is_empty(),
+            Some(None) => true,
+            Some(Some(c)) => c.is_empty(),
         };
         if empty {
+            if h >= self.clusters.len() {
+                debug_assert!(false);
+                return false;
+            }
             self.clusters[h] = None;
-            self.summary.as_mut().unwrap().remove(h as u16);
+            debug_assert!(self.summary.is_some());
+            let Some(sum) = self.summary.as_mut() else {
+                debug_assert!(false);
+                return false;
+            };
+            sum.remove(h as u16);
         }
         if Some(v) == self.max || Some(x) == self.max {
-            match self.summary.as_ref().unwrap().max() {
+            debug_assert!(self.summary.is_some());
+            let Some(sum) = self.summary.as_ref() else {
+                debug_assert!(false);
+                return false;
+            };
+            match sum.max() {
                 None => {
                     self.max = self.min;
                 }
                 Some(last) => {
                     let li = last as usize;
-                    let inner = self.clusters[li].as_ref().unwrap().max().unwrap();
+                    if li >= self.clusters.len() {
+                        debug_assert!(false);
+                        return false;
+                    }
+                    let Some(cluster) = self.clusters[li].as_ref() else {
+                        debug_assert!(false);
+                        return false;
+                    };
+                    let Some(inner) = cluster.max() else {
+                        debug_assert!(false);
+                        return false;
+                    };
                     self.max = Some(index(li, inner as usize, self.sq));
                 }
             }
@@ -318,6 +390,9 @@ impl FlowVeb {
 
     /// Remove one pid wherever it waits.
     /// Returns true when the pid was queued.
+    /// Scan stays within one key queue. Total entries stay within the
+    /// daemon depth bound of five hundred twelve, so a deeper bound
+    /// needs a position index. The pid index finds the key directly.
     pub fn remove(&mut self, pid: u32) -> bool {
         let key = match self.pid_key.get(&pid).copied() {
             Some(k) => k,
