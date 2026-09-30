@@ -2,21 +2,21 @@
 
 ### What is it?
 
-scx_flow is a sched-ext scheduler that uses a Van Emde Boas tree for CPU order. The tree lives fully in BPF with summary, clusters, min, max. The daemon admits under the bound. The slice stays fixed at 2ms. See `src/bpf/veb/` and `src/bpf/intf.h`.
+scx_flow is a sched-ext scheduler that replaces FIFO plus rbtree queue ordering for CPU dispatch with a Van Emde Boas tree. The tree is the queues in BPF with summary, clusters, counts, pid rows, root. Duplicates share one key with park order deciding within one key. The daemon admits under the bound. The slice stays fixed at 2ms. See `src/bpf/veb/` and `src/bpf/intf.h`.
 
 ### Why?
 
-The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree in BPF. A Van Emde Boas tree may beat priority queue, BST, rbtree for least deadline search. BPF keeps the tree accurate with bounded loops and fail closed parks. The benefits may outweigh the overhead when deadlines drive placement. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
+The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree in BPF. A Van Emde Boas tree may beat FIFO, priority queue, BST, rbtree for least deadline search. BPF keeps the tree accurate with bounded loops and fail closed parks. The benefits may outweigh the overhead when deadlines drive placement. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ## More details
 
 ### Queues
 
-Core parks at overflow with plain insert. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in tree order up to 16 per pass with sequence, liveness, affinity checks and parks stale entries with no tree drop. Empty tree or stall moves one gated task with the same checks plus keyed drop so progress stays bounded with no bypass. Probes cap at 20 with empty skip through counts plus drained advance so one pass never scans the tail more than 20 times. Tree order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. Bounds stay predicted from probe counts with veristat measured in CI plus no live benchmarks. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks at overflow with tree insert. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in tree order up to 16 per pass with sequence, liveness, affinity checks and parks missing order plus stale sequence with no tree drop. Empty tree or stall moves one gated task with the same checks plus keyed drop so progress stays bounded with no bypass. Probes cap at 20 with empty skip through counts plus drained advance so one pass never scans the tail more than 20 times. Daemon order holds within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. Bounds stay predicted from probe counts with veristat measured in CI plus no live benchmarks. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
-Deadlines quantize to 16 bit keys at 1024 nanos per step. Universe holds 65536 keys with shift 10 covering 67ms with saturate at top. Each key holds one FIFO queue for duplicates. Tree finds least key in doubly logarithmic time with summary, clusters, min, max. Bit scans use trailing plus leading zeros with zero check. Counts bump before pid link so full maps never leave phantom keys with rollback plus one park. Zero counts clear bits at once so empty keys never linger. Root races across CPUs with least taking the smaller of cached plus scan. Order follows deadlines solely with stored shares for admission. Removal drops the pid key on complete, disable, exit with keyed drop for per CPU views. Oracle tests cover order plus FIFO. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
+Deadlines quantize to 16 bit keys at 1024 nanos per step. Universe holds 65536 keys with shift 10 covering 67ms with saturate at top. Duplicates share one key with park order deciding within one key. Tree finds least key in doubly logarithmic time with summary, clusters, min, max. Bit scans use trailing plus leading zeros with zero check. Counts bump before pid link so full maps never leave phantom keys with rollback plus one park. Zero counts clear bits at once so empty keys never linger. Root races across CPUs with least taking the smaller of cached plus scan. Order follows deadlines solely with stored shares for admission. Removal drops the pid key on stopping, disable, exit with keyed drop solely on move when the stored key still matches. Oracle tests cover order plus duplicates. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ### Admission
 
