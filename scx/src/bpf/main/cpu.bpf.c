@@ -6,6 +6,8 @@
  * the universal entry gate. The gate runs first in every op.
  * Bad CPUs plus bad tasks fail closed with one counter. Shared counters pair
  * volatile reads with atomic updates so observers see steady values.
+ * Gauge compare and swap loops give up as benign with the next op
+ * retrying the same value so counters stay best effort.
  * Runs inline for a small verifier footprint.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

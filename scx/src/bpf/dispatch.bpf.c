@@ -5,7 +5,9 @@
  * Moves admitted tasks in tree order up to sixteen per pass.
  * The pass starts from the least key and follows successors with
  * at most twenty key probes so one pass never scans the tail more
- * than twenty times. Empty keys skip through counts with no tail
+ * than twenty times. Twenty covers sixteen moves plus four skip
+ * slack so full batches never starve on sparse keys. Empty keys
+ * skip through counts with no tail
  * scan and drained keys advance at once so fruitless rescans never
  * run. Each key scans the overflow tail and moves the first admitted
  * task with sequence, liveness, affinity checks. Duplicates leave in

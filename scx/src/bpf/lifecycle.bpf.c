@@ -6,6 +6,8 @@
  * CPU gauge. Stopping charges the segment to total runtime and counts
  * one requeue else one completion and emits one complete notify.
  * Stopping drops the tree key so dispatched keys never linger.
+ * Gate fail stopping notifies when queued like disable so shares
+ * return at once instead of waiting for stale collection.
  * Stopping skips the notify when the task never queued. Enable clears
  * the task state. Disable plus exit charge leftovers, drop the tree
  * key, emit one complete notify so admission drops once. Ring reserve
@@ -84,15 +86,21 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 start;
 	u32 weight;
 	cpu = scx_bpf_task_cpu(p);
+	weight = p->scx.weight;
 	if (!flow_entry_ok(cpu, p, 0)) {
+		struct flow_task_ctx *gtctx;
 		flow_gate_reject();
 		veb_remove((u32)p->pid);
+		gtctx = flow_lookup(p);
+		if (!gtctx || READ_ONCE(gtctx->seq) != 0)
+			flow_notify_complete((u32)p->pid,
+			    cpu >= 0 ? (u32)cpu : 0, weight,
+			    runnable ? 1 : 0);
 		return;
 	}
 	veb_remove((u32)p->pid);
 	tctx = flow_lookup(p);
 	now = flow_now();
-	weight = p->scx.weight;
 	if (!tctx) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		flow_notify_complete((u32)p->pid,

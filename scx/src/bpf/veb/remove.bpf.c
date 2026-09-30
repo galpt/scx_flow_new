@@ -3,6 +3,11 @@
  * vEB remove helper for the flow core.
  *
  * Holds one pid remove with last key cleanup and root refresh.
+ * Lifecycle owns its pid row on stopping, disable, exit so unkeyed
+ * remove drops solely its own key, while dispatch races with requeue
+ * across CPUs so keyed remove guards reuse. Pid row deletes run
+ * under RCU read lock on move plus outside locks on lifecycle with
+ * HASH delete needing no deferral in either case.
  * Last key clears cluster and summary bits then refreshes root.
  * A zero count still clears stale bits so empty keys never linger.
  * Counts drop with compare and swap so concurrent CPUs stay
@@ -180,8 +185,6 @@ static __noinline bool veb_remove(u32 pid)
 	}
 	h = veb_high(k);
 	l = veb_low(k);
-	if (h >= 256)
-		return true;
 	cidx = h * 4 + (l >> 6);
 	if (cidx >= 1024)
 		return true;

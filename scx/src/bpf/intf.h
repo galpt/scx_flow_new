@@ -16,7 +16,8 @@
  * avoids cross tier moves that would bounce cache and NUMA locality.
  * Undrained queues hold zero tasks and cost solely at init. Counters
  * use atomic adds from every CPU and stay best effort for
- * observability. Admits, rejects, misses stay zero in BPF as an ABI
+ * observability. Concurrent skips may count twice with parks staying
+ * noisy but fail closed. Admits, rejects, misses stay zero in BPF as an ABI
  * placeholder and merge from the daemon so the wire stays at 96B.
  * Reads poll at dashboard cadence so line bouncing stays bounded by
  * event rate. Shared fields pair reads with writes through atomics

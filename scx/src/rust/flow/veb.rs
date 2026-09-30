@@ -457,6 +457,21 @@ impl FlowVeb {
         self.len -= 1;
         true
     }
+
+    /// Remove one pid solely when it still holds the expected key.
+    /// Mirrors the BPF keyed drop on move. Stale expects pass through
+    /// with no state change so a reused pid never drops a fresh key.
+    /// Zero identifiers pass through as missing.
+    #[cfg(test)]
+    pub fn remove_if_key(&mut self, pid: u32, expect: u16) -> bool {
+        if pid == 0 {
+            return false;
+        }
+        match self.pid_key.get(&pid).copied() {
+            Some(k) if k == expect => self.remove(pid),
+            _ => false,
+        }
+    }
 }
 
 impl Default for FlowVeb {
@@ -662,5 +677,571 @@ mod tests {
         assert!(q.contains_pid(2));
         assert!(!q.remove(1));
         assert_eq!(q.len(), 1);
+    }
+
+    /// Flat bitmap mirror of the BPF tree for differential coverage.
+    /// Replicates quantize, high, low, insert, remove, keyed remove,
+    /// cached plus scan least, greatest, successor exactly as the BPF
+    /// helpers behave single threaded. Compare and swap loops collapse
+    /// to one update here while contention fallbacks stay park counted
+    /// in the BPF code. Within key order stays out since the core keeps
+    /// park order in the overflow tail, not in the tree.
+    struct BpfMirror {
+        summary: [u64; 4],
+        clusters: [u64; 1024],
+        counts: Vec<u32>,
+        pid: HashMap<u32, u16>,
+        root_min: Option<u16>,
+        root_max: Option<u16>,
+        parks: u64,
+    }
+
+    /// Cap of the BPF pid rows mirroring the map bound.
+    const MIRROR_PID_CAP: usize = 4096;
+
+    impl BpfMirror {
+        fn new() -> Self {
+            Self {
+                summary: [0; 4],
+                clusters: [0; 1024],
+                counts: vec![0; VEB_U],
+                pid: HashMap::new(),
+                root_min: None,
+                root_max: None,
+                parks: 0,
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.pid.len()
+        }
+
+        fn quant(deadline: u64) -> u16 {
+            (deadline >> QUANT_SHIFT).min(VEB_MASK) as u16
+        }
+
+        fn high(k: u16) -> usize {
+            (k as usize) >> 8
+        }
+
+        fn low(k: u16) -> usize {
+            (k as usize) & 255
+        }
+
+        fn set_bit(&mut self, k: u16) {
+            let h = Self::high(k);
+            let l = Self::low(k);
+            self.clusters[h * 4 + (l >> 6)] |= 1u64 << (l & 63);
+            self.summary[h >> 6] |= 1u64 << (h & 63);
+        }
+
+        fn root_insert(&mut self, k: u16) {
+            match (self.root_min, self.root_max) {
+                (None, _) => {
+                    self.root_min = Some(k);
+                    self.root_max = Some(k);
+                }
+                _ => {
+                    if Some(k) < self.root_min {
+                        self.root_min = Some(k);
+                    }
+                    if Some(k) > self.root_max {
+                        self.root_max = Some(k);
+                    }
+                }
+            }
+        }
+
+        fn cluster_first(&self, h: usize) -> Option<usize> {
+            for w in 0..4 {
+                let v = self.clusters[h * 4 + w];
+                if v == 0 {
+                    continue;
+                }
+                let b = v.trailing_zeros() as usize;
+                if b >= 64 {
+                    continue;
+                }
+                return Some(w * 64 + b);
+            }
+            None
+        }
+
+        fn cluster_last(&self, h: usize) -> Option<usize> {
+            let mut best: Option<usize> = None;
+            for w in 0..4 {
+                let v = self.clusters[h * 4 + w];
+                if v == 0 {
+                    continue;
+                }
+                if v.leading_zeros() >= 64 {
+                    continue;
+                }
+                let top = 63 - v.leading_zeros() as usize;
+                best = Some(w * 64 + top);
+            }
+            best
+        }
+
+        fn scan_min(&self) -> Option<u16> {
+            for w in 0..4 {
+                let v = self.summary[w];
+                if v == 0 {
+                    continue;
+                }
+                let b = v.trailing_zeros() as usize;
+                if b >= 64 {
+                    continue;
+                }
+                let h = w * 64 + b;
+                if h >= 256 {
+                    continue;
+                }
+                if let Some(l) = self.cluster_first(h) {
+                    return Some((h * 256 + l) as u16);
+                }
+            }
+            None
+        }
+
+        fn scan_max(&self) -> Option<u16> {
+            for w in 0..4 {
+                let r = 3 - w;
+                let v = self.summary[r];
+                if v == 0 {
+                    continue;
+                }
+                if v.leading_zeros() >= 64 {
+                    continue;
+                }
+                let b = 63 - v.leading_zeros() as usize;
+                let h = r * 64 + b;
+                if h >= 256 {
+                    continue;
+                }
+                if let Some(l) = self.cluster_last(h) {
+                    return Some((h * 256 + l) as u16);
+                }
+            }
+            None
+        }
+
+        fn min(&self) -> Option<u16> {
+            match (self.root_min, self.scan_min()) {
+                (None, s) => s,
+                (c, None) => c,
+                (Some(c), Some(s)) => Some(c.min(s)),
+            }
+        }
+
+        fn succ(&self, x: u16) -> Option<u16> {
+            if x == u16::MAX {
+                return None;
+            }
+            let h = Self::high(x);
+            let l = Self::low(x);
+            let hw = l >> 6;
+            let hb = l & 63;
+            let v = self.clusters[h * 4 + hw];
+            let mask = if hb >= 63 { 0 } else { u64::MAX << (hb + 1) };
+            if v & mask != 0 {
+                let b = (v & mask).trailing_zeros() as usize;
+                if b < 64 {
+                    return Some((h * 256 + hw * 64 + b) as u16);
+                }
+            }
+            for w in 0..4 {
+                let cand = hw as i32 + 1 + w;
+                if !(0..4).contains(&cand) {
+                    continue;
+                }
+                let v = self.clusters[h * 4 + cand as usize];
+                if v == 0 {
+                    continue;
+                }
+                let b = v.trailing_zeros() as usize;
+                if b >= 64 {
+                    continue;
+                }
+                return Some((h * 256 + cand as usize * 64 + b) as u16);
+            }
+            let sh = h >> 6;
+            let sb = h & 63;
+            let v = self.summary[sh];
+            let mask = if sb >= 63 { 0 } else { u64::MAX << (sb + 1) };
+            if v & mask != 0 {
+                let b = (v & mask).trailing_zeros() as usize;
+                if b < 64 {
+                    let h2 = sh * 64 + b;
+                    if h2 < 256
+                        && let Some(l2) = self.cluster_first(h2)
+                    {
+                        return Some((h2 * 256 + l2) as u16);
+                    }
+                }
+            }
+            for w in 0..4 {
+                let cand = sh as i32 + 1 + w;
+                if !(0..4).contains(&cand) {
+                    continue;
+                }
+                let sv = self.summary[cand as usize];
+                if sv == 0 {
+                    continue;
+                }
+                let sb2 = sv.trailing_zeros() as usize;
+                if sb2 >= 64 {
+                    continue;
+                }
+                let h2 = cand as usize * 64 + sb2;
+                if h2 >= 256 {
+                    continue;
+                }
+                if let Some(l2) = self.cluster_first(h2) {
+                    return Some((h2 * 256 + l2) as u16);
+                }
+            }
+            None
+        }
+
+        fn clear_bit(&mut self, k: u16) {
+            let h = Self::high(k);
+            let l = Self::low(k);
+            self.clusters[h * 4 + (l >> 6)] &= !(1u64 << (l & 63));
+            if (0..4).all(|w| self.clusters[h * 4 + w] == 0) {
+                self.summary[h >> 6] &= !(1u64 << (h & 63));
+            }
+        }
+
+        fn root_remove(&mut self, k: u16) {
+            if Some(k) != self.root_min && Some(k) != self.root_max {
+                return;
+            }
+            if Some(k) == self.root_min {
+                match self.scan_min() {
+                    None => {
+                        self.root_min = None;
+                        self.root_max = None;
+                    }
+                    Some(nmn) => {
+                        if self.root_min == Some(k) {
+                            self.root_min = Some(nmn);
+                        }
+                    }
+                }
+            }
+            if Some(k) == self.root_max {
+                match self.scan_max() {
+                    None => {
+                        self.root_min = None;
+                        self.root_max = None;
+                    }
+                    Some(nmx) => {
+                        if self.root_max == Some(k) {
+                            self.root_max = Some(nmx);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn insert(&mut self, pid: u32, deadline: u64) {
+            if pid == 0 {
+                return;
+            }
+            let k = Self::quant(deadline);
+            if let Some(&old) = self.pid.get(&pid) {
+                if old == k {
+                    return;
+                }
+                self.remove(pid);
+            }
+            let ki = k as usize;
+            if self.counts[ki] == u32::MAX {
+                self.parks += 1;
+                return;
+            }
+            let prev = self.counts[ki];
+            if !self.pid.contains_key(&pid) && self.pid.len() >= MIRROR_PID_CAP {
+                self.parks += 1;
+                return;
+            }
+            self.counts[ki] = prev + 1;
+            self.pid.insert(pid, k);
+            self.set_bit(k);
+            if prev == 0 {
+                self.root_insert(k);
+            }
+        }
+
+        fn remove(&mut self, pid: u32) -> bool {
+            if pid == 0 {
+                return false;
+            }
+            let k = match self.pid.get(&pid).copied() {
+                Some(k) => k,
+                None => return false,
+            };
+            let ki = k as usize;
+            if self.counts[ki] == 0 {
+                self.pid.remove(&pid);
+                self.clear_bit(k);
+                self.root_remove(k);
+                return true;
+            }
+            let prev = self.counts[ki];
+            self.counts[ki] = prev - 1;
+            self.pid.remove(&pid);
+            if prev != 1 {
+                return true;
+            }
+            self.clear_bit(k);
+            self.root_remove(k);
+            true
+        }
+
+        fn remove_if_key(&mut self, pid: u32, expect: u16) -> bool {
+            if pid == 0 {
+                return false;
+            }
+            match self.pid.get(&pid).copied() {
+                Some(k) if k == expect => self.remove(pid),
+                _ => false,
+            }
+        }
+
+        fn succ_chain(&self) -> Vec<u16> {
+            let mut out = Vec::new();
+            let mut cur = self.min();
+            while let Some(k) = cur {
+                out.push(k);
+                cur = self.succ(k);
+            }
+            out
+        }
+    }
+
+    /// Dispatch loop model mirroring the BPF pass shape.
+    /// Starts from the least key, follows successors, caps key probes,
+    /// stops at the batch bound, skips empty keys through counts, picks
+    /// one pid per visited key. Returns moved plus probes spent.
+    fn dispatch_model(m: &mut BpfMirror, cap: usize, batch: usize) -> (usize, usize) {
+        let mut moved = 0;
+        let mut probes = 0;
+        let mut cur = m.min();
+        for _ in 0..cap {
+            if moved >= batch {
+                break;
+            }
+            let k = match cur {
+                Some(k) => k,
+                None => break,
+            };
+            probes += 1;
+            if m.counts[k as usize] == 0 {
+                cur = m.succ(k);
+                continue;
+            }
+            let pid = match m.pid.iter().find(|kv| *kv.1 == k).map(|(&p, _)| p) {
+                Some(p) => p,
+                None => {
+                    cur = m.succ(k);
+                    continue;
+                }
+            };
+            m.remove(pid);
+            moved += 1;
+            if m.counts[k as usize] == 0 {
+                cur = m.succ(k);
+            }
+        }
+        (moved, probes)
+    }
+
+    fn ordered_keys(q: &FlowVeb) -> Vec<u16> {
+        let mut keys: Vec<u16> = Vec::new();
+        for e in q.ordered() {
+            let k = quantize(e.deadline);
+            if keys.last() != Some(&k) {
+                keys.push(k);
+            }
+        }
+        keys
+    }
+
+    #[test]
+    fn bpf_mirror_matches_flow_veb_on_random_ops() {
+        let mut q = FlowVeb::new();
+        let mut m = BpfMirror::new();
+        let mut rng = xorshift(0x2545F4914F6CDD1D);
+        for i in 0..1500u32 {
+            let pid = 5000 + i;
+            let deadline = (rng() % 64_000_000) + 1_000;
+            q.insert(pid, deadline, i as u64);
+            m.insert(pid, deadline);
+            assert_eq!(q.len(), m.len());
+        }
+        assert_eq!(ordered_keys(&q), m.succ_chain());
+        assert_eq!(q.peek_min().map(|e| quantize(e.deadline)), m.min());
+        for pid in (5000..6500u32).step_by(7) {
+            assert!(q.remove(pid));
+            assert!(m.remove(pid));
+        }
+        assert_eq!(q.len(), m.len());
+        assert_eq!(ordered_keys(&q), m.succ_chain());
+        assert_eq!(q.peek_min().map(|e| quantize(e.deadline)), m.min());
+        while let Some(e) = q.pop_min() {
+            let k = quantize(e.deadline);
+            assert_eq!(m.min(), Some(k));
+            assert!(m.remove(e.pid));
+        }
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.min(), None);
+        assert_eq!(m.succ_chain(), Vec::<u16>::new());
+    }
+
+    #[test]
+    fn bpf_mirror_covers_saturation_empty_duplicate_successor_edges() {
+        let mut m = BpfMirror::new();
+        assert_eq!(m.min(), None);
+        assert_eq!(m.succ(0), None);
+        assert!(!m.remove(42));
+        assert!(!m.remove_if_key(42, 0));
+        assert_eq!(BpfMirror::quant(u64::MAX), 65535);
+        m.insert(1, u64::MAX);
+        assert_eq!(m.min(), Some(65535));
+        assert_eq!(m.succ(65535), None);
+        m.insert(1, u64::MAX);
+        assert_eq!(m.len(), 1);
+        let mut m2 = BpfMirror::new();
+        m2.insert(10, 255u64 << QUANT_SHIFT);
+        m2.insert(11, 256u64 << QUANT_SHIFT);
+        assert_eq!(m2.min(), Some(255));
+        assert_eq!(m2.succ(0), Some(255));
+        assert_eq!(m2.succ(254), Some(255));
+        assert_eq!(m2.succ(255), Some(256));
+        assert_eq!(m2.succ(256), None);
+        m2.insert(10, 256u64 << QUANT_SHIFT);
+        assert_eq!(m2.min(), Some(256));
+        assert_eq!(m2.len(), 2);
+        assert!(!m2.remove_if_key(10, 255));
+        assert_eq!(m2.len(), 2);
+        assert!(m2.remove_if_key(10, 256));
+        assert_eq!(m2.len(), 1);
+        m2.insert(0, 1000);
+        assert_eq!(m2.len(), 1);
+        assert!(!m2.remove(0));
+        assert!(!m2.remove_if_key(0, 0));
+    }
+
+    #[test]
+    fn full_pid_map_rolls_back_count_with_one_park() {
+        let mut m = BpfMirror::new();
+        for pid in 1..=MIRROR_PID_CAP as u32 {
+            m.insert(pid, ((pid as u64 % 32) + 1) << QUANT_SHIFT);
+        }
+        assert_eq!(m.len(), MIRROR_PID_CAP);
+        let key = BpfMirror::quant(1u64 << QUANT_SHIFT);
+        let before = m.counts[key as usize];
+        m.insert(MIRROR_PID_CAP as u32 + 1, 1u64 << QUANT_SHIFT);
+        assert_eq!(m.parks, 1);
+        assert_eq!(m.len(), MIRROR_PID_CAP);
+        assert_eq!(m.counts[key as usize], before);
+        assert_eq!(m.min(), m.scan_min());
+    }
+
+    #[test]
+    fn dispatch_probes_stay_capped_with_batch_bound() {
+        const PROBES: usize = 20;
+        const BATCH: usize = 16;
+        let mut dense = BpfMirror::new();
+        for i in 0..40u32 {
+            dense.insert(100 + i, (i as u64) << QUANT_SHIFT);
+        }
+        let (moved, probes) = dispatch_model(&mut dense, PROBES, BATCH);
+        assert_eq!(moved, BATCH);
+        assert_eq!(probes, BATCH);
+        assert_eq!(dense.len(), 40 - BATCH);
+        let mut sparse = BpfMirror::new();
+        for i in 0..16u32 {
+            sparse.insert(200 + i, (i as u64 * 1000) << QUANT_SHIFT);
+        }
+        let (moved, probes) = dispatch_model(&mut sparse, PROBES, BATCH);
+        assert_eq!(moved, BATCH);
+        assert!(probes <= PROBES);
+        assert_eq!(sparse.len(), 0);
+        let mut stale = BpfMirror::new();
+        for i in 0..10u32 {
+            stale.insert(300 + i, (i as u64) << QUANT_SHIFT);
+        }
+        for k in [2u16, 4, 6, 8, 10] {
+            stale.counts[k as usize] = 0;
+        }
+        let (moved, probes) = dispatch_model(&mut stale, PROBES, BATCH);
+        assert_eq!(moved, 6);
+        assert!(probes <= PROBES);
+        assert!(probes > moved);
+        let mut empty = BpfMirror::new();
+        let (moved, probes) = dispatch_model(&mut empty, PROBES, BATCH);
+        assert_eq!((moved, probes), (0, 0));
+    }
+
+    #[test]
+    fn rapid_requeue_keeps_fresh_key() {
+        let mut q = FlowVeb::new();
+        q.insert(7, 8_000_000, 1);
+        let stale = quantize(8_000_000);
+        assert!(q.remove(7));
+        q.insert(7, 32_000_000, 2);
+        let fresh = quantize(32_000_000);
+        assert_ne!(stale, fresh);
+        assert!(!q.remove_if_key(7, stale));
+        assert!(q.contains_pid(7));
+        assert_eq!(q.peek_min().unwrap().pid, 7);
+        assert!(q.remove_if_key(7, fresh));
+        assert!(q.is_empty());
+        assert!(!q.remove_if_key(7, fresh));
+        assert!(!q.remove_if_key(0, fresh));
+    }
+
+    #[test]
+    fn high_stays_within_256_after_saturate() {
+        for d in [0u64, 1, 1023, 1024, 1_000_000, 67_000_000, u64::MAX] {
+            let k = quantize(d);
+            assert!((k as usize) < VEB_U);
+            assert!((k >> 8) < 256);
+        }
+        assert_eq!(quantize(u64::MAX), 65535);
+        assert_eq!(65535u16 >> 8, 255);
+        let mut m = BpfMirror::new();
+        m.insert(1, u64::MAX);
+        assert_eq!(BpfMirror::high(65535), 255);
+        assert_eq!(m.min(), Some(65535));
+    }
+
+    #[test]
+    fn cas_fallback_parks_then_retry_heals_bit() {
+        let mut m = BpfMirror::new();
+        let k = BpfMirror::quant(8_000_000);
+        m.insert(1, 8_000_000);
+        m.counts[k as usize] = u32::MAX;
+        m.insert(2, 8_000_000);
+        assert_eq!(m.parks, 1);
+        assert_eq!(m.len(), 1);
+        let mut n = BpfMirror::new();
+        n.insert(3, 8_000_000);
+        let h = BpfMirror::high(k);
+        let l = BpfMirror::low(k);
+        n.clusters[h * 4 + (l >> 6)] = 0;
+        n.summary[h >> 6] = 0;
+        n.insert(4, 8_000_000);
+        assert_eq!(n.min(), Some(k));
+        assert_eq!(n.len(), 2);
+        let mut z = BpfMirror::new();
+        z.insert(5, 8_000_000);
+        z.counts[k as usize] = 0;
+        assert!(z.remove(5));
+        assert_eq!(z.min(), None);
+        assert_eq!(z.succ_chain(), Vec::<u16>::new());
     }
 }

@@ -114,8 +114,6 @@ static __noinline void veb_insert(u32 pid, u64 deadline)
 	}
 	h = veb_high(k);
 	l = veb_low(k);
-	if (h >= 256)
-		return;
 	cidx = h * 4 + (l >> 6);
 	sidx = h >> 6;
 	if (cidx >= 1024 || sidx >= 4)

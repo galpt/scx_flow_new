@@ -24,7 +24,7 @@ Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plu
 
 ### Gates
 
-Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter and stale select returns error. Exiting work stays exempt. Ring reserve faults plus dashboard drops count one park with single count. Wire gaps resync with one park and first sequence accepts mid attach. Reserved plus unknown kinds hold at the core. One sequence serves task state, wire, order entry. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
+Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter and stale select returns error. Gate fail stopping notifies when queued so shares return at once. Exiting work stays exempt. Ring reserve faults plus dashboard drops count one park with single count. Wire gaps resync with one park and first sequence accepts mid attach. Reserved plus unknown kinds hold at the core. One sequence serves task state, wire, order entry. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
 
 ### Reporting
 
@@ -34,7 +34,7 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 
 - Rules live in `src/bpf/intf.h`.
 - Maps live in `src/bpf/main.bpf.c` with splits in `main/` plus `veb/`.
-- Order lives in `src/bpf/veb/` with oracle mirror in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`.
+- Order lives in `src/bpf/veb/` with oracle mirror plus BPF bitmap differential in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`.
 - Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.
 - Sections stay under fifty lines each with line counts not word counts.
 

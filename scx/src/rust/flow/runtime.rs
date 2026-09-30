@@ -721,4 +721,32 @@ mod tests {
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.peek_order().unwrap().pid, 12);
     }
+
+    #[test]
+    fn gate_fail_complete_drops_share_promptly() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(9, 4000, 0, 1_000_000, 91);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.admitted(0) > 0);
+        d.handle_complete(9, 2_000_000, true);
+        assert_eq!(d.admitted(0), 0);
+        assert_eq!(d.task_len(), 0);
+        assert_eq!(d.queue_len(), 0);
+        let removed = d.gc_stale(2_000_000);
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn parks_stay_noisy_but_fail_closed() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(5, 4000, 0, 1_000_000, 51);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.note_ev_drop();
+        d.note_ev_drop();
+        assert_eq!(d.ev_drops, 2);
+        assert_eq!(d.queue_len(), 1);
+        d.handle_complete(5, 2_000_000, true);
+        assert_eq!(d.queue_len(), 0);
+        assert_eq!(d.task_len(), 0);
+    }
 }
