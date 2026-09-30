@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow is a sched-ext scheduler that replaces FIFO plus rbtree queue ordering for CPU dispatch with a Van Emde Boas tree. The tree is the queues in BPF with summary, clusters, counts, pid rows, root. Duplicates share one key with park order deciding within one key. The daemon admits under the bound. The slice stays fixed at 2ms. See `src/bpf/veb/` and `src/bpf/intf.h`.
+scx_flow is a sched-ext scheduler that replaces FIFO plus rbtree queue ordering for CPU dispatch with a [Van Emde Boas tree](https://www.geeksforgeeks.org/dsa/van-emde-boas-tree-set-1-basics-and-construction/). The tree is the queues in BPF with summary, clusters, counts, pid rows, root. Duplicates share one key with park order deciding within one key. The daemon admits under the bound. The slice stays fixed at 2ms. See `src/bpf/veb/` and `src/bpf/intf.h`.
 
 ### Why?
 
@@ -35,6 +35,7 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 - Rules live in `src/bpf/intf.h`.
 - Maps live in `src/bpf/main.bpf.c` with splits in `main/` plus `veb/`.
 - Order lives in `src/bpf/veb/` with oracle mirror plus BPF bitmap differential in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`.
+- BPF holds live scheduling logic under verifier while Rust holds test only mirrors, oracle, config validation, daemon ledger, snapshot, webui. Mirrors never drive dispatch. Pair `cgroup.bpf.c` plus `flow/cgrp.rs` shows live stubs plus test only hints. See `flow/mod.rs` plus `bpf/veb/`.
 - Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.
 - Sections stay under fifty lines each with line counts not word counts.
 
