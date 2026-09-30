@@ -81,7 +81,7 @@ impl<'a> Scheduler<'a> {
                 id,
                 smt,
                 running_pid: st.running_pid,
-                slice_ns: crate::flow_slice::QUANTUM_NS,
+                slice_ns: crate::flow::slice::QUANTUM_NS,
             });
         }
         let timestamp_ns = std::time::SystemTime::now()
