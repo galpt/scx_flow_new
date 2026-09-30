@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Stats server for the flow scheduler.
+//! Stats server for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Exports the counters view plus the dashboard view from the BPF maps.
+//! Exports the counters view plus the dashboard view from the core.
 //! The stats server carries deltas while the dashboard carries raw
 //! counters plus per CPU cards for the loopback page.
 
@@ -23,8 +23,8 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with placement, admission, and miss detail.
-/// BPF holds 15 counters, Rust adds display-only uptime for 16.
+/// Counters with placement plus admission plus miss detail.
+/// BPF holds fifteen counters. Rust adds display-only uptime for sixteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -32,8 +32,8 @@ pub struct Metrics {
     #[stat(desc = "Total runtime in nanoseconds")]
     #[serde(default)]
     pub total_runtime: u64,
-    /// Display-only uptime since attach in nanos with no BPF use.
-    /// Filled from the start instant, never from the BPF counters.
+    /// Display-only uptime since attach in nanos from the start instant.
+    /// Filled from the start instant through the dashboard poll.
     #[stat(desc = "Uptime since attach in nanoseconds")]
     #[serde(default)]
     pub uptime_ns: u64,
@@ -79,17 +79,17 @@ pub struct Metrics {
 }
 
 /// One card of the per CPU grid.
-/// Id plus SMT stay fixed while pid plus slice refresh on each poll.
+/// Identifier plus SMT stay fixed while pid plus slice refresh per poll.
 /// Pid holds zero when idle and slice holds the shared quantum.
-/// SMT marks the second thread of one core for display only with
-/// no placement use and false on old JSON.
+/// SMT marks the second thread of one core for display solely and
+/// false on old payloads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
-    /// CPU id.
+    /// CPU identifier.
     #[serde(default)]
     pub id: u32,
     /// True for the second thread of one core with false on single thread.
-    /// Display only with no placement use plus false on old JSON.
+    /// Display solely plus false on old payloads.
     #[serde(default)]
     pub smt: bool,
     /// Pid now on the CPU with zero when idle.
@@ -123,7 +123,7 @@ pub struct WebMetrics {
 }
 
 /// Stats printer loop for the monitor flag.
-/// Polls the stats server on the interval with plain text lines.
+/// Polls the stats server per interval with plain text lines.
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
         &[],
@@ -134,7 +134,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
 }
 
 /// Server data for the stats server.
-/// A single top op reports interval deltas of the counters.
+/// A single top operation reports interval deltas of the counters.
 pub fn server_data() -> StatsServerData<(), Metrics> {
     let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {
         req_ch.send(())?;
@@ -182,7 +182,7 @@ impl Metrics {
     }
 
     /// Interval delta of the counters over the poll interval.
-    /// Gauges like on_cpu plus uptime_ns pass through as live values.
+    /// Gauges for on CPU plus uptime pass through as live values.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             on_cpu: self.on_cpu,

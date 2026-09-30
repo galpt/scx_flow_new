@@ -104,29 +104,21 @@ pub fn fail_open(reason: &FailReason) -> FailAction {
 
 /// Per task state held by the daemon.
 /// Share stays zero for parks. Admit CPU names the row holding the
-/// share. Release anchors the miss check. Seq orders arrivals.
+/// share. Release anchors the miss check.
 #[derive(Clone, Debug)]
 pub struct TaskState {
-    /// Task identifier.
-    pub pid: u32,
     /// Last release time in nanos.
     pub release: u64,
-    /// Relative period in nanos.
-    pub period: u64,
     /// Absolute deadline in nanos.
     pub deadline: u64,
     /// Stored per mille share with zero for parks.
     pub share: u64,
     /// CPU holding the stored share.
     pub admit_cpu: u32,
-    /// Arrival sequence.
-    pub seq: u64,
     /// Served runtime scaled by weight.
     pub vruntime: u64,
     /// Weight used by the runtime advance.
     pub weight: u32,
-    /// Hint micros used by this release.
-    pub hint_us: u32,
 }
 
 /// Daemon holding the quantized queue plus admission rows.
@@ -255,16 +247,12 @@ impl Daemon {
             self.tasks.insert(
                 pid,
                 TaskState {
-                    pid,
                     release: now,
-                    period,
                     deadline,
                     share: 0,
                     admit_cpu: 0,
-                    seq: self.next_seq,
                     vruntime: 0,
                     weight: clamp_share(weight),
-                    hint_us: hint,
                 },
             );
             self.next_seq = self.next_seq.saturating_add(1);
@@ -282,16 +270,12 @@ impl Daemon {
         self.tasks.insert(
             pid,
             TaskState {
-                pid,
                 release: now,
-                period,
                 deadline,
                 share,
                 admit_cpu: cpu,
-                seq,
                 vruntime: 0,
                 weight: clamp_share(weight),
-                hint_us: hint,
             },
         );
         self.order.insert(pid, deadline, seq);
@@ -320,11 +304,7 @@ impl Daemon {
             self.misses += 1;
             self.parks += 1;
         }
-        if runnable {
-            self.tasks.remove(&pid);
-        } else {
-            self.tasks.remove(&pid);
-        }
+        self.tasks.remove(&pid);
     }
 
     /// Note one observed wire sequence.
@@ -339,6 +319,7 @@ impl Daemon {
 
     /// Pick one CPU for one task through the shared placement model.
     /// Callers pass live depths in rank order.
+    #[allow(clippy::too_many_arguments)]
     pub fn pick_cpu(
         &self,
         idle: &[i32],

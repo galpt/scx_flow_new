@@ -111,6 +111,7 @@ impl Veb {
     }
 
     /// Tree height in levels. The full universe spans five levels.
+    #[cfg(test)]
     pub fn height(&self) -> usize {
         if self.u <= 2 {
             return 1;
@@ -119,6 +120,7 @@ impl Veb {
     }
 
     /// True when the tree holds the key.
+    #[cfg(test)]
     pub fn contains(&self, x: u16) -> bool {
         if self.min == Some(x) || self.max == Some(x) {
             return true;
@@ -217,10 +219,8 @@ impl Veb {
             },
             None => false,
         };
-        if !present {
-            if Some(x) != self.max {
-                return false;
-            }
+        if !present && Some(x) != self.max {
+            return false;
         }
         let empty = match &self.clusters[h] {
             None => true,
@@ -273,16 +273,19 @@ impl FlowVeb {
     }
 
     /// True when the queue holds zero entries.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
     /// Least key held with empty for vacant queues.
+    #[cfg(test)]
     pub fn min_key(&self) -> Option<u16> {
         self.tree.min()
     }
 
     /// True when the pid is queued.
+    #[cfg(test)]
     pub fn contains_pid(&self, pid: u32) -> bool {
         self.pid_key.contains_key(&pid)
     }
@@ -318,6 +321,7 @@ impl FlowVeb {
 
     /// Remove and return the least entry.
     /// Least key wins and equal keys leave in insert order.
+    #[cfg(test)]
     pub fn pop_min(&mut self) -> Option<FlowEntry> {
         let k = self.tree.min()?;
         let (entry, empty) = {

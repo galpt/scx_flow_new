@@ -48,7 +48,7 @@ fn jt(v: &Value) -> String {
 /* Merged dashboard object for one snapshot. */
 /* Full log with version plus timestamp plus topology plus stats */
 /* plus per CPU. Same object serves stats polling plus snapshot */
-/* download on loopback with no new exposure. */
+/* download on loopback through the same routes. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -62,11 +62,10 @@ fn merged(snap: &WebMetrics) -> Value {
 /* Start the dashboard thread. */
 /* Consumes snapshots plus exits when the shutdown flag is set */
 /* or the channel closes. Serves the page on the root plus the */
-/* same JSON on the stats plus snapshot paths with loopback only */
-/* plus no store plus unknown paths get not found. Binds one */
-/* loopback only with IPv6 first plus IPv4 fallback plus no */
-/* serve when both fail. One thread plus one lock per poll */
-/* stays cheap beside the page poll with no backlog. */
+/* same JSON on the stats plus snapshot paths with loopback solely */
+/* plus stored headers plus unknown paths get not found. Binds one */
+/* loopback solely with IPv6 first plus IPv4 fallback. One thread */
+/* plus one lock per poll stays cheap beside the page poll. */
 pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
     log::info!("web thread started");
     let html = include_str!("../../ui/index.html").to_string();
@@ -101,7 +100,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
         server = Some(s);
     }
     let Some(server) = server else {
-        log::warn!("web TCP blocked with no serve");
+        log::warn!("web TCP blocked");
         return;
     };
     log::info!("web on port {addr}");
@@ -154,7 +153,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Merged keeps the five live keys with no stale keys. */
+    /* Merged keeps the five live keys. */
     #[test]
     fn merged_keeps_live_keys() {
         let snap = WebMetrics::default();
@@ -405,7 +404,7 @@ mod tests {
         assert!(!html.contains("#mode-badge"));
     }
 
-    /* Dashboard polls once per second with no stored history. */
+    /* Dashboard polls once per second. */
     #[test]
     fn dashboard_polls_once_per_second() {
         let html = include_str!("../../ui/index.html");

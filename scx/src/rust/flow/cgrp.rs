@@ -19,7 +19,7 @@ pub const HINT_CAP: usize = 4096;
 /// Light shares map to long periods and heavy shares map to short
 /// periods. The hint tunes admission through the period alone.
 pub fn hint_period_us(weight: u32) -> u64 {
-    let w = weight.clamp(super::slice::WEIGHT_MIN, super::slice::WEIGHT_MAX);
+    let w = super::slice::clamp_weight(weight);
     if w < 64 {
         32_000
     } else if w < 128 {
@@ -49,6 +49,7 @@ impl HintTable {
     }
 
     /// Empty table with a custom cap for tests.
+    #[cfg(test)]
     pub fn with_cap(cap: usize) -> Self {
         Self {
             rows: HashMap::new(),
@@ -57,11 +58,13 @@ impl HintTable {
     }
 
     /// Row count now held.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.rows.len()
     }
 
     /// True when the table holds zero rows.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
@@ -73,8 +76,8 @@ impl HintTable {
         if id == 0 {
             return false;
         }
-        if self.rows.contains_key(&id) {
-            self.rows.insert(id, period_us);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.rows.entry(id) {
+            e.insert(period_us);
             return true;
         }
         if self.rows.len() >= self.cap {
@@ -85,6 +88,7 @@ impl HintTable {
     }
 
     /// Remove one hint row. Missing identifiers pass through.
+    #[cfg(test)]
     pub fn remove(&mut self, id: u64) {
         self.rows.remove(&id);
     }
@@ -100,6 +104,7 @@ impl HintTable {
 
     /// Store one weight derived hint for one identifier.
     /// Full tables keep the old value and report false.
+    #[cfg(test)]
     pub fn set_weight(&mut self, id: u64, weight: u32) -> bool {
         self.insert(id, hint_period_us(weight))
     }

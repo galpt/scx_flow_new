@@ -17,9 +17,12 @@ pub mod veb;
 
 pub use cgrp::*;
 pub use edf::*;
+#[cfg(test)]
 pub use preempt::*;
 pub use runtime::*;
 pub use select::*;
 pub use slice::*;
+#[cfg(test)]
 pub use slot::*;
+#[cfg(test)]
 pub use veb::*;

@@ -11,7 +11,7 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 static __noinline void flow_notify_complete(u32 pid,
-	u32 cpu, u32 weight)
+	u32 cpu, u32 weight, u32 runnable)
 {
 	struct flow_event *ev;
 	u64 seq;
@@ -24,7 +24,7 @@ static __noinline void flow_notify_complete(u32 pid,
 	ev->pid = pid;
 	ev->cpu = cpu;
 	ev->weight = weight;
-	ev->pad = 0;
+	ev->pad = runnable;
 	ev->at = flow_now();
 	bpf_ringbuf_submit(ev, 0);
 }
@@ -88,14 +88,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (!tctx) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		flow_notify_complete((u32)p->pid,
-		    cpu >= 0 ? (u32)cpu : 0, weight);
+		    cpu >= 0 ? (u32)cpu : 0, weight,
+		    runnable ? 1 : 0);
 		return;
 	}
 	start = __sync_lock_test_and_set(&tctx->run_at, 0);
 	if (start == 0) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		flow_notify_complete((u32)p->pid,
-		    cpu >= 0 ? (u32)cpu : 0, weight);
+		    cpu >= 0 ? (u32)cpu : 0, weight,
+		    runnable ? 1 : 0);
 		return;
 	}
 	if (flow_time_before(now, start))
@@ -106,7 +108,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	flow_notify_complete((u32)p->pid,
-	    cpu >= 0 ? (u32)cpu : 0, weight);
+	    cpu >= 0 ? (u32)cpu : 0, weight,
+	    runnable ? 1 : 0);
 	if (runnable) {
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
