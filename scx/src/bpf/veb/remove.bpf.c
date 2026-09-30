@@ -94,11 +94,11 @@ static __noinline void veb_root_remove(u32 k)
 		return;
 	if (k == cmn) {
 		nmn = veb_scan_min();
-		if (nmn == 0xFFFFFFFFU) {
+		if (nmn == (u32)FLOW_VEB_EMPTY) {
 			u32 old = __sync_val_compare_and_swap(&r->has, 1, 0);
 			if (old == 1) {
-				WRITE_ONCE(r->min, 0xFFFFFFFFU);
-				WRITE_ONCE(r->max, 0xFFFFFFFFU);
+				WRITE_ONCE(r->min, (u32)FLOW_VEB_EMPTY);
+				WRITE_ONCE(r->max, (u32)FLOW_VEB_EMPTY);
 			}
 		} else {
 			bpf_for(i, 0, 4) {
@@ -114,11 +114,11 @@ static __noinline void veb_root_remove(u32 k)
 	}
 	if (k == cmx) {
 		nmx = veb_scan_max();
-		if (nmx == 0xFFFFFFFFU) {
+		if (nmx == (u32)FLOW_VEB_EMPTY) {
 			u32 old = __sync_val_compare_and_swap(&r->has, 1, 0);
 			if (old == 1) {
-				WRITE_ONCE(r->min, 0xFFFFFFFFU);
-				WRITE_ONCE(r->max, 0xFFFFFFFFU);
+				WRITE_ONCE(r->min, (u32)FLOW_VEB_EMPTY);
+				WRITE_ONCE(r->max, (u32)FLOW_VEB_EMPTY);
 			}
 		} else {
 			bpf_for(i, 0, 4) {

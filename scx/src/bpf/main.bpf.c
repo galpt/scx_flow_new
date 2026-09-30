@@ -65,6 +65,8 @@ volatile u64 flow_seq;
 #include "veb/succ.bpf.c"
 #include "veb/remove.bpf.c"
 #include "veb/insert.bpf.c"
+#include "helpers/move.bpf.c"
+#include "helpers/finish.bpf.c"
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"

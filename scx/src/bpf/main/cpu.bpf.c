@@ -25,11 +25,21 @@ static __always_inline bool flow_cpu_ok(
 {
 	if (cpu < 0)
 		return false;
-	if ((u64)cpu >= nr_cpu_ids)
-		return false;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+	if (!flow_cpu_live((u32)cpu))
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
+}
+/* CPU row with live plus lookup in one place. */
+/* Gives zero on unknown CPUs so callers skip with no set. */
+/* Keeps pid clear paths paired through one entry. */
+static __always_inline struct flow_cpu_state *flow_cpu_state_for(
+	s32 cpu)
+{
+	if (cpu < 0)
+		return 0;
+	if (!flow_cpu_live((u32)cpu))
+		return 0;
+	return flow_cpu((u32)cpu);
 }
 static __always_inline void flow_on_cpu_dec(void)
 {
@@ -49,13 +59,8 @@ static __always_inline void flow_on_cpu_dec(void)
 }
 static __always_inline void flow_clear_running(s32 cpu)
 {
-	struct flow_cpu_state *st;
+	struct flow_cpu_state *st = flow_cpu_state_for(cpu);
 	s32 i;
-	if (cpu < 0)
-		return;
-	if (!flow_cpu_live((u32)cpu))
-		return;
-	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
 	bpf_for(i, 0, 4) {
@@ -73,13 +78,9 @@ static __always_inline void flow_clear_running_if_owner(
 	s32 cpu, u32 pid)
 {
 	struct flow_cpu_state *st;
-	if (cpu < 0)
-		return;
 	if (pid == 0)
 		return;
-	if (!flow_cpu_live((u32)cpu))
-		return;
-	st = flow_cpu((u32)cpu);
+	st = flow_cpu_state_for(cpu);
 	if (!st)
 		return;
 	__sync_val_compare_and_swap(&st->running_pid, pid, 0);

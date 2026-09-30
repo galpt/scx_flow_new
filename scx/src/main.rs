@@ -210,6 +210,26 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
+    /* Forward one ring payload into the bounded queue. */
+    /* Stack copies avoid per event heap growth on the hot path. */
+    /* Full queues count one drop with parks folded later so no drop */
+    /* stays silent. Short payloads drop with no state change. */
+    fn forward_event(
+        data: &[u8],
+        tx: &crossbeam::channel::Sender<[u8; EVENT_LEN]>,
+        drops: &Arc<AtomicU64>,
+    ) -> i32 {
+        if data.len() < EVENT_LEN {
+            return 0;
+        }
+        let mut buf = [0u8; EVENT_LEN];
+        buf.copy_from_slice(&data[..EVENT_LEN]);
+        if tx.try_send(buf).is_err() {
+            drops.fetch_add(1, Ordering::Relaxed);
+        }
+        0
+    }
+
     /* Build one polling handle over both notify rings. */
     /* Stack copies carry fixed payloads into the bounded queue. */
     /* Full queues drop with drop accounting folded into parks. */
@@ -224,15 +244,7 @@ impl<'a> Scheduler<'a> {
         let drops_a = ev_drops.clone();
         if bld
             .add(&skel.maps.flow_enq_rb, move |data| {
-                if data.len() < EVENT_LEN {
-                    return 0;
-                }
-                let mut buf = [0u8; EVENT_LEN];
-                buf.copy_from_slice(&data[..EVENT_LEN]);
-                if tx_a.try_send(buf).is_err() {
-                    drops_a.fetch_add(1, Ordering::Relaxed);
-                }
-                0
+                Self::forward_event(data, &tx_a, &drops_a)
             })
             .is_err()
         {
@@ -242,15 +254,7 @@ impl<'a> Scheduler<'a> {
         let drops_b = ev_drops;
         if bld
             .add(&skel.maps.flow_cmp_rb, move |data| {
-                if data.len() < EVENT_LEN {
-                    return 0;
-                }
-                let mut buf = [0u8; EVENT_LEN];
-                buf.copy_from_slice(&data[..EVENT_LEN]);
-                if tx_b.try_send(buf).is_err() {
-                    drops_b.fetch_add(1, Ordering::Relaxed);
-                }
-                0
+                Self::forward_event(data, &tx_b, &drops_b)
             })
             .is_err()
         {
@@ -388,6 +392,16 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    /* Count one daemon lag park with progress kept. */
+    /* Missing rings plus poll faults reach here so every stall counts */
+    /* once with no missed park. Runs through the fail open matrix with */
+    /* park on lag. */
+    fn note_daemon_lag(&mut self) {
+        let action = flow::fail_open(&flow::FailReason::DaemonLag);
+        debug_assert_eq!(action, flow::FailAction::ParkFifo);
+        self.daemon.parks = self.daemon.parks.saturating_add(1);
+    }
+
     /* Drain available ring events into the daemon. */
     /* Polls kernel rings then drains until empty or cap with remainder */
     /* deferred to the next poll. Queue drops fold into parks plus the */
@@ -398,14 +412,10 @@ impl<'a> Scheduler<'a> {
     fn drain_rings(&mut self) {
         if let Some(rb) = self.rings.as_ref() {
             if rb.consume().is_err() {
-                let action = flow::fail_open(&flow::FailReason::DaemonLag);
-                debug_assert_eq!(action, flow::FailAction::ParkFifo);
-                self.daemon.parks = self.daemon.parks.saturating_add(1);
+                self.note_daemon_lag();
             }
         } else {
-            let action = flow::fail_open(&flow::FailReason::DaemonLag);
-            debug_assert_eq!(action, flow::FailAction::ParkFifo);
-            self.daemon.parks = self.daemon.parks.saturating_add(1);
+            self.note_daemon_lag();
         }
         let dropped = self.ev_drops.swap(0, Ordering::Relaxed);
         for _ in 0..dropped {
@@ -575,6 +585,19 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
         );
         assert_eq!(crate::config::Config::default().dispatch_batch, 16);
+        assert_eq!(
+            crate::flow::DISPATCH_BATCH as u64,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
+        );
+        assert_eq!(
+            crate::flow::DISPATCH_PROBES as u64,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_PROBES as u64
+        );
+        assert_eq!(crate::flow::DISPATCH_PROBES, 20);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_VEB_EMPTY as u32,
+            0xFFFFFFFF
+        );
     }
 
     #[test]

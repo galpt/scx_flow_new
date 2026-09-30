@@ -1152,8 +1152,8 @@ mod tests {
 
     #[test]
     fn dispatch_probes_stay_capped_with_batch_bound() {
-        const PROBES: usize = 20;
-        const BATCH: usize = 16;
+        const PROBES: usize = crate::flow::DISPATCH_PROBES;
+        const BATCH: usize = crate::flow::DISPATCH_BATCH;
         let mut dense = BpfMirror::new();
         for i in 0..40u32 {
             dense.insert(100 + i, (i as u64) << QUANT_SHIFT);

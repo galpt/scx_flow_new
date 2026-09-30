@@ -96,7 +96,7 @@ static __noinline u32 veb_scan_min(void)
 			continue;
 		return h * 256 + l;
 	}
-	return 0xFFFFFFFFU;
+	return (u32)FLOW_VEB_EMPTY;
 }
 static __noinline u32 veb_scan_max(void)
 {
@@ -129,33 +129,33 @@ static __noinline u32 veb_scan_max(void)
 			continue;
 		return h * 256 + l;
 	}
-	return 0xFFFFFFFFU;
+	return (u32)FLOW_VEB_EMPTY;
 }
 static __noinline u32 veb_cached_min(void)
 {
 	struct veb_root *r = veb_root_ptr();
 	if (!r)
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	if (!READ_ONCE(r->has))
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	return READ_ONCE(r->min);
 }
 static __noinline u32 veb_cached_max(void)
 {
 	struct veb_root *r = veb_root_ptr();
 	if (!r)
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	if (!READ_ONCE(r->has))
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	return READ_ONCE(r->max);
 }
 static __noinline u32 veb_min(void)
 {
 	u32 c = veb_cached_min();
 	u32 s = veb_scan_min();
-	if (c == 0xFFFFFFFFU)
+	if (c == (u32)FLOW_VEB_EMPTY)
 		return s;
-	if (s == 0xFFFFFFFFU)
+	if (s == (u32)FLOW_VEB_EMPTY)
 		return c;
 	if (c < s)
 		return c;

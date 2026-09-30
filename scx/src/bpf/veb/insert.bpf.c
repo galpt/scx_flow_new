@@ -130,7 +130,7 @@ static __noinline void veb_insert(u32 pid, u64 deadline)
 		if (!cntp)
 			return;
 		cur = READ_ONCE(*cntp);
-		if (cur == 0xFFFFFFFFU) {
+		if (cur == (u32)FLOW_VEB_EMPTY) {
 			__sync_fetch_and_add(&flow_stats.parks, 1);
 			return;
 		}

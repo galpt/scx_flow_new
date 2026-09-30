@@ -38,6 +38,10 @@ pub const SEQ_INIT: u64 = 1;
 pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
+/// Max key probes per dispatch pass. Mirrors the BPF header.
+/// Twenty covers sixteen moves plus four skip slack so full batches
+/// never starve on sparse keys.
+pub const DISPATCH_PROBES: usize = 20;
 /// Bound for the userspace event queue at twice order depth.
 /// Holds enqueue plus complete pairs per burst. Full queues drop with
 /// parks accounting and latest state reconciles on the next notify.
@@ -63,6 +67,9 @@ const _: () = assert!(PROTO_ORDER == 2 && PROTO_DISPATCH == 3);
 /// Userspace drains use the deeper drain cap while the core moves one
 /// per pass.
 const _: () = assert!(DISPATCH_BATCH == 16);
+/// Guard that the dispatch probes mirror the BPF header.
+/// Twenty probes cover sixteen moves plus four skip slack.
+const _: () = assert!(DISPATCH_PROBES == 20);
 
 /// Admission decision for one enqueue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,10 +155,10 @@ pub struct TaskState {
 /// deadline plus grace. Queue drops fold into parks plus the drop
 /// gauge with zero wire change.
 pub struct Daemon {
-    order: FlowVeb,
+    pub(crate) order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
-    tasks: HashMap<u32, TaskState>,
+    pub(crate) tasks: HashMap<u32, TaskState>,
     next_seq: u64,
     wire_last: u64,
     /// Tasks admitted under the use bound.
@@ -304,35 +311,21 @@ impl Daemon {
         wire_seq: u64,
     ) -> AdmitDecision {
         if pid == 0 {
-            self.rejects += 1;
-            self.parks += 1;
-            return AdmitDecision::Park;
+            return self.reject_park(pid, false);
         }
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
-            self.drop_stored(pid);
-            self.order.remove(pid);
-            self.rejects += 1;
-            self.parks += 1;
-            return AdmitDecision::Park;
+            return self.reject_park(pid, true);
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
-            self.drop_stored(pid);
-            self.order.remove(pid);
-            self.rejects += 1;
-            self.parks += 1;
-            return AdmitDecision::Park;
+            return self.reject_park(pid, true);
         }
         if !self.tasks.contains_key(&pid) && self.tasks.len() >= TASKS_CAP {
-            self.order.remove(pid);
-            self.rejects += 1;
-            self.parks += 1;
-            return AdmitDecision::Park;
+            return self.reject_park(pid, false);
         }
         if self.tasks.contains_key(&pid) {
-            self.drop_stored(pid);
-            self.order.remove(pid);
+            self.unpublish(pid);
         }
         let hint = if hint_us != 0 {
             hint_us
@@ -393,17 +386,16 @@ impl Daemon {
         let (release, deadline) = match self.tasks.get(&pid) {
             Some(t) => (t.release, t.deadline),
             None => {
-                self.order.remove(pid);
+                self.unpublish(pid);
                 return;
             }
         };
-        self.drop_stored(pid);
-        self.order.remove(pid);
-        if !runnable && super::edf::missed(release, deadline, now) {
+        let miss = !runnable && super::edf::missed(release, deadline, now);
+        self.remove_row(pid);
+        if miss {
             self.misses += 1;
             self.parks += 1;
         }
-        self.tasks.remove(&pid);
     }
 
     /// Collect stale rows past deadline plus grace.
@@ -423,9 +415,7 @@ impl Daemon {
             }
         }
         for pid in &stale {
-            self.drop_stored(*pid);
-            self.order.remove(*pid);
-            self.tasks.remove(pid);
+            self.remove_row(*pid);
         }
         stale
     }
@@ -586,6 +576,7 @@ mod tests {
         assert_eq!(PROTO_DISPATCH, 3);
         assert_eq!(PROTO_COMPLETE, 4);
         assert_eq!(DISPATCH_BATCH, 16);
+        assert_eq!(DISPATCH_PROBES, 20);
         assert_eq!(ORDER_DEPTH_MAX, 512);
         assert_eq!(DRAIN_CAP, 1024);
         assert_eq!(EV_CAP, 1024);

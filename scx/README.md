@@ -33,8 +33,8 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Maps live in `src/bpf/main.bpf.c` with splits in `main/` plus `veb/` plus `dispatch/` for the level helper.
-- Order lives in `src/bpf/veb/` with oracle mirror plus BPF bitmap differential in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`.
+- Maps live in `src/bpf/main.bpf.c` with splits in `main/` plus `veb/` plus `dispatch/` for the level helper plus `helpers/` for paired move plus finish.
+- Order lives in `src/bpf/veb/` with oracle mirror plus BPF bitmap differential in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`. Ledger pairing lives in `flow/helpers.rs` with share, order, task single exit.
 - BPF holds live scheduling logic under verifier while Rust holds test only mirrors, oracle, config validation, daemon ledger, snapshot, webui. Mirrors never drive dispatch. Pair `cgroup.bpf.c` plus `flow/cgrp.rs` shows live stubs plus test only hints. See `flow/mod.rs` plus `bpf/veb/`.
 - Level lives in `src/bpf/dispatch/perf.bpf.c` with paired boost plus idle from per CPU depth and no call on steady through one dispatch exit. See `src/bpf/dispatch.bpf.c` and `src/bpf/intf.h`.
 - Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.

@@ -22,11 +22,11 @@ static __noinline u32 veb_succ(u32 x)
 	int b;
 	int w;
 	if (x >= (u32)FLOW_VEB_U - 1)
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	h = veb_high(x);
 	l = veb_low(x);
 	if (h >= 256)
-		return 0xFFFFFFFFU;
+		return (u32)FLOW_VEB_EMPTY;
 	hw = l >> 6;
 	hb = l & 63;
 	if (hw < 4) {
@@ -119,5 +119,5 @@ static __noinline u32 veb_succ(u32 x)
 			}
 		}
 	}
-	return 0xFFFFFFFFU;
+	return (u32)FLOW_VEB_EMPTY;
 }

@@ -4,10 +4,12 @@
  *
  * Holds the leftover charge used when stopping never ran. Parks wake
  * by direct kick on insert. Outlined to keep disable plus exit small.
+ * Gives true when a segment charged so callers count once with no
+ * missed gauge drop. Gives false when idle or raced with no charge.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-static __noinline void flow_charge_leftover(struct task_struct *p,
+static __noinline bool flow_charge_leftover(struct task_struct *p,
 	struct flow_task_ctx *tctx, s32 cpu)
 {
 	u64 start;
@@ -15,11 +17,12 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	u64 delta;
 	u64 got;
 	if (!tctx)
-		return;
+		return false;
 	(void)p;
+	(void)cpu;
 	start = READ_ONCE(tctx->run_at);
 	if (start == 0)
-		return;
+		return false;
 	now = flow_now();
 	if (flow_time_before(now, start))
 		delta = 0;
@@ -28,7 +31,8 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	got = __sync_val_compare_and_swap(&tctx->run_at,
 	    start, 0);
 	if (got != start)
-		return;
+		return false;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	flow_on_cpu_dec();
+	return true;
 }

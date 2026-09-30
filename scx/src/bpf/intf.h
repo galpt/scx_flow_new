@@ -68,6 +68,7 @@ enum flow_consts {
 	FLOW_OVERFLOW = 0x5A01ULL,
 	FLOW_MAX_DSQS = 522ULL,
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
+	FLOW_DISPATCH_MAX_PROBES = 20ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_PROTO_ENQUEUE = 1ULL,
 	FLOW_PROTO_ORDER = 2ULL,
@@ -78,6 +79,7 @@ enum flow_consts {
 	FLOW_ORDER_CAP = 4096ULL,
 	FLOW_VEB_U = 65536ULL,
 	FLOW_QUANT_SHIFT = 10ULL,
+	FLOW_VEB_EMPTY = 0xFFFFFFFFULL,
 	/* CPU performance levels at half plus max with no knob. Any own */
 	/* plus local plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
