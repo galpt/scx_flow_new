@@ -1,10 +1,16 @@
 # scx_flow
 
-scx_flow is a Linux deadline daemon in Rust with a thin BPF core and 2ms slice.
+### What is it?
+
+scx_flow is a sched-ext scheduler that tries a Van Emde Boas tree for CPU order. The tree lives fully in Rust. BPF stays minimal with gate plus park plus notify plus execute. The slice stays fixed at 2ms. See `src/rust/flow/veb.rs` and `src/bpf/intf.h`.
+
+### Why?
+
+The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree. A Van Emde Boas tree may beat priority queue plus BST plus rbtree for least deadline search. Rust keeps the tree accurate with tests for order plus FIFO. The benefits may outweigh the overhead when deadlines drive placement. See `src/rust/flow/veb.rs` and `src/rust/flow/runtime.rs`.
 
 ### Queues
 
-Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local plus node plus machine plus overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Tier counters for local plus node plus machine stay zero. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local plus node plus machine plus overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -34,5 +40,5 @@ Reporting uses `--stats` plus `--monitor` plus `--no-webui`. Dashboard serves lo
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `16B` plus `8B` plus `8B` plus `120B`.
+- State is `16B` plus `8B` plus `8B` plus `96B`.
 - Needs kernels, `7.2` series and up.

@@ -9,9 +9,9 @@
 //! CPU reads cost one syscall per online CPU and run throttled at
 //! dashboard cadence on the hot thread. Policy counters merge from
 //! the daemon while mechanism counters come from the core. Parks sum
-//! core drops plus daemon parks plus userspace queue drops. Tier
-//! counters for local plus node plus machine stay zero while overflow
-//! counts progress. Dashboard timestamps use wall time for logs plus
+//! core drops plus daemon parks plus userspace queue drops. Dispatch
+//! drains the overflow tail solely with FIFO order and over moves
+//! count progress. Dashboard timestamps use wall time for logs plus
 //! file names while deadlines plus runtime use monotonic time, so the
 //! two domains stay separate by intent.
 
@@ -33,9 +33,6 @@ impl<'a> Scheduler<'a> {
             inserts: s.inserts,
             requeues: s.requeues,
             completions: s.completions,
-            local_moves: s.local_moves,
-            node_moves: s.node_moves,
-            machine_moves: s.machine_moves,
             over_moves: s.over_moves,
             kicks: s.kicks,
             admits: self.daemon.admits,

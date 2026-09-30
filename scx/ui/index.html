@@ -327,18 +327,6 @@
           <span class="stat-value" id="completions">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
-          Local moves:</span>
-          <span class="stat-value" id="local-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Node moves:</span>
-          <span class="stat-value" id="node-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Machine moves:</span>
-          <span class="stat-value" id="machine-moves">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
           Overflow moves:</span>
           <span class="stat-value" id="over-moves">0</span>
         </div>
@@ -489,9 +477,6 @@
       var ins = s.inserts || 0;
       var req = s.requeues || 0;
       var done = s.completions || 0;
-      var local = s.local_moves || 0;
-      var node = s.node_moves || 0;
-      var machine = s.machine_moves || 0;
       var over = s.over_moves || 0;
       var adm = s.admits || 0;
       var rej = s.rejects || 0;
@@ -499,7 +484,6 @@
       var park = s.parks || 0;
       var gate = s.gate_rejects || 0;
       var placed = ins + req;
-      var shared = node + machine + over;
       var tldr, explanation;
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
@@ -511,8 +495,7 @@
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
-          '. Local moves cover ' + fmt(local) +
-          ' and shared moves cover ' + fmt(shared) +
+          '. Overflow moves cover ' + fmt(over) +
           '. Admits cover ' + fmt(adm) +
           ' with rejects ' + fmt(rej) +
           ' and misses ' + fmt(miss) +
@@ -524,8 +507,7 @@
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
-          '. Local moves cover ' + fmt(local) +
-          ' and shared moves cover ' + fmt(shared) +
+          '. Overflow moves cover ' + fmt(over) +
           '. Admits cover ' + fmt(adm) +
           ' with rejects ' + fmt(rej) +
           ' and misses ' + fmt(miss) +
@@ -582,12 +564,6 @@
         fmt(s.requeues || 0);
       el('completions').textContent =
         fmt(s.completions || 0);
-      el('local-moves').textContent =
-        fmt(s.local_moves || 0);
-      el('node-moves').textContent =
-        fmt(s.node_moves || 0);
-      el('machine-moves').textContent =
-        fmt(s.machine_moves || 0);
       el('over-moves').textContent =
         fmt(s.over_moves || 0);
       el('kicks').textContent =

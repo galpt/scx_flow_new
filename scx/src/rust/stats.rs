@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement plus admission plus miss detail.
-/// BPF holds fifteen counters. Rust adds display-only uptime for sixteen.
+/// BPF holds twelve counters. Rust adds display-only uptime for thirteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -46,15 +46,6 @@ pub struct Metrics {
     #[stat(desc = "Blocks and exits with release")]
     #[serde(default)]
     pub completions: u64,
-    #[stat(desc = "Moves from the local tier")]
-    #[serde(default)]
-    pub local_moves: u64,
-    #[stat(desc = "Moves from the node tier")]
-    #[serde(default)]
-    pub node_moves: u64,
-    #[stat(desc = "Moves from the machine tier")]
-    #[serde(default)]
-    pub machine_moves: u64,
     #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub over_moves: u64,
@@ -162,7 +153,7 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
-             local={} node={} machine={} over={} kick={} adm={} rej={} \
+             over={} kick={} adm={} rej={} \
              miss={} park={} gate={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
@@ -171,9 +162,6 @@ impl Metrics {
             self.inserts,
             self.requeues,
             self.completions,
-            self.local_moves,
-            self.node_moves,
-            self.machine_moves,
             self.over_moves,
             self.kicks,
             self.admits,
@@ -195,9 +183,6 @@ impl Metrics {
             inserts: self.inserts.wrapping_sub(rhs.inserts),
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             completions: self.completions.wrapping_sub(rhs.completions),
-            local_moves: self.local_moves.wrapping_sub(rhs.local_moves),
-            node_moves: self.node_moves.wrapping_sub(rhs.node_moves),
-            machine_moves: self.machine_moves.wrapping_sub(rhs.machine_moves),
             over_moves: self.over_moves.wrapping_sub(rhs.over_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             admits: self.admits.wrapping_sub(rhs.admits),

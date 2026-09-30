@@ -426,13 +426,10 @@ impl<'a> Scheduler<'a> {
         self.drain_rings();
         let m = self.get_metrics();
         info!(
-            "exit ins={} req={} done={} local={} node={} machine={} over={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
+            "exit ins={} req={} done={} over={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
-            m.local_moves,
-            m.node_moves,
-            m.machine_moves,
             m.over_moves,
             m.kicks,
             m.admits,
@@ -585,11 +582,8 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_120() {
-        assert_eq!(
-            std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            120
-        );
+    fn sched_stats_size_is_96() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(), 96);
     }
 
     #[test]

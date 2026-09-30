@@ -88,9 +88,6 @@ struct flow_sched_stats {
 	u64 inserts;
 	u64 requeues;
 	u64 completions;
-	u64 local_moves;
-	u64 node_moves;
-	u64 machine_moves;
 	u64 over_moves;
 	u64 kicks;
 	u64 admits;
@@ -114,8 +111,8 @@ _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-_Static_assert(sizeof(struct flow_sched_stats) == 120,
-	"stats stay at 120B");
+_Static_assert(sizeof(struct flow_sched_stats) == 96,
+	"stats stay at 96B");
 _Static_assert(sizeof(struct flow_event) == 40,
 	"event stays at 40B");
 _Static_assert(FLOW_MAX_DSQS ==

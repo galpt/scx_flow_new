@@ -174,7 +174,7 @@ mod tests {
         let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.6.0\"}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
-        assert_eq!(m.stats.local_moves, 0);
+        assert_eq!(m.stats.over_moves, 0);
         assert_eq!(m.stats.gate_rejects, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "4.6.0");
@@ -203,9 +203,6 @@ mod tests {
                 inserts: 3,
                 requeues: 1,
                 completions: 2,
-                local_moves: 10,
-                node_moves: 4,
-                machine_moves: 2,
                 over_moves: 1,
                 kicks: 5,
                 admits: 3,
@@ -233,15 +230,22 @@ mod tests {
             topology: "cpus=4 seeded".to_string(),
         };
         let txt = serde_json::to_string(&snap).unwrap();
-        assert!(txt.contains("local_moves"));
-        assert!(txt.contains("node_moves"));
-        assert!(txt.contains("machine_moves"));
         assert!(txt.contains("over_moves"));
         assert!(txt.contains("admits"));
         assert!(txt.contains("rejects"));
         assert!(txt.contains("misses"));
         assert!(txt.contains("parks"));
         assert!(txt.contains("gate_rejects"));
+        assert!(txt.contains("slice_ns"));
+        assert!(txt.contains("running_pid"));
+        assert!(txt.contains("\"smt\":false"));
+        assert!(txt.contains("\"smt\":true"));
+        assert!(txt.contains("version"));
+        assert!(txt.contains("topology"));
+        assert!(txt.contains("timestamp_ns"));
+        assert!(!txt.contains("local_moves"));
+        assert!(!txt.contains("node_moves"));
+        assert!(!txt.contains("machine_moves"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -264,9 +268,6 @@ mod tests {
         assert!(!txt.contains("governor"));
         assert!(!txt.contains("energy"));
         let back: WebMetrics = serde_json::from_str(&txt).unwrap();
-        assert_eq!(back.stats.local_moves, 10);
-        assert_eq!(back.stats.node_moves, 4);
-        assert_eq!(back.stats.machine_moves, 2);
         assert_eq!(back.stats.over_moves, 1);
         assert_eq!(back.stats.admits, 3);
         assert_eq!(back.stats.rejects, 1);
@@ -309,7 +310,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the fifteen live counters plus uptime. */
+    /* Dashboard shows the twelve live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -319,9 +320,6 @@ mod tests {
         assert!(html.contains("id=\"inserts\""));
         assert!(html.contains("id=\"requeues\""));
         assert!(html.contains("id=\"completions\""));
-        assert!(html.contains("id=\"local-moves\""));
-        assert!(html.contains("id=\"node-moves\""));
-        assert!(html.contains("id=\"machine-moves\""));
         assert!(html.contains("id=\"over-moves\""));
         assert!(html.contains("id=\"kicks\""));
         assert!(html.contains("id=\"admits\""));
@@ -332,11 +330,14 @@ mod tests {
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
-        assert!(html.contains("local_moves"));
-        assert!(html.contains("node_moves"));
-        assert!(html.contains("machine_moves"));
         assert!(html.contains("over_moves"));
         assert!(html.contains("gate_rejects"));
+        assert!(!html.contains("local_moves"));
+        assert!(!html.contains("node_moves"));
+        assert!(!html.contains("machine_moves"));
+        assert!(!html.contains("id=\"local-moves\""));
+        assert!(!html.contains("id=\"node-moves\""));
+        assert!(!html.contains("id=\"machine-moves\""));
         assert!(!html.contains("global_moves"));
         assert!(!html.contains("global-moves"));
     }
@@ -345,6 +346,12 @@ mod tests {
     #[test]
     fn dashboard_hides_stale_fields() {
         let html = include_str!("../../ui/index.html");
+        assert!(!html.contains("local_moves"));
+        assert!(!html.contains("node_moves"));
+        assert!(!html.contains("machine_moves"));
+        assert!(!html.contains("local-moves"));
+        assert!(!html.contains("node-moves"));
+        assert!(!html.contains("machine-moves"));
         assert!(!html.contains("steal_moves"));
         assert!(!html.contains("slot_moves"));
         assert!(!html.contains("throttled_ns"));
