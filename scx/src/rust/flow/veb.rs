@@ -369,6 +369,26 @@ impl FlowVeb {
         self.queues.get(&k)?.front()
     }
 
+    /// Entries in dispatch order without removal.
+    /// Least key wins and equal keys leave in insert order.
+    /// Collects every queue then sorts by key plus sequence so the
+    /// view matches repeated least removal.
+    #[cfg(test)]
+    pub fn ordered(&self) -> Vec<FlowEntry> {
+        let mut out = Vec::with_capacity(self.len);
+        for q in self.queues.values() {
+            for e in q {
+                out.push(e.clone());
+            }
+        }
+        out.sort_by(|a, b| {
+            quantize(a.deadline)
+                .cmp(&quantize(b.deadline))
+                .then(a.seq.cmp(&b.seq))
+        });
+        out
+    }
+
     /// Remove and return the least entry.
     /// Least key wins and equal keys leave in insert order.
     #[cfg(test)]
@@ -569,5 +589,21 @@ mod tests {
             first = false;
             last_key = k;
         }
+    }
+
+    #[test]
+    fn ordered_view_matches_pop_sequence() {
+        let mut q = FlowVeb::new();
+        q.insert(1, 32_000_000, 1);
+        q.insert(2, 8_000_000, 2);
+        q.insert(3, 16_000_000, 3);
+        q.insert(4, 16_000_000, 4);
+        let view: Vec<u32> = q.ordered().iter().map(|e| e.pid).collect();
+        assert_eq!(view, vec![2, 3, 4, 1]);
+        let mut popped = Vec::new();
+        while let Some(e) = q.pop_min() {
+            popped.push(e.pid);
+        }
+        assert_eq!(popped, view);
     }
 }

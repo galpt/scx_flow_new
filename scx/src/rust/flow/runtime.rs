@@ -6,16 +6,16 @@
 //! Holds the daemon order, the admission table, the wire
 //! protocol. The daemon keeps one quantized queue, one admitted
 //! row per CPU, one hint table. Order follows deadlines solely
-//! through the quantized tree. The BPF core parks FIFO and notifies.
-//! The daemon order stays a shadow view for observability, depth
-//! bound, future dispatch while the core executes FIFO. Shadow
-//! cost stays on the userspace thread within five hundred twelve
-//! entries and stays off the BPF hot path. Times stay in the monotonic
-//! domain shared with the core. Parks include backpressure drops,
-//! ring drops, userspace queue drops. Queue backlog is the channel
-//! length and drop rate is the parks delta, so both stay visible with
-//! zero wire change. Hints stay derived from task weight keyed by task
-//! identifier. Lost completes collect past deadline plus grace.
+//! through the quantized tree. The BPF core parks and notifies.
+//! Dispatch moves admitted tasks in daemon order with sequence plus
+//! liveness checks and parks stale entries. Order cost stays on the
+//! userspace thread within five hundred twelve entries and stays off
+//! the BPF hot path. Times stay in the monotonic domain shared with
+//! the core. Parks include backpressure drops, ring drops, userspace
+//! queue drops. Queue backlog is the channel length and drop rate is
+//! the parks delta, so both stay visible with zero wire change.
+//! Hints stay derived from task weight keyed by task identifier.
+//! Lost completes collect past deadline plus grace.
 
 use std::collections::HashMap;
 
@@ -34,7 +34,7 @@ pub const PROTO_DISPATCH: u64 = 3;
 pub const PROTO_COMPLETE: u64 = 4;
 /// First sequence handed to fresh tasks.
 pub const SEQ_INIT: u64 = 1;
-/// Max queued entries tracked before the core parks FIFO.
+/// Max queued entries tracked before the core parks with no run.
 pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
@@ -74,7 +74,7 @@ pub enum AdmitDecision {
         /// CPU holding the share.
         cpu: u32,
     },
-    /// Parked FIFO with the core holding the task.
+    /// Parked with the core holding the task and no run.
     Park,
 }
 
@@ -122,8 +122,9 @@ pub fn fail_open(reason: &FailReason) -> FailAction {
 
 /// Per task state held by the daemon.
 /// Share stays zero for parks. Admit CPU names the row holding the
-/// share. Release anchors the miss check. Order uses deadlines
-/// solely with stored shares for admission.
+/// share. Release anchors the miss check. Wire sequence pairs the
+/// daemon order entry with the core task state for dispatch checks.
+/// Order uses deadlines solely with stored shares for admission.
 #[derive(Clone, Debug)]
 pub struct TaskState {
     /// Last release time in nanos.
@@ -134,6 +135,8 @@ pub struct TaskState {
     pub share: u64,
     /// CPU holding the stored share.
     pub admit_cpu: u32,
+    /// Wire sequence from the enqueue notify.
+    pub wire_seq: u64,
 }
 
 /// Daemon holding the quantized queue plus admission rows.
@@ -220,6 +223,29 @@ impl Daemon {
         self.order.peek_min().cloned()
     }
 
+    /// Admitted entries in dispatch order for the core map.
+    /// Each row carries pid, wire sequence, deadline, admit CPU.
+    /// Parks stay out so rejects park with no run. The core checks
+    /// the wire sequence against task state plus CPU affinity and
+    /// moves admitted tasks in this order up to the batch bound.
+    #[cfg(test)]
+    pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
+        let mut out = Vec::with_capacity(self.order.len());
+        for e in self.order.ordered() {
+            if let Some(t) = self.tasks.get(&e.pid)
+                && t.share != 0
+            {
+                out.push((e.pid, t.wire_seq, t.deadline, t.admit_cpu));
+            }
+        }
+        out
+    }
+
+    /// Stored row for one pid with empty for unknown identifiers.
+    pub fn task(&self, pid: u32) -> Option<&TaskState> {
+        self.tasks.get(&pid)
+    }
+
     /// Last observed wire sequence.
     #[cfg(test)]
     pub fn wire_last(&self) -> u64 {
@@ -262,13 +288,20 @@ impl Daemon {
 
     /// Handle one enqueue notify from the core.
     /// Fresh hints flow through the hint table. Stored shares add
-    /// once and drop once. Rejects park FIFO at the core. Stale CPUs
-    /// drop the stored share then park. Depth overflow drops the
-    /// stored share then parks. Table full parks fresh identifiers
-    /// with zero stored share so the map stays capped. Order sequence
-    /// advances solely on admits while wire sequence stays untouched
-    /// here.
-    pub fn handle_enqueue(&mut self, pid: u32, hint_us: u32, cpu: u32, now: u64) -> AdmitDecision {
+    /// once and drop once. Rejects park with no run at the core.
+    /// Stale CPUs drop the stored share then park. Depth overflow
+    /// drops the stored share then parks. Table full parks fresh
+    /// identifiers with zero stored share so the map stays capped.
+    /// Order sequence advances solely on admits while the wire
+    /// sequence pairs each row with core task state for dispatch.
+    pub fn handle_enqueue(
+        &mut self,
+        pid: u32,
+        hint_us: u32,
+        cpu: u32,
+        now: u64,
+        wire_seq: u64,
+    ) -> AdmitDecision {
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
@@ -312,6 +345,7 @@ impl Daemon {
                     deadline,
                     share: 0,
                     admit_cpu: 0,
+                    wire_seq,
                 },
             );
             self.rejects += 1;
@@ -331,6 +365,7 @@ impl Daemon {
                 deadline,
                 share,
                 admit_cpu: cpu,
+                wire_seq,
             },
         );
         self.order.insert(pid, deadline, seq);
@@ -365,9 +400,10 @@ impl Daemon {
     /// Drops stored shares then clears order plus task rows. Lost
     /// completes return shares here so admitted sums never leak.
     /// Callers pass monotonic now and poll at a slow cadence.
-    pub fn gc_stale(&mut self, now: u64) {
+    /// Returns removed pids for core map cleanup.
+    pub fn gc_stale(&mut self, now: u64) -> Vec<u32> {
         if self.tasks.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut stale = Vec::new();
         for (pid, task) in self.tasks.iter() {
@@ -376,11 +412,12 @@ impl Daemon {
                 stale.push(*pid);
             }
         }
-        for pid in stale {
-            self.drop_stored(pid);
-            self.order.remove(pid);
-            self.tasks.remove(&pid);
+        for pid in &stale {
+            self.drop_stored(*pid);
+            self.order.remove(*pid);
+            self.tasks.remove(pid);
         }
+        stale
     }
 
     /// Note one observed wire sequence.
@@ -460,11 +497,11 @@ mod tests {
     fn admit_holds_950_bound_with_stored_drop_once() {
         let mut d = Daemon::new();
         for pid in 1..=7u32 {
-            let got = d.handle_enqueue(pid, 0, 0, 1_000_000);
+            let got = d.handle_enqueue(pid, 0, 0, 1_000_000, pid as u64);
             assert!(matches!(got, AdmitDecision::Admit { .. }));
         }
         assert_eq!(d.admitted(0), 875);
-        let got = d.handle_enqueue(8, 0, 0, 1_000_000);
+        let got = d.handle_enqueue(8, 0, 0, 1_000_000, 8);
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.rejects, 1);
         assert_eq!(d.parks, 1);
@@ -472,7 +509,7 @@ mod tests {
         assert_eq!(d.admitted(0), 750);
         d.handle_complete(1, 2_000_000, true);
         assert_eq!(d.admitted(0), 750);
-        let got = d.handle_enqueue(8, 0, 0, 2_000_000);
+        let got = d.handle_enqueue(8, 0, 0, 2_000_000, 18);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.admits, 8);
     }
@@ -480,10 +517,10 @@ mod tests {
     #[test]
     fn stale_cpu_and_depth_drop_stored_share() {
         let mut d = Daemon::new();
-        let got = d.handle_enqueue(1, 0, 0, 1_000_000);
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 1);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.admitted(0), 125);
-        let got = d.handle_enqueue(1, 0, 9999, 2_000_000);
+        let got = d.handle_enqueue(1, 0, 9999, 2_000_000, 2);
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.admitted(0), 0);
         assert_eq!(d.queue_len(), 0);
@@ -492,8 +529,8 @@ mod tests {
     #[test]
     fn order_follows_least_deadline() {
         let mut d = Daemon::new();
-        d.handle_enqueue(1, 32000, 0, 1_000_000);
-        d.handle_enqueue(2, 4000, 0, 1_000_000);
+        d.handle_enqueue(1, 32000, 0, 1_000_000, 11);
+        d.handle_enqueue(2, 4000, 0, 1_000_000, 12);
         let top = d.peek_order().unwrap();
         assert_eq!(top.pid, 2);
         assert_eq!(d.queue_len(), 2);
@@ -502,7 +539,7 @@ mod tests {
     #[test]
     fn miss_counts_on_blocking_complete_past_deadline() {
         let mut d = Daemon::new();
-        d.handle_enqueue(1, 4000, 0, 1_000_000);
+        d.handle_enqueue(1, 4000, 0, 1_000_000, 21);
         d.handle_complete(1, 1_000_000 + 4_000_000 + 1, false);
         assert_eq!(d.misses, 1);
         assert_eq!(d.parks, 1);
@@ -514,8 +551,9 @@ mod tests {
         assert_eq!(d.note_seq(1), FailAction::ParkFifo);
         assert_eq!(d.wire_last(), 1);
         let order_before = d.next_order();
-        let got = d.handle_enqueue(10, 0, 0, 1_000_000);
+        let got = d.handle_enqueue(10, 0, 0, 1_000_000, 5);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.task(10).unwrap().wire_seq, 5);
         assert_eq!(d.wire_last(), 1);
         assert_eq!(d.next_order(), order_before.saturating_add(1));
         assert_eq!(d.note_seq(2), FailAction::ParkFifo);
@@ -558,10 +596,10 @@ mod tests {
     fn task_table_caps_fresh_identifiers() {
         let mut d = Daemon::new();
         for pid in 1..=TASKS_CAP as u32 {
-            let _ = d.handle_enqueue(pid + 100000, 32000, 0, 1_000_000);
+            let _ = d.handle_enqueue(pid + 100000, 32000, 0, 1_000_000, (pid + 100000) as u64);
         }
         assert_eq!(d.task_len(), TASKS_CAP);
-        let got = d.handle_enqueue(9999999, 32000, 0, 1_000_000);
+        let got = d.handle_enqueue(9999999, 32000, 0, 1_000_000, 9999999);
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.task_len(), TASKS_CAP);
     }
@@ -569,14 +607,55 @@ mod tests {
     #[test]
     fn stale_rows_collect_past_grace() {
         let mut d = Daemon::new();
-        let got = d.handle_enqueue(1, 4000, 0, 1_000_000);
+        let got = d.handle_enqueue(1, 4000, 0, 1_000_000, 31);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.admitted(0), 500);
         let late = 1_000_000 + 4_000_000 + STALE_GRACE_NS + 1;
-        d.gc_stale(late);
+        let removed = d.gc_stale(late);
+        assert_eq!(removed, vec![1]);
         assert_eq!(d.admitted(0), 0);
         assert_eq!(d.queue_len(), 0);
         assert_eq!(d.task_len(), 0);
+    }
+
+    #[test]
+    fn ordered_entries_drive_dispatch_in_veb_order() {
+        let mut d = Daemon::new();
+        d.handle_enqueue(1, 32000, 0, 1_000_000, 101);
+        d.handle_enqueue(2, 4000, 0, 1_000_000, 102);
+        d.handle_enqueue(3, 16000, 0, 1_000_000, 103);
+        let view: Vec<u32> = d.ordered_entries().iter().map(|r| r.0).collect();
+        assert_eq!(view, vec![2, 3, 1]);
+        let rows = d.ordered_entries();
+        assert_eq!(rows[0].1, 102);
+        assert_eq!(rows[1].1, 103);
+        assert_eq!(rows[2].1, 101);
+        for pid in 4..=10u32 {
+            let _ = d.handle_enqueue(pid, 0, 0, 1_000_000, 100 + pid as u64);
+        }
+        let got = d.handle_enqueue(99, 0, 0, 1_000_000, 199);
+        assert!(matches!(got, AdmitDecision::Park));
+        let view: Vec<u32> = d.ordered_entries().iter().map(|r| r.0).collect();
+        assert!(!view.contains(&99));
+        assert_eq!(d.task(99).unwrap().share, 0);
+    }
+
+    #[test]
+    fn gc_returns_removed_for_core_cleanup() {
+        let mut d = Daemon::new();
+        d.handle_enqueue(1, 4000, 0, 1_000_000, 41);
+        d.handle_enqueue(2, 32000, 0, 1_000_000, 42);
+        let late = 1_000_000 + 4_000_000 + STALE_GRACE_NS + 1;
+        let mut removed = d.gc_stale(late);
+        removed.sort();
+        assert_eq!(removed, vec![1]);
+        assert_eq!(
+            d.ordered_entries()
+                .iter()
+                .map(|r| r.0)
+                .collect::<Vec<u32>>(),
+            vec![2]
+        );
     }
 
     #[test]

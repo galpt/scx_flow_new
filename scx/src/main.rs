@@ -181,7 +181,7 @@ impl<'a> Scheduler<'a> {
         info!("Topology: {topology}");
         /* Bounded event queue drops with parks accounting when full. */
         /* Stack copies avoid per event heap growth on the hot path. */
-        /* Faulty setup keeps FIFO progress at the core. */
+        /* Faulty setup keeps progress at the core through fail open. */
         let (ev_tx, ev_rx) = crossbeam::channel::bounded::<[u8; EVENT_LEN]>(flow::EV_CAP);
         let ev_drops = Arc::new(AtomicU64::new(0));
         let rings = Self::build_rings(&skel, ev_tx, ev_drops.clone());
@@ -213,7 +213,7 @@ impl<'a> Scheduler<'a> {
     /* Build one polling handle over both notify rings. */
     /* Stack copies carry fixed payloads into the bounded queue. */
     /* Full queues drop with drop accounting folded into parks. */
-    /* Faulty maps yield empty with FIFO progress preserved. */
+    /* Faulty maps yield empty with progress preserved through fail open. */
     fn build_rings(
         skel: &BpfSkel<'a>,
         ev_tx: crossbeam::channel::Sender<[u8; EVENT_LEN]>,
@@ -297,12 +297,12 @@ impl<'a> Scheduler<'a> {
         Some((kind, seq, pid, cpu, weight, pad, at))
     }
 
-    /* Apply one decoded notify to the daemon. */
+    /* Apply one decoded notify to the daemon plus the core order map. */
     /* Enqueue derives the hint from the task weight and caches the */
-    /* row before admission. Complete drops the stored share. Wire */
+    /* row before admission then publishes the order entry for dispatch. */
+    /* Complete drops the stored share plus the order entry. Wire */
     /* gaps count one park through resync. Reserved plus unknown kinds */
-    /* hold at the core with progress kept. The daemon order stays a */
-    /* shadow view while the core executes FIFO. */
+    /* hold at the core with progress kept. Rejects park with no run. */
     fn handle_event(&mut self, data: &[u8]) {
         let Some((kind, seq, pid, cpu, weight, pad, at)) = Self::decode_event(data) else {
             return;
@@ -314,14 +314,61 @@ impl<'a> Scheduler<'a> {
             let hint = flow::hint_period_us(weight) as u32;
             self.daemon.hints_mut().insert(pid as u64, hint as u64);
             let time = if at != 0 { at } else { Self::mono_ns() };
-            self.daemon.handle_enqueue(pid, hint, cpu, time);
+            let decision = self.daemon.handle_enqueue(pid, hint, cpu, time, seq);
+            if matches!(decision, flow::AdmitDecision::Admit { .. }) {
+                self.publish_order_entry(pid);
+            } else {
+                self.unpublish_order_entry(pid);
+            }
         } else if kind == flow::PROTO_COMPLETE {
             let runnable = pad != 0;
             let time = if at != 0 { at } else { Self::mono_ns() };
             self.daemon.handle_complete(pid, time, runnable);
+            self.unpublish_order_entry(pid);
         } else {
             let action = flow::fail_open(&flow::FailReason::BadKey);
             debug_assert_eq!(action, flow::FailAction::HoldKick);
+        }
+    }
+
+    /* Publish one admitted row to the core order map. */
+    /* Faulty updates count one park with progress kept through fail open. */
+    /* Missing rows unpublish so rejects park with no run. */
+    fn publish_order_entry(&mut self, pid: u32) {
+        let Some(t) = self.daemon.task(pid) else {
+            self.unpublish_order_entry(pid);
+            return;
+        };
+        if t.share == 0 {
+            self.unpublish_order_entry(pid);
+            return;
+        }
+        let key = pid.to_ne_bytes();
+        let mut val = [0u8; 24];
+        val[0..8].copy_from_slice(&t.wire_seq.to_ne_bytes());
+        val[8..16].copy_from_slice(&t.deadline.to_ne_bytes());
+        val[16..20].copy_from_slice(&t.admit_cpu.to_ne_bytes());
+        {
+            use libbpf_rs::MapCore;
+            if let Err(e) = self
+                .skel
+                .maps
+                .order_stor
+                .update(&key, &val, libbpf_rs::MapFlags::ANY)
+            {
+                log::warn!("order publish failed for pid {pid}: {e}");
+                self.daemon.parks = self.daemon.parks.saturating_add(1);
+            }
+        }
+    }
+
+    /* Remove one row from the core order map. */
+    /* Missing rows pass through so drops stay idempotent. */
+    fn unpublish_order_entry(&mut self, pid: u32) {
+        let key = pid.to_ne_bytes();
+        {
+            use libbpf_rs::MapCore;
+            let _ = self.skel.maps.order_stor.delete(&key);
         }
     }
 
@@ -345,7 +392,7 @@ impl<'a> Scheduler<'a> {
     /* Polls kernel rings then drains until empty or cap with remainder */
     /* deferred to the next poll. Queue drops fold into parks plus the */
     /* drop gauge. Missing rings plus poll faults count one park with */
-    /* FIFO kept. Dashboard backpressure counts solely at send time so */
+    /* progress kept. Dashboard backpressure counts solely at send time so */
     /* one drop counts one park. Backlog is the channel length and drop */
     /* rate is the parks delta with zero wire change. */
     fn drain_rings(&mut self) {
@@ -375,7 +422,7 @@ impl<'a> Scheduler<'a> {
     /* Push one dashboard snapshot when past freshness. */
     /* Per CPU map reads run solely here so the hot thread stays cheap */
     /* while the page stays fresh at dashboard cadence. One failed send */
-    /* counts one park with FIFO kept. */
+    /* counts one park with progress kept. */
     fn push_web_if_due(&mut self) {
         let Some(ref tx) = self.webui_tx else {
             return;
@@ -392,13 +439,16 @@ impl<'a> Scheduler<'a> {
 
     /* Collect stale rows past grace at a slow cadence. */
     /* Lost completes return shares here so admitted sums never leak. */
+    /* Removed rows unpublish from the core map so stale order never runs. */
     fn maybe_gc(&mut self) {
         if self.last_gc.elapsed() < Duration::from_millis(GC_INTERVAL_MS) {
             return;
         }
         self.last_gc = Instant::now();
         let now = Self::mono_ns();
-        self.daemon.gc_stale(now);
+        for pid in self.daemon.gc_stale(now) {
+            self.unpublish_order_entry(pid);
+        }
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -595,8 +645,8 @@ mod tests {
     #[test]
     fn order_is_deadline_only() {
         let mut d = crate::flow::Daemon::new();
-        d.handle_enqueue(1, 32000, 0, 1_000_000);
-        d.handle_enqueue(2, 4000, 0, 1_000_000);
+        d.handle_enqueue(1, 32000, 0, 1_000_000, 101);
+        d.handle_enqueue(2, 4000, 0, 1_000_000, 102);
         assert_eq!(d.peek_order().unwrap().pid, 2);
     }
 
@@ -635,6 +685,10 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_ORDER_DEPTH as u64
         );
         assert_eq!(
+            crate::flow::TASKS_CAP as u64,
+            crate::bpf_intf::flow_consts_FLOW_ORDER_CAP as u64
+        );
+        assert_eq!(
             crate::flow::VEB_U as u64,
             crate::bpf_intf::flow_consts_FLOW_VEB_U as u64
         );
@@ -646,6 +700,16 @@ mod tests {
         assert_eq!(crate::flow::PROTO_ORDER, 2);
         assert_eq!(crate::flow::PROTO_DISPATCH, 3);
         assert_eq!(crate::flow::PROTO_COMPLETE, 4);
+    }
+
+    #[test]
+    fn order_entry_matches_header() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_order_entry>(), 24);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as usize,
+            crate::flow::DISPATCH_BATCH
+        );
+        assert_eq!(crate::flow::DISPATCH_BATCH, 16);
     }
 
     #[test]

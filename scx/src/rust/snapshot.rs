@@ -9,11 +9,11 @@
 //! CPU reads cost one syscall per online CPU and run throttled at
 //! dashboard cadence on the hot thread. Policy counters merge from
 //! the daemon while mechanism counters come from the core. Parks sum
-//! core drops, daemon parks, userspace queue drops. Dispatch
-//! drains the overflow tail solely with FIFO order and over moves
-//! count progress. Dashboard timestamps use wall time for logs plus
-//! file names while deadlines plus runtime use monotonic time, so the
-//! two domains stay separate by intent.
+//! core drops, daemon parks, userspace queue drops. Dispatch moves
+//! admitted tasks in daemon order and over moves count progress.
+//! Dashboard timestamps use wall time for logs plus file names while
+//! deadlines plus runtime use monotonic time, so the two domains stay
+//! separate by intent.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;

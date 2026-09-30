@@ -2,19 +2,24 @@
 /*
  * Shared constants and helpers for the thin core.
  *
- * The core parks FIFO at the overflow tail and notifies the daemon.
+ * The core parks at the overflow tail and notifies the daemon.
  * The daemon orders through the quantized tree and admits under the
  * bound. Init reserves five hundred twelve local queues, eight
  * node queues, machine, overflow as an ABI placeholder so
- * queue identifiers stay stable across releases. Dispatch drains the
- * overflow tail solely with FIFO order. A single tail avoids cross
- * tier moves that would bounce cache and NUMA locality. Undrained
- * queues hold zero tasks and cost solely at init. Counters use atomic
- * adds from every CPU and stay best effort for observability. Reads
+ * queue identifiers stay stable across releases. Enqueue inserts
+ * with the deadline as vtime so the tail stays deadline ordered.
+ * Dispatch moves admitted tasks in daemon order up to sixteen per
+ * pass with sequence plus liveness checks. Stale entries park and
+ * the daemon drops shares through complete plus stale collection.
+ * Empty order or stale views fail open with one head move so
+ * progress stays bounded. A single tail avoids cross tier moves
+ * that would bounce cache and NUMA locality. Undrained queues hold
+ * zero tasks and cost solely at init. Counters use atomic adds
+ * from every CPU and stay best effort for observability. Reads
  * poll at dashboard cadence so line bouncing stays bounded by event
  * rate. Shared fields pair reads with writes through atomics plus
- * volatile access. The watchdog stays at twenty seconds. Policy lives
- * in the daemon. The core holds gate, park, notify, execute.
+ * volatile access. The watchdog stays at twenty seconds. Policy
+ * lives in the daemon. The core holds gate, park, notify, execute.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -66,6 +71,7 @@ enum flow_consts {
 	FLOW_PROTO_COMPLETE = 4ULL,
 	FLOW_SEQ_INIT = 1ULL,
 	FLOW_ORDER_DEPTH = 512ULL,
+	FLOW_ORDER_CAP = 4096ULL,
 	FLOW_VEB_U = 65536ULL,
 	FLOW_QUANT_SHIFT = 10ULL,
 };
@@ -104,6 +110,12 @@ struct flow_event {
 	u32 pad;
 	u64 at;
 };
+struct flow_order_entry {
+	u64 seq;
+	u64 deadline;
+	u32 cpu;
+	u32 pad;
+};
 _Static_assert(sizeof(struct flow_task_ctx) == 16,
 	"task state stays at 16B");
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
@@ -114,6 +126,8 @@ _Static_assert(sizeof(struct flow_sched_stats) == 96,
 	"stats stay at 96B");
 _Static_assert(sizeof(struct flow_event) == 40,
 	"event stays at 40B");
+_Static_assert(sizeof(struct flow_order_entry) == 24,
+	"order entry stays at 24B");
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
 	"dsq count stays local, node, two");
@@ -159,5 +173,36 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 	if (dsq == (u64)FLOW_OVERFLOW)
 		return true;
 	return false;
+}
+static __always_inline u32 flow_clamp_weight(u32 w)
+{
+	if (w < (u32)FLOW_WEIGHT_MIN)
+		return (u32)FLOW_WEIGHT_MIN;
+	if (w > (u32)FLOW_WEIGHT_MAX)
+		return (u32)FLOW_WEIGHT_MAX;
+	return w;
+}
+static __always_inline u64 flow_hint_us(u32 weight)
+{
+	u32 w = flow_clamp_weight(weight);
+	if (w < 64)
+		return 32000ULL;
+	if (w < 128)
+		return 16000ULL;
+	if (w < 512)
+		return 8000ULL;
+	return 4000ULL;
+}
+static __always_inline u64 flow_period_ns(u32 weight)
+{
+	u64 hint = flow_hint_us(weight);
+	if (hint == 0)
+		return (u64)FLOW_PERIOD_NS;
+	return hint * 1000ULL;
+}
+static __always_inline u64 flow_deadline_at(u64 now,
+	u64 period)
+{
+	return flow_sat_add(now, period);
 }
 #endif

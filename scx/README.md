@@ -12,7 +12,7 @@ The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree.
 
 ### Queues
 
-Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks at overflow with deadline vtime. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in daemon order up to 16 per pass with sequence plus liveness checks and parks stale entries. Empty order or stall fails open with one head move so progress stays bounded. Daemon order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -24,7 +24,7 @@ Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plu
 
 ### Gates
 
-Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter and stale select returns error. Exiting work stays exempt. Ring reserve faults plus dashboard drops count one park with single count. Wire gaps resync with one park and first sequence accepts mid attach. Reserved plus unknown kinds hold at the core. One sequence serves task state plus wire. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
+Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter and stale select returns error. Exiting work stays exempt. Ring reserve faults plus dashboard drops count one park with single count. Wire gaps resync with one park and first sequence accepts mid attach. Reserved plus unknown kinds hold at the core. One sequence serves task state, wire, order entry. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
 
 ### Reporting
 

@@ -2,12 +2,13 @@
 /*
  * Flow thin core.
  *
- * Maps hold task run state, CPU pid rows, topology rows,
- * two notify rings. Init reserves five hundred twelve local queues,
- * eight node queues, machine, overflow as an ABI
- * placeholder so identifiers stay stable. The core parks FIFO and
- * notifies. The daemon orders and admits. Hotplug needs a restart.
- * The watchdog stays at twenty seconds.
+ * Maps hold task run state, CPU pid rows, topology rows, daemon
+ * order rows, two notify rings. Init reserves five hundred twelve
+ * local queues, eight node queues, machine, overflow as an ABI
+ * placeholder so identifiers stay stable. The core parks and
+ * notifies. The daemon orders and admits. Dispatch moves admitted
+ * tasks in daemon order. Hotplug needs a restart. The watchdog
+ * stays at twenty seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -43,6 +44,12 @@ struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 1 << 20);
 } flow_cmp_rb SEC(".maps");
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, FLOW_ORDER_CAP);
+	__type(key, u32);
+	__type(value, struct flow_order_entry);
+} order_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
