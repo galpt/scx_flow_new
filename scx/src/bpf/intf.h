@@ -11,8 +11,10 @@
  * Dispatch moves admitted tasks in tree order up to sixteen per
  * pass with sequence, liveness, affinity checks. Stale entries park
  * and the daemon drops shares through complete plus stale collection.
- * Empty tree or stall moves one gated task with the same checks plus
- * keyed drop so progress stays bounded with no bypass. A single tail
+ * Empty queue leaves at once with no scan. Empty tree or stall moves
+ * one affinity gated head task with liveness plus affinity checks
+ * plus keyed drop and no order gate so runnable tasks never wait on
+ * the daemon shadow. A single tail
  * avoids cross tier moves that would bounce cache and NUMA locality.
  * Undrained queues hold zero tasks and cost solely at init. Counters
  * use atomic adds from every CPU and stay best effort for

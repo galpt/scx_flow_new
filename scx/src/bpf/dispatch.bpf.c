@@ -14,9 +14,11 @@
  * park order within one key. Per CPU mismatch, missing order, stale
  * sequence skip with no tree drop and the daemon drops
  * shares through complete plus stale collection. Only the moved pid
- * drops its key when the stored key still matches. Empty tree or
- * stall moves one gated task with the same checks plus keyed drop
- * so progress stays bounded with no bypass. Over moves count
+ * drops its key when the stored key still matches. Empty queue leaves
+ * at once with no scan so idle stays cheap. Empty tree or stall
+ * moves one affinity gated head task with liveness plus affinity
+ * checks plus keyed drop and no order or sequence gate so runnable
+ * tasks never wait on the daemon shadow. Over moves count
  * progress. Level follows after ordered moves plus fail open
  * with the same CPU only and no call on steady through one exit,
  * so idle cannot be skipped.
@@ -48,6 +50,12 @@ static __noinline bool veb_try_move_one(u32 key, s32 cpu)
 	bpf_rcu_read_unlock();
 	return moved;
 }
+/* Fail open with liveness plus affinity solely and no order gate. */
+/* Moves the first live affinity match at the overflow head so one */
+/* runnable task always lands on the dispatch CPU even when the */
+/* daemon shadow holds no order row yet. Skips drop no tree state */
+/* with no park count so transient misses stay quiet. The moved pid */
+/* drops its key solely when the stored key still matches. */
 static __noinline bool veb_fail_open_one(s32 cpu)
 {
 	bool moved = false;
@@ -64,17 +72,38 @@ static __noinline bool veb_fail_open_one(s32 cpu)
 		return false;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
-		u32 pid = 0;
-		u32 k2 = 0;
+		struct task_struct *t;
+		u32 pid;
+		u32 *kp;
 		if (moved)
 			break;
-		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p, 0,
-		    false, &pid, &k2)) {
+		if (!flow_entry_ok(cpu, p, 0))
+			continue;
+		t = bpf_task_from_pid(p->pid);
+		if (!t)
+			continue;
+		pid = (u32)t->pid;
+		if (pid == 0) {
+			bpf_task_release(t);
+			continue;
+		}
+		if (!flow_entry_ok(cpu, t, 0)) {
+			bpf_task_release(t);
+			continue;
+		}
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, t,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 			moved = true;
 			reap_pid = pid;
-			reap_key = k2;
-			break;
+			kp = bpf_map_lookup_elem(&veb_pid, &pid);
+			if (kp && READ_ONCE(*kp) !=
+			    (u32)FLOW_VEB_EMPTY &&
+			    READ_ONCE(*kp) < (u32)FLOW_VEB_U)
+				reap_key = READ_ONCE(*kp);
 		}
+		bpf_task_release(t);
+		if (moved)
+			break;
 	}
 	bpf_rcu_read_unlock();
 	if (moved) {
@@ -97,6 +126,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		flow_gate_reject();
 		return;
 	}
+	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+		goto out;
 	cur = veb_min();
 	if (cur == (u32)FLOW_VEB_EMPTY) {
 		if (veb_fail_open_one(cpu))
