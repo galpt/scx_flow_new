@@ -10,6 +10,7 @@
 /// True when one arrival kicks the occupant of a busy CPU.
 /// A strictly earlier deadline kicks at once. Equal or later deadlines
 /// pace at slice expiry. Empty deadlines pace in every case.
+#[cfg(test)]
 pub fn arrival_kicks(arrival: u64, occupant: u64) -> bool {
     if occupant == 0 {
         return false;

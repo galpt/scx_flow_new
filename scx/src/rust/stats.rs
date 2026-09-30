@@ -67,10 +67,10 @@ pub struct Metrics {
     #[stat(desc = "Tasks parked on admission reject")]
     #[serde(default)]
     pub rejects: u64,
-    #[stat(desc = "Wall completions past release plus deadline")]
+    #[stat(desc = "Monotonic completions past release plus deadline")]
     #[serde(default)]
     pub misses: u64,
-    #[stat(desc = "Overflow parks from misses plus rejects")]
+    #[stat(desc = "Overflow parks from misses plus rejects plus drops")]
     #[serde(default)]
     pub parks: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]

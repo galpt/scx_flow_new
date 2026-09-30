@@ -3,10 +3,14 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the served runtime plus the daemon order plus the admission
-//! table plus the wire protocol. The daemon keeps one quantized queue
-//! plus one admitted row per CPU plus one hint table. The BPF core
-//! parks FIFO and notifies. The daemon orders and admits.
+//! Holds the daemon order plus the admission table plus the wire
+//! protocol. The daemon keeps one quantized queue plus one admitted
+//! row per CPU plus one hint table. Order follows deadlines solely
+//! through the quantized tree. The BPF core parks FIFO and notifies.
+//! The daemon order stays a shadow view for observability while the
+//! core executes FIFO. Times stay in the monotonic domain shared with
+//! the core. Parks include backpressure drops. Hints stay derived
+//! from task weight keyed by task identifier.
 
 use std::collections::HashMap;
 
@@ -15,9 +19,11 @@ use super::veb::FlowVeb;
 
 /// Wire kind for enqueue notify from the core.
 pub const PROTO_ENQUEUE: u64 = 1;
-/// Wire kind for order decision inside the daemon.
+/// Reserved kind for daemon internal order decisions. Never emitted
+/// by the core. Observed values hold at the core with progress kept.
 pub const PROTO_ORDER: u64 = 2;
-/// Wire kind for dispatch execution at the core.
+/// Reserved kind for daemon internal dispatch decisions. Never
+/// emitted by the core. Observed values hold at the core.
 pub const PROTO_DISPATCH: u64 = 3;
 /// Wire kind for complete notify from the core.
 pub const PROTO_COMPLETE: u64 = 4;
@@ -27,26 +33,6 @@ pub const SEQ_INIT: u64 = 1;
 pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
-
-/// Clamp one share into the admitted range.
-/// Edge values fall to the near bound.
-pub fn clamp_share(w: u32) -> u32 {
-    w.clamp(super::slice::WEIGHT_MIN, super::slice::WEIGHT_MAX)
-}
-
-/// Advanced runtime after one execution segment.
-/// Heavy weights advance slowly and light weights advance fast. Large
-/// inputs saturate at the top.
-pub fn runtime_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
-    let w = clamp_share(weight) as u64;
-    let base = super::slice::WEIGHT_BASE as u64;
-    let q = delta / w;
-    if q > u64::MAX / base {
-        return u64::MAX;
-    }
-    let adv = (q * base).saturating_add(delta % w * base / w);
-    vruntime.saturating_add(adv)
-}
 
 /// Admission decision for one enqueue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,7 +77,9 @@ pub enum FailAction {
 }
 
 /// Fail open matrix shared by the core and by the daemon.
-/// Every fault parks forward with progress preserved.
+/// ParkFifo parks FIFO. Resync accepts the fresh sequence.
+/// DropShare drops the stored share then parks. HoldKick holds at
+/// the core with progress preserved.
 pub fn fail_open(reason: &FailReason) -> FailAction {
     match reason {
         FailReason::RingFull => FailAction::ParkFifo,
@@ -104,7 +92,8 @@ pub fn fail_open(reason: &FailReason) -> FailAction {
 
 /// Per task state held by the daemon.
 /// Share stays zero for parks. Admit CPU names the row holding the
-/// share. Release anchors the miss check.
+/// share. Release anchors the miss check. Order uses deadlines
+/// solely with stored shares for admission.
 #[derive(Clone, Debug)]
 pub struct TaskState {
     /// Last release time in nanos.
@@ -115,29 +104,27 @@ pub struct TaskState {
     pub share: u64,
     /// CPU holding the stored share.
     pub admit_cpu: u32,
-    /// Served runtime scaled by weight.
-    pub vruntime: u64,
-    /// Weight used by the runtime advance.
-    pub weight: u32,
 }
 
 /// Daemon holding the quantized queue plus admission rows.
-/// Admitted rows hold one per mille sum per CPU. Tasks hold one stored
-/// share each. Adds pair with drops exactly once per admit.
+/// Admitted rows hold one per mille sum per CPU. Tasks hold one
+/// stored share each. Adds pair with drops exactly once per admit.
+/// Wire sequence tracks notifies while order sequence tracks queued
+/// tasks. Disable plus exit notifies drop shares through complete.
 pub struct Daemon {
     order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
     tasks: HashMap<u32, TaskState>,
     next_seq: u64,
-    last_seq: u64,
+    wire_last: u64,
     /// Tasks admitted under the use bound.
     pub admits: u64,
     /// Tasks parked on admission reject.
     pub rejects: u64,
-    /// Wall completions past release plus deadline.
+    /// Monotonic completions past release plus deadline.
     pub misses: u64,
-    /// Overflow parks from misses plus rejects.
+    /// Overflow parks from misses plus rejects plus drops.
     pub parks: u64,
 }
 
@@ -150,7 +137,7 @@ impl Daemon {
             admitted: vec![0u64; super::slot::MAX_CPUS as usize],
             tasks: HashMap::new(),
             next_seq: SEQ_INIT,
-            last_seq: 0,
+            wire_last: 0,
             admits: 0,
             rejects: 0,
             misses: 0,
@@ -158,7 +145,7 @@ impl Daemon {
         }
     }
 
-    /// Hint table for cgroup updates.
+    /// Hint table for weight derived updates.
     pub fn hints_mut(&mut self) -> &mut HintTable {
         &mut self.hints
     }
@@ -169,18 +156,33 @@ impl Daemon {
     }
 
     /// Queued entry count now held in the tree.
+    #[cfg(test)]
     pub fn queue_len(&self) -> usize {
         self.order.len()
     }
 
     /// Least queued entry with empty for vacant queues.
+    #[cfg(test)]
     pub fn peek_order(&self) -> Option<super::veb::FlowEntry> {
         self.order.peek_min().cloned()
+    }
+
+    /// Last observed wire sequence.
+    #[cfg(test)]
+    pub fn wire_last(&self) -> u64 {
+        self.wire_last
+    }
+
+    /// Next order sequence for fresh admits.
+    #[cfg(test)]
+    pub fn next_order(&self) -> u64 {
+        self.next_seq
     }
 
     /// Share of one hint through the default period on miss.
     /// A two millisecond slice in a sixteen millisecond period takes
     /// one hundred twenty five per mille.
+    #[cfg(test)]
     pub fn share_for(&self, hint_us: u32) -> u64 {
         let period = super::edf::task_period(hint_us);
         super::edf::slice_permillle(period)
@@ -188,7 +190,7 @@ impl Daemon {
 
     /// Drop the stored share of one task with floor at zero.
     /// Clears the stored value so repeat drops stay empty.
-    fn drop_stored(&mut self, pid: u32) {
+    pub(crate) fn drop_stored(&mut self, pid: u32) {
         let (share, cpu) = match self.tasks.get(&pid) {
             Some(t) => (t.share, t.admit_cpu),
             None => return,
@@ -198,9 +200,6 @@ impl Daemon {
         }
         if let Some(row) = self.admitted.get_mut(cpu as usize) {
             *row = row.saturating_sub(share);
-            if *row > super::edf::ADMIT_PERMILLE * 2 {
-                *row = 0;
-            }
         }
         if let Some(t) = self.tasks.get_mut(&pid) {
             t.share = 0;
@@ -209,23 +208,24 @@ impl Daemon {
     }
 
     /// Handle one enqueue notify from the core.
-    /// Fresh hints flow through the hint table. Stored shares add once
-    /// and drop once. Rejects park FIFO at the core.
-    #[allow(clippy::too_many_arguments)]
-    pub fn handle_enqueue(
-        &mut self,
-        pid: u32,
-        hint_us: u32,
-        cpu: u32,
-        now: u64,
-        weight: u32,
-    ) -> AdmitDecision {
+    /// Fresh hints flow through the hint table. Stored shares add
+    /// once and drop once. Rejects park FIFO at the core. Stale CPUs
+    /// drop the stored share then park. Depth overflow drops the
+    /// stored share then parks. Order sequence advances solely on
+    /// admits while wire sequence stays untouched here.
+    pub fn handle_enqueue(&mut self, pid: u32, hint_us: u32, cpu: u32, now: u64) -> AdmitDecision {
         if cpu as u64 >= super::slot::MAX_CPUS {
+            let action = fail_open(&FailReason::BadCpu);
+            debug_assert_eq!(action, FailAction::DropShare);
+            self.drop_stored(pid);
+            self.order.remove(pid);
             self.rejects += 1;
             self.parks += 1;
             return AdmitDecision::Park;
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
+            self.drop_stored(pid);
+            self.order.remove(pid);
             self.rejects += 1;
             self.parks += 1;
             return AdmitDecision::Park;
@@ -251,11 +251,8 @@ impl Daemon {
                     deadline,
                     share: 0,
                     admit_cpu: 0,
-                    vruntime: 0,
-                    weight: clamp_share(weight),
                 },
             );
-            self.next_seq = self.next_seq.saturating_add(1);
             self.rejects += 1;
             self.parks += 1;
             return AdmitDecision::Park;
@@ -266,7 +263,6 @@ impl Daemon {
         }
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.last_seq = seq;
         self.tasks.insert(
             pid,
             TaskState {
@@ -274,8 +270,6 @@ impl Daemon {
                 deadline,
                 share,
                 admit_cpu: cpu,
-                vruntime: 0,
-                weight: clamp_share(weight),
             },
         );
         self.order.insert(pid, deadline, seq);
@@ -284,20 +278,17 @@ impl Daemon {
     }
 
     /// Handle one complete notify from the core.
-    /// Drops the stored share exactly once. Misses count when wall time
-    /// passes release plus deadline on a blocking complete.
-    pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool, delta: u64) {
-        let (release, deadline, weight, vruntime) = match self.tasks.get(&pid) {
-            Some(t) => (t.release, t.deadline, t.weight, t.vruntime),
+    /// Drops the stored share exactly once. Misses count when
+    /// monotonic time passes release plus deadline on a blocking
+    /// complete. Runtime charge stays in the core total.
+    pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
+        let (release, deadline) = match self.tasks.get(&pid) {
+            Some(t) => (t.release, t.deadline),
             None => {
                 self.order.remove(pid);
                 return;
             }
         };
-        let adv = runtime_advance(vruntime, delta, weight);
-        if let Some(t) = self.tasks.get_mut(&pid) {
-            t.vruntime = adv;
-        }
         self.drop_stored(pid);
         self.order.remove(pid);
         if !runnable && super::edf::missed(release, deadline, now) {
@@ -308,17 +299,28 @@ impl Daemon {
     }
 
     /// Note one observed wire sequence.
-    /// Gaps resync through the fail open matrix.
+    /// In order notifies advance the wire mark. Duplicates plus
+    /// reorder plus forward jumps report resync through the fail open
+    /// matrix. Zero stays ignored. Callers execute the resync park.
     pub fn note_seq(&mut self, seq: u64) -> FailAction {
-        if seq <= self.last_seq && seq != 0 {
+        if seq == 0 {
+            return FailAction::ParkFifo;
+        }
+        if seq <= self.wire_last {
+            self.wire_last = self.wire_last.max(seq);
             return fail_open(&FailReason::SeqGap);
         }
-        self.last_seq = seq;
+        if self.wire_last != 0 && seq > self.wire_last.saturating_add(1) {
+            self.wire_last = seq;
+            return fail_open(&FailReason::SeqGap);
+        }
+        self.wire_last = seq;
         FailAction::ParkFifo
     }
 
     /// Pick one CPU for one task through the shared placement model.
     /// Callers pass live depths in rank order.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn pick_cpu(
         &self,
@@ -334,11 +336,13 @@ impl Daemon {
     }
 
     /// True when one arrival preempts the occupant.
+    #[cfg(test)]
     pub fn should_kick(&self, arrival: u64, occupant: u64) -> bool {
         super::preempt::arrival_kicks(arrival, occupant)
     }
 
     /// Queue identifier for one CPU with overflow past the bound.
+    #[cfg(test)]
     pub fn queue_for(&self, cpu: u32) -> u64 {
         if (cpu as u64) < super::slot::MAX_CPUS {
             return super::slot::local_dsq(cpu);
@@ -358,25 +362,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_weight_advances_raw() {
-        assert_eq!(runtime_advance(0, 2_000_000, 128), 2_000_000);
-    }
-
-    #[test]
-    fn heavy_advances_slow_light_fast() {
-        let heavy = runtime_advance(0, 2_000_000, 16_384);
-        let light = runtime_advance(0, 2_000_000, 1);
-        assert!(heavy < 2_000_000);
-        assert!(light > 2_000_000);
-    }
-
-    #[test]
-    fn huge_inputs_saturate() {
-        assert_eq!(runtime_advance(u64::MAX, u64::MAX, 128), u64::MAX);
-        assert_eq!(runtime_advance(0, u64::MAX, 1), u64::MAX);
-    }
-
-    #[test]
     fn share_is_125_at_default_period() {
         let d = Daemon::new();
         assert_eq!(d.share_for(0), 125);
@@ -387,28 +372,40 @@ mod tests {
     fn admit_holds_950_bound_with_stored_drop_once() {
         let mut d = Daemon::new();
         for pid in 1..=7u32 {
-            let got = d.handle_enqueue(pid, 0, 0, 1_000_000, 128);
+            let got = d.handle_enqueue(pid, 0, 0, 1_000_000);
             assert!(matches!(got, AdmitDecision::Admit { .. }));
         }
         assert_eq!(d.admitted(0), 875);
-        let got = d.handle_enqueue(8, 0, 0, 1_000_000, 128);
+        let got = d.handle_enqueue(8, 0, 0, 1_000_000);
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.rejects, 1);
         assert_eq!(d.parks, 1);
-        d.handle_complete(1, 2_000_000, true, 2_000_000);
+        d.handle_complete(1, 2_000_000, true);
         assert_eq!(d.admitted(0), 750);
-        d.handle_complete(1, 2_000_000, true, 2_000_000);
+        d.handle_complete(1, 2_000_000, true);
         assert_eq!(d.admitted(0), 750);
-        let got = d.handle_enqueue(8, 0, 0, 2_000_000, 128);
+        let got = d.handle_enqueue(8, 0, 0, 2_000_000);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.admits, 8);
     }
 
     #[test]
+    fn stale_cpu_and_depth_drop_stored_share() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.admitted(0), 125);
+        let got = d.handle_enqueue(1, 0, 9999, 2_000_000);
+        assert!(matches!(got, AdmitDecision::Park));
+        assert_eq!(d.admitted(0), 0);
+        assert_eq!(d.queue_len(), 0);
+    }
+
+    #[test]
     fn order_follows_least_deadline() {
         let mut d = Daemon::new();
-        d.handle_enqueue(1, 32000, 0, 1_000_000, 128);
-        d.handle_enqueue(2, 4000, 0, 1_000_000, 128);
+        d.handle_enqueue(1, 32000, 0, 1_000_000);
+        d.handle_enqueue(2, 4000, 0, 1_000_000);
         let top = d.peek_order().unwrap();
         assert_eq!(top.pid, 2);
         assert_eq!(d.queue_len(), 2);
@@ -417,10 +414,28 @@ mod tests {
     #[test]
     fn miss_counts_on_blocking_complete_past_deadline() {
         let mut d = Daemon::new();
-        d.handle_enqueue(1, 4000, 0, 1_000_000, 128);
-        d.handle_complete(1, 1_000_000 + 4_000_000 + 1, false, 2_000_000);
+        d.handle_enqueue(1, 4000, 0, 1_000_000);
+        d.handle_complete(1, 1_000_000 + 4_000_000 + 1, false);
         assert_eq!(d.misses, 1);
         assert_eq!(d.parks, 1);
+    }
+
+    #[test]
+    fn wire_and_order_sequences_stay_split() {
+        let mut d = Daemon::new();
+        assert_eq!(d.note_seq(1), FailAction::ParkFifo);
+        assert_eq!(d.wire_last(), 1);
+        let order_before = d.next_order();
+        let got = d.handle_enqueue(10, 0, 0, 1_000_000);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.wire_last(), 1);
+        assert_eq!(d.next_order(), order_before.saturating_add(1));
+        assert_eq!(d.note_seq(2), FailAction::ParkFifo);
+        assert_eq!(d.wire_last(), 2);
+        assert_eq!(d.note_seq(2), FailAction::Resync);
+        assert_eq!(d.wire_last(), 2);
+        assert_eq!(d.note_seq(10), FailAction::Resync);
+        assert_eq!(d.wire_last(), 10);
     }
 
     #[test]

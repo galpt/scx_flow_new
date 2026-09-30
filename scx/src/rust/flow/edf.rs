@@ -43,13 +43,8 @@ pub fn slice_permillle(period: u64) -> u64 {
 
 /// True when one CPU admits one more per mille share.
 /// The admitted sum plus the fresh share stays within the bound.
-/// Wrapped sums fail closed.
 pub fn admit_ok(admitted: u64, share: u64) -> bool {
-    let sum = admitted.saturating_add(share);
-    if sum < admitted {
-        return false;
-    }
-    sum <= ADMIT_PERMILLE
+    admitted.saturating_add(share) <= ADMIT_PERMILLE
 }
 
 /// True when one task missed its deadline at the given time.

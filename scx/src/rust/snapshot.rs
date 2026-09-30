@@ -7,7 +7,9 @@
 //! Each poll reads the counters plus the per CPU pid view through
 //! cheap map reads, so the page stays light beside the slice. Policy
 //! counters merge from the daemon while mechanism counters come from
-//! the core.
+//! the core. Parks sum core drops plus daemon parks. Tier counters
+//! for local plus node plus machine stay zero while overflow counts
+//! progress.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -35,7 +37,7 @@ impl<'a> Scheduler<'a> {
             admits: self.daemon.admits,
             rejects: self.daemon.rejects,
             misses: self.daemon.misses,
-            parks: self.daemon.parks,
+            parks: s.parks.saturating_add(self.daemon.parks),
             gate_rejects: s.gate_rejects,
         }
     }

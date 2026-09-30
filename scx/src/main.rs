@@ -137,7 +137,6 @@ impl<'a> Scheduler<'a> {
         /* Ops flags live in the BPF object for recent kernels. */
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
-        let _ = &mut skel;
         /* Seed the BPF topology view with sibling plus node rows. */
         /* Faulty updates keep the BPF default. */
         let rows = topology::topo_rows();
@@ -163,18 +162,6 @@ impl<'a> Scheduler<'a> {
             .collect();
         let topology = topology::describe_topology(&rows);
         info!("Topology: {topology}");
-        /* Queue layout for the start log plus header cover. */
-        info!(
-            "Queues: {} {} {} {}",
-            flow::slot::SLOT_MAX_DSQS,
-            flow::slot::SLOT_MACHINE,
-            flow::slot::NODE_BASE,
-            flow::slot::MAX_NODES
-        );
-        let _ = flow::slot::machine_dsq();
-        let _ = flow::slot::node_dsq(0);
-        let _ = flow::slot::slot_nr_dsqs();
-        let _ = flow::slot::dsq_valid(flow::slot::machine_dsq());
         /* Ring buffers carry enqueue plus complete notifies. */
         /* Faulty setup keeps FIFO progress at the core. */
         let (ev_tx, ev_rx) = crossbeam::channel::unbounded::<Vec<u8>>();
@@ -266,78 +253,73 @@ impl<'a> Scheduler<'a> {
 
     /* Apply one decoded notify to the daemon. */
     /* Enqueue derives the hint from the task weight and caches the */
-    /* row before admission. Complete drops the stored share. Gaps */
-    /* resync through the fail open matrix. Faulty payloads drop with */
-    /* FIFO progress preserved at the core. */
+    /* row before admission. Complete drops the stored share. Wire */
+    /* gaps count one park through resync. Reserved plus unknown kinds */
+    /* hold at the core with progress kept. The daemon order stays a */
+    /* shadow view while the core executes FIFO. */
     fn handle_event(&mut self, data: &[u8]) {
         let Some((kind, seq, pid, cpu, weight, pad, at)) = Self::decode_event(data) else {
             return;
         };
-        let _ = self.daemon.note_seq(seq);
+        if self.daemon.note_seq(seq) == flow::FailAction::Resync {
+            self.daemon.parks = self.daemon.parks.saturating_add(1);
+        }
         if kind == flow::PROTO_ENQUEUE {
-            if cpu as u64 >= flow::slot::MAX_CPUS {
-                let _ = flow::fail_open(&flow::FailReason::BadCpu);
-            }
             let hint = flow::hint_period_us(weight) as u32;
-            let _ = self.daemon.share_for(hint);
-            let _ = self.daemon.hints_mut().insert(pid as u64, hint as u64);
-            let time = if at != 0 { at } else { Self::now_ns() };
-            let _ = self.daemon.handle_enqueue(pid, hint, cpu, time, weight);
-            let live: Vec<i32> = self.online_cpus.iter().map(|c| *c as i32).collect();
-            let depths = vec![0u64; live.len()];
-            let bound = flow::SHARED_SCAN_BOUND as usize;
-            let live_b = if live.len() > bound {
-                &live[..bound]
-            } else {
-                &live[..]
-            };
-            let depths_b = if depths.len() > bound {
-                &depths[..bound]
-            } else {
-                &depths[..]
-            };
-            let _ = self
-                .daemon
-                .pick_cpu(&[], cpu as i32, &live, live_b, depths_b, at, time);
-            let _ = self.daemon.should_kick(at, at.saturating_add(1));
-            let _ = self.daemon.queue_for(cpu);
-            let _ = self.daemon.admitted(cpu);
-            let _ = self.daemon.queue_len();
+            self.daemon.hints_mut().insert(pid as u64, hint as u64);
+            let time = if at != 0 { at } else { Self::mono_ns() };
+            self.daemon.handle_enqueue(pid, hint, cpu, time);
         } else if kind == flow::PROTO_COMPLETE {
             let runnable = pad != 0;
-            let time = if at != 0 { at } else { Self::now_ns() };
-            self.daemon
-                .handle_complete(pid, time, runnable, flow::QUANTUM_NS);
-        } else if kind == flow::PROTO_ORDER || kind == flow::PROTO_DISPATCH {
-            let _ = flow::fail_open(&flow::FailReason::BadKey);
-            let _ = flow::slot::dsq_valid(flow::slot::machine_dsq());
-            let _ = flow::slot::node_dsq(0);
-            let _ = flow::slot::slot_nr_dsqs();
+            let time = if at != 0 { at } else { Self::mono_ns() };
+            self.daemon.handle_complete(pid, time, runnable);
         } else {
-            let _ = flow::fail_open(&flow::FailReason::BadKey);
+            debug_assert!(
+                kind == flow::PROTO_ORDER
+                    || kind == flow::PROTO_DISPATCH
+                    || kind != flow::PROTO_ENQUEUE
+            );
+            let action = flow::fail_open(&flow::FailReason::BadKey);
+            debug_assert_eq!(action, flow::FailAction::HoldKick);
         }
-        let _ = self.daemon.peek_order();
-        let _ = flow::DISPATCH_BATCH;
     }
 
-    /* Wall time in nanos since epoch with zero on fault. */
-    fn now_ns() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|v| v.as_nanos().min(u64::MAX as u128) as u64)
-            .unwrap_or(0)
+    /* Monotonic time in nanos since boot with zero on fault. */
+    /* Shares the domain with the core clock for deadlines. */
+    fn mono_ns() -> u64 {
+        unsafe {
+            let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
+            if libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) == 0 {
+                let ts = ts.assume_init();
+                (ts.tv_sec as u64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add(ts.tv_nsec as u64)
+            } else {
+                0
+            }
+        }
     }
 
     /* Drain available ring events into the daemon. */
-    /* Bounded per pass by the dispatch batch. Faults keep FIFO. */
+    /* Bounded per pass by the dispatch batch. Missing rings plus a */
+    /* full dashboard channel plus poll faults count one park with */
+    /* FIFO kept. */
     fn drain_rings(&mut self) {
-        if let Some(rb) = &self.rings {
-            let _ = rb.consume();
+        if let Some(rb) = self.rings.as_ref() {
+            if rb.consume().is_err() {
+                let action = flow::fail_open(&flow::FailReason::DaemonLag);
+                debug_assert_eq!(action, flow::FailAction::ParkFifo);
+                self.daemon.parks = self.daemon.parks.saturating_add(1);
+            }
         } else {
-            let _ = flow::fail_open(&flow::FailReason::DaemonLag);
+            let action = flow::fail_open(&flow::FailReason::DaemonLag);
+            debug_assert_eq!(action, flow::FailAction::ParkFifo);
+            self.daemon.parks = self.daemon.parks.saturating_add(1);
         }
         if self.webui_tx.as_ref().is_some_and(|tx| tx.is_full()) {
-            let _ = flow::fail_open(&flow::FailReason::RingFull);
+            let action = flow::fail_open(&flow::FailReason::RingFull);
+            debug_assert_eq!(action, flow::FailAction::ParkFifo);
+            self.daemon.parks = self.daemon.parks.saturating_add(1);
         }
         for _ in 0..flow::DISPATCH_BATCH {
             match self.ev_rx.try_recv() {
@@ -361,9 +343,12 @@ impl<'a> Scheduler<'a> {
                         if !tx.is_full() {
                             let web = self.get_web_metrics();
                             let stats = web.stats.clone();
-                            let _ = tx.try_send(web);
+                            if tx.try_send(web).is_err() {
+                                self.daemon.parks = self.daemon.parks.saturating_add(1);
+                            }
                             res_ch.send(stats)?
                         } else {
+                            self.daemon.parks = self.daemon.parks.saturating_add(1);
                             res_ch.send(self.get_metrics())?
                         }
                     } else {
@@ -375,7 +360,9 @@ impl<'a> Scheduler<'a> {
                         && !tx.is_full()
                     {
                         let web = self.get_web_metrics();
-                        let _ = tx.try_send(web);
+                        if tx.try_send(web).is_err() {
+                            self.daemon.parks = self.daemon.parks.saturating_add(1);
+                        }
                     }
                 }
                 Err(e) => Err(e)?,
@@ -557,8 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_advance_matches_base() {
-        assert_eq!(crate::flow::runtime_advance(0, 2_000_000, 128), 2_000_000);
+    fn order_is_deadline_only() {
+        let mut d = crate::flow::Daemon::new();
+        d.handle_enqueue(1, 32000, 0, 1_000_000);
+        d.handle_enqueue(2, 4000, 0, 1_000_000);
+        assert_eq!(d.peek_order().unwrap().pid, 2);
     }
 
     #[test]
@@ -572,23 +562,23 @@ mod tests {
     #[test]
     fn proto_matches_header() {
         assert_eq!(
-            crate::flow::PROTO_ENQUEUE as u64,
+            crate::flow::PROTO_ENQUEUE,
             crate::bpf_intf::flow_consts_FLOW_PROTO_ENQUEUE as u64
         );
         assert_eq!(
-            crate::flow::PROTO_ORDER as u64,
+            crate::flow::PROTO_ORDER,
             crate::bpf_intf::flow_consts_FLOW_PROTO_ORDER as u64
         );
         assert_eq!(
-            crate::flow::PROTO_DISPATCH as u64,
+            crate::flow::PROTO_DISPATCH,
             crate::bpf_intf::flow_consts_FLOW_PROTO_DISPATCH as u64
         );
         assert_eq!(
-            crate::flow::PROTO_COMPLETE as u64,
+            crate::flow::PROTO_COMPLETE,
             crate::bpf_intf::flow_consts_FLOW_PROTO_COMPLETE as u64
         );
         assert_eq!(
-            crate::flow::SEQ_INIT as u64,
+            crate::flow::SEQ_INIT,
             crate::bpf_intf::flow_consts_FLOW_SEQ_INIT as u64
         );
         assert_eq!(

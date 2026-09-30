@@ -9,16 +9,19 @@
 //! identifier is the slowest sufficient pick on symmetric hosts.
 
 /// Bound of the shared scan at eight peers. Fixed.
+#[cfg(test)]
 pub const SHARED_SCAN_BOUND: u32 = 8;
 
 /// Drain nanos of one queue depth as slices times the quantum.
 /// Large depths saturate at the top.
+#[cfg(test)]
 pub fn drain_ns(depth: u64) -> u64 {
     depth.saturating_mul(super::slice::QUANTUM_NS)
 }
 
 /// True when one CPU drains before a deadline.
 /// Empty deadlines pass for every CPU.
+#[cfg(test)]
 pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
     if deadline == 0 {
         return true;
@@ -32,6 +35,7 @@ pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
 /// deadline, then the first sufficient shared CPU in identifier order.
 /// Callers pass host sized slices within the five hundred twelve CPU
 /// bound. Returns minus one when the mask holds live peers.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
     idle: &[i32],

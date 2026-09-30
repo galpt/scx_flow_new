@@ -3,8 +3,10 @@
  * Dispatch op for the thin core.
  *
  * Executes one FIFO move from the overflow tail to local. Empty
- * queues move nothing. The daemon owns order. The core keeps progress
- * with FIFO execution.
+ * queues move nothing. The daemon holds order as a shadow view while
+ * the core executes FIFO. Init reserves local plus node plus machine
+ * plus overflow while dispatch drains overflow solely, so local plus
+ * node plus machine counters stay zero and over moves count progress.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

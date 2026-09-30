@@ -119,23 +119,6 @@ impl Veb {
         1 + self.summary.as_ref().map(|s| s.height()).unwrap_or(1)
     }
 
-    /// True when the tree holds the key.
-    #[cfg(test)]
-    pub fn contains(&self, x: u16) -> bool {
-        if self.min == Some(x) || self.max == Some(x) {
-            return true;
-        }
-        if self.u == 2 {
-            return false;
-        }
-        let h = high(x, self.sq);
-        let l = low(x, self.sq);
-        match self.clusters.get(h).and_then(|c| c.as_ref()) {
-            Some(c) => c.contains(l as u16),
-            None => false,
-        }
-    }
-
     /// Insert one key. Duplicate inserts pass through.
     pub fn insert(&mut self, x: u16) {
         if self.min.is_none() {
@@ -278,12 +261,6 @@ impl FlowVeb {
         self.len == 0
     }
 
-    /// Least key held with empty for vacant queues.
-    #[cfg(test)]
-    pub fn min_key(&self) -> Option<u16> {
-        self.tree.min()
-    }
-
     /// True when the pid is queued.
     #[cfg(test)]
     pub fn contains_pid(&self, pid: u32) -> bool {
@@ -314,6 +291,7 @@ impl FlowVeb {
     }
 
     /// Least entry held with empty for vacant queues.
+    #[cfg(test)]
     pub fn peek_min(&self) -> Option<&FlowEntry> {
         let k = self.tree.min()?;
         self.queues.get(&k)?.front()
@@ -460,8 +438,8 @@ mod tests {
         let mut q = FlowVeb::new();
         let mut oracle: BTreeMap<u16, VecDeque<FlowEntry>> = BTreeMap::new();
         let mut rng = xorshift(0x9E3779B97F4A7C15);
-        let mut seq = 0u64;
-        for i in 0..2000u32 {
+        for (seq, i) in (0..2000u32).enumerate() {
+            let seq = seq as u64;
             let pid = 1000 + i;
             let deadline = (rng() % 64_000_000) + 1_000_000;
             let key = quantize(deadline);
@@ -470,7 +448,6 @@ mod tests {
                 .entry(key)
                 .or_default()
                 .push_back(FlowEntry { pid, deadline, seq });
-            seq += 1;
             if i % 7 == 0 {
                 let a = q.pop_min().unwrap();
                 let (_, oq) = oracle.iter_mut().next().unwrap();

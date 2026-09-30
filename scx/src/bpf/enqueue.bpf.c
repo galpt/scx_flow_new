@@ -5,7 +5,8 @@
  * Parks FIFO at the overflow tail and notifies the daemon. Exiting
  * tasks run at once on the task CPU. The gate runs first for other
  * arrivals. One idle kick follows each park. Order plus admission live
- * in the daemon. The core keeps progress with FIFO parks.
+ * in the daemon as a shadow view. The core keeps progress with FIFO
+ * parks. Ring reserve faults count one park.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -15,8 +16,10 @@ static __noinline void flow_notify_enqueue(u32 pid,
 	struct flow_event *ev;
 	u64 seq;
 	ev = bpf_ringbuf_reserve(&flow_enq_rb, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		__sync_fetch_and_add(&flow_stats.parks, 1);
 		return;
+	}
 	seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	ev->kind = (u64)FLOW_PROTO_ENQUEUE;
 	ev->seq = seq;

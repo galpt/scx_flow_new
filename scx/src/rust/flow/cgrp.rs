@@ -4,9 +4,10 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the flat period hint table used by admission. The table maps
-//! hierarchy identifiers to periods. Light shares map to long periods
-//! and heavy shares map to short periods. Full tables keep the default
-//! period for fresh identifiers.
+//! task identifiers to periods derived from task weight. Light shares
+//! map to long periods and heavy shares map to short periods. Full
+//! tables keep the default period for fresh identifiers. Hierarchy
+//! tracking stays out, so hints stay derived, not hierarchy bound.
 
 use std::collections::HashMap;
 
@@ -31,9 +32,10 @@ pub fn hint_period_us(weight: u32) -> u64 {
     }
 }
 
-/// Flat hint table keyed by hierarchy identifier.
+/// Flat hint table keyed by task identifier.
 /// Holds at most cap rows. Fresh identifiers miss to zero and the
-/// caller falls back to the default period.
+/// caller falls back to the default period. Keys name tasks, not
+/// hierarchy groups.
 pub struct HintTable {
     rows: HashMap<u64, u64>,
     cap: usize,
@@ -100,13 +102,6 @@ impl HintTable {
             return 0;
         }
         self.rows.get(&id).copied().unwrap_or(0)
-    }
-
-    /// Store one weight derived hint for one identifier.
-    /// Full tables keep the old value and report false.
-    #[cfg(test)]
-    pub fn set_weight(&mut self, id: u64, weight: u32) -> bool {
-        self.insert(id, hint_period_us(weight))
     }
 }
 
