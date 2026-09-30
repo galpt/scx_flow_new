@@ -78,6 +78,10 @@ enum flow_consts {
 	FLOW_ORDER_CAP = 4096ULL,
 	FLOW_VEB_U = 65536ULL,
 	FLOW_QUANT_SHIFT = 10ULL,
+	/* CPU performance levels at half plus max with no knob. Any own */
+	/* plus local plus running picks max else half with no shared use. */
+	FLOW_CPU_PERF_HALF = 512ULL,
+	FLOW_CPU_PERF_MAX = 1024ULL,
 };
 struct flow_task_ctx {
 	u64 run_at;

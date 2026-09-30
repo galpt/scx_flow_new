@@ -17,10 +17,12 @@
  * drops its key when the stored key still matches. Empty tree or
  * stall moves one gated task with the same checks plus keyed drop
  * so progress stays bounded with no bypass. Over moves count
- * progress.
+ * progress. Level follows after ordered moves plus fail open
+ * with the same CPU only and no call on steady.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
+#include "dispatch/perf.bpf.c"
 static __noinline bool veb_try_move_one(u32 key, s32 cpu)
 {
 	bool moved = false;
@@ -186,6 +188,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (cur == 0xFFFFFFFFU) {
 		if (veb_fail_open_one(cpu))
 			__sync_fetch_and_add(&flow_stats.over_moves, 1);
+		/* Level follows after ordered moves plus fail open */
+		/* with the same CPU only. */
+		flow_perf_update(cpu);
 		return;
 	}
 	bpf_for(attempt, 0, 20) {
@@ -214,8 +219,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved) {
 		__sync_fetch_and_add(&flow_stats.over_moves,
 		    (u64)moved);
+		/* Level follows after ordered moves plus fail open */
+		/* with the same CPU only. */
+		flow_perf_update(cpu);
 		return;
 	}
 	if (veb_fail_open_one(cpu))
 		__sync_fetch_and_add(&flow_stats.over_moves, 1);
+	/* Level follows after ordered moves plus fail open */
+	/* with the same CPU only. */
+	flow_perf_update(cpu);
 }
