@@ -2,21 +2,21 @@
 
 ### What is it?
 
-scx_flow is a sched-ext scheduler that tries a Van Emde Boas tree for CPU order. The tree lives fully in Rust. BPF stays minimal with gate, park, notify, execute. The slice stays fixed at 2ms. See `src/rust/flow/veb.rs` and `src/bpf/intf.h`.
+scx_flow is a sched-ext scheduler that uses a Van Emde Boas tree for CPU order. The tree lives fully in BPF with summary, clusters, min, max. The daemon admits under the bound. The slice stays fixed at 2ms. See `src/bpf/veb/` and `src/bpf/intf.h`.
 
 ### Why?
 
-The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree. A Van Emde Boas tree may beat priority queue, BST, rbtree for least deadline search. Rust keeps the tree accurate with tests for order plus FIFO. The benefits may outweigh the overhead when deadlines drive placement. See `src/rust/flow/veb.rs` and `src/rust/flow/runtime.rs`.
+The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree in BPF. A Van Emde Boas tree may beat priority queue, BST, rbtree for least deadline search. BPF keeps the tree accurate with bounded loops and fail closed parks. The benefits may outweigh the overhead when deadlines drive placement. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ## More details
 
 ### Queues
 
-Core parks at overflow with deadline vtime. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in daemon order up to 16 per pass with sequence plus liveness checks and parks stale entries. Empty order or stall fails open with one head move so progress stays bounded. Daemon order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks at overflow with plain insert. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in tree order up to 16 per pass with sequence plus liveness checks and parks stale entries. Empty tree or stall fails open with one head move so progress stays bounded. Tree order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
-Deadlines quantize to 16 bit keys at 1024 nanos per step. Each key holds one FIFO queue. Tree finds least key in doubly logarithmic time. Order follows deadlines solely with stored shares for admission. Removal scans one key queue within 512 entries. Oracle tests cover order plus FIFO. See `src/rust/flow/veb.rs` and `src/bpf/intf.h`.
+Deadlines quantize to 16 bit keys at 1024 nanos per step. Universe holds 65536 keys with shift 10 covering 67ms with saturate at top. Each key holds one FIFO queue for duplicates. Tree finds least key in doubly logarithmic time with summary, clusters, min, max. Order follows deadlines solely with stored shares for admission. Removal drops the pid key on complete, disable, exit. Oracle tests cover order plus FIFO. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ### Admission
 
@@ -33,8 +33,8 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Maps live in `src/bpf/main.bpf.c` with splits in `main/`.
-- Order lives in `flow/veb.rs` with facade in `flow/mod.rs` and checks in `config.rs`.
+- Maps live in `src/bpf/main.bpf.c` with splits in `main/` plus `veb/`.
+- Order lives in `src/bpf/veb/` with oracle mirror in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`.
 - Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.
 - Sections stay under fifty lines each with line counts not word counts.
 
