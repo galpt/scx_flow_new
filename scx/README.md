@@ -8,6 +8,8 @@ scx_flow is a sched-ext scheduler that tries a Van Emde Boas tree for CPU order.
 
 The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree. A Van Emde Boas tree may beat priority queue, BST, rbtree for least deadline search. Rust keeps the tree accurate with tests for order plus FIFO. The benefits may outweigh the overhead when deadlines drive placement. See `src/rust/flow/veb.rs` and `src/rust/flow/runtime.rs`.
 
+## More details
+
 ### Queues
 
 Core parks FIFO at overflow. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch drains overflow solely with FIFO. A single tail avoids cross tier moves. Daemon order stays a shadow view for observability within 512 entries. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
