@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * CPU view plus entry gate for the thin core.
+ * CPU view plus entry gate for the flow core.
  *
  * Holds the live, mask checks, running pid helpers,
  * the universal entry gate. The gate runs first in every op.

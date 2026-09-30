@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Hierarchy stubs for the thin core.
+ * Hierarchy stubs for the flow core.
  *
  * Policy lives in the daemon through weight derived hints keyed by
  * task identifier. The core keeps paired stubs so hierarchy

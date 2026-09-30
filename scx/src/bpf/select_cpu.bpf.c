@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Select CPU op for the thin core.
+ * Select CPU op for the flow core.
  *
  * Keeps the previous CPU when allowed and live. Falls back to the
  * first allowed live CPU. Stale masks fail closed with an error and

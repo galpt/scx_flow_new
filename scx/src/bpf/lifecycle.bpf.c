@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Task lifecycle ops for the thin core.
+ * Task lifecycle ops for the flow core.
  *
  * Running claims the segment start and tracks the CPU pid plus the on
  * CPU gauge. Stopping charges the segment to total runtime and counts
  * one requeue else one completion and emits one complete notify.
+ * Stopping drops the tree key so dispatched keys never linger.
  * Stopping skips the notify when the task never queued. Enable clears
- * the task state. Disable plus exit charge leftovers plus emit one
- * complete notify so admission drops once. Ring reserve faults count
- * one park. Release clears stale pid views. Mechanism solely. Policy
- * lives in the daemon.
+ * the task state. Disable plus exit charge leftovers, drop the tree
+ * key, emit one complete notify so admission drops once. Ring reserve
+ * faults count one park. Release clears stale pid views. Mechanism
+ * solely. Policy lives in the daemon with order in the core.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -85,8 +86,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
+		veb_remove((u32)p->pid);
 		return;
 	}
+	veb_remove((u32)p->pid);
 	tctx = flow_lookup(p);
 	now = flow_now();
 	weight = p->scx.weight;
@@ -145,9 +148,11 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	s32 cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
+		veb_remove((u32)p->pid);
 		flow_notify_complete((u32)p->pid, 0, weight, 1);
 		return;
 	}
+	veb_remove((u32)p->pid);
 	tctx = flow_lookup(p);
 	flow_charge_leftover(p, tctx, cpu);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
@@ -162,6 +167,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	u32 weight = p->scx.weight;
 	s32 cpu = scx_bpf_task_cpu(p);
 	(void)args;
+	veb_remove((u32)p->pid);
 	tctx = flow_lookup(p);
 	flow_charge_leftover(p, tctx, cpu);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);

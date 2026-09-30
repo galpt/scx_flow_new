@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Charge helper for the thin core.
+ * Charge helper for the flow core.
  *
  * Holds the leftover charge used when stopping never ran. Parks wake
  * by direct kick on insert. Outlined to keep disable plus exit small.

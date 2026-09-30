@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow thin core.
+ * Flow core with tree queues.
  *
- * Maps hold task run state, CPU pid rows, topology rows, daemon
- * order rows, two notify rings. Init reserves five hundred twelve
- * local queues, eight node queues, machine, overflow as an ABI
- * placeholder so identifiers stay stable. The core parks and
- * notifies. The daemon orders and admits. Dispatch moves admitted
- * tasks in daemon order. Hotplug needs a restart. The watchdog
- * stays at twenty seconds.
+ * Maps hold task run state, CPU rows, topology rows, daemon order
+ * rows, tree summary, clusters, counts, tree pid rows, root, two
+ * notify rings. Init reserves five hundred twelve local queues,
+ * eight node queues, machine, overflow as an ABI placeholder so
+ * identifiers stay stable. The core parks and notifies. The core
+ * orders through the tree and the daemon admits. Dispatch moves
+ * admitted tasks in tree order. Hotplug needs a restart. The
+ * watchdog stays at twenty seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -58,6 +59,12 @@ volatile u64 flow_seq;
 #include "main/cpu.bpf.c"
 #include "main/hier.bpf.c"
 #include "main/timer.bpf.c"
+#include "veb/map.bpf.c"
+#include "veb/core.bpf.c"
+#include "veb/min.bpf.c"
+#include "veb/succ.bpf.c"
+#include "veb/remove.bpf.c"
+#include "veb/insert.bpf.c"
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"

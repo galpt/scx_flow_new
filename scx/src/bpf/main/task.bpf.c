@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Task and map helpers for the thin core.
+ * Task and map helpers for the flow core.
  *
  * Holds the clock, task, CPU loads used by every op. Runs
  * inline for a small verifier footprint.

@@ -1,25 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the thin core.
+ * Shared constants and helpers for the flow core.
  *
  * The core parks at the overflow tail and notifies the daemon.
- * The daemon orders through the quantized tree and admits under the
- * bound. Init reserves five hundred twelve local queues, eight
- * node queues, machine, overflow as an ABI placeholder so
- * queue identifiers stay stable across releases. Enqueue inserts
- * with the deadline as vtime so the tail stays deadline ordered.
- * Dispatch moves admitted tasks in daemon order up to sixteen per
+ * The core orders through the Van Emde Boas tree and the daemon
+ * admits under the bound. Init reserves five hundred twelve local
+ * queues, eight node queues, machine, overflow as an ABI placeholder
+ * so queue identifiers stay stable across releases. Enqueue inserts
+ * one key derived from the deadline and parks with plain insert.
+ * Dispatch moves admitted tasks in tree order up to sixteen per
  * pass with sequence plus liveness checks. Stale entries park and
  * the daemon drops shares through complete plus stale collection.
- * Empty order or stale views fail open with one head move so
- * progress stays bounded. A single tail avoids cross tier moves
- * that would bounce cache and NUMA locality. Undrained queues hold
- * zero tasks and cost solely at init. Counters use atomic adds
- * from every CPU and stay best effort for observability. Reads
- * poll at dashboard cadence so line bouncing stays bounded by event
- * rate. Shared fields pair reads with writes through atomics plus
- * volatile access. The watchdog stays at twenty seconds. Policy
- * lives in the daemon. The core holds gate, park, notify, execute.
+ * Empty tree or stall fails open with one head move so progress
+ * stays bounded. A single tail avoids cross tier moves that would
+ * bounce cache and NUMA locality. Undrained queues hold zero tasks
+ * and cost solely at init. Counters use atomic adds from every CPU
+ * and stay best effort for observability. Reads poll at dashboard
+ * cadence so line bouncing stays bounded by event rate. Shared
+ * fields pair reads with writes through atomics plus volatile
+ * access. The watchdog stays at twenty seconds. Policy lives in
+ * the daemon with order in the core. The core holds gate, park,
+ * notify, execute.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
