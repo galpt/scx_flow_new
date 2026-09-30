@@ -21,9 +21,7 @@ static __noinline u32 veb_succ(u32 x)
 	u64 masked;
 	int b;
 	int w;
-	if (x >= 65535)
-		return 0xFFFFFFFFU;
-	if (x >= 65536)
+	if (x >= (u32)FLOW_VEB_U - 1)
 		return 0xFFFFFFFFU;
 	h = veb_high(x);
 	l = veb_low(x);

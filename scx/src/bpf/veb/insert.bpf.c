@@ -4,10 +4,13 @@
  *
  * Holds one key insert with duplicate refresh and saturate.
  * Duplicate pids drop the old key then join the fresh key.
- * First key sets cluster and summary bits then links the pid.
- * Later keys bump the count then link the pid. Root least and
+ * Counts bump first then pid links then bits plus root follow
+ * so a full pid map never leaves phantom keys. Root least and
  * greatest move solely outward with compare and swap so concurrent
- * CPUs never miss live low keys. Faults fail closed with parks.
+ * CPUs never miss live low keys. Bit sets retry four times then
+ * give up as benign with the next insert retrying the same bit.
+ * Count compare and swap gives up after four tries with one park.
+ * Faults fail closed with parks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -95,12 +98,13 @@ static __noinline void veb_insert(u32 pid, u64 deadline)
 	u64 cbit;
 	u64 sbit;
 	u32 *oldp;
+	bool done = false;
 	int i;
 	if (pid == 0)
 		return;
 	k = veb_quant(deadline);
-	if (k >= 65536)
-		k = 65535;
+	if (k >= (u32)FLOW_VEB_U)
+		k = (u32)FLOW_VEB_U - 1;
 	oldp = bpf_map_lookup_elem(&veb_pid, &pid);
 	if (oldp) {
 		u32 old = READ_ONCE(*oldp);
@@ -118,25 +122,51 @@ static __noinline void veb_insert(u32 pid, u64 deadline)
 		return;
 	cbit = 1ULL << (u64)(l & 63);
 	sbit = 1ULL << (u64)(h & 63);
-	veb_set_clu_bit(cidx, cbit);
-	veb_set_sum_bit(sidx, sbit);
 	bpf_for(i, 0, 4) {
 		u32 *cntp = veb_cnt_ptr(k);
 		u32 cur;
 		u32 nxt;
 		u32 old;
+		long upd;
+		int j;
 		if (!cntp)
 			return;
 		cur = READ_ONCE(*cntp);
-		if (cur == 0xFFFFFFFFU)
+		if (cur == 0xFFFFFFFFU) {
+			__sync_fetch_and_add(&flow_stats.parks, 1);
 			return;
+		}
 		nxt = cur + 1;
 		old = __sync_val_compare_and_swap(cntp, cur, nxt);
 		if (old != cur)
 			continue;
-		bpf_map_update_elem(&veb_pid, &pid, &k, BPF_ANY);
+		upd = bpf_map_update_elem(&veb_pid, &pid, &k, BPF_ANY);
+		if (upd != 0) {
+			bpf_for(j, 0, 4) {
+				u32 *rp = veb_cnt_ptr(k);
+				u32 rc;
+				u32 rn;
+				u32 ro;
+				if (!rp)
+					break;
+				rc = READ_ONCE(*rp);
+				if (rc == 0)
+					break;
+				rn = rc - 1;
+				ro = __sync_val_compare_and_swap(rp, rc, rn);
+				if (ro == rc)
+					break;
+			}
+			__sync_fetch_and_add(&flow_stats.parks, 1);
+			return;
+		}
+		veb_set_clu_bit(cidx, cbit);
+		veb_set_sum_bit(sidx, sbit);
 		if (cur == 0)
 			veb_root_insert(k);
+		done = true;
 		break;
 	}
+	if (!done)
+		__sync_fetch_and_add(&flow_stats.parks, 1);
 }

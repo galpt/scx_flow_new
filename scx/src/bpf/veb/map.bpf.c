@@ -34,7 +34,7 @@ struct {
 } veb_clusters SEC(".maps");
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 65536);
+	__uint(max_entries, FLOW_VEB_U);
 	__type(key, u32);
 	__type(value, u32);
 } veb_counts SEC(".maps");

@@ -4,8 +4,13 @@
  *
  * Holds one pid remove with last key cleanup and root refresh.
  * Last key clears cluster and summary bits then refreshes root.
+ * A zero count still clears stale bits so empty keys never linger.
  * Counts drop with compare and swap so concurrent CPUs stay
- * consistent. Faults fail closed with parks.
+ * consistent. Four tries then give up with one park and the next
+ * remove retries the same key. Bit clears retry four times then
+ * give up as benign with the next remove retrying the same bit.
+ * Callers with a per CPU view use the keyed remove so a reused pid
+ * never drops a fresh key. Faults fail closed with parks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -131,6 +136,8 @@ static __noinline bool veb_remove(u32 pid)
 	u32 l;
 	u32 cidx;
 	u64 cbit;
+	bool zero_found = false;
+	bool dropped = false;
 	int i;
 	if (pid == 0)
 		return false;
@@ -138,7 +145,7 @@ static __noinline bool veb_remove(u32 pid)
 	if (!kp)
 		return false;
 	k = READ_ONCE(*kp);
-	if (k >= 65536) {
+	if (k >= (u32)FLOW_VEB_U) {
 		bpf_map_delete_elem(&veb_pid, &pid);
 		return false;
 	}
@@ -154,7 +161,8 @@ static __noinline bool veb_remove(u32 pid)
 		cur = READ_ONCE(*cntp);
 		if (cur == 0) {
 			bpf_map_delete_elem(&veb_pid, &pid);
-			return false;
+			zero_found = true;
+			break;
 		}
 		nxt = cur - 1;
 		old = __sync_val_compare_and_swap(cntp, cur, nxt);
@@ -163,7 +171,12 @@ static __noinline bool veb_remove(u32 pid)
 		bpf_map_delete_elem(&veb_pid, &pid);
 		if (cur != 1)
 			return true;
+		dropped = true;
 		break;
+	}
+	if (!dropped && !zero_found) {
+		__sync_fetch_and_add(&flow_stats.parks, 1);
+		return false;
 	}
 	h = veb_high(k);
 	l = veb_low(k);
@@ -188,4 +201,18 @@ static __noinline bool veb_remove(u32 pid)
 	}
 	veb_root_remove(k);
 	return true;
+}
+static __noinline bool veb_remove_if_key(u32 pid, u32 expect)
+{
+	u32 *kp;
+	if (pid == 0)
+		return false;
+	if (expect >= (u32)FLOW_VEB_U)
+		return false;
+	kp = bpf_map_lookup_elem(&veb_pid, &pid);
+	if (!kp)
+		return false;
+	if (READ_ONCE(*kp) != expect)
+		return false;
+	return veb_remove(pid);
 }

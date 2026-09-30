@@ -9,18 +9,20 @@
  * so queue identifiers stay stable across releases. Enqueue inserts
  * one key derived from the deadline and parks with plain insert.
  * Dispatch moves admitted tasks in tree order up to sixteen per
- * pass with sequence plus liveness checks. Stale entries park and
- * the daemon drops shares through complete plus stale collection.
- * Empty tree or stall fails open with one head move so progress
- * stays bounded. A single tail avoids cross tier moves that would
- * bounce cache and NUMA locality. Undrained queues hold zero tasks
- * and cost solely at init. Counters use atomic adds from every CPU
- * and stay best effort for observability. Reads poll at dashboard
- * cadence so line bouncing stays bounded by event rate. Shared
- * fields pair reads with writes through atomics plus volatile
- * access. The watchdog stays at twenty seconds. Policy lives in
- * the daemon with order in the core. The core holds gate, park,
- * notify, execute.
+ * pass with sequence, liveness, affinity checks. Stale entries park
+ * and the daemon drops shares through complete plus stale collection.
+ * Empty tree or stall moves one gated task with the same checks plus
+ * keyed drop so progress stays bounded with no bypass. A single tail
+ * avoids cross tier moves that would bounce cache and NUMA locality.
+ * Undrained queues hold zero tasks and cost solely at init. Counters
+ * use atomic adds from every CPU and stay best effort for
+ * observability. Admits, rejects, misses stay zero in BPF as an ABI
+ * placeholder and merge from the daemon so the wire stays at 96B.
+ * Reads poll at dashboard cadence so line bouncing stays bounded by
+ * event rate. Shared fields pair reads with writes through atomics
+ * plus volatile access. The watchdog stays at twenty seconds. Policy
+ * lives in the daemon with order in the core. The core holds gate,
+ * park, notify, execute.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

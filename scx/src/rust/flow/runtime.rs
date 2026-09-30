@@ -289,11 +289,12 @@ impl Daemon {
     /// Handle one enqueue notify from the core.
     /// Fresh hints flow through the hint table. Stored shares add
     /// once and drop once. Rejects park with no run at the core.
-    /// Stale CPUs drop the stored share then park. Depth overflow
-    /// drops the stored share then parks. Table full parks fresh
-    /// identifiers with zero stored share so the map stays capped.
-    /// Order sequence advances solely on admits while the wire
-    /// sequence pairs each row with core task state for dispatch.
+    /// Zero identifiers park at once with no table row. Stale CPUs
+    /// drop the stored share then park. Depth overflow drops the
+    /// stored share then parks. Table full parks fresh identifiers
+    /// with zero stored share so the map stays capped. Order sequence
+    /// advances solely on admits while the wire sequence pairs each
+    /// row with core task state for dispatch.
     pub fn handle_enqueue(
         &mut self,
         pid: u32,
@@ -302,6 +303,11 @@ impl Daemon {
         now: u64,
         wire_seq: u64,
     ) -> AdmitDecision {
+        if pid == 0 {
+            self.rejects += 1;
+            self.parks += 1;
+            return AdmitDecision::Park;
+        }
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
@@ -376,10 +382,14 @@ impl Daemon {
     /// Handle one complete notify from the core.
     /// Drops the stored share exactly once. Misses count when
     /// monotonic time passes release plus deadline on a blocking
-    /// complete. Runtime charge stays in the core total. Unknown
+    /// complete. Runtime charge stays in the core total. Zero
+    /// identifiers pass through with no state change. Unknown
     /// identifiers pass through after order cleanup, so a lost enqueue
     /// never leaks a share.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
+        if pid == 0 {
+            return;
+        }
         let (release, deadline) = match self.tasks.get(&pid) {
             Some(t) => (t.release, t.deadline),
             None => {
@@ -665,5 +675,50 @@ mod tests {
         d.note_ev_drop();
         assert_eq!(d.ev_drops, 1);
         assert_eq!(d.parks, 1);
+    }
+
+    #[test]
+    fn zero_identifier_parks_with_no_row() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(0, 0, 0, 1_000_000, 1);
+        assert!(matches!(got, AdmitDecision::Park));
+        assert_eq!(d.task_len(), 0);
+        assert_eq!(d.queue_len(), 0);
+        assert_eq!(d.rejects, 1);
+        assert_eq!(d.parks, 1);
+        d.handle_complete(0, 2_000_000, false);
+        assert_eq!(d.misses, 0);
+        assert_eq!(d.task_len(), 0);
+    }
+
+    #[test]
+    fn keyed_remove_keeps_fresh_key_on_reuse() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(7, 4000, 0, 1_000_000, 71);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.queue_len(), 1);
+        d.handle_complete(7, 2_000_000, true);
+        assert_eq!(d.queue_len(), 0);
+        assert_eq!(d.task_len(), 0);
+        d.handle_complete(7, 2_000_000, true);
+        assert_eq!(d.queue_len(), 0);
+        let got = d.handle_enqueue(7, 32000, 0, 3_000_000, 72);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.queue_len(), 1);
+        assert_eq!(d.peek_order().unwrap().pid, 7);
+    }
+
+    #[test]
+    fn empty_key_clears_tree_bits() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(11, 4000, 0, 1_000_000, 81);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.queue_len(), 1);
+        d.handle_complete(11, 2_000_000, true);
+        assert_eq!(d.queue_len(), 0);
+        assert!(d.peek_order().is_none());
+        let got = d.handle_enqueue(12, 4000, 0, 3_000_000, 82);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.peek_order().unwrap().pid, 12);
     }
 }

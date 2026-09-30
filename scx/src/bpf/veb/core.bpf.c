@@ -5,17 +5,20 @@
  * Holds quantize, high, low, bit scans.
  * Quantize maps deadlines to keys with saturate at top.
  * High splits the high eight bits. Low splits the low eight bits.
- * Bit scans find first and last set bits within one word.
- * Map shims bound every index so the verifier sees safe access.
- * All helpers stay small so the verifier stays small.
+ * Bit scans use count trailing plus leading zeros with zero check
+ * so one word resolves in constant time. Map shims bound every
+ * index so the verifier sees safe access. All helpers stay small
+ * so the verifier stays small. Root updates race across CPUs and
+ * readers take the smaller of cached plus scan so stale high views
+ * never miss live low keys.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 static __always_inline u32 veb_quant(u64 deadline)
 {
 	u64 k = deadline >> FLOW_QUANT_SHIFT;
-	if (k > 65535ULL)
-		k = 65535ULL;
+	if (k >= (u64)FLOW_VEB_U)
+		k = (u64)FLOW_VEB_U - 1;
 	return (u32)k;
 }
 static __always_inline u32 veb_high(u32 k)
@@ -28,30 +31,15 @@ static __always_inline u32 veb_low(u32 k)
 }
 static __noinline int veb_first_bit(u64 w)
 {
-	int i;
-	bpf_for(i, 0, 64) {
-		u64 bit;
-		if (i < 0 || i >= 64)
-			continue;
-		bit = 1ULL << (u64)i;
-		if (w & bit)
-			return i;
-	}
-	return 64;
+	if (!w)
+		return 64;
+	return __builtin_ctzll(w);
 }
 static __noinline int veb_last_bit(u64 w)
 {
-	int i;
-	bpf_for(i, 0, 64) {
-		int b = 63 - i;
-		u64 bit;
-		if (b < 0 || b >= 64)
-			continue;
-		bit = 1ULL << (u64)b;
-		if (w & bit)
-			return b;
-	}
-	return -1;
+	if (!w)
+		return -1;
+	return 63 - __builtin_clzll(w);
 }
 static __always_inline u64 *veb_sum_ptr(u32 idx)
 {
@@ -67,7 +55,7 @@ static __always_inline u64 *veb_clu_ptr(u32 idx)
 }
 static __always_inline u32 *veb_cnt_ptr(u32 k)
 {
-	if (k >= 65536)
+	if (k >= (u32)FLOW_VEB_U)
 		return 0;
 	return bpf_map_lookup_elem(&veb_counts, &k);
 }

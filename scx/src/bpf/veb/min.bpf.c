@@ -4,10 +4,10 @@
  *
  * Holds cached reads and bitmap scans for least and greatest.
  * Cached reads use the root with fail closed empty on faults.
- * Scans walk summary then clusters with bounded loops.
- * The least helper takes the smaller of cached and scan so stale
- * high views never miss live low keys. All helpers stay bounded
- * so the verifier stays small.
+ * Scans walk summary then clusters with bounded loops. Root races
+ * across CPUs so the least helper takes the smaller of cached plus
+ * scan and stale high views never miss live low keys. All helpers
+ * stay bounded so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

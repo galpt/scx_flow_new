@@ -341,7 +341,11 @@ impl FlowVeb {
 
     /// Insert one task by deadline. Duplicate pids refresh in place.
     /// Refresh drops the old position and joins the tail of the fresh key.
+    /// Zero identifiers pass through with no state change.
     pub fn insert(&mut self, pid: u32, deadline: u64, seq: u64) {
+        if pid == 0 {
+            return;
+        }
         if self.pid_key.contains_key(&pid) {
             self.remove(pid);
         }
@@ -412,8 +416,14 @@ impl FlowVeb {
     /// Returns true when the pid was queued.
     /// Scan stays within one key queue. Total entries stay within the
     /// daemon depth bound of five hundred twelve, so a deeper bound
-    /// needs a position index. The pid index finds the key directly.
+    /// needs a position index. The pid index finds the key directly
+    /// and the queue position verifies the value so a reused pid never
+    /// drops a fresh key. Empty keys clear the tree bit at once so no
+    /// phantom key lingers. Zero identifiers pass through as missing.
     pub fn remove(&mut self, pid: u32) -> bool {
+        if pid == 0 {
+            return false;
+        }
         let key = match self.pid_key.get(&pid).copied() {
             Some(k) => k,
             None => return false,
@@ -421,7 +431,14 @@ impl FlowVeb {
         let empty = {
             let q = match self.queues.get_mut(&key) {
                 Some(q) => q,
-                None => return false,
+                None => {
+                    self.pid_key.remove(&pid);
+                    if self.len > 0 {
+                        self.len -= 1;
+                    }
+                    self.tree.remove(key);
+                    return false;
+                }
             };
             let pos = q.iter().position(|e| e.pid == pid);
             match pos {
@@ -605,5 +622,45 @@ mod tests {
             popped.push(e.pid);
         }
         assert_eq!(popped, view);
+    }
+
+    #[test]
+    fn zero_identifier_stays_out() {
+        let mut q = FlowVeb::new();
+        q.insert(0, 8_000_000, 1);
+        assert_eq!(q.len(), 0);
+        assert!(q.is_empty());
+        assert!(!q.remove(0));
+        q.insert(1, 8_000_000, 1);
+        assert_eq!(q.len(), 1);
+        assert!(!q.remove(0));
+        assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn empty_key_clears_tree_bit() {
+        let mut q = FlowVeb::new();
+        q.insert(1, 8_000_000, 1);
+        assert_eq!(q.peek_min().unwrap().pid, 1);
+        assert!(q.remove(1));
+        assert!(q.is_empty());
+        assert_eq!(q.peek_min(), None);
+        assert_eq!(q.pop_min(), None);
+        q.insert(2, 8_000_000, 2);
+        assert_eq!(q.peek_min().unwrap().pid, 2);
+    }
+
+    #[test]
+    fn remove_verifies_queue_position() {
+        let mut q = FlowVeb::new();
+        q.insert(1, 8_000_000, 1);
+        q.insert(2, 16_000_000, 2);
+        assert!(!q.remove(99));
+        assert_eq!(q.len(), 2);
+        assert!(q.remove(1));
+        assert!(!q.contains_pid(1));
+        assert!(q.contains_pid(2));
+        assert!(!q.remove(1));
+        assert_eq!(q.len(), 1);
     }
 }

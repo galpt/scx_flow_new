@@ -12,15 +12,15 @@ The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree 
 
 ### Queues
 
-Core parks at overflow with plain insert. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in tree order up to 16 per pass with sequence plus liveness checks and parks stale entries. Empty tree or stall fails open with one head move so progress stays bounded. Tree order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+Core parks at overflow with plain insert. Init reserves 522 queues as an ABI placeholder with local, node, machine, overflow. Dispatch moves admitted tasks in tree order up to 16 per pass with sequence, liveness, affinity checks and parks stale entries with no tree drop. Empty tree or stall moves one gated task with the same checks plus keyed drop so progress stays bounded with no bypass. Probes cap at 20 with empty skip through counts plus drained advance so one pass never scans the tail more than 20 times. Tree order drives dispatch within 512 entries with rejects parking and no run. Userspace queue holds 1024 events with drain cap 1024 and drops count parks. Over moves count progress. Bounds stay predicted from probe counts with veristat measured in CI plus no live benchmarks. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
-Deadlines quantize to 16 bit keys at 1024 nanos per step. Universe holds 65536 keys with shift 10 covering 67ms with saturate at top. Each key holds one FIFO queue for duplicates. Tree finds least key in doubly logarithmic time with summary, clusters, min, max. Order follows deadlines solely with stored shares for admission. Removal drops the pid key on complete, disable, exit. Oracle tests cover order plus FIFO. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
+Deadlines quantize to 16 bit keys at 1024 nanos per step. Universe holds 65536 keys with shift 10 covering 67ms with saturate at top. Each key holds one FIFO queue for duplicates. Tree finds least key in doubly logarithmic time with summary, clusters, min, max. Bit scans use trailing plus leading zeros with zero check. Counts bump before pid link so full maps never leave phantom keys with rollback plus one park. Zero counts clear bits at once so empty keys never linger. Root races across CPUs with least taking the smaller of cached plus scan. Order follows deadlines solely with stored shares for admission. Removal drops the pid key on complete, disable, exit with keyed drop for per CPU views. Oracle tests cover order plus FIFO. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ### Admission
 
-Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plus share stays within 950 per mille. Stored shares add once and drop once through enqueue, complete, disable, exit. Lost completes collect past deadline plus 128ms grace. Task rows cap at 4096. Hints stay derived from weight keyed by task. Times stay monotonic. See `src/rust/flow/runtime.rs`.
+Share equals 2ms times 1000 over period with 125 per mille at 16ms. Admitted plus share stays within 950 per mille. Stored shares add once and drop once through enqueue, complete, disable, exit. Lost completes collect past deadline plus 128ms grace. Task rows cap at 4096 with zero identifiers parking at once. Hints stay derived from weight keyed by task. Times stay monotonic. See `src/rust/flow/runtime.rs`.
 
 ### Gates
 
