@@ -43,7 +43,7 @@ impl<'a> Scheduler<'a> {
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::bpf_intf::flow_cpu_state {
         let idle = crate::bpf_intf::flow_cpu_state {
             running_pid: 0,
-            cursor: 0,
+            pad: 0,
         };
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             return idle;

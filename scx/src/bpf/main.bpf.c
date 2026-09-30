@@ -1,17 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core.
+ * Flow thin core.
  *
- * Maps hold task releases, CPU pid plus cursor rows, the topology
- * view, the capacity view, the admitted use rows, and the flat hint
- * rows. Init creates one local queue per CPU plus one shared queue
- * per node plus one machine queue plus one overflow tail, and it
- * fails loudly when an id reaches the local range. Ops split across
- * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
- * lifecycle, and flat hierarchy files. Shared helpers split across
- * main/task, deadline, hier, cpu, and timer files with maps plus
- * init here. Hotplug needs a restart, and the watchdog stays at
- * 20 seconds.
+ * Maps hold task run state plus CPU pid rows plus topology rows plus
+ * two notify rings. Init creates five hundred twelve local queues
+ * plus eight node queues plus machine plus overflow. The core parks
+ * FIFO and notifies. The daemon orders and admits. Hotplug needs a
+ * restart. The watchdog stays at twenty seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -21,57 +16,39 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/* Per task release for the life of the task. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
-/* Per CPU pid with placement cursor. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_cpu_state);
 } cpu_state_stor SEC(".maps");
-/* Per CPU topology view with sibling plus node. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
 	__type(key, u32);
 	__type(value, struct flow_topo);
 } topo_stor SEC(".maps");
-/* Per CPU capacity view with one units row. */
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_MAX_CPUS);
-	__type(key, u32);
-	__type(value, struct flow_cpu_cap);
-} cap_stor SEC(".maps");
-/* Per CPU admitted use with one per mille row. */
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 20);
+} flow_enq_rb SEC(".maps");
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_MAX_CPUS);
-	__type(key, u32);
-	__type(value, struct flow_cpu_admit);
-} admit_stor SEC(".maps");
-/* Flat period hint by id with miss default. Keys are hierarchy ids */
-/* with a bound at 4096, so large hosts hold churn with no stall. */
-/* Full tables fail closed to the default period with no eviction. */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, FLOW_HINT_MAX);
-	__type(key, u64);
-	__type(value, struct flow_hint);
-} hint_stor SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1 << 20);
+} flow_cmp_rb SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
+volatile u64 flow_seq;
 #include "main/task.bpf.c"
 #include "main/cpu.bpf.c"
 #include "main/hier.bpf.c"
-#include "main/deadline.bpf.c"
 #include "main/timer.bpf.c"
 #include "select_cpu.bpf.c"
 #include "enqueue.bpf.c"
@@ -83,7 +60,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	s32 ret;
 	u64 n;
 	s32 cpu;
-	u64 want = 1;
 	n = scx_bpf_nr_cpu_ids();
 	if (n > (u64)FLOW_MAX_CPUS) {
 		scx_bpf_error("CPU count over bound");
@@ -94,46 +70,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	nr_cpu_ids = n;
-	/* Node count derives from the seeded NUMA view with a cap */
-	/* at eight. Seeded rows arrive before attach, so the scan */
-	/* sees the host view. Unseeded rows read as zero, so the */
-	/* fallback stays at one with no panic on large hosts. */
-	{
-		s32 c;
-		u32 hi = 0;
-		bool seen = false;
-		bpf_for(c, 0, FLOW_MAX_CPUS) {
-			u32 key;
-			struct flow_topo *tp;
-			u32 nd;
-			if (c < 0)
-				continue;
-			if ((u64)c >= n)
-				break;
-			key = (u32)c;
-			tp = bpf_map_lookup_elem(&topo_stor,
-			    &key);
-			if (!tp)
-				continue;
-			nd = READ_ONCE(tp->node);
-			if (nd >= (u32)FLOW_MAX_NODES)
-				continue;
-			if (!seen || nd > hi) {
-				hi = nd;
-				seen = true;
-			}
-		}
-		if (seen)
-			want = (u64)hi + 1;
-		if (want < 1)
-			want = 1;
-		if (want > (u64)FLOW_MAX_NODES)
-			want = (u64)FLOW_MAX_NODES;
-		nr_node_ids = want;
-	}
+	nr_node_ids = (u64)FLOW_MAX_NODES;
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		struct flow_cpu_state *st;
-		struct flow_cpu_cap *cp;
 		u32 key;
 		if (cpu < 0)
 			continue;
@@ -145,16 +84,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		st = bpf_map_lookup_elem(&cpu_state_stor, &key);
 		if (st) {
 			st->running_pid = 0;
-			st->cursor = (u32)cpu;
+			st->pad = 0;
 		}
-		cp = bpf_map_lookup_elem(&cap_stor, &key);
-		if (cp)
-			cp->units = (u32)FLOW_CAP_BASE;
 	}
-	/* One local queue per CPU plus one shared queue per node plus */
-	/* one machine queue plus one overflow tail. Local ids cover */
-	/* 0x5100 plus id and node ids cover 0x5900 plus id. The node */
-	/* loop covers the derived count with a cap at eight. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 local;
 		if (cpu < 0)
@@ -172,17 +104,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			return ret;
 		}
 	}
-	/* One shared queue per node from the derived count. */
-	/* The bound stays at eight, so large hosts fold to machine. */
 	{
 		u32 node;
-		u64 nn = nr_node_ids;
-		if (nn > (u64)FLOW_MAX_NODES)
-			nn = (u64)FLOW_MAX_NODES;
 		bpf_for(node, 0, FLOW_MAX_NODES) {
 			u64 nd;
-			if ((u64)node >= nn)
-				break;
 			nd = flow_node_dsq(node);
 			if (!flow_dsq_valid(nd)) {
 				scx_bpf_error("dsq id over bound");
@@ -243,5 +168,5 @@ SCX_OPS_DEFINE(flow_ops,
 					  SCX_OPS_ENQ_MIGRATION_DISABLED |
 					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
 	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
-	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
+	       .timeout_ms		= 20000,
 	       .name			= "flow");
