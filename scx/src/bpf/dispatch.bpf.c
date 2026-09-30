@@ -18,7 +18,8 @@
  * stall moves one gated task with the same checks plus keyed drop
  * so progress stays bounded with no bypass. Over moves count
  * progress. Level follows after ordered moves plus fail open
- * with the same CPU only and no call on steady.
+ * with the same CPU only and no call on steady through one exit,
+ * so idle cannot be skipped.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -188,10 +189,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (cur == 0xFFFFFFFFU) {
 		if (veb_fail_open_one(cpu))
 			__sync_fetch_and_add(&flow_stats.over_moves, 1);
-		/* Level follows after ordered moves plus fail open */
-		/* with the same CPU only. */
-		flow_perf_update(cpu);
-		return;
+		/* Single exit covers the level, so idle cannot be skipped. */
+		goto out;
 	}
 	bpf_for(attempt, 0, 20) {
 		u32 *cntp;
@@ -219,14 +218,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved) {
 		__sync_fetch_and_add(&flow_stats.over_moves,
 		    (u64)moved);
-		/* Level follows after ordered moves plus fail open */
-		/* with the same CPU only. */
-		flow_perf_update(cpu);
-		return;
+		/* Single exit covers the level, so idle cannot be skipped. */
+		goto out;
 	}
 	if (veb_fail_open_one(cpu))
 		__sync_fetch_and_add(&flow_stats.over_moves, 1);
+out:
 	/* Level follows after ordered moves plus fail open */
-	/* with the same CPU only. */
+	/* with the same CPU only through one exit. */
 	flow_perf_update(cpu);
 }
