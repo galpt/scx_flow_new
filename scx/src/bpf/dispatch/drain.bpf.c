@@ -10,8 +10,9 @@
  * move admitted tasks out of order under flood with best effort
  * order there. Each move stays affinity gated with keyed drop, so
  * order rows never leak and no dead task runs. Callers pass sixteen,
- * so the budget stays exact with no clamp. Runs noinline with scalar
- * CPU plus budget and a bounded loop so the verifier stays small.
+ * so the budget stays exact with no clamp. Runs inline so the batch
+ * wrapper costs no call frame with scalar CPU plus budget and a
+ * bounded loop so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
