@@ -3,19 +3,22 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the daemon order, the admission table, the wire
+//! Holds the daemon mirror, the admission oracle, the wire
 //! protocol. The daemon keeps one quantized queue, one admitted
-//! row per CPU, one hint table. Order follows deadlines solely
-//! through the quantized tree. The BPF core parks and notifies.
-//! Dispatch moves admitted tasks in daemon order with sequence plus
-//! liveness checks and parks stale entries. Order cost stays on the
-//! userspace thread within five hundred twelve entries and stays off
-//! the BPF hot path. Times stay in the monotonic domain shared with
-//! the core. Parks include backpressure drops, ring drops, userspace
-//! queue drops. Queue backlog is the channel length and drop rate is
-//! the parks delta, so both stay visible with zero wire change.
-//! Hints stay derived from task weight keyed by task identifier.
-//! Lost completes collect past deadline plus grace.
+//! row per CPU, one hint table as a read only mirror for tests plus
+//! observability. Order follows deadlines solely through the
+//! quantized tree. The BPF core parks plus admits plus orders
+//! synchronously with no roundtrip. Dispatch moves admitted tasks in
+//! core order with sequence plus liveness checks and parks stale
+//! entries. Mirror cost stays on the userspace thread within five
+//! hundred twelve entries and stays off the BPF hot path. Times stay
+//! in the monotonic domain shared with the core. Parks include
+//! backpressure drops, ring drops, userspace queue drops. Queue
+//! backlog is the channel length and drop rate is the parks delta,
+//! so both stay visible with zero wire change. Hints stay derived
+//! from task weight keyed by task identifier. Lost completes collect
+//! past deadline plus grace for observability solely with no core
+//! revoke.
 
 use std::collections::HashMap;
 
@@ -32,7 +35,10 @@ pub const PROTO_ORDER: u64 = 2;
 pub const PROTO_DISPATCH: u64 = 3;
 /// Wire kind for complete notify from the core.
 pub const PROTO_COMPLETE: u64 = 4;
-/// First sequence handed to fresh tasks.
+/// First sequence handed to fresh tasks as oracle check.
+/// Core allocates one sequence per enqueue with the mirror kept for
+/// tests solely.
+#[cfg(test)]
 pub const SEQ_INIT: u64 = 1;
 /// Max queued entries tracked before the core parks with no run.
 pub const ORDER_DEPTH_MAX: usize = 512;
@@ -129,9 +135,10 @@ pub fn fail_open(reason: &FailReason) -> FailAction {
 
 /// Per task state held by the daemon.
 /// Share stays zero for parks. Admit CPU names the row holding the
-/// share. Release anchors the miss check. Wire sequence pairs the
-/// daemon order entry with the core task state for dispatch checks.
-/// Order uses deadlines solely with stored shares for admission.
+/// share. Release anchors the miss check. Sequence holds the single
+/// enqueue sequence shared with core task state plus the order row
+/// for dispatch checks. Order uses deadlines solely with stored
+/// shares for admission. Mirror only with the core as authority.
 #[derive(Clone, Debug)]
 pub struct TaskState {
     /// Last release time in nanos.
@@ -142,24 +149,25 @@ pub struct TaskState {
     pub share: u64,
     /// CPU holding the stored share.
     pub admit_cpu: u32,
-    /// Wire sequence from the enqueue notify.
+    /// Single sequence from the enqueue notify as oracle.
+    #[allow(dead_code)]
     pub wire_seq: u64,
 }
 
-/// Daemon holding the quantized queue plus admission rows.
+/// Daemon holding the quantized mirror plus admission oracle.
 /// Admitted rows hold one per mille sum per CPU. Tasks hold one
-/// stored share each. Adds pair with drops exactly once per admit.
-/// Wire sequence tracks notifies while order sequence tracks queued
-/// tasks. Disable plus exit notifies drop shares through complete.
-/// Task rows stay capped at the task bound. Stale rows collect past
-/// deadline plus grace. Queue drops fold into parks plus the drop
-/// gauge with zero wire change.
+/// stored share each. Adds pair with drops exactly once per admit
+/// in the mirror. Single sequence tracks notifies plus queued tasks
+/// with no split. Disable plus exit notifies drop shares through
+/// complete in the mirror. Task rows stay capped at the task bound.
+/// Stale rows collect past deadline plus grace for observability
+/// solely. Queue drops fold into parks plus the drop gauge with zero
+/// wire change. Core owns dispatch with the mirror never gating it.
 pub struct Daemon {
     pub(crate) order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
     pub(crate) tasks: HashMap<u32, TaskState>,
-    next_seq: u64,
     wire_last: u64,
     /// Tasks admitted under the use bound.
     pub admits: u64,
@@ -182,7 +190,6 @@ impl Daemon {
             hints: HintTable::new(),
             admitted: vec![0u64; super::slot::MAX_CPUS as usize],
             tasks: HashMap::new(),
-            next_seq: SEQ_INIT,
             wire_last: 0,
             admits: 0,
             rejects: 0,
@@ -230,11 +237,12 @@ impl Daemon {
         self.order.peek_min().cloned()
     }
 
-    /// Admitted entries in dispatch order for the core map.
-    /// Each row carries pid, wire sequence, deadline, admit CPU.
+    /// Admitted entries in dispatch order as oracle rows.
+    /// Each row carries pid, sequence, deadline, admit CPU.
     /// Parks stay out so rejects park with no run. The core checks
-    /// the wire sequence against task state plus CPU affinity and
-    /// moves admitted tasks in this order up to the batch bound.
+    /// the sequence against task state plus CPU affinity and moves
+    /// admitted tasks in this order up to the batch bound. Mirror
+    /// only with the core as authority.
     #[cfg(test)]
     pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
         let mut out = Vec::with_capacity(self.order.len());
@@ -249,20 +257,16 @@ impl Daemon {
     }
 
     /// Stored row for one pid with empty for unknown identifiers.
+    /// Oracle only with the core as authority.
+    #[cfg(test)]
     pub fn task(&self, pid: u32) -> Option<&TaskState> {
         self.tasks.get(&pid)
     }
 
-    /// Last observed wire sequence.
+    /// Last observed sequence for gap observability.
     #[cfg(test)]
     pub fn wire_last(&self) -> u64 {
         self.wire_last
-    }
-
-    /// Next order sequence for fresh admits.
-    #[cfg(test)]
-    pub fn next_order(&self) -> u64 {
-        self.next_seq
     }
 
     /// Share of one hint through the default period on miss.
@@ -293,15 +297,15 @@ impl Daemon {
         }
     }
 
-    /// Handle one enqueue notify from the core.
+    /// Handle one enqueue notify as mirror oracle.
     /// Fresh hints flow through the hint table. Stored shares add
-    /// once and drop once. Rejects park with no run at the core.
-    /// Zero identifiers park at once with no table row. Stale CPUs
-    /// clear the task row then park. Depth overflow clears the task
-    /// row then parks. Table full parks fresh identifiers
-    /// with zero stored share so the map stays capped. Order sequence
-    /// advances solely on admits while the wire sequence pairs each
-    /// row with core task state for dispatch.
+    /// once and drop once in the mirror. Rejects park with no run at
+    /// the core. Zero identifiers park at once with no table row.
+    /// Stale CPUs clear the task row then park. Depth overflow clears
+    /// the task row then parks. Table full parks fresh identifiers
+    /// with zero stored share so the map stays capped. Single
+    /// sequence pairs each row with core task state plus the order
+    /// row with no split. Mirror only with the core as authority.
     pub fn handle_enqueue(
         &mut self,
         pid: u32,
@@ -357,8 +361,6 @@ impl Daemon {
             let row = &mut self.admitted[cpu as usize];
             *row = row.saturating_add(share);
         }
-        let seq = self.next_seq;
-        self.next_seq = self.next_seq.saturating_add(1);
         self.tasks.insert(
             pid,
             TaskState {
@@ -369,18 +371,18 @@ impl Daemon {
                 wire_seq,
             },
         );
-        self.order.insert(pid, deadline, seq);
+        self.order.insert(pid, deadline, wire_seq);
         self.admits += 1;
         AdmitDecision::Admit { share, cpu }
     }
 
-    /// Handle one complete notify from the core.
-    /// Drops the stored share exactly once. Misses count when
-    /// monotonic time passes release plus deadline on a blocking
-    /// complete. Runtime charge stays in the core total. Zero
-    /// identifiers pass through with no state change. Unknown
-    /// identifiers pass through after order cleanup, so a lost enqueue
-    /// never leaks a share.
+    /// Handle one complete notify as mirror oracle.
+    /// Drops the stored share exactly once in the mirror. Misses
+    /// count when monotonic time passes release plus deadline on a
+    /// blocking complete. Runtime charge stays in the core total.
+    /// Zero identifiers pass through with no state change. Unknown
+    /// identifiers pass through after order cleanup, so a lost
+    /// enqueue never leaks a share. Mirror only.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         if pid == 0 {
             return;
@@ -400,11 +402,12 @@ impl Daemon {
         }
     }
 
-    /// Collect stale rows past deadline plus grace.
+    /// Collect stale rows past deadline plus grace as mirror only.
     /// Drops stored shares then clears order plus task rows. Lost
-    /// completes return shares here so admitted sums never leak.
-    /// Callers pass monotonic now and poll at a slow cadence.
-    /// Returns removed pids for core map cleanup.
+    /// completes return shares here so admitted sums never leak in
+    /// the mirror. Callers pass monotonic now and poll at a slow
+    /// cadence. Returns removed pids for observability solely with no
+    /// core revoke.
     pub fn gc_stale(&mut self, now: u64) -> Vec<u32> {
         if self.tasks.is_empty() {
             return Vec::new();
@@ -422,13 +425,13 @@ impl Daemon {
         stale
     }
 
-    /// Note one observed wire sequence.
-    /// In order notifies advance the wire mark. Duplicates,
-    /// reorder, forward jumps report resync through the fail open
-    /// matrix. Zero stays ignored. The first notify after attach
-    /// accepts any sequence as a mid attach edge with zero resync, so
-    /// tasks queued before attach never count a false gap. Callers
-    /// execute the resync park.
+    /// Note one observed sequence for gap observability solely.
+    /// In order notifies advance the mark. Duplicates, reorder,
+    /// forward jumps report resync through the fail open matrix with
+    /// loss irrelevant to dispatch. Zero stays ignored. The first
+    /// notify after attach accepts any sequence as a mid attach edge
+    /// with zero resync, so tasks queued before attach never count a
+    /// false gap. Mirror only with no core effect.
     pub fn note_seq(&mut self, seq: u64) -> FailAction {
         if seq == 0 {
             return FailAction::ParkFifo;
@@ -529,16 +532,15 @@ mod tests {
     }
 
     #[test]
-    fn wire_and_order_sequences_stay_split() {
+    fn wire_and_order_share_single_sequence() {
         let mut d = Daemon::new();
         assert_eq!(d.note_seq(1), FailAction::ParkFifo);
         assert_eq!(d.wire_last(), 1);
-        let order_before = d.next_order();
         let got = d.handle_enqueue(10, 0, 0, 1_000_000, 5);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.task(10).unwrap().wire_seq, 5);
         assert_eq!(d.wire_last(), 1);
-        assert_eq!(d.next_order(), order_before.saturating_add(1));
+        assert_eq!(d.peek_order().unwrap().seq, 5);
         assert_eq!(d.note_seq(2), FailAction::ParkFifo);
         assert_eq!(d.wire_last(), 2);
         assert_eq!(d.note_seq(2), FailAction::Resync);
@@ -616,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_returns_removed_for_core_cleanup() {
+    fn gc_returns_removed_for_observability_only() {
         let mut d = Daemon::new();
         d.handle_enqueue(1, 4000, 0, 1_000_000, 41);
         d.handle_enqueue(2, 32000, 0, 1_000_000, 42);

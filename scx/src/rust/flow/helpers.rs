@@ -3,12 +3,13 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the paired share, order, task helpers with single exit through
-//! one return. Every admit pairs an add with a drop exactly once. Every
-//! remove pairs share drop, order remove, task clear in one place. Every
-//! reject pairs order cleanup with parks accounting. Callers reach all
-//! five through here so a missed cleanup cannot leak shares or linger
-//! keys.
+//! Holds the paired share, order, task helpers for the mirror with
+//! single exit through one return. Every admit pairs an add with a
+//! drop exactly once in the mirror. Every remove pairs share drop,
+//! order remove, task clear in one place. Every reject pairs order
+//! cleanup with parks accounting. Callers reach all three through
+//! here so a missed cleanup cannot leak shares or linger keys in the
+//! mirror. Core owns authority with the mirror never gating dispatch.
 
 use super::Daemon;
 use super::runtime::AdmitDecision;

@@ -7,12 +7,15 @@
 //! Each poll reads the counters and the per CPU pid view through
 //! map reads. Counter reads stay cheap with one BSS view while per
 //! CPU reads cost one syscall per online CPU and run throttled at
-//! dashboard cadence on the hot thread. Policy counters merge from
-//! the daemon while mechanism counters come from the core. Parks sum
-//! core drops, daemon parks, userspace queue drops. Dispatch moves
-//! admitted tasks in daemon order and over moves count progress with
-//! ordered moves counting vEB hits plus fail open moves counting FIFO
-//! parks so every dispatched task lands in one bucket.
+//! dashboard cadence on the hot thread. Admission counters come from
+//! the core as source of truth with the mirror kept for tests plus
+//! observability solely. Parks sum core parks plus userspace queue
+//! drops with no double count. Dispatch moves admitted tasks in core
+//! order and over moves count progress with ordered moves counting
+//! vEB hits plus fail open moves counting FIFO parks so every
+//! dispatched task lands in one bucket. Ordered share stays high
+//! since rows land synchronously with solely genuine affinity misses
+//! reaching fail open.
 //! Dashboard timestamps use wall time for logs plus file names while
 //! deadlines plus runtime use monotonic time, so the two domains stay
 //! separate by intent.
@@ -28,6 +31,7 @@ impl<'a> Scheduler<'a> {
     pub(crate) fn get_metrics(&self) -> stats::Metrics {
         let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
         let s = &bss.flow_stats;
+        let ev = self.ev_drops.load(std::sync::atomic::Ordering::Relaxed);
         stats::Metrics {
             on_cpu: s.on_cpu,
             total_runtime: s.total_runtime,
@@ -37,10 +41,10 @@ impl<'a> Scheduler<'a> {
             completions: s.completions,
             over_moves: s.over_moves,
             kicks: s.kicks,
-            admits: self.daemon.admits,
-            rejects: self.daemon.rejects,
-            misses: self.daemon.misses,
-            parks: s.parks.saturating_add(self.daemon.parks),
+            admits: s.admits,
+            rejects: s.rejects,
+            misses: s.misses,
+            parks: s.parks.saturating_add(ev),
             gate_rejects: s.gate_rejects,
             veb_hits: s.veb_hits,
             fifo_parks: s.fifo_parks,

@@ -3,11 +3,13 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the flat period hint table used by admission. The table maps
+//! Holds the flat period hint table as mirror oracle. The table maps
 //! task identifiers to periods derived from task weight. Light shares
 //! map to long periods and heavy shares map to short periods. Full
-//! tables keep the default period for fresh identifiers. Hierarchy
-//! tracking stays out, so hints stay derived, not hierarchy bound.
+//! tables keep the default period for fresh identifiers. Core derives
+//! periods directly from weight with the mirror kept for tests plus
+//! observability solely. Hierarchy tracking stays out, so hints stay
+//! derived, not hierarchy bound.
 
 use std::collections::HashMap;
 

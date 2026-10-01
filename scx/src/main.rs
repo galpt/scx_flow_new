@@ -4,8 +4,10 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Loads the BPF object, seeds the topology view, drives the
-//! loop. Observability flows through counters plus the loopback
-//! dashboard with per CPU cards plus a JSON snapshot for debug.
+//! loop. Admission plus order live in the core with no roundtrip.
+//! Observability flows through counters plus the loopback dashboard
+//! with per CPU cards plus a JSON snapshot for debug. The daemon
+//! mirror never gates dispatch.
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -106,9 +108,9 @@ struct Opts {
 }
 
 /* Scheduler owns the skeleton, the link, the stats server, */
-/* the dashboard channel, the daemon order. It drives the */
-/* run loop until shutdown or exit. Backlog is the event channel */
-/* length and drop rate is the parks delta with zero wire change. */
+/* the dashboard channel, the mirror. It drives the run loop */
+/* until shutdown or exit. Backlog is the event channel length */
+/* and drop rate is the parks delta with zero wire change. */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -122,7 +124,7 @@ pub(crate) struct Scheduler<'a> {
     smt: Vec<bool>,
     /* One line topology summary for the page. */
     topology: String,
-    /* Daemon order plus admission state. */
+    /* Daemon mirror for observability solely. */
     pub(crate) daemon: flow::Daemon,
     /* Bounded event channel from the ring buffers. */
     ev_rx: crossbeam::channel::Receiver<[u8; EVENT_LEN]>,
@@ -179,7 +181,7 @@ impl<'a> Scheduler<'a> {
             .collect();
         let topology = topology::describe_topology(&rows);
         info!("Topology: {topology}");
-        /* Bounded event queue drops with parks accounting when full. */
+        /* Bounded event queue drops with drop gauge when full. */
         /* Stack copies avoid per event heap growth on the hot path. */
         /* Faulty setup keeps progress at the core through fail open. */
         let (ev_tx, ev_rx) = crossbeam::channel::bounded::<[u8; EVENT_LEN]>(flow::EV_CAP);
@@ -212,8 +214,8 @@ impl<'a> Scheduler<'a> {
 
     /* Forward one ring payload into the bounded queue. */
     /* Stack copies avoid per event heap growth on the hot path. */
-    /* Full queues count one drop with parks folded later so no drop */
-    /* stays silent. Short payloads drop with no state change. */
+    /* Full queues count one drop in the gauge with no core effect. */
+    /* Short payloads drop with no state change. */
     fn forward_event(
         data: &[u8],
         tx: &crossbeam::channel::Sender<[u8; EVENT_LEN]>,
@@ -232,7 +234,7 @@ impl<'a> Scheduler<'a> {
 
     /* Build one polling handle over both notify rings. */
     /* Stack copies carry fixed payloads into the bounded queue. */
-    /* Full queues drop with drop accounting folded into parks. */
+    /* Full queues drop with gauge solely and no core effect. */
     /* Faulty maps yield empty with progress preserved through fail open. */
     fn build_rings(
         skel: &BpfSkel<'a>,
@@ -301,78 +303,30 @@ impl<'a> Scheduler<'a> {
         Some((kind, seq, pid, cpu, weight, pad, at))
     }
 
-    /* Apply one decoded notify to the daemon plus the core order map. */
+    /* Apply one decoded notify to the daemon mirror solely. */
     /* Enqueue derives the hint from the task weight and caches the */
-    /* row before admission then publishes the order entry for dispatch. */
-    /* Complete drops the stored share plus the order entry. Wire */
-    /* gaps count one park through resync. Reserved plus unknown kinds */
-    /* hold at the core with progress kept. Rejects park with no run. */
+    /* row then mirrors admission for observability with no core */
+    /* effect. Complete mirrors the share drop for observability. */
+    /* Gaps stay observability solely with loss irrelevant. Reserved */
+    /* plus unknown kinds hold at the core with progress kept. */
+    /* Rejects park with no run in the core. */
     fn handle_event(&mut self, data: &[u8]) {
         let Some((kind, seq, pid, cpu, weight, pad, at)) = Self::decode_event(data) else {
             return;
         };
-        if self.daemon.note_seq(seq) == flow::FailAction::Resync {
-            self.daemon.parks = self.daemon.parks.saturating_add(1);
-        }
+        let _ = self.daemon.note_seq(seq);
         if kind == flow::PROTO_ENQUEUE {
             let hint = flow::hint_period_us(weight) as u32;
             self.daemon.hints_mut().insert(pid as u64, hint as u64);
             let time = if at != 0 { at } else { Self::mono_ns() };
-            let decision = self.daemon.handle_enqueue(pid, hint, cpu, time, seq);
-            if matches!(decision, flow::AdmitDecision::Admit { .. }) {
-                self.publish_order_entry(pid);
-            } else {
-                self.unpublish_order_entry(pid);
-            }
+            let _ = self.daemon.handle_enqueue(pid, hint, cpu, time, seq);
         } else if kind == flow::PROTO_COMPLETE {
             let runnable = pad != 0;
             let time = if at != 0 { at } else { Self::mono_ns() };
             self.daemon.handle_complete(pid, time, runnable);
-            self.unpublish_order_entry(pid);
         } else {
             let action = flow::fail_open(&flow::FailReason::BadKey);
             debug_assert_eq!(action, flow::FailAction::HoldKick);
-        }
-    }
-
-    /* Publish one admitted row to the core order map. */
-    /* Faulty updates count one park with progress kept through fail open. */
-    /* Missing rows unpublish so rejects park with no run. */
-    fn publish_order_entry(&mut self, pid: u32) {
-        let Some(t) = self.daemon.task(pid) else {
-            self.unpublish_order_entry(pid);
-            return;
-        };
-        if t.share == 0 {
-            self.unpublish_order_entry(pid);
-            return;
-        }
-        let key = pid.to_ne_bytes();
-        let mut val = [0u8; 24];
-        val[0..8].copy_from_slice(&t.wire_seq.to_ne_bytes());
-        val[8..16].copy_from_slice(&t.deadline.to_ne_bytes());
-        val[16..20].copy_from_slice(&t.admit_cpu.to_ne_bytes());
-        {
-            use libbpf_rs::MapCore;
-            if let Err(e) = self
-                .skel
-                .maps
-                .order_stor
-                .update(&key, &val, libbpf_rs::MapFlags::ANY)
-            {
-                log::warn!("order publish failed for pid {pid}: {e}");
-                self.daemon.parks = self.daemon.parks.saturating_add(1);
-            }
-        }
-    }
-
-    /* Remove one row from the core order map. */
-    /* Missing rows pass through so drops stay idempotent. */
-    fn unpublish_order_entry(&mut self, pid: u32) {
-        let key = pid.to_ne_bytes();
-        {
-            use libbpf_rs::MapCore;
-            let _ = self.skel.maps.order_stor.delete(&key);
         }
     }
 
@@ -392,23 +346,22 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    /* Count one daemon lag park with progress kept. */
-    /* Missing rings plus poll faults reach here so every stall counts */
-    /* once with no missed park. Runs through the fail open matrix with */
-    /* park on lag. */
+    /* Note one ring stall for observability solely. */
+    /* Missing rings plus poll faults reach here with no park since */
+    /* dispatch runs independent of the ring with loss irrelevant. */
     fn note_daemon_lag(&mut self) {
         let action = flow::fail_open(&flow::FailReason::DaemonLag);
         debug_assert_eq!(action, flow::FailAction::ParkFifo);
-        self.daemon.parks = self.daemon.parks.saturating_add(1);
     }
 
-    /* Drain available ring events into the daemon. */
+    /* Drain available ring events into the mirror. */
     /* Polls kernel rings then drains until empty or cap with remainder */
-    /* deferred to the next poll. Queue drops fold into parks plus the */
-    /* drop gauge. Missing rings plus poll faults count one park with */
-    /* progress kept. Dashboard backpressure counts solely at send time so */
-    /* one drop counts one park. Backlog is the channel length and drop */
-    /* rate is the parks delta with zero wire change. */
+    /* deferred to the next poll. Queue drops fold into the drop gauge */
+    /* with parks from the core as source of truth. Missing rings plus */
+    /* poll faults stay observability solely with no park since dispatch */
+    /* runs independent. Dashboard backpressure drops the frame solely */
+    /* with no park. Backlog is the channel length and drop rate is the */
+    /* parks delta with zero wire change. */
     fn drain_rings(&mut self) {
         if let Some(rb) = self.rings.as_ref() {
             if rb.consume().is_err() {
@@ -431,8 +384,9 @@ impl<'a> Scheduler<'a> {
 
     /* Push one dashboard snapshot when past freshness. */
     /* Per CPU map reads run solely here so the hot thread stays cheap */
-    /* while the page stays fresh at dashboard cadence. One failed send */
-    /* counts one park with progress kept. */
+    /* while the page stays fresh at dashboard cadence. Failed sends */
+    /* drop the frame solely with no park since dispatch runs */
+    /* independent. */
     fn push_web_if_due(&mut self) {
         let Some(ref tx) = self.webui_tx else {
             return;
@@ -442,23 +396,20 @@ impl<'a> Scheduler<'a> {
         }
         let web = self.get_web_metrics();
         self.last_web = Instant::now();
-        if tx.try_send(web).is_err() {
-            self.daemon.parks = self.daemon.parks.saturating_add(1);
-        }
+        let _ = tx.try_send(web);
     }
 
-    /* Collect stale rows past grace at a slow cadence. */
-    /* Lost completes return shares here so admitted sums never leak. */
-    /* Removed rows unpublish from the core map so stale order never runs. */
+    /* Collect stale mirror rows past grace at a slow cadence. */
+    /* Lost completes return shares here in the mirror for */
+    /* observability solely with no core revoke. Core drops through */
+    /* stopping plus disable plus exit exactly once. */
     fn maybe_gc(&mut self) {
         if self.last_gc.elapsed() < Duration::from_millis(GC_INTERVAL_MS) {
             return;
         }
         self.last_gc = Instant::now();
         let now = Self::mono_ns();
-        for pid in self.daemon.gc_stale(now) {
-            self.unpublish_order_entry(pid);
-        }
+        let _ = self.daemon.gc_stale(now);
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -609,6 +560,11 @@ mod tests {
         assert_eq!(crate::flow::slice::WEIGHT_BASE, 128);
         assert_eq!(crate::flow::slice::WEIGHT_MIN, 1);
         assert_eq!(crate::flow::slice::WEIGHT_MAX, 16_384);
+        assert_eq!(
+            crate::flow::edf::ADMIT_PERMILLE,
+            crate::bpf_intf::flow_consts_FLOW_ADMIT_PERMILLE as u64
+        );
+        assert_eq!(crate::flow::edf::ADMIT_PERMILLE, 950);
     }
 
     #[test]
@@ -639,8 +595,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_16() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 16);
+    fn task_size_is_24() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 24);
     }
 
     #[test]

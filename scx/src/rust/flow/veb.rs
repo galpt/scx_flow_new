@@ -3,9 +3,11 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the quantized order used by the daemon. Deadlines quantize to
+//! Holds the quantized order as mirror oracle. Deadlines quantize to
 //! a small key. Each key holds one FIFO queue. The tree finds the least
 //! key in doubly logarithmic time. Equal keys leave in insert order.
+//! Core owns order with the mirror kept for tests plus observability
+//! solely with identical quantize plus duplicate plus remove math.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -685,13 +687,16 @@ mod tests {
         assert_eq!(q.len(), 1);
     }
 
-    /// Flat bitmap mirror of the BPF tree for differential coverage.
+    /// Flat bitmap mirror of the BPF tree plus ledger for coverage.
     /// Replicates quantize, high, low, insert, remove, keyed remove,
     /// cached plus scan least, greatest, successor exactly as the BPF
-    /// helpers behave single threaded. Compare and swap loops collapse
-    /// to one update here while contention fallbacks stay park counted
-    /// in the BPF code. Within key order stays out since the core keeps
-    /// park order in the overflow tail, not in the tree.
+    /// helpers behave single threaded. Admission plus order rows land
+    /// synchronously in the core with the mirror kept as oracle for
+    /// tests plus observability solely. Compare and swap loops
+    /// collapse to one update here while contention fallbacks stay
+    /// park counted in the BPF code. Within key order stays out since
+    /// the core keeps park order in the overflow tail, not in the
+    /// tree.
     struct BpfMirror {
         summary: [u64; 4],
         clusters: [u64; 1024],

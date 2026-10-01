@@ -4,8 +4,10 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the release, period, deadline, admission models.
-//! The daemon orders through the quantized tree in veb. This file
-//! keeps the scalar math used by admission and by header checks.
+//! The core orders through the quantized tree in veb with admission
+//! plus order owned in the core. This file keeps the scalar math as
+//! oracle for tests plus header checks with identical share plus
+//! bound math.
 
 /// Default period in nanos at sixteen milliseconds. Holds eight slices.
 pub const PERIOD_NS: u64 = 16_000_000;
