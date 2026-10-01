@@ -12,8 +12,8 @@
  * consistent. Four tries then give up with one park and the next
  * remove retries the same key. Bit clears retry four times then
  * give up as benign with the next remove retrying the same bit.
- * Callers with a per CPU view use the keyed remove so a reused pid
- * never drops a fresh key. Faults fail closed with parks.
+ * Teardown stays the single reaper so a reused pid never drops a
+ * fresh key. Faults fail closed with parks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

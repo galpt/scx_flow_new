@@ -4,8 +4,8 @@
  *
  * Moves admitted tasks in global deadline order up to sixteen per pass
  * with no sequence gate and no CPU gate. Each move picks the least key
- * then deadline among entries the dispatch CPU may run, with the
- * stored CPU kept as a tiebreak solely. Affinity plus liveness gate
+ * then deadline then owned then pid among entries the dispatch CPU may
+ * run. Affinity plus liveness gate
  * every move through the same entry check as the FIFO path, so the
  * target class never widens. Ordered checks run first so admitted
  * tasks stay preferred, while the FIFO drain moves the remainder in
@@ -69,6 +69,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			break;
 		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
 			break;
+		/* A recheck miss ends ordered and falls to FIFO below, */
+		/* so one stale pick never burns extra scans. */
 		if (!veb_consume_best(cpu))
 			break;
 		moved++;

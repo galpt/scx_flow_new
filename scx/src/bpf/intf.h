@@ -19,9 +19,9 @@
  * task, so urgent arrivals preempt longer runs with at most one kick
  * per park and no storm. Dispatch moves admitted tasks in global
  * deadline order up to sixteen per pass with no sequence gate and
- * no CPU gate. Each pass picks the least key then deadline among
- * entries the dispatch CPU may run, with the stored CPU kept as a
- * tiebreak solely, so any CPU takes the earliest work it may run.
+ * no CPU gate. Each pass picks the least key then deadline then owned
+ * then pid among entries the dispatch CPU may run, so any CPU takes
+ * the earliest work it may run.
  * Affinity plus liveness still gate every move through the same
  * entry check as the FIFO path, so the target class never widens.
  * Ordered checks run first
