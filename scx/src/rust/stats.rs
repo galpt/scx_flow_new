@@ -67,10 +67,10 @@ pub struct Metrics {
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
-    #[stat(desc = "Ordered vEB dispatches with admitted order match")]
+    #[stat(desc = "Ordered vEB dispatches in key plus deadline order")]
     #[serde(default)]
     pub veb_hits: u64,
-    #[stat(desc = "Fail open dispatches with no ordered dispatch")]
+    #[stat(desc = "Empty or corrupt fallback dispatches as canary")]
     #[serde(default)]
     pub fifo_parks: u64,
 }

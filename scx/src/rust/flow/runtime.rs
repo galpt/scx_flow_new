@@ -9,9 +9,9 @@
 //! observability, plus one head view per low key byte and one owner
 //! view per task as oracle for the core hints. Order follows deadlines solely
 //! through the quantized tree. The BPF core parks plus admits plus
-//! orders synchronously with no roundtrip. Dispatch moves admitted
-//! tasks in least key then deadline order with affinity plus liveness
-//! checks and parks stale entries. The head view keeps the earliest
+//! orders synchronously with no roundtrip. Dispatch moves every parked
+//! task in least key then deadline order with rejects at the top key
+//! last with affinity plus liveness checks and parks stale entries. The head view keeps the earliest
 //! deadline then smallest pid per low key byte so picks skip tail walks
 //! in the core, while the owner view steers repeat parks toward the
 //! previous CPU with mask still checked in the core. Mirror cost stays on the
@@ -49,15 +49,15 @@ pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
 /// Max key probes per dispatch pass. Mirrors the BPF header.
-/// Twenty stays as ABI while ordered fills sixteen per pass with FIFO
-/// covering the remainder so full batches never starve.
+/// Twenty stays as ABI while ordered fills sixteen per pass so full
+/// batches never starve.
 pub const DISPATCH_PROBES: usize = 20;
-/// Deep backlog shape. Mirrors the BPF header. Past one hundred
-/// twenty eight queued the backlog still drains sixteen per pass with
-/// ordered first and FIFO covering the remainder.
+/// Deep backlog shape. Mirrors the BPF header as ABI. Backlog still
+/// drains sixteen ordered per pass with the fallback solely on empty
+/// tree or corrupt state.
 pub const DISPATCH_FLOOD_PROBES: usize = 4;
-/// Queue depth past which the flood cap applies. Mirrors the header.
-/// Past one hundred twenty eight queued the stall budget gates order.
+/// Queue depth marking deep backlog. Mirrors the header as ABI.
+/// Ordered still drains sixteen per pass past this depth.
 pub const DISPATCH_FLOOD_QUEUED: usize = 128;
 /// Bound for the userspace event queue at twice order depth.
 /// Holds enqueue plus complete pairs per burst. Full queues drop with
@@ -88,15 +88,15 @@ const _: () = assert!(DISPATCH_BATCH == 16);
 /// Twenty stays as ABI with sixteen moves filling the batch.
 const _: () = assert!(DISPATCH_PROBES == 20);
 /// Guard that the flood stall budget mirrors the BPF header.
-/// Four plus one hundred twenty eight mark deep backlog shape with
-/// ordered first and FIFO covering the remainder.
+/// Four plus one hundred twenty eight mark deep backlog shape as ABI
+/// with ordered draining sixteen per pass.
 const _: () = assert!(DISPATCH_FLOOD_PROBES == 4);
 /// Guard that the flood queue bound mirrors the BPF header.
-/// Past one hundred twenty eight queued the backlog still drains with
-/// ordered first and FIFO covering the remainder.
+/// Backlog still drains ordered past this depth with the fallback
+/// solely on empty tree or corrupt state.
 const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 /// Guard that the flood budget stays inside the probe budget.
-/// Ordered fills sixteen with FIFO covering the remainder.
+/// Ordered fills sixteen per pass as ABI.
 const _: () = assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
 /// Guard that one batch never exceeds the probe budget.
 const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
@@ -335,9 +335,9 @@ impl Daemon {
     /// Admitted entries in dispatch order as oracle rows.
     /// Each row carries pid, sequence, deadline, admit CPU.
     /// Parks stay out so rejects park with no run. The core moves
-    /// admitted tasks in least key then deadline order up to the batch
-    /// bound with affinity plus liveness checks. Mirror
-    /// only with the core as authority.
+    /// every parked task in least key then deadline order up to the
+    /// batch bound with rejects at the top key last with affinity plus
+    /// liveness checks. Mirror only with the core as authority.
     #[cfg(test)]
     pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
         let mut out = Vec::with_capacity(self.order.len());
@@ -717,14 +717,16 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn flood_and_drain_bounds_hold() {
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
         assert_eq!(DISPATCH_BATCH, 16);
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
-        // Ordered fills sixteen with FIFO covering the remainder,
-        // so deep backlog still drains in order per pass.
+        // Ordered fills sixteen per pass with the fallback solely on
+        // empty tree or corrupt state, so deep backlog still drains
+        // in order per pass.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DISPATCH_FLOOD_PROBES + (DISPATCH_BATCH >> 2), 8);

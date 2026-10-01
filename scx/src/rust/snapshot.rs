@@ -10,11 +10,12 @@
 //! dashboard cadence on the hot thread. Admission counters come from
 //! the core as source of truth with the mirror kept for tests plus
 //! observability solely. Parks sum core parks plus userspace queue
-//! drops with no double count. Dispatch moves admitted tasks in core
-//! order and over moves count progress with ordered moves counting
-//! vEB hits plus fail open moves counting FIFO parks so every
-//! dispatched task lands in one bucket. Ordered share stays high
-//! since rows land synchronously with solely genuine affinity misses
+//! drops with no double count. Dispatch moves every parked task in
+//! core order with rejects at the top key last and over moves count
+//! progress with ordered moves counting vEB hits plus fallback moves
+//! counting FIFO parks so every dispatched task lands in one bucket.
+//! Ordered share stays near total since every parked task carries a
+//! key plus deadline with solely the empty or corrupt fallback
 //! reaching fail open.
 //! Dashboard timestamps use wall time for logs plus file names while
 //! deadlines plus runtime use monotonic time, so the two domains stay

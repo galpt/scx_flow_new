@@ -56,9 +56,10 @@ impl Config {
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
     /// at sixteen milliseconds. The batch stays at sixteen with ordered
-    /// filling the batch and FIFO covering the remainder. Flood bound
-    /// stays at four plus one hundred twenty eight as deep backlog
-    /// shape with a twenty probe cap kept as ABI. Admission
+    /// filling the batch and the fallback solely on empty tree or
+    /// corrupt state. Flood bound stays at four plus one hundred twenty
+    /// eight as ABI deep backlog shape with a twenty probe cap kept as
+    /// ABI. Admission
     /// holds use under nine hundred fifty per mille with base capacity
     /// one thousand twenty four. Queues hold five hundred twelve local,
     /// eight node, machine, overflow. Hints hold four
@@ -230,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn flood_and_drain_bounds_hold() {
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
@@ -237,8 +239,9 @@ mod tests {
         assert_eq!(DEF_BATCH, 16);
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
-        // Ordered fills the batch with FIFO covering the remainder,
-        // so deep backlog still drains sixteen per pass in order.
+        // Ordered fills the batch per pass with the fallback solely on
+        // empty tree or corrupt state, so deep backlog still drains
+        // sixteen per pass in order.
         let slack = DEF_BATCH - DEF_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DEF_FLOOD_PROBES + (DEF_BATCH >> 2), 8);

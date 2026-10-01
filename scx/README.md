@@ -22,7 +22,7 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order with live checks, then FIFO for the remainder. A low byte head skips tail walks with fallback. Placement reuses the last owner when allowed. Past 128 queued, backlog drains 16 per pass. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. FIFO runs solely on empty tree or corrupt state. A low byte head skips tail walks. Placement reuses the owner when allowed. Backlog drains 16 ordered per pass. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -30,7 +30,7 @@ Each due time becomes a `16 bit` number at `1024 nanos` per step with top values
 
 ### Admission
 
-Tasks carry shares from weight and the core holds load under `950 per mille` per CPU. Shares add once and drop once. Rejects park with no key, row, or run. Misses count past due on blocking ends. Mirror keeps math for tests only. See `src/bpf/admit/` and `src/rust/flow/runtime.rs`.
+Tasks carry shares from weight and the core holds load under `950 per mille` per CPU. Shares add once and drop once. Rejects park at the top key with no row or run. Misses count past due on blocking ends. Mirror keeps math for tests only. See `src/bpf/admit/` and `src/rust/flow/runtime.rs`.
 
 ### Gates
 
@@ -63,6 +63,6 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
 - Placement uses an idle CPU when live, else the last owner when live plus allowed, else the selected CPU when live, else the first live CPU, so load spreads with warmth and no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
-- Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs the earliest admitted in order while rejects drain FIFO up to `16` per pass with higher latency.
-- Flood throughput stays bounded by the fixed `2ms` slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus FIFO plus preempt work.
+- Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain ordered at the top key with higher latency.
+- Flood throughput stays bounded by the fixed `2ms` slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
 - Preempt sends at most one directed kick per park to the owner CPU solely when the wakeup holds a row and runs earlier than the owner task, with a running reject counting as longer, so urgent arrivals preempt longer runs with no storm and equal or earlier owners never bounce.
