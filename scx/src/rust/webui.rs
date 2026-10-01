@@ -377,7 +377,9 @@ mod tests {
         assert!(html.contains("VEB_HEALTHY_PCT"));
         assert!(html.contains("95"));
         assert!(html.contains("receiving the benefits of the vEB queues"));
-        assert!(html.contains("are not receiving the benefits of the vEB queues"));
+        assert!(html.contains("struggling without the benefits of the vEB queues"));
+        assert!(html.contains("% of dispatched tasks"));
+        assert!(!html.contains("are not receiving the benefits of the vEB queues"));
         assert!(html.contains("processed by vEB"));
         assert!(html.contains("completions window"));
         assert!(html.contains("fail-open share"));
