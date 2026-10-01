@@ -57,3 +57,9 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 - Releases need a restart.
 - State is `16B`, `8B`, `8B`, `112B`.
 - Needs kernels, `7.2` series and up.
+- Cursor spread eight peer scan stays dropped by design as homegrown.
+- Gated local, node, machine router with `cpu_meets` stays dropped by design as homegrown.
+- Fixed order four tier drain stays dropped by design as homegrown.
+- Tiers lose since tier priority beats deadline priority with extra scans plus moves.
+- Node plus machine queues stay reserved as ABI only with no tasks.
+- Single tail, sticky previous, mask wins stays adopted with no change.
