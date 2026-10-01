@@ -162,6 +162,8 @@ static __noinline bool flow_head_pick(s32 cpu,
 	if (d == 0)
 		goto out;
 	owner = READ_ONCE(tctx->admit_cpu);
+	if ((u64)owner >= (u64)FLOW_MAX_CPUS)
+		goto out;
 	if (owner != want_owner) {
 		/* Heal the slot to the live owner, so migration keeps */
 		/* warmth with no extra scan while pid plus key plus */
