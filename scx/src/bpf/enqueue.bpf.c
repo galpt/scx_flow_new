@@ -11,7 +11,15 @@
  * count one park. One sequence allocation serves task state plus
  * wire notify so the wire stays dense. One park helper pairs sequence,
  * tree insert, notify through one exit so a parked task never misses
- * its notify.
+ * its notify. Placement derives one deadline from weight derived
+ * period plus now then quantizes to one key with the same quantize
+ * as the tree so placement shares the order source with dispatch.
+ * The selected CPU wins when live plus allowed with no drain check
+ * so warmth stays cheap. An idle CPU wins next through the idle pick
+ * when live plus allowed so light work lands with no scan. The first
+ * allowed live CPU wins last. The chosen CPU feeds the notify so the
+ * daemon admits against it with per CPU rows and rejects park with
+ * no run. Dispatch order stays least plus successor with no change.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -98,10 +106,45 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    cpu >= 0 ? (u32)cpu : 0, tctx);
 		return;
 	}
-	if (sel >= 0 && flow_cpu_ok(p, sel))
-		cpu = sel;
-	else if (!flow_cpu_ok(p, cpu))
-		cpu = (s32)bpf_cpumask_first(p->cpus_ptr);
+	/* Placement with selected, idle, first in one place. */
+	/* Gives selected when allowed and live else idle when allowed */
+	/* and live else first when allowed and live else error. Shares */
+	/* the deadline source with the tree through the same quantize */
+	/* with no drain check so warmth stays cheap. The chosen CPU */
+	/* feeds the notify so the daemon admits against it with per CPU */
+	/* rows and rejects park with no run. */
+	{
+		u64 period = flow_period_ns(weight);
+		u64 deadline = flow_deadline_at(flow_now(), period);
+		u32 key = veb_quant(deadline);
+		s32 idle;
+		s32 first;
+		if (key >= (u32)FLOW_VEB_U) {
+			flow_gate_reject();
+			flow_enqueue_park(p, enq_flags, weight, 0,
+			    tctx);
+			return;
+		}
+		if (sel >= 0 && flow_cpu_ok(p, sel)) {
+			cpu = sel;
+		} else {
+			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			if (flow_cpu_ok(p, idle)) {
+				cpu = idle;
+			} else {
+				first = (s32)bpf_cpumask_first(
+				    p->cpus_ptr);
+				if (flow_cpu_ok(p, first)) {
+					cpu = first;
+				} else {
+					flow_gate_reject();
+					flow_enqueue_park(p, enq_flags,
+					    weight, 0, tctx);
+					return;
+				}
+			}
+		}
+	}
 	if (!flow_cpu_ok(p, cpu)) {
 		flow_gate_reject();
 		flow_enqueue_park(p, enq_flags, weight, 0, tctx);
