@@ -4,23 +4,25 @@
  *
  * Parks at the overflow tail and notifies for observability solely.
  * Exiting tasks run at once on the task CPU. The gate runs first
- * for other arrivals. One idle kick follows each park. The core
- * orders through the tree and admits under the bound in the core.
- * Dispatch moves admitted tasks in tree order. The tail parks with
- * plain insert and the tree holds the key so order never uses kernel
+ * for other arrivals. One kick follows each park to the chosen CPU
+ * when its running view is empty else to one idle peer in the task
+ * mask so backlog pulls work with no idle wait. The core orders
+ * through the tree and admits under the bound in the core. Dispatch
+ * moves admitted tasks in tree order. The tail parks with plain
+ * insert and the tree holds the key so order never uses kernel
  * queues. Rings stay best effort with loss irrelevant to decisions.
  * One sequence allocation serves task state plus order row plus
  * observability notify so the wire stays dense. Admit writes tree
  * plus row synchronously with the same sequence, deadline, CPU so
  * dispatch needs no roundtrip. Reject parks with no key plus no row
  * plus no run. Placement picks with live checks alone and no
- * deadline quantize. The selected CPU wins when live plus allowed
- * with no drain check so warmth stays cheap. An idle CPU wins next
- * through the idle pick when live plus allowed so light work lands
- * with no scan. The first allowed live CPU wins last. The chosen
- * CPU holds the admitted share with per CPU rows and rejects park
- * with no run. Dispatch order stays least plus successor with no
- * change. Fail open stays rare since rows land synchronously.
+ * deadline quantize. An idle CPU wins first through the idle pick
+ * when live plus allowed so load spreads with no scan. The selected
+ * CPU wins next when live plus allowed with no drain check so warmth
+ * stays cheap under load. The first allowed live CPU wins last. The
+ * chosen CPU holds the admitted share with per CPU rows and rejects
+ * park with no run. Dispatch order stays least plus successor with
+ * no change. Fail open stays rare since rows land synchronously.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -198,44 +200,42 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    cpu >= 0 ? (u32)cpu : 0, weight, seq_tmp);
 		return;
 	}
-	/* Placement with selected, idle, first in one place. */
-	/* Gives selected when allowed and live else idle when allowed */
+	/* Placement with idle, selected, first in one place. */
+	/* Gives idle when allowed and live else selected when allowed */
 	/* and live else first when allowed and live else error with */
-	/* no drain check so warmth stays cheap. The chosen CPU */
-	/* holds the share with per CPU rows and rejects park with */
-	/* no run. */
+	/* no drain check so spread stays cheap with warmth under load. */
+	/* The chosen CPU holds the share with per CPU rows and rejects */
+	/* park with no run. */
 	{
 		s32 idle;
 		s32 first;
-		if (sel >= 0 && flow_cpu_ok(p, sel)) {
+		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (flow_cpu_ok(p, idle)) {
+			cpu = idle;
+		} else if (sel >= 0 && flow_cpu_ok(p, sel)) {
 			cpu = sel;
 		} else {
-			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			if (flow_cpu_ok(p, idle)) {
-				cpu = idle;
+			first = (s32)bpf_cpumask_first(
+			    p->cpus_ptr);
+			if (flow_cpu_ok(p, first)) {
+				cpu = first;
 			} else {
-				first = (s32)bpf_cpumask_first(
-				    p->cpus_ptr);
-				if (flow_cpu_ok(p, first)) {
-					cpu = first;
-				} else {
-					flow_gate_reject();
-					seq_tmp = __sync_fetch_and_add(
-					    &flow_seq, 1) + 1;
-					WRITE_ONCE(tctx->seq, seq_tmp);
-					WRITE_ONCE(tctx->admit_share, 0);
-					WRITE_ONCE(tctx->admit_cpu, 0);
-					veb_remove((u32)p->pid);
-					flow_order_delete((u32)p->pid);
-					__sync_fetch_and_add(
-					    &flow_stats.rejects, 1);
-					__sync_fetch_and_add(
-					    &flow_stats.parks, 1);
-					flow_park_plain(p, enq_flags);
-					flow_notify_enqueue((u32)p->pid,
-					    0, weight, seq_tmp);
-					return;
-				}
+				flow_gate_reject();
+				seq_tmp = __sync_fetch_and_add(
+				    &flow_seq, 1) + 1;
+				WRITE_ONCE(tctx->seq, seq_tmp);
+				WRITE_ONCE(tctx->admit_share, 0);
+				WRITE_ONCE(tctx->admit_cpu, 0);
+				veb_remove((u32)p->pid);
+				flow_order_delete((u32)p->pid);
+				__sync_fetch_and_add(
+				    &flow_stats.rejects, 1);
+				__sync_fetch_and_add(
+				    &flow_stats.parks, 1);
+				flow_park_plain(p, enq_flags);
+				flow_notify_enqueue((u32)p->pid,
+				    0, weight, seq_tmp);
+				return;
 			}
 		}
 	}
@@ -254,12 +254,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		return;
 	}
 	flow_enqueue_admit(p, enq_flags, weight, (u32)cpu, tctx);
+	/* Kick with chosen plus idle peer in one place. */
+	/* Gives the chosen CPU the kick when its running view is */
+	/* empty else one idle peer in the task mask so backlog pulls */
+	/* work with no idle wait. The peer keeps mask wins and the */
+	/* woken CPU takes the earliest key it may run so vEB order */
+	/* never changes. At most one kick lands per park with no call */
+	/* when no idle CPU stays live. */
 	{
 		struct flow_cpu_state *st = flow_cpu_state_for(cpu);
 		if (st && READ_ONCE(st->running_pid) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
+		} else {
+			s32 peer = scx_bpf_pick_idle_cpu(
+			    p->cpus_ptr, 0);
+			if (flow_cpu_ok(p, peer)) {
+				scx_bpf_test_and_clear_cpu_idle(peer);
+				scx_bpf_kick_cpu(peer, SCX_KICK_IDLE);
+				__sync_fetch_and_add(
+				    &flow_stats.kicks, 1);
+			}
 		}
 	}
 }

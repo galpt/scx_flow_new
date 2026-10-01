@@ -5,22 +5,22 @@
  * Proposes one CPU with deadline driven placement. The op derives one
  * deadline from weight derived period plus now then quantizes to one
  * key with the same quantize as the tree so placement shares the order
- * source with dispatch. The previous CPU wins when live plus allowed
- * with no drain check so warmth stays cheap. An idle CPU wins next
- * through the idle pick when live plus allowed so light work lands
- * with no scan. The first allowed live CPU wins last. Stale masks fail
- * closed with an error and one gate count so callers never run on a
- * stale CPU. The core owns admit with per CPU rows and the core
- * proposes solely through the selected CPU so rejects park with no run.
- * Dispatch order stays least plus successor with no change. The core
- * keeps mask wins and progress. One fallback helper pairs the previous,
- * idle, first checks with the gate count through one exit so a missed
- * gate cannot slip through.
+ * source with dispatch. An idle CPU wins first through the idle pick
+ * when live plus allowed so load spreads with no scan. The previous
+ * CPU wins next when live plus allowed with no drain check so warmth
+ * stays cheap under load. The first allowed live CPU wins last. Stale
+ * masks fail closed with an error and one gate count so callers never
+ * run on a stale CPU. The core owns admit with per CPU rows and the
+ * core proposes solely through the selected CPU so rejects park with
+ * no run. Dispatch order stays least plus successor with no change.
+ * The core keeps mask wins and progress. One fallback helper pairs
+ * the idle, previous, first checks with the gate count through one
+ * exit so a missed gate cannot slip through.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Fallback with previous, idle, first, gate in one place. */
-/* Gives previous when allowed and live else idle when allowed */
+/* Fallback with idle, previous, first, gate in one place. */
+/* Gives idle when allowed and live else previous when allowed */
 /* and live else first when allowed and live else error with one */
 /* gate count. Callers reach the gate solely here so every failure */
 /* counts once with no missed reject. Placement shares the deadline */
@@ -31,11 +31,11 @@ static __always_inline s32 flow_fallback_cpu(
 {
 	s32 idle;
 	s32 first;
-	if (flow_cpu_ok(p, prev_cpu))
-		return prev_cpu;
 	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (flow_cpu_ok(p, idle))
 		return idle;
+	if (flow_cpu_ok(p, prev_cpu))
+		return prev_cpu;
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;

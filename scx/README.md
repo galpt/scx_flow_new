@@ -61,5 +61,5 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Draining four fixed priority tiers in order stays out by design, since tier order beats due time order and extra moves cost time.
 - Priority tiers lose to due time order, since tier order needs extra scans and moves while due time order runs the most urgent task first.
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
-- Placement uses the selected CPU when live, else an idle CPU when live, else the first live CPU, so warmth stays cheap with no extra scan.
+- Placement uses an idle CPU when live, else the selected CPU when live, else the first live CPU, so load spreads with no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
