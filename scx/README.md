@@ -10,7 +10,7 @@ The goal is to try fast ordered queues in the kernel and learn if urgent tasks r
 
 ### How it works?
 
-Arrivals pass a gate first so stale tasks wait safely. Each task gets a due time from its weight and joins a waiting line in due time order. A helper checks total load and lets tasks run while the line stays feasible, and tasks that do not fit wait without running. Each CPU takes waiting tasks starting with the earliest due time. When a task stops or exits it leaves the line and frees its load, and a safety path still runs waiting tasks when the ordered line stalls. See `src/bpf/veb/`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/runtime.rs`.
+Arrivals pass a gate first so stale tasks wait safely. Each task gets a due time from its weight and the core checks its load share against the per CPU sum under the bound. Admitted tasks join the waiting line in due time order with a tree key plus an order row written at once, and tasks that do not fit wait without running. Each CPU takes admitted tasks starting with the earliest due time with no wait for outside help. When a task stops or exits it leaves the line and frees its load at once in the core, and a safety path still runs waiting tasks when the ordered line stalls but stays rare since rows land at once. Rings carry notices for review only with loss having no effect on order. The outside helper watches counters only. See `src/bpf/veb/`, `src/bpf/admit/`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/runtime.rs`.
 
 ## Typical Use Cases
 
@@ -22,7 +22,7 @@ Arrivals pass a gate first so stale tasks wait safely. Each task gets a due time
 
 ### Queues
 
-The waiting line lives in one shared queue and order comes from the ordered queue. Dispatch takes waiting tasks in due time order with live checks, so idle CPUs stay cheap. Each pass moves at most `16` tasks within at most `20` number checks, and a drained line exits the pass at once. A safety path runs one waiting task when the ordered path stalls, so runnable tasks never wait on the helper. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+The waiting line lives in one shared queue and order comes from the ordered queue kept in the core. Dispatch takes admitted tasks in due time order with live checks, so idle CPUs stay cheap. Each pass moves at most `16` tasks within at most `20` number checks, and a drained line exits the pass at once. A safety path runs one waiting task when the ordered path stalls, so runnable tasks never wait on outside help, but it stays rare since rows land at once and only true affinity gaps reach it. Rings carry notices for review only. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -30,11 +30,11 @@ Each due time becomes a short number of `16 bit` at `1024 nanos` per step with t
 
 ### Admission
 
-Each task carries a small load share from its weight and the helper keeps total load under a bound of `950 per mille`. Shares add once and drop once when tasks finish or exit, so load never leaks. Stale tasks and full lines clear the task row at once, so no empty row lingers. Shares that miss their finish notice return after a short grace of `128ms`. See `src/rust/flow/runtime.rs`.
+Each task carries a small load share from its weight and the core keeps total load under a bound of `950 per mille` with per CPU sums. Shares add once at park time and drop once when tasks stop, disable, or exit, so load never leaks. Rejects park at once with no key, no row, and no run. Stale tasks clear at once, so no empty row lingers. Misses count when blocking ends pass the due time. A userspace mirror keeps the same math for tests and review only with no effect on order. Rings carry notices for review only. See `src/bpf/admit/` and `src/rust/flow/runtime.rs`.
 
 ### Gates
 
-A gate checks every step first so stale tasks and CPUs wait safely instead of running in the wrong place. Exiting work runs through at once. One counter tracks held work so problems stay visible. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
+A gate checks every step first so stale tasks and CPUs wait safely instead of running in the wrong place. Exiting work runs through at once. Gate fails drop the ledger at once with no leak. The safety path stays affinity gated and rare since rows land at once. One counter tracks held work so problems stay visible. Rings carry notices for review only. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
 
 ### Reporting
 
@@ -43,17 +43,18 @@ Flags of `--stats`, `--monitor` and `--no-webui` show live counters in text or i
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/veb/`, `src/bpf/dispatch/` and `src/bpf/helpers/`.
+- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/veb/`, `src/bpf/admit/`, `src/bpf/dispatch/` and `src/bpf/helpers/`.
 - Order lives in `src/bpf/veb/` with a mirror in `src/rust/flow/veb.rs` for tests only. The mirror checks tree order plus saturation plus duplicates against the kernel logic, since no kernel test harness runs here.
+- Admission lives in `src/bpf/admit/` with share, row, drop parts plus a mirror in `src/rust/flow/runtime.rs` for tests only. The mirror keeps the same share plus bound math with no effect on order. Rings carry notices for review only.
 - Task load and order bookkeeping lives in `src/rust/flow/helpers.rs` and `src/rust/flow/mod.rs` with checks in `src/rust/config.rs`.
 - Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
-- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`.
+- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses as source of truth.
 
 ## Limitations
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `16B`, `8B`, `8B`, `112B`.
+- State is `24B`, `8B`, `8B`, `112B`.
 - Needs kernels, `7.2` series and up.
 - Spreading wakeups across eight nearby CPUs stays out by design, since early tests showed no gain and more scans cost time.
 - Picking among local plus node plus machine queues with drain checks stays out by design, since the simple first live pick proved enough and extra checks cost time.
