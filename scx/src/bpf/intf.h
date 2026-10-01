@@ -12,16 +12,20 @@
  * deadline, CPU and parks with plain insert. Rejects park with no
  * key plus no row plus no run. Dispatch moves admitted tasks in tree
  * order up to sixteen per pass with sequence, liveness, affinity
- * checks. Stale entries park and the core drops shares through
- * stopping plus disable plus exit plus gate fail paths exactly once.
- * Empty queue leaves at once with no scan. Empty tree or stall moves
- * one affinity gated head task with liveness plus affinity checks
- * plus keyed drop and no order gate so runnable tasks never stall
- * on live work. Ordered moves count one vEB hit plus fail open
- * moves count one FIFO park so every dispatched task lands in one
- * bucket with completions counted apart. Fail open stays rare since
- * order rows land synchronously and solely genuine affinity misses
- * reach it. A single tail avoids cross tier moves that would bounce
+ * checks. Under flood with more than one hundred twenty eight queued
+ * the pass stops ordered probes after four and drains FIFO, so one
+ * pass never burns twenty full tail scans with zero moves. Stale
+ * entries park and the core drops shares through stopping plus
+ * disable plus exit plus gate fail paths exactly once. Empty queue
+ * leaves at once with no scan. Empty tree or stall drains up to
+ * sixteen FIFO tasks with liveness plus affinity checks plus keyed
+ * drop and no order gate so runnable tasks never stall on live work.
+ * Ordered moves count one vEB hit plus fail open moves count one
+ * FIFO park so every dispatched task lands in one bucket with
+ * completions counted apart. Fail open stays rare in normal load
+ * since order rows land synchronously and solely genuine affinity
+ * misses reach it. Under flood it carries rejects in FIFO order up
+ * to the batch bound so backlog drains. A single tail avoids cross tier moves that would bounce
  * cache and NUMA locality. Undrained queues hold zero tasks and cost
  * solely at init. Counters use atomic adds from every CPU and stay
  * best effort for observability. Concurrent skips may count twice
@@ -81,6 +85,8 @@ enum flow_consts {
 	FLOW_MAX_DSQS = 522ULL,
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
 	FLOW_DISPATCH_MAX_PROBES = 20ULL,
+	FLOW_DISPATCH_FLOOD_PROBES = 4ULL,
+	FLOW_DISPATCH_FLOOD_QUEUED = 128ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_PROTO_ENQUEUE = 1ULL,
 	FLOW_PROTO_ORDER = 2ULL,
