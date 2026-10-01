@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow is a CPU scheduler that runs the most urgent waiting task first. It uses a Van Emde Boas tree in the kernel to keep due time order from task weights. A helper keeps total load feasible and each run lasts a fixed slice of `2ms`. See `src/bpf/veb/` and `src/bpf/intf.h`.
+scx_flow is a CPU scheduler that runs the most urgent waiting task first. It uses a [Van Emde Boas tree](https://www.geeksforgeeks.org/dsa/van-emde-boas-tree-set-1-basics-and-construction/) in the kernel to keep due time order from task weights. A helper keeps total load feasible and each run lasts a fixed slice of `2ms`. See `src/bpf/veb/` and `src/bpf/intf.h`.
 
 ### Why?
 
