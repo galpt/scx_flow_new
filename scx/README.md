@@ -28,7 +28,7 @@ Gate runs first in every op. Stale CPUs plus tasks fail closed with one counter 
 
 ### Reporting
 
-Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback port `50005` with counters, per CPU pid, slice, SMT, version, snapshot download. Rings poll each 10ms decoupled from 100ms dashboard cache. Parks sum core drops, daemon parks, queue drops. Misses use monotonic time and file names use wall time. See `src/rust/stats.rs`.
+Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback port `50005` with counters, per CPU pid, slice, SMT, version, snapshot download plus vEB hits plus FIFO parks cards plus `TL;DR` plus `Explanation`. Rings poll each 10ms decoupled from 100ms dashboard cache with one second page poll reusing `/api/stats` plus `/api/snapshot`. Parks sum core drops, daemon parks, queue drops. Ordered moves count vEB hits plus fail open moves count FIFO parks with completions apart. `TL;DR` says running tasks gain or miss ordered queues at ninety five share over the completions window with math plus fail-open share in `Explanation`. Misses use monotonic time and file names use wall time. Wire holds fourteen counters at `112B`. See `src/rust/stats.rs`, `src/rust/webui.rs`, `ui/index.html`.
 
 ## Code map
 
@@ -37,12 +37,12 @@ Reporting uses `--stats`, `--monitor`, `--no-webui`. Dashboard serves loopback p
 - Order lives in `src/bpf/veb/` with oracle mirror plus BPF bitmap differential in `flow/veb.rs` plus facade in `flow/mod.rs` and checks in `config.rs`. Ledger pairing lives in `flow/helpers.rs` with share, order, task single exit.
 - BPF holds live scheduling logic under verifier while Rust holds test only mirrors, oracle, config validation, daemon ledger, snapshot, webui. Mirrors never drive dispatch. Pair `cgroup.bpf.c` plus `flow/cgrp.rs` shows live stubs plus test only hints. See `flow/mod.rs` plus `bpf/veb/`.
 - Level lives in `src/bpf/dispatch/perf.bpf.c` with paired boost plus idle from per CPU depth and no call on steady through one dispatch exit. See `src/bpf/dispatch.bpf.c` and `src/bpf/intf.h`.
-- Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.
+- Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html` with vEB hits, FIFO parks, `TL;DR`, `Explanation`.
 - Sections stay under fifty lines each with line counts not word counts.
 
 ## Limitations
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `16B`, `8B`, `8B`, `96B`.
+- State is `16B`, `8B`, `8B`, `112B`.
 - Needs kernels, `7.2` series and up.

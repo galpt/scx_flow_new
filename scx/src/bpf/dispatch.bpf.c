@@ -19,7 +19,9 @@
  * moves one affinity gated head task with liveness plus affinity
  * checks plus keyed drop and no order or sequence gate so runnable
  * tasks never wait on the daemon shadow. Over moves count
- * progress. Level follows after ordered moves plus fail open
+ * progress with ordered moves counting vEB hits plus fail open
+ * moves counting FIFO parks so every dispatched task lands in one
+ * bucket. Level follows after ordered moves plus fail open
  * with the same CPU only and no call on steady through one exit,
  * so idle cannot be skipped.
  *
@@ -54,7 +56,8 @@ static __noinline bool veb_try_move_one(u32 key, s32 cpu)
 /* Moves the first live affinity match at the overflow head so one */
 /* runnable task always lands on the dispatch CPU even when the */
 /* daemon shadow holds no order row yet. Skips drop no tree state */
-/* with no park count so transient misses stay quiet. The moved pid */
+/* with no park count so transient misses stay quiet. Moves count */
+/* one FIFO park at the decision point. The moved pid */
 /* drops its key solely when the stored key still matches. */
 static __noinline bool veb_fail_open_one(s32 cpu)
 {
@@ -130,8 +133,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		goto out;
 	cur = veb_min();
 	if (cur == (u32)FLOW_VEB_EMPTY) {
-		if (veb_fail_open_one(cpu))
+		if (veb_fail_open_one(cpu)) {
 			__sync_fetch_and_add(&flow_stats.over_moves, 1);
+			__sync_fetch_and_add(&flow_stats.fifo_parks, 1);
+		}
 		/* Single exit covers the level, so idle cannot be skipped. */
 		goto out;
 	}
@@ -161,11 +166,15 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (moved) {
 		__sync_fetch_and_add(&flow_stats.over_moves,
 		    (u64)moved);
+		__sync_fetch_and_add(&flow_stats.veb_hits,
+		    (u64)moved);
 		/* Single exit covers the level, so idle cannot be skipped. */
 		goto out;
 	}
-	if (veb_fail_open_one(cpu))
+	if (veb_fail_open_one(cpu)) {
 		__sync_fetch_and_add(&flow_stats.over_moves, 1);
+		__sync_fetch_and_add(&flow_stats.fifo_parks, 1);
+	}
 out:
 	/* Level follows after ordered moves plus fail open */
 	/* with the same CPU only through one exit. */

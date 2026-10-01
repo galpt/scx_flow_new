@@ -176,6 +176,8 @@ mod tests {
         assert_eq!(m.stats.on_cpu, 1);
         assert_eq!(m.stats.over_moves, 0);
         assert_eq!(m.stats.gate_rejects, 0);
+        assert_eq!(m.stats.veb_hits, 0);
+        assert_eq!(m.stats.fifo_parks, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "4.6.0");
         assert_eq!(m.timestamp_ns, 0);
@@ -210,6 +212,8 @@ mod tests {
                 misses: 2,
                 parks: 2,
                 gate_rejects: 0,
+                veb_hits: 2,
+                fifo_parks: 0,
             },
             per_cpu: vec![
                 crate::stats::PerCpuMetrics {
@@ -236,6 +240,8 @@ mod tests {
         assert!(txt.contains("misses"));
         assert!(txt.contains("parks"));
         assert!(txt.contains("gate_rejects"));
+        assert!(txt.contains("veb_hits"));
+        assert!(txt.contains("fifo_parks"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -274,6 +280,8 @@ mod tests {
         assert_eq!(back.stats.misses, 2);
         assert_eq!(back.stats.parks, 2);
         assert_eq!(back.stats.gate_rejects, 0);
+        assert_eq!(back.stats.veb_hits, 2);
+        assert_eq!(back.stats.fifo_parks, 0);
         assert_eq!(back.per_cpu.len(), 2);
         assert!(!back.per_cpu[0].smt);
         assert!(back.per_cpu[1].smt);
@@ -310,7 +318,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the twelve live counters plus uptime. */
+    /* Dashboard shows the fourteen live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -327,11 +335,15 @@ mod tests {
         assert!(html.contains("id=\"misses\""));
         assert!(html.contains("id=\"parks\""));
         assert!(html.contains("id=\"gate-rejects\""));
+        assert!(html.contains("id=\"veb-hits\""));
+        assert!(html.contains("id=\"fifo-parks\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
         assert!(html.contains("over_moves"));
         assert!(html.contains("gate_rejects"));
+        assert!(html.contains("veb_hits"));
+        assert!(html.contains("fifo_parks"));
         assert!(!html.contains("local_moves"));
         assert!(!html.contains("node_moves"));
         assert!(!html.contains("machine_moves"));
@@ -340,6 +352,42 @@ mod tests {
         assert!(!html.contains("id=\"machine-moves\""));
         assert!(!html.contains("global_moves"));
         assert!(!html.contains("global-moves"));
+    }
+
+    /* Dashboard shows vEB plus FIFO benefit cards. */
+    #[test]
+    fn dashboard_shows_veb_benefit_cards() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("Processed using vEB"));
+        assert!(html.contains("Processed using FIFO (parks)"));
+        assert!(html.contains("id=\"veb-hits\""));
+        assert!(html.contains("id=\"fifo-parks\""));
+        assert!(html.contains("veb_hits"));
+        assert!(html.contains("fifo_parks"));
+        assert!(html.contains("veb-hits"));
+        assert!(html.contains("fifo-parks"));
+    }
+
+    /* Dashboard tells the vEB benefit story in plain words. */
+    #[test]
+    fn dashboard_shows_tldr_benefit() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("id=\"summary-tldr\""));
+        assert!(html.contains("id=\"summary-explanation\""));
+        assert!(html.contains("VEB_HEALTHY_PCT"));
+        assert!(html.contains("95"));
+        assert!(html.contains("receiving the benefits of the vEB queues"));
+        assert!(html.contains("are not receiving the benefits of the vEB queues"));
+        assert!(html.contains("processed by vEB"));
+        assert!(html.contains("completions window"));
+        assert!(html.contains("fail-open share"));
+        assert!(html.contains("dispatched over"));
+        assert!(html.contains("refreshed each second"));
+        assert!(html.contains("Flow is running"));
+        assert!(html.contains("buildSummary"));
+        assert!(html.contains("vebBenefit"));
+        assert!(html.contains("recentVebHealthy"));
+        assert!(html.contains("vebPct"));
     }
 
     /* Dashboard hides stale wire fields plus heavy sections. */

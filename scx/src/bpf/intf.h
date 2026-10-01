@@ -14,13 +14,17 @@
  * Empty queue leaves at once with no scan. Empty tree or stall moves
  * one affinity gated head task with liveness plus affinity checks
  * plus keyed drop and no order gate so runnable tasks never wait on
- * the daemon shadow. A single tail
+ * the daemon shadow. Ordered moves count one vEB hit plus fail open
+ * moves count one FIFO park so every dispatched task lands in one
+ * bucket with completions counted apart. A single tail
  * avoids cross tier moves that would bounce cache and NUMA locality.
  * Undrained queues hold zero tasks and cost solely at init. Counters
  * use atomic adds from every CPU and stay best effort for
  * observability. Concurrent skips may count twice with parks staying
  * noisy but fail closed. Admits, rejects, misses stay zero in BPF as an ABI
- * placeholder and merge from the daemon so the wire stays at 96B.
+ * placeholder and merge from the daemon. Ordered moves count vEB hits
+ * plus fail open moves count FIFO parks so every dispatched task lands
+ * in one bucket with completions counted apart. The wire stays at 112B.
  * Reads poll at dashboard cadence so line bouncing stays bounded by
  * event rate. Shared fields pair reads with writes through atomics
  * plus volatile access. The watchdog stays at twenty seconds. Policy
@@ -112,6 +116,8 @@ struct flow_sched_stats {
 	u64 misses;
 	u64 parks;
 	u64 gate_rejects;
+	u64 veb_hits;
+	u64 fifo_parks;
 };
 struct flow_event {
 	u64 kind;
@@ -134,8 +140,8 @@ _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-_Static_assert(sizeof(struct flow_sched_stats) == 96,
-	"stats stay at 96B");
+_Static_assert(sizeof(struct flow_sched_stats) == 112,
+	"stats stay at 112B");
 _Static_assert(sizeof(struct flow_event) == 40,
 	"event stays at 40B");
 _Static_assert(sizeof(struct flow_order_entry) == 24,

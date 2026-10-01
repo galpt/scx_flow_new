@@ -10,7 +10,9 @@
 //! dashboard cadence on the hot thread. Policy counters merge from
 //! the daemon while mechanism counters come from the core. Parks sum
 //! core drops, daemon parks, userspace queue drops. Dispatch moves
-//! admitted tasks in daemon order and over moves count progress.
+//! admitted tasks in daemon order and over moves count progress with
+//! ordered moves counting vEB hits plus fail open moves counting FIFO
+//! parks so every dispatched task lands in one bucket.
 //! Dashboard timestamps use wall time for logs plus file names while
 //! deadlines plus runtime use monotonic time, so the two domains stay
 //! separate by intent.
@@ -40,6 +42,8 @@ impl<'a> Scheduler<'a> {
             misses: self.daemon.misses,
             parks: s.parks.saturating_add(self.daemon.parks),
             gate_rejects: s.gate_rejects,
+            veb_hits: s.veb_hits,
+            fifo_parks: s.fifo_parks,
         }
     }
 

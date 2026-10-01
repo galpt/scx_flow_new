@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, miss detail.
-/// BPF holds twelve counters. Rust adds display-only uptime for thirteen.
+/// BPF holds fourteen counters. Rust adds display-only uptime for fifteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -67,6 +67,12 @@ pub struct Metrics {
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
+    #[stat(desc = "Ordered vEB dispatches with admitted order match")]
+    #[serde(default)]
+    pub veb_hits: u64,
+    #[stat(desc = "Fail open dispatches with no ordered dispatch")]
+    #[serde(default)]
+    pub fifo_parks: u64,
 }
 
 /// One card of the per CPU grid.
@@ -154,7 +160,7 @@ impl Metrics {
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
              over={} kick={} adm={} rej={} \
-             miss={} park={} gate={}",
+             miss={} park={} gate={} veb={} fifo={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -169,6 +175,8 @@ impl Metrics {
             self.misses,
             self.parks,
             self.gate_rejects,
+            self.veb_hits,
+            self.fifo_parks,
         )?;
         Ok(())
     }
@@ -190,6 +198,8 @@ impl Metrics {
             misses: self.misses.wrapping_sub(rhs.misses),
             parks: self.parks.wrapping_sub(rhs.parks),
             gate_rejects: self.gate_rejects.wrapping_sub(rhs.gate_rejects),
+            veb_hits: self.veb_hits.wrapping_sub(rhs.veb_hits),
+            fifo_parks: self.fifo_parks.wrapping_sub(rhs.fifo_parks),
         }
     }
 }

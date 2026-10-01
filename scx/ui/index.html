@@ -354,6 +354,14 @@
           Gate rejects:</span>
           <span class="stat-value" id="gate-rejects">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Processed using vEB:</span>
+          <span class="stat-value" id="veb-hits">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Processed using FIFO (parks):</span>
+          <span class="stat-value" id="fifo-parks">0</span>
+        </div>
       </div>
     </div>
 
@@ -366,6 +374,18 @@
 
   <script>
     const el = (id) => document.getElementById(id);
+
+    /* Healthy share for the vEB benefit verdict with no knob. */
+    /* Ninety five keeps the ordered path dominant while fail open */
+    /* stays quiet. The dashboard refreshes each second. */
+    const VEB_HEALTHY_PCT = 95;
+
+    /* Previous dispatched totals for the recent window check. */
+    /* The recent window covers one dashboard poll with the same */
+    /* healthy share as the cumulative window. */
+    var prevVebHits = 0;
+    var prevFifoParks = 0;
+    var prevVebSeen = false;
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
@@ -449,8 +469,9 @@
     }
 
     /* Summary prose built from the live gauges. */
-    /* The tldr names the running count. The explanation */
-    /* walks joins plus moves plus admission plus misses. */
+    /* The tldr names the running count plus the vEB benefit verdict. */
+    /* The explanation walks joins plus moves plus admission plus misses */
+    /* plus the vEB share math over the completions window. */
     /* Live pid count from the per CPU cards. */
     /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
@@ -472,6 +493,40 @@
       return raw;
     }
 
+    /* Ordered share in percent over dispatched total. */
+    /* Zero dispatched yields zero so idle stays quiet. */
+    function vebPct(veb, fifo) {
+      var total = veb + fifo;
+      if (!total) return 0;
+      return (veb / total) * 100;
+    }
+
+    /* Recent window health over one dashboard poll. */
+    /* Empty deltas stay healthy so idle never flaps. */
+    /* First poll uses the cumulative window alone. */
+    function recentVebHealthy(curVeb, curFifo) {
+      var dVeb, dFifo, dTotal;
+      if (!prevVebSeen) return true;
+      dVeb = curVeb - prevVebHits;
+      dFifo = curFifo - prevFifoParks;
+      if (dVeb < 0) dVeb = 0;
+      if (dFifo < 0) dFifo = 0;
+      dTotal = dVeb + dFifo;
+      if (!dTotal) return true;
+      return ((dVeb / dTotal) * 100) >= VEB_HEALTHY_PCT;
+    }
+
+    /* Benefit verdict over the completions window. */
+    /* Cumulative share at or above the healthy mark with */
+    /* completions present plus a healthy recent poll means */
+    /* the running tasks gain from ordered queues. */
+    function vebBenefit(veb, fifo, done) {
+      var total = veb + fifo;
+      if (!total || !done) return false;
+      if (vebPct(veb, fifo) < VEB_HEALTHY_PCT) return false;
+      return recentVebHealthy(veb, fifo);
+    }
+
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -483,36 +538,44 @@
       var miss = s.misses || 0;
       var park = s.parks || 0;
       var gate = s.gate_rejects || 0;
+      var veb = s.veb_hits || 0;
+      var fifo = s.fifo_parks || 0;
+      var dispatched = veb + fifo;
       var placed = ins + req;
+      var share = vebPct(veb, fifo);
+      var failShare = dispatched ? (fifo / dispatched) * 100 : 0;
+      var receiving = vebBenefit(veb, fifo, done);
+      var benefit = receiving
+        ? 'are receiving the benefits of the vEB queues'
+        : 'are not receiving the benefits of the vEB queues';
+      var math = fmt(veb) + ' out of ' + fmt(dispatched) +
+        ' dispatched over ' + fmt(done) +
+        ' completions processed by vEB = ' + share.toFixed(1) +
+        '%, computed as vEB hits divided by dispatched total ' +
+        'over the completions window since attach with fail-open share ' +
+        failShare.toFixed(1) + '% refreshed each second';
       var tldr, explanation;
-      if (!placed && !onCpu) {
+      var base = 'As you can see from the gauges, ' +
+        'joins cover ' + fmt(placed) +
+        ' with completions ' + fmt(done) +
+        '. Overflow moves cover ' + fmt(over) +
+        '. Admits cover ' + fmt(adm) +
+        ' with rejects ' + fmt(rej) +
+        ' and misses ' + fmt(miss) +
+        ' with parks ' + fmt(park) +
+        ' and gate rejects ' + fmt(gate) + '. ';
+      if (!placed && !onCpu && !dispatched && !done) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet.';
+          'no tasks have been placed yet. ' + math + '.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks.';
-        explanation = 'As you can see from the gauges, ' +
-          'joins cover ' + fmt(placed) +
-          ' with completions ' + fmt(done) +
-          '. Overflow moves cover ' + fmt(over) +
-          '. Admits cover ' + fmt(adm) +
-          ' with rejects ' + fmt(rej) +
-          ' and misses ' + fmt(miss) +
-          ' with parks ' + fmt(park) +
-          ' and gate rejects ' + fmt(gate) + '.';
+          ' tasks and these tasks ' + benefit + '.';
+        explanation = base + math + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
-          ' tasks and is now idle.';
-        explanation = 'As you can see from the gauges, ' +
-          'joins cover ' + fmt(placed) +
-          ' with completions ' + fmt(done) +
-          '. Overflow moves cover ' + fmt(over) +
-          '. Admits cover ' + fmt(adm) +
-          ' with rejects ' + fmt(rej) +
-          ' and misses ' + fmt(miss) +
-          ' with parks ' + fmt(park) +
-          ' and gate rejects ' + fmt(gate) + '.';
+          ' tasks and is now idle. Those tasks ' + benefit + '.';
+        explanation = base + math + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -578,6 +641,16 @@
         fmt(s.parks || 0);
       el('gate-rejects').textContent =
         fmt(s.gate_rejects || 0);
+      el('veb-hits').textContent =
+        fmt(s.veb_hits || 0);
+      el('fifo-parks').textContent =
+        fmt(s.fifo_parks || 0);
+
+      /* Track dispatched totals for the next recent window check. */
+      /* Runs after the summary so the verdict uses the prior poll. */
+      prevVebHits = s.veb_hits || 0;
+      prevFifoParks = s.fifo_parks || 0;
+      prevVebSeen = true;
 
       renderCoreCards(data);
     }
