@@ -39,7 +39,7 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 	u32 best_pid = 0;
 	u32 best_key = (u32)FLOW_VEB_EMPTY;
 	u64 best_deadline = (u64)~0ULL;
-	u32 best_owned = 0;
+	u32 best_rank = 0xFFFFFFFFu;
 	u32 best_owner = 0;
 	u64 ov;
 	struct task_struct *p;
@@ -65,7 +65,7 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 		u32 k;
 		u64 d;
 		u32 owner;
-		u32 owned;
+		u32 rank;
 		bool better;
 		/* Iterator never holds null here, so no null branch. */
 		/* Task state alone orders every parked task with no extra */
@@ -87,7 +87,11 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 		if (d == 0)
 			continue;
 		owner = READ_ONCE(tctx->admit_cpu);
-		owned = owner == (u32)cpu ? 1 : 0;
+		/* Owned sorts before unowned with smaller pid first, so */
+		/* one rank folds both tiebreaks: pids stay below bit 31 */
+		/* while unowned sets it, keeping a single compare below. */
+		rank = iter_pid |
+		    (owner == (u32)cpu ? 0u : 0x80000000u);
 		/* Single better check keeps one update site with no */
 		/* nested takes, so the verifier walks one flat chain. */
 		if (best_pid == 0)
@@ -96,16 +100,14 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 			better = k < best_key;
 		else if (d != best_deadline)
 			better = d < best_deadline;
-		else if (owned != best_owned)
-			better = owned > best_owned;
 		else
-			better = iter_pid < best_pid;
+			better = rank < best_rank;
 		if (!better)
 			continue;
 		best_pid = iter_pid;
 		best_key = k;
 		best_deadline = d;
-		best_owned = owned;
+		best_rank = rank;
 		best_owner = owner;
 	}
 	bpf_rcu_read_unlock();
@@ -139,8 +141,9 @@ static __noinline bool veb_consume_best(s32 cpu)
 		return false;
 	if (!flow_pick_least(cpu, &pid, &key, &deadline, &owner))
 		return false;
-	if (pid == 0 || key >= (u32)FLOW_VEB_U || deadline == 0)
-		return false;
+	/* The pick only returns validated pid plus key plus deadline, */
+	/* so no recheck lands here: a stale pid simply misses the move */
+	/* scan below with the head cleared after. */
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, ov, 0) {
 		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p,

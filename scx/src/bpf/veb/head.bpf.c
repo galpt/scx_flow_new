@@ -131,13 +131,12 @@ static __noinline bool flow_head_pick(s32 cpu,
 	if (!flow_cpu_live((u32)cpu))
 		return false;
 	want_key = veb_min();
+	/* Empty reads all ones past the universe, so the range check */
+	/* below already rejects it with no extra branch. */
 	if (want_key >= (u32)FLOW_VEB_U)
 		return false;
-	if (want_key == (u32)FLOW_VEB_EMPTY)
-		return false;
+	/* Masking to a byte can never reach 256, so no range check. */
 	slot = want_key & 255;
-	if (slot >= 256)
-		return false;
 	h = bpf_map_lookup_elem(&head_by_low, &slot);
 	if (!h)
 		return false;
