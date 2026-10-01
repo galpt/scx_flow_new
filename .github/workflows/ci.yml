@@ -102,4 +102,12 @@ jobs:
           cargo build --profile ci -p scx_flow
           cargo metadata --format-version 1 > /tmp/meta.json
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
-            --no-build scx_flow
+            --no-build scx_flow || {
+            echo '=== TEMP DIAG: verbose verifier log for flow_dispatch ==='
+            OBJ=$(find target/ci/build -path '*scx_flow*/out/bpf.bpf.o' \
+              | head -1)
+            echo "object: $OBJ"
+            veristat -vl1 --log-size=1048576 "$OBJ" > /tmp/vstat.log 2>&1 || true
+            tail -c 24000 /tmp/vstat.log
+            exit 1
+          }
