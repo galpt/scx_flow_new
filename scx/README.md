@@ -14,10 +14,9 @@ Task arrival hits the gate first with stale CPUs plus tasks failing closed. The 
 
 ## Typical Use Cases
 
-- Deadline ordered runs. BPF vEB queues keep least key order with bounded probes, so deadline driven work gains ordered moves with fail open cover when the tree stalls.
-- Admission bound checks. Rust daemon ledger pairs share, order, task single exit under 950 per mille, so overload parks early with no runaway queue growth.
-- Hierarchy neutral hosts. Thin stub passes init, move, weight with no policy in BPF, so transitions stay balanced while hints stay derived from weight.
-- Benefit review on dashboard. Loopback dashboard shows vEB hits, FIFO parks, `TL;DR`, `Explanation` at ninety five share, so ordered gain needs no log scraping.
+- Latency sensitive apps. Tasks with the earliest deadline run first, so short arrivals never wait behind long work and stay responsive under load.
+- Desktop use. A fixed `2ms` slice keeps interaction smooth, so typing and motion stay fluid while background work continues.
+- Mixed batch work. Admission keeps overload feasible, so heavy jobs still finish while urgent tasks move ahead in deadline order.
 
 ## More details
 
