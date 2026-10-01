@@ -2,34 +2,40 @@
 /*
  * Shared constants and helpers for the flow core.
  *
- * The core parks at the overflow tail and notifies the daemon.
- * The core orders through the Van Emde Boas tree and the daemon
- * admits under the bound. Init reserves five hundred twelve local
+ * The core parks at the overflow tail and notifies for observability.
+ * The core orders through the Van Emde Boas tree and admits under
+ * the bound in the core. Init reserves five hundred twelve local
  * queues, eight node queues, machine, overflow as an ABI placeholder
- * so queue identifiers stay stable across releases. Enqueue inserts
- * one key derived from the deadline and parks with plain insert.
- * Dispatch moves admitted tasks in tree order up to sixteen per
- * pass with sequence, liveness, affinity checks. Stale entries park
- * and the daemon drops shares through complete plus stale collection.
+ * so queue identifiers stay stable across releases. Enqueue admits
+ * synchronously with share math plus bound check then inserts
+ * one key derived from the deadline plus one order row with sequence,
+ * deadline, CPU and parks with plain insert. Rejects park with no
+ * key plus no row plus no run. Dispatch moves admitted tasks in tree
+ * order up to sixteen per pass with sequence, liveness, affinity
+ * checks. Stale entries park and the core drops shares through
+ * stopping plus disable plus exit plus gate fail paths exactly once.
  * Empty queue leaves at once with no scan. Empty tree or stall moves
  * one affinity gated head task with liveness plus affinity checks
- * plus keyed drop and no order gate so runnable tasks never wait on
- * the daemon shadow. Ordered moves count one vEB hit plus fail open
+ * plus keyed drop and no order gate so runnable tasks never stall
+ * on live work. Ordered moves count one vEB hit plus fail open
  * moves count one FIFO park so every dispatched task lands in one
- * bucket with completions counted apart. A single tail
- * avoids cross tier moves that would bounce cache and NUMA locality.
- * Undrained queues hold zero tasks and cost solely at init. Counters
- * use atomic adds from every CPU and stay best effort for
- * observability. Concurrent skips may count twice with parks staying
- * noisy but fail closed. Admits, rejects, misses stay zero in BPF as an ABI
- * placeholder and merge from the daemon. Ordered moves count vEB hits
- * plus fail open moves count FIFO parks so every dispatched task lands
- * in one bucket with completions counted apart. The wire stays at 112B.
- * Reads poll at dashboard cadence so line bouncing stays bounded by
- * event rate. Shared fields pair reads with writes through atomics
- * plus volatile access. The watchdog stays at twenty seconds. Policy
- * lives in the daemon with order in the core. The core holds gate,
- * park, notify, execute.
+ * bucket with completions counted apart. Fail open stays rare since
+ * order rows land synchronously and solely genuine affinity misses
+ * reach it. A single tail avoids cross tier moves that would bounce
+ * cache and NUMA locality. Undrained queues hold zero tasks and cost
+ * solely at init. Counters use atomic adds from every CPU and stay
+ * best effort for observability. Concurrent skips may count twice
+ * with parks staying noisy but fail closed. Admits, rejects, misses
+ * count in the core as source of truth and merge into the snapshot.
+ * Ordered moves count vEB hits plus fail open moves count FIFO parks
+ * so every dispatched task lands in one bucket with completions
+ * counted apart. The wire stays at 112B. Reads poll at dashboard
+ * cadence so line bouncing stays bounded by event rate. Shared
+ * fields pair reads with writes through atomics plus volatile
+ * access. The watchdog stays at twenty seconds. Admission plus order
+ * live in the core with the daemon as monitor. The core holds gate,
+ * admit, park, notify, execute. Rings carry observability solely
+ * with loss irrelevant to decisions.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -86,6 +92,7 @@ enum flow_consts {
 	FLOW_VEB_U = 65536ULL,
 	FLOW_QUANT_SHIFT = 10ULL,
 	FLOW_VEB_EMPTY = 0xFFFFFFFFULL,
+	FLOW_ADMIT_PERMILLE = 950ULL,
 	/* CPU performance levels at half plus max with no knob. Any own */
 	/* plus local plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
@@ -94,6 +101,8 @@ enum flow_consts {
 struct flow_task_ctx {
 	u64 run_at;
 	u64 seq;
+	u32 admit_share;
+	u32 admit_cpu;
 };
 struct flow_cpu_state {
 	u32 running_pid;
@@ -134,8 +143,8 @@ struct flow_order_entry {
 	u32 cpu;
 	u32 pad;
 };
-_Static_assert(sizeof(struct flow_task_ctx) == 16,
-	"task state stays at 16B");
+_Static_assert(sizeof(struct flow_task_ctx) == 24,
+	"task state stays at 24B");
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
 _Static_assert(sizeof(struct flow_topo) == 8,
@@ -222,5 +231,16 @@ static __always_inline u64 flow_deadline_at(u64 now,
 	u64 period)
 {
 	return flow_sat_add(now, period);
+}
+static __always_inline u64 flow_share_permille(u64 period)
+{
+	if (period == 0)
+		return 0;
+	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
+}
+static __always_inline bool flow_admit_ok(u64 held,
+	u64 share)
+{
+	return flow_sat_add(held, share) <= (u64)FLOW_ADMIT_PERMILLE;
 }
 #endif

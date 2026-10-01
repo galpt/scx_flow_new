@@ -9,8 +9,8 @@
  * ARRAY except pid rows which use HASH capped at task bound. Sizes
  * stay fixed so the verifier sees bounded access. Updates use atomic
  * compare and swap so concurrent CPUs stay consistent with fail
- * closed drops on faults. Policy lives in the daemon with order in
- * the core.
+ * closed drops on faults. Admission plus order live in the core
+ * with the daemon as monitor solely.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

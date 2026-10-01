@@ -4,17 +4,19 @@
  *
  * Running claims the segment start and tracks the CPU pid plus the on
  * CPU gauge. Stopping charges the segment to total runtime and counts
- * one requeue else one completion and emits one complete notify.
- * Stopping drops the tree key so dispatched keys never linger.
- * Gate fail stopping notifies when queued like disable so shares
- * return at once instead of waiting for stale collection.
- * Stopping skips the notify when the task never queued. Enable clears
- * the task state. Disable plus exit charge leftovers, drop the tree
- * key, emit one complete notify so admission drops once. One finish
- * helper pairs key, charge, pid, gauge, notify through one exit so a
- * missed cleanup cannot leak. Ring reserve faults count one park.
- * Release clears stale pid views. Mechanism solely. Policy lives in
- * the daemon with order in the core.
+ * one requeue else one completion and emits one observability notify.
+ * Stopping drops the tree key plus the ledger share plus the order
+ * row so dispatched keys never linger and use never leaks. Gate fail
+ * stopping drops plus notifies when queued like disable so shares
+ * return at once with no stale wait. Stopping skips the notify when
+ * the task never queued. Enable clears the task state with share plus
+ * CPU cleared. Disable plus exit charge leftovers, drop the tree key
+ * plus the ledger share plus the order row, emit one observability
+ * notify so every admit pairs one drop. One finish helper pairs key,
+ * charge, pid, gauge, ledger, notify through one exit so a missed
+ * cleanup cannot leak. Rings stay best effort with loss irrelevant.
+ * Release clears stale pid views. Admission plus order live in the
+ * core with the daemon as monitor solely.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -59,20 +61,23 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	s32 cpu;
 	u32 weight;
 	bool charged;
+	u32 run_flag = runnable ? 1 : 0;
 	cpu = scx_bpf_task_cpu(p);
 	weight = p->scx.weight;
 	if (!flow_entry_ok(cpu, p, 0)) {
 		struct flow_task_ctx *gtctx;
+		u64 now;
 		flow_gate_reject();
 		veb_remove((u32)p->pid);
 		gtctx = flow_lookup(p);
+		now = flow_now();
+		flow_admit_drop((u32)p->pid, gtctx, run_flag, now);
 		if (!gtctx || READ_ONCE(gtctx->seq) != 0)
 			flow_notify_complete((u32)p->pid,
-			    cpu >= 0 ? (u32)cpu : 0, weight,
-			    runnable ? 1 : 0);
+			    cpu >= 0 ? (u32)cpu : 0, weight, run_flag);
 		return;
 	}
-	charged = flow_finish_task(p, cpu, weight, runnable ? 1 : 0);
+	charged = flow_finish_task(p, cpu, weight, run_flag);
 	if (!charged)
 		return;
 	if (runnable) {
@@ -94,14 +99,21 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 		return;
 	WRITE_ONCE(tctx->run_at, 0);
 	WRITE_ONCE(tctx->seq, 0);
+	WRITE_ONCE(tctx->admit_share, 0);
+	WRITE_ONCE(tctx->admit_cpu, 0);
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
 	u32 weight = p->scx.weight;
 	s32 cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
+		struct flow_task_ctx *gtctx;
+		u64 now;
 		flow_gate_reject();
 		veb_remove((u32)p->pid);
+		gtctx = flow_lookup(p);
+		now = flow_now();
+		flow_admit_drop((u32)p->pid, gtctx, 1, now);
 		flow_notify_complete((u32)p->pid, 0, weight, 1);
 		return;
 	}

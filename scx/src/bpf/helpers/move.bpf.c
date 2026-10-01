@@ -6,11 +6,13 @@
  * one exit. Callers pass the iterator task with the expected key plus
  * a keyed flag. Keyed checks strict equality while unkeyed checks
  * liveness bound solely. Sequence, liveness, affinity, order checks
- * run in one place so every skip parks with no tree drop. The task
- * reference drops once on every path through one exit so a missed
- * release cannot leak. The move reports the pid plus key on success
- * so callers drop the key with the stored match. Runs inline so the
- * iterator stays in the caller with no extra call cost.
+ * run in one place so every skip parks with no tree drop. The core
+ * drops shares through stopping plus disable plus exit with order
+ * delete idempotent. The task reference drops once on every path
+ * through one exit so a missed release cannot leak. The move reports
+ * the pid plus key on success so callers drop the key with the stored
+ * match. Runs inline so the iterator stays in the caller with no
+ * extra call cost.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

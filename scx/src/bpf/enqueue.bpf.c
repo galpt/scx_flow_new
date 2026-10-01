@@ -2,22 +2,25 @@
 /*
  * Enqueue op for the flow core.
  *
- * Parks at the overflow tail and notifies the daemon. Exiting
- * tasks run at once on the task CPU. The gate runs first for other
- * arrivals. One idle kick follows each park. The core orders through
- * the tree and the daemon admits. Dispatch moves admitted tasks in
- * tree order. The tail parks with plain insert and the tree holds
- * the key so order never uses kernel queues. Ring reserve faults
- * count one park. One sequence allocation serves task state plus
- * wire notify so the wire stays dense. One park helper pairs sequence,
- * tree insert, notify through one exit so a parked task never misses
- * its notify. Placement picks with live checks alone and no
+ * Parks at the overflow tail and notifies for observability solely.
+ * Exiting tasks run at once on the task CPU. The gate runs first
+ * for other arrivals. One idle kick follows each park. The core
+ * orders through the tree and admits under the bound in the core.
+ * Dispatch moves admitted tasks in tree order. The tail parks with
+ * plain insert and the tree holds the key so order never uses kernel
+ * queues. Rings stay best effort with loss irrelevant to decisions.
+ * One sequence allocation serves task state plus order row plus
+ * observability notify so the wire stays dense. Admit writes tree
+ * plus row synchronously with the same sequence, deadline, CPU so
+ * dispatch needs no roundtrip. Reject parks with no key plus no row
+ * plus no run. Placement picks with live checks alone and no
  * deadline quantize. The selected CPU wins when live plus allowed
- * with no drain check so warmth stays cheap. An idle CPU wins next through the idle pick
- * when live plus allowed so light work lands with no scan. The first
- * allowed live CPU wins last. The chosen CPU feeds the notify so the
- * daemon admits against it with per CPU rows and rejects park with
- * no run. Dispatch order stays least plus successor with no change.
+ * with no drain check so warmth stays cheap. An idle CPU wins next
+ * through the idle pick when live plus allowed so light work lands
+ * with no scan. The first allowed live CPU wins last. The chosen
+ * CPU holds the admitted share with per CPU rows and rejects park
+ * with no run. Dispatch order stays least plus successor with no
+ * change. Fail open stays rare since rows land synchronously.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,10 +29,8 @@ static __noinline void flow_notify_enqueue(u32 pid,
 {
 	struct flow_event *ev;
 	ev = bpf_ringbuf_reserve(&flow_enq_rb, sizeof(*ev), 0);
-	if (!ev) {
-		__sync_fetch_and_add(&flow_stats.parks, 1);
+	if (!ev)
 		return;
-	}
 	ev->kind = (u64)FLOW_PROTO_ENQUEUE;
 	ev->seq = seq;
 	ev->pid = pid;
@@ -39,30 +40,114 @@ static __noinline void flow_notify_enqueue(u32 pid,
 	ev->at = flow_now();
 	bpf_ringbuf_submit(ev, 0);
 }
-static __always_inline void flow_park_tree(struct task_struct *p,
-	u64 enq_flags, u32 weight)
+static __always_inline void flow_park_plain(struct task_struct *p,
+	u64 enq_flags)
 {
-	u64 period = flow_period_ns(weight);
-	u64 deadline = flow_deadline_at(flow_now(), period);
-	veb_insert((u32)p->pid, deadline);
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
 	    (u64)FLOW_QUANTUM_NS, enq_flags);
 	__sync_fetch_and_add(&flow_stats.inserts, 1);
 }
-/* Park plus notify with sequence in one place. */
-/* Allocates one sequence then stores it when state lives then parks */
-/* with tree insert then notifies the daemon. Every park reaches the */
-/* daemon with no missed notify. Callers pass zero for unknown CPUs */
-/* so fail closed parks still notify with no bypass. */
-static __noinline void flow_enqueue_park(struct task_struct *p,
-	u64 enq_flags, u32 weight, u32 cpu_notify,
+/* Park plus notify with BPF owned admission in one place. */
+/* Allocates one sequence then stores it then admits synchronously */
+/* with tree plus row or parks as reject with no key plus no row then */
+/* parks at the tail then notifies for observability solely. Every */
+/* park notifies best effort with loss irrelevant. Callers pass the */
+/* chosen CPU with zero for unknown so fail closed parks still notify */
+/* with no bypass. */
+static __noinline void flow_enqueue_admit(struct task_struct *p,
+	u64 enq_flags, u32 weight, u32 cpu,
 	struct flow_task_ctx *tctx)
 {
+	u64 now = flow_now();
+	u64 period = flow_period_ns(weight);
+	u64 deadline = flow_deadline_at(now, period);
+	u64 share = flow_share_permille(period);
 	u64 seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
+	u32 pid = (u32)p->pid;
+	bool added = false;
+	bool admitted = false;
 	if (tctx)
 		WRITE_ONCE(tctx->seq, seq);
-	flow_park_tree(p, enq_flags, weight);
-	flow_notify_enqueue((u32)p->pid, cpu_notify, weight, seq);
+	if (pid == 0) {
+		flow_gate_reject();
+		if (tctx) {
+			WRITE_ONCE(tctx->admit_share, 0);
+			WRITE_ONCE(tctx->admit_cpu, 0);
+		}
+		flow_order_delete(pid);
+		__sync_fetch_and_add(&flow_stats.rejects, 1);
+		__sync_fetch_and_add(&flow_stats.parks, 1);
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue(pid, cpu, weight, seq);
+		return;
+	}
+	if ((u64)cpu >= (u64)FLOW_MAX_CPUS) {
+		flow_gate_reject();
+		if (tctx) {
+			WRITE_ONCE(tctx->admit_share, 0);
+			WRITE_ONCE(tctx->admit_cpu, 0);
+		}
+		veb_remove(pid);
+		flow_order_delete(pid);
+		__sync_fetch_and_add(&flow_stats.rejects, 1);
+		__sync_fetch_and_add(&flow_stats.parks, 1);
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue(pid, cpu, weight, seq);
+		return;
+	}
+	if (share == 0) {
+		if (tctx) {
+			WRITE_ONCE(tctx->admit_share, 0);
+			WRITE_ONCE(tctx->admit_cpu, cpu);
+		}
+		veb_insert(pid, deadline);
+		if (flow_order_write(pid, seq, deadline, cpu)) {
+			__sync_fetch_and_add(&flow_stats.admits, 1);
+			admitted = true;
+		} else {
+			veb_remove(pid);
+			if (tctx) {
+				WRITE_ONCE(tctx->admit_share, 0);
+				WRITE_ONCE(tctx->admit_cpu, 0);
+			}
+		}
+	} else {
+		if (flow_admit_try_add(cpu, share)) {
+			added = true;
+			if (tctx) {
+				WRITE_ONCE(tctx->admit_share, (u32)share);
+				WRITE_ONCE(tctx->admit_cpu, cpu);
+			}
+			veb_insert(pid, deadline);
+			if (flow_order_write(pid, seq, deadline, cpu)) {
+				__sync_fetch_and_add(&flow_stats.admits, 1);
+				admitted = true;
+			} else {
+				veb_remove(pid);
+				flow_admitted_sub(cpu, share);
+				if (tctx) {
+					WRITE_ONCE(tctx->admit_share, 0);
+					WRITE_ONCE(tctx->admit_cpu, 0);
+				}
+			}
+		}
+	}
+	if (admitted) {
+		(void)added;
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue(pid, cpu, weight, seq);
+		return;
+	}
+	if (tctx) {
+		WRITE_ONCE(tctx->admit_share, 0);
+		WRITE_ONCE(tctx->admit_cpu, 0);
+	}
+	veb_remove(pid);
+	flow_order_delete(pid);
+	__sync_fetch_and_add(&flow_stats.rejects, 1);
+	__sync_fetch_and_add(&flow_stats.parks, 1);
+	flow_park_plain(p, enq_flags);
+	flow_notify_enqueue(pid, cpu, weight, seq);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
@@ -71,6 +156,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	s32 sel;
 	s32 cpu;
 	u32 weight;
+	u64 seq_tmp;
 	(void)enq_flags;
 	if (p->flags & PF_EXITING) {
 		s32 tgt = scx_bpf_task_cpu(p);
@@ -88,8 +174,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	weight = p->scx.weight;
 	if (!tctx) {
 		flow_gate_reject();
-		flow_enqueue_park(p, enq_flags, weight,
-		    cpu >= 0 ? (u32)cpu : 0, 0);
+		seq_tmp = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue((u32)p->pid,
+		    cpu >= 0 ? (u32)cpu : 0, weight, seq_tmp);
 		if (flow_cpu_ok(p, sel)) {
 			scx_bpf_test_and_clear_cpu_idle(sel);
 			scx_bpf_kick_cpu(sel, SCX_KICK_IDLE);
@@ -100,16 +188,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (!flow_entry_ok(sel, p, 0) &&
 	    !flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
-		flow_enqueue_park(p, enq_flags, weight,
-		    cpu >= 0 ? (u32)cpu : 0, tctx);
+		seq_tmp = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		WRITE_ONCE(tctx->seq, seq_tmp);
+		WRITE_ONCE(tctx->admit_share, 0);
+		WRITE_ONCE(tctx->admit_cpu, 0);
+		veb_remove((u32)p->pid);
+		flow_order_delete((u32)p->pid);
+		__sync_fetch_and_add(&flow_stats.rejects, 1);
+		__sync_fetch_and_add(&flow_stats.parks, 1);
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue((u32)p->pid,
+		    cpu >= 0 ? (u32)cpu : 0, weight, seq_tmp);
 		return;
 	}
 	/* Placement with selected, idle, first in one place. */
 	/* Gives selected when allowed and live else idle when allowed */
 	/* and live else first when allowed and live else error with */
 	/* no drain check so warmth stays cheap. The chosen CPU */
-	/* feeds the notify so the daemon admits against it with per CPU */
-	/* rows and rejects park with no run. */
+	/* holds the share with per CPU rows and rejects park with */
+	/* no run. */
 	{
 		s32 idle;
 		s32 first;
@@ -126,8 +223,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 					cpu = first;
 				} else {
 					flow_gate_reject();
-					flow_enqueue_park(p, enq_flags,
-					    weight, 0, tctx);
+					seq_tmp = __sync_fetch_and_add(
+					    &flow_seq, 1) + 1;
+					WRITE_ONCE(tctx->seq, seq_tmp);
+					WRITE_ONCE(tctx->admit_share, 0);
+					WRITE_ONCE(tctx->admit_cpu, 0);
+					veb_remove((u32)p->pid);
+					flow_order_delete((u32)p->pid);
+					__sync_fetch_and_add(
+					    &flow_stats.rejects, 1);
+					__sync_fetch_and_add(
+					    &flow_stats.parks, 1);
+					flow_park_plain(p, enq_flags);
+					flow_notify_enqueue((u32)p->pid,
+					    0, weight, seq_tmp);
 					return;
 				}
 			}
@@ -135,10 +244,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	if (!flow_cpu_ok(p, cpu)) {
 		flow_gate_reject();
-		flow_enqueue_park(p, enq_flags, weight, 0, tctx);
+		seq_tmp = __sync_fetch_and_add(&flow_seq, 1) + 1;
+		WRITE_ONCE(tctx->seq, seq_tmp);
+		WRITE_ONCE(tctx->admit_share, 0);
+		WRITE_ONCE(tctx->admit_cpu, 0);
+		veb_remove((u32)p->pid);
+		flow_order_delete((u32)p->pid);
+		__sync_fetch_and_add(&flow_stats.rejects, 1);
+		__sync_fetch_and_add(&flow_stats.parks, 1);
+		flow_park_plain(p, enq_flags);
+		flow_notify_enqueue((u32)p->pid, 0, weight, seq_tmp);
 		return;
 	}
-	flow_enqueue_park(p, enq_flags, weight, (u32)cpu, tctx);
+	flow_enqueue_admit(p, enq_flags, weight, (u32)cpu, tctx);
 	{
 		struct flow_cpu_state *st = flow_cpu_state_for(cpu);
 		if (st && READ_ONCE(st->running_pid) == 0) {

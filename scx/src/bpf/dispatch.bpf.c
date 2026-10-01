@@ -8,23 +8,23 @@
  * than twenty times. Twenty covers sixteen moves plus four skip
  * slack so full batches never starve on sparse keys. A drained tail
  * exits the pass at once so empty probes never run. Empty keys
- * skip through counts with no tail
- * scan and drained keys advance at once so fruitless rescans never
- * run. Each key scans the overflow tail and moves the first admitted
- * task with sequence, liveness, affinity checks. Duplicates leave in
- * park order within one key. Per CPU mismatch, missing order, stale
- * sequence skip with no tree drop and the daemon drops
- * shares through complete plus stale collection. Only the moved pid
- * drops its key when the stored key still matches. Empty queue leaves
- * at once with no scan so idle stays cheap. Empty tree or stall
- * moves one affinity gated head task with liveness plus affinity
- * checks plus keyed drop and no order or sequence gate so runnable
- * tasks never wait on the daemon shadow. Over moves count
- * progress with ordered moves counting vEB hits plus fail open
- * moves counting FIFO parks so every dispatched task lands in one
- * bucket. Level follows after ordered moves plus fail open
- * with the same CPU only and no call on steady through one exit,
- * so idle cannot be skipped.
+ * skip through counts with no tail scan and drained keys advance at
+ * once so fruitless rescans never run. Each key scans the overflow
+ * tail and moves the first admitted task with sequence, liveness,
+ * affinity checks. Duplicates leave in park order within one key.
+ * Per CPU mismatch, missing order, stale sequence skip with no tree
+ * drop and the core drops shares through stopping plus disable plus
+ * exit. Only the moved pid drops its key when the stored key still
+ * matches. Empty queue leaves at once with no scan so idle stays
+ * cheap. Empty tree or stall moves one affinity gated head task with
+ * liveness plus affinity checks plus keyed drop and no order or
+ * sequence gate so runnable tasks never stall on live work. Fail
+ * open stays rare since rows land synchronously and solely genuine
+ * affinity misses reach it. Over moves count progress with ordered
+ * moves counting vEB hits plus fail open moves counting FIFO parks
+ * so every dispatched task lands in one bucket. Level follows after
+ * ordered moves plus fail open with the same CPU only and no call on
+ * steady through one exit, so idle cannot be skipped.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -55,11 +55,12 @@ static __noinline bool veb_try_move_one(u32 key, s32 cpu)
 }
 /* Fail open with liveness plus affinity solely and no order gate. */
 /* Moves the first live affinity match at the overflow head so one */
-/* runnable task always lands on the dispatch CPU even when the */
-/* daemon shadow holds no order row yet. Skips drop no tree state */
-/* with no park count so transient misses stay quiet. Moves count */
-/* one FIFO park at the decision point. The moved pid */
-/* drops its key solely when the stored key still matches. */
+/* runnable task always lands on the dispatch CPU even when a stale */
+/* entry holds no order row. Skips drop no tree state with no park */
+/* count so transient misses stay quiet. Moves count one FIFO park */
+/* at the decision point. The moved pid drops its key solely when */
+/* the stored key still matches. Stays rare since admits write rows */
+/* synchronously and solely genuine affinity misses reach here. */
 static __noinline bool veb_fail_open_one(s32 cpu)
 {
 	bool moved = false;

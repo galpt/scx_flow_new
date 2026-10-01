@@ -2,14 +2,15 @@
 /*
  * Flow core with tree queues.
  *
- * Maps hold task run state, CPU rows, topology rows, daemon order
- * rows, tree summary, clusters, counts, tree pid rows, root, two
- * notify rings. Init reserves five hundred twelve local queues,
+ * Maps hold task run state, CPU rows, topology rows, admitted sums,
+ * order rows, tree summary, clusters, counts, tree pid rows, root,
+ * two notify rings. Init reserves five hundred twelve local queues,
  * eight node queues, machine, overflow as an ABI placeholder so
- * identifiers stay stable. The core parks and notifies. The core
- * orders through the tree and the daemon admits. Dispatch moves
- * admitted tasks in tree order. Hotplug needs a restart. The
- * watchdog stays at twenty seconds.
+ * identifiers stay stable. The core parks and notifies for
+ * observability solely. The core orders through the tree and admits
+ * under the bound in the core. Dispatch moves admitted tasks in tree
+ * order. Hotplug needs a restart. The watchdog stays at twenty
+ * seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -51,6 +52,12 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_order_entry);
 } order_stor SEC(".maps");
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, u64);
+} admitted_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
@@ -65,6 +72,9 @@ volatile u64 flow_seq;
 #include "veb/succ.bpf.c"
 #include "veb/remove.bpf.c"
 #include "veb/insert.bpf.c"
+#include "admit/share.bpf.c"
+#include "admit/row.bpf.c"
+#include "admit/drop.bpf.c"
 #include "helpers/move.bpf.c"
 #include "helpers/finish.bpf.c"
 #include "select_cpu.bpf.c"

@@ -10,7 +10,7 @@
  * through the idle pick when live plus allowed so light work lands
  * with no scan. The first allowed live CPU wins last. Stale masks fail
  * closed with an error and one gate count so callers never run on a
- * stale CPU. The daemon owns admit with per CPU rows and the core
+ * stale CPU. The core owns admit with per CPU rows and the core
  * proposes solely through the selected CPU so rejects park with no run.
  * Dispatch order stays least plus successor with no change. The core
  * keeps mask wins and progress. One fallback helper pairs the previous,
