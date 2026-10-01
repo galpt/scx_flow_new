@@ -8,6 +8,13 @@ scx_flow is a sched-ext scheduler that replaces FIFO plus rbtree queue ordering 
 
 The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree in BPF. A Van Emde Boas tree may beat FIFO, priority queue, BST, rbtree for least deadline search. BPF keeps the tree accurate with bounded loops and fail closed parks. The benefits may outweigh the overhead when deadlines drive placement. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
+## Typical Use Cases
+
+- Deadline ordered runs. BPF vEB queues keep least key order with bounded probes, so deadline driven work gains ordered moves with fail open cover when the tree stalls.
+- Admission bound checks. Rust daemon ledger pairs share, order, task single exit under 950 per mille, so overload parks early with no runaway queue growth.
+- Hierarchy neutral hosts. Thin stub passes init, move, weight with no policy in BPF, so transitions stay balanced while hints stay derived from weight.
+- Benefit review on dashboard. Loopback dashboard shows vEB hits, FIFO parks, `TL;DR`, `Explanation` at ninety five share, so ordered gain needs no log scraping.
+
 ## More details
 
 ### Queues
