@@ -52,7 +52,7 @@ static __noinline bool flow_perf_busy(s32 cpu)
 /* Holds the ksym plus live plus bound plus allowlist plus cap plus */
 /* transition checks in one place, so callers cannot split them. */
 /* Any local plus running picks max else half with no knob through */
-/* through the paired entry, never a bare want. The kfunc check runs */
+/* the paired entry, never a bare want. The kfunc check runs */
 /* first, so old kernels skip with no set. The live check runs next, */
 /* so unknown CPUs skip with no set. The allowlist guards the pre cap */
 /* choice only, the cap may step outside it within range, so no trap */

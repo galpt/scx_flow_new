@@ -25,7 +25,8 @@
 /* gate count. Callers reach the gate solely here so every failure */
 /* counts once with no missed reject. Placement shares the deadline */
 /* source with the tree through the same quantize with no drain */
-/* check so warmth stays cheap. */
+/* check so warmth stays cheap. Idle first stays BPF only with no */
+/* mirror, since the idle pick needs the live mask with no replay. */
 static __always_inline s32 flow_fallback_cpu(
 	const struct task_struct *p, s32 prev_cpu)
 {

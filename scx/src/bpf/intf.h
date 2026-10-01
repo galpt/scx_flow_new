@@ -93,8 +93,8 @@ enum flow_consts {
 	FLOW_QUANT_SHIFT = 10ULL,
 	FLOW_VEB_EMPTY = 0xFFFFFFFFULL,
 	FLOW_ADMIT_PERMILLE = 950ULL,
-	/* CPU performance levels at half plus max with no knob. Any own */
-	/* plus local plus running picks max else half with no shared use. */
+	/* CPU performance levels at half plus max with no knob. Any local */
+	/* plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
 };
