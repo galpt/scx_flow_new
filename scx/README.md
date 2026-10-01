@@ -8,6 +8,10 @@ scx_flow is a sched-ext scheduler that replaces FIFO plus rbtree queue ordering 
 
 The goal is to test what happens when a CPU scheduler uses a Van Emde Boas tree in BPF. A Van Emde Boas tree may beat FIFO, priority queue, BST, rbtree for least deadline search. BPF keeps the tree accurate with bounded loops and fail closed parks. The benefits may outweigh the overhead when deadlines drive placement. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
+### How it works?
+
+Task arrival hits the gate first with stale CPUs plus tasks failing closed. The core derives one deadline from weight derived period plus now then quantizes to one 16 bit key at 1024 nanos per step with saturate at top. Enqueue inserts the key in the tree, parks at the overflow tail, notifies the daemon with one sequence, and the daemon admits under 950 per mille with rejects parking and no run. Dispatch starts from the least key and follows successors in tree order up to 16 moves capped at 20 probes with sequence, liveness, affinity checks, and empty tree or stall moves one affinity gated head task to the dispatch CPU with keyed drop so runnable tasks never wait. Stopping, disable, exit drop the tree key plus notify complete, and the daemon drops the stored share once with lost shares collected past deadline plus 128ms grace. Duplicates share one key with park order deciding within one key, and the tree finds least plus successor in doubly logarithmic time with cached least in constant time, so ordered search may beat FIFO scan plus rbtree O(log n) when deadlines drive placement. See `src/bpf/veb/`, `src/bpf/dispatch.bpf.c`, `src/rust/flow/runtime.rs`.
+
 ## Typical Use Cases
 
 - Deadline ordered runs. BPF vEB queues keep least key order with bounded probes, so deadline driven work gains ordered moves with fail open cover when the tree stalls.
