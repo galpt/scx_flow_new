@@ -68,8 +68,3 @@ static __noinline void flow_admitted_sub(u32 cpu, u64 share)
 			return;
 	}
 }
-static __always_inline u64 flow_share_for_weight(u32 weight)
-{
-	u64 period = flow_period_ns(weight);
-	return flow_share_permille(period);
-}

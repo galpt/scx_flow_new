@@ -16,15 +16,12 @@ use super::runtime::AdmitDecision;
 
 impl Daemon {
     /// Park with order cleanup plus parks accounting in one place.
-    /// Drops the stored share when asked then clears the order row then
-    /// counts one reject plus one park. Zero identifiers park with no
-    /// row change. Fresh identifiers park with no share drop. Stale
-    /// CPUs plus deep queues park with share drop. Callers return the
+    /// Clears the order row then counts one reject plus one park.
+    /// Zero identifiers park with no row change. Fresh identifiers
+    /// park with no share drop. Stale CPUs plus deep queues park
+    /// after the caller drops the stored share. Callers return the
     /// parked decision at once with no extra work.
-    pub(crate) fn reject_park(&mut self, pid: u32, drop: bool) -> AdmitDecision {
-        if drop {
-            self.drop_stored(pid);
-        }
+    pub(crate) fn reject_park(&mut self, pid: u32) -> AdmitDecision {
         self.order.remove(pid);
         self.rejects += 1;
         self.parks += 1;

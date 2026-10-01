@@ -64,7 +64,6 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 share = flow_share_permille(period);
 	u64 seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	u32 pid = (u32)p->pid;
-	bool added = false;
 	bool admitted = false;
 	if (tctx)
 		WRITE_ONCE(tctx->seq, seq);
@@ -113,7 +112,6 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		}
 	} else {
 		if (flow_admit_try_add(cpu, share)) {
-			added = true;
 			if (tctx) {
 				WRITE_ONCE(tctx->admit_share, (u32)share);
 				WRITE_ONCE(tctx->admit_cpu, cpu);
@@ -133,7 +131,6 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		}
 	}
 	if (admitted) {
-		(void)added;
 		flow_park_plain(p, enq_flags);
 		flow_notify_enqueue(pid, cpu, weight, seq);
 		return;

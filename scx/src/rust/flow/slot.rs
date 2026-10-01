@@ -7,7 +7,7 @@
 //! shared queue serves each node. One machine queue serves the host.
 //! One overflow tail serves parks. Init reserves the full set as an
 //! ABI placeholder so identifiers stay stable across releases while
-//! dispatch moves admitted tasks in daemon order. A single tail
+//! dispatch moves admitted tasks in core order. A single tail
 //! avoids cross tier moves that would bounce cache and NUMA locality.
 //! Undrained queues hold zero tasks and cost solely at init.
 

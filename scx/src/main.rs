@@ -409,7 +409,18 @@ impl<'a> Scheduler<'a> {
         }
         self.last_gc = Instant::now();
         let now = Self::mono_ns();
-        let _ = self.daemon.gc_stale(now);
+        let removed = self.daemon.gc_stale(now);
+        let (admits, rejects, misses, parks, drops) = self.daemon.mirror_counts();
+        log::debug!(
+            "stale collected={} admits={} rejects={} misses={} parks={} drops={} seq={}",
+            removed.len(),
+            admits,
+            rejects,
+            misses,
+            parks,
+            drops,
+            self.daemon.wire_last()
+        );
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {

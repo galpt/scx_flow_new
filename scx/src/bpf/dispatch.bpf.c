@@ -44,7 +44,7 @@ static __noinline bool veb_try_move_one(u32 key, s32 cpu)
 		if (moved)
 			break;
 		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p, key,
-		    true, &pid, &k2)) {
+		    &pid, &k2)) {
 			moved = true;
 			veb_remove_if_key(pid, k2);
 			break;

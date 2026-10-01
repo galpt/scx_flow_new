@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Daemon order, admission, protocol for the flow daemon.
+//! Daemon mirror, admission oracle, protocol for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -150,7 +150,8 @@ pub struct TaskState {
     /// CPU holding the stored share.
     pub admit_cpu: u32,
     /// Single sequence from the enqueue notify as oracle.
-    #[allow(dead_code)]
+    /// Mirror only with the core as authority.
+    #[cfg(test)]
     pub wire_seq: u64,
 }
 
@@ -263,10 +264,22 @@ impl Daemon {
         self.tasks.get(&pid)
     }
 
-    /// Last observed sequence for gap observability.
-    #[cfg(test)]
+    /// Last observed sequence for gap observability solely.
+    /// Mirror only with the core as authority.
     pub fn wire_last(&self) -> u64 {
         self.wire_last
+    }
+
+    /// Mirror counts for observability solely with no core effect.
+    /// Lets production logs observe the oracle without gating dispatch.
+    pub fn mirror_counts(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.admits,
+            self.rejects,
+            self.misses,
+            self.parks,
+            self.ev_drops,
+        )
     }
 
     /// Share of one hint through the default period on miss.
@@ -315,20 +328,20 @@ impl Daemon {
         wire_seq: u64,
     ) -> AdmitDecision {
         if pid == 0 {
-            return self.reject_park(pid, false);
+            return self.reject_park(pid);
         }
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
             self.remove_row(pid);
-            return self.reject_park(pid, false);
+            return self.reject_park(pid);
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
             self.remove_row(pid);
-            return self.reject_park(pid, false);
+            return self.reject_park(pid);
         }
         if !self.tasks.contains_key(&pid) && self.tasks.len() >= TASKS_CAP {
-            return self.reject_park(pid, false);
+            return self.reject_park(pid);
         }
         if self.tasks.contains_key(&pid) {
             self.unpublish(pid);
@@ -350,6 +363,7 @@ impl Daemon {
                     deadline,
                     share: 0,
                     admit_cpu: 0,
+                    #[cfg(test)]
                     wire_seq,
                 },
             );
@@ -368,6 +382,7 @@ impl Daemon {
                 deadline,
                 share,
                 admit_cpu: cpu,
+                #[cfg(test)]
                 wire_seq,
             },
         );
