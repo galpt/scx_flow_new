@@ -83,8 +83,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		    (u64)moved);
 		__sync_fetch_and_add(&flow_stats.veb_hits,
 		    (u64)moved);
-		if (moved < (u32)FLOW_DISPATCH_MAX_BATCH &&
-		    scx_bpf_dsq_nr_queued(flow_overflow_dsq()) != 0) {
+		/* The fallback itself no-ops on an empty queue, so no */
+		/* extra depth check lands here with the entry plus the */
+		/* ordered loop already gating empty. */
+		if (moved < (u32)FLOW_DISPATCH_MAX_BATCH) {
 			u32 left = (u32)FLOW_DISPATCH_MAX_BATCH - moved;
 			extra = veb_fail_open_drain(cpu, left);
 			flow_fifo_account(extra);

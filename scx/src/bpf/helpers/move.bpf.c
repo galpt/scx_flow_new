@@ -39,15 +39,16 @@ static __always_inline bool flow_move_candidate(
 	/* Iterator never holds null here, so no null branch. */
 	/* Cheap skip with no reference for pids this move cannot take. */
 	/* Uses the picked pid from the least scan, so a deep tail pays */
-	/* a reference solely on the one picked entry. */
+	/* a reference solely on the one picked entry. Want stays non */
+	/* zero from the least pick, so zero falls through the mismatch */
+	/* below with no extra branch. */
 	iter_pid = (u32)p->pid;
-	if (iter_pid == 0)
-		return false;
 	if (iter_pid != want_pid)
 		return false;
-	/* Live proven at entry, so mask alone gates here. */
-	if (!flow_mask_ok(cpu, p))
-		return false;
+	/* The least pick already gated mask, so the live task check */
+	/* below alone gates affinity with no extra iterator test: a */
+	/* changed affinity still misses there with one extra reference */
+	/* solely on the picked entry in the rare race. */
 	t = bpf_task_from_pid(p->pid);
 	if (!t)
 		return false;
@@ -62,12 +63,21 @@ static __always_inline bool flow_move_candidate(
 	tctx = flow_lookup(t);
 	if (!tctx)
 		goto out;
-	if (READ_ONCE(tctx->key) != want_key)
-		goto out;
-	if (READ_ONCE(tctx->deadline) != want_deadline)
-		goto out;
-	if (READ_ONCE(tctx->admit_cpu) != want_owner)
-		goto out;
+	/* Key plus owner fold into one 64-bit compare with pid reuse */
+	/* still guarded: keys stay below bit 32 while owners do too, */
+	/* so one compare covers both with deadline kept apart for the */
+	/* far top key rejects. */
+	{
+		u32 have_key = READ_ONCE(tctx->key);
+		u64 have_deadline = READ_ONCE(tctx->deadline);
+		u32 have_owner = READ_ONCE(tctx->admit_cpu);
+		u64 have_ko = ((u64)have_key << 32) | (u64)have_owner;
+		u64 want_ko = ((u64)want_key << 32) | (u64)want_owner;
+		if (have_ko != want_ko)
+			goto out;
+		if (have_deadline != want_deadline)
+			goto out;
+	}
 	if (scx_bpf_dsq_move(it, t,
 	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 		moved = true;

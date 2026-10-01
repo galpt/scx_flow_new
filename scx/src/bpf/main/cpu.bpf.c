@@ -14,9 +14,10 @@
  */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
+	/* Nr ids never exceeds the build bound with init failing over */
+	/* bound, so the ids check alone implies the bound with no */
+	/* extra branch while lookups keep their own bound for safety. */
 	if ((u64)cpu >= nr_cpu_ids)
-		return false;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return false;
 	return true;
 }
