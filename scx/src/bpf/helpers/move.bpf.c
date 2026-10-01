@@ -6,7 +6,7 @@
  * one exit. Callers pass the iterator task with the picked pid plus
  * key plus deadline plus owner from the global least scan. Checks
  * strict equality on pid plus key plus deadline plus owner with
- * affinity, liveness, share checks in one place and no sequence gate,
+ * affinity plus liveness in one place and no sequence gate,
  * so any CPU takes the earliest work it may run. Key plus deadline
  * may match across tasks in the same instant, so the owner check
  * narrows the reuse window with one cheap read. Foreign pids skip
@@ -61,8 +61,6 @@ static __always_inline bool flow_move_candidate(
 		goto out;
 	tctx = flow_lookup(t);
 	if (!tctx)
-		goto out;
-	if (READ_ONCE(tctx->admit_share) == 0)
 		goto out;
 	if (READ_ONCE(tctx->key) != want_key)
 		goto out;

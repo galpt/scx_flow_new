@@ -2,48 +2,48 @@
 /*
  * Dispatch op for the flow core.
  *
- * Moves admitted tasks in global deadline order up to sixteen per pass
- * with no sequence gate and no CPU gate. Each move picks the least key
- * then deadline then owned then pid among entries the dispatch CPU may
- * run. Affinity plus liveness gate
- * every move through the same mask as the FIFO path with live proven
- * once at entry, so the target class never widens. Ordered checks run
- * first so admitted tasks stay preferred, while the FIFO drain moves
- * the remainder in queue order up to the batch bound. Past one hundred
- * twenty eight queued ordered stops after four moves with FIFO covering
- * the remainder to sixteen, so a deep tail never burns sixteen double
- * scans in one pass. One head read plus task state gates admission
- * with fallback to the tail scan, so hits skip the walk while only
- * the picked pid takes a reference.
+ * Moves every parked task in global deadline order up to sixteen per
+ * pass with no sequence gate and no CPU gate. Each move picks the
+ * least key then deadline then owned then pid among entries the
+ * dispatch CPU may run, so admits sort before top key rejects while
+ * rejects still drain ordered last. Affinity plus liveness gate
+ * every move through the same mask as the fallback path with live
+ * proven once at entry, so the target class never widens. Ordered
+ * checks run first so every parked task stays preferred, while the
+ * fallback drain moves solely the remainder when the tree reads empty
+ * or state proves corrupt up to the batch bound. Deep backlog still
+ * drains sixteen ordered per pass with the earliest moves kept in
+ * order. One head read plus task state picks the least with fallback
+ * to the tail scan, so hits skip the walk while only the picked pid
+ * takes a reference.
  * Drops run at teardown, so the hot path keeps no deletes and the
  * core drops shares through stopping plus disable plus exit. Empty
  * queue leaves at once with no scan so idle stays cheap. Stall drains
- * up to sixteen FIFO tasks with mask checks and no
- * order gate so runnable tasks never stall on live work. Fail open
- * stays rare in normal load since rows land synchronously and solely
- * genuine affinity misses reach it. Over moves count progress with
- * ordered moves counting vEB hits plus fail open moves counting FIFO
- * parks so every dispatched task lands in one bucket. Level follows
- * after ordered moves plus fail open with the same CPU only and no
- * call on steady through one exit, so idle cannot be skipped.
+ * solely through the same empty or corrupt fallback with mask checks
+ * and no order gate so runnable tasks never stall on live work. Fail
+ * open stays as the empty or corrupt canary since task state plus
+ * tree land synchronously and solely genuine misses reach it. Over
+ * moves count progress with ordered moves counting vEB hits plus
+ * fallback moves counting FIFO parks so every dispatched task lands
+ * in one bucket. Level follows after ordered moves plus fallback with
+ * the same CPU only and no call on steady through one exit, so idle
+ * cannot be skipped.
  *
- * The pass splits across dispatch/probes, failopen, drain, flood,
- * ordered, head, perf files with one RCU section per scan. Ordered
- * plus drain plus flood plus pick plus consume plus head stay noinline
- * with scalar inputs and bounded loops, so the verifier stays small
- * with no unrolled caller tree, while the single task moves plus the
- * FIFO account stay inline so the deepest path keeps its call frames
- * small.
+ * The pass splits across dispatch/probes, failopen, drain, ordered,
+ * head, perf files with one RCU section per scan. Ordered plus drain
+ * plus pick plus consume plus head stay noinline with scalar inputs
+ * and bounded loops, so the verifier stays small with no unrolled
+ * caller tree, while the single task moves plus the fallback account
+ * stay inline so the deepest path keeps its call frames small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include "dispatch/perf.bpf.c"
-#include "dispatch/flood.bpf.c"
 #include "dispatch/probes.bpf.c"
 #include "dispatch/failopen.bpf.c"
 #include "dispatch/drain.bpf.c"
 #include "dispatch/ordered.bpf.c"
-/* Single FIFO account with over plus park in one place. */
+/* Single fallback account with over plus park in one place. */
 /* Keeps the three drain sites paired, so every extra move lands in */
 /* both buckets with no missed count. */
 static __always_inline void flow_fifo_account(u32 extra)

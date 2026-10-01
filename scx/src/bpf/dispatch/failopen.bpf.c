@@ -3,15 +3,16 @@
  * Fail open move for the dispatch batch drain.
  *
  * Holds one overflow task check plus move with single release through
- * one exit. Callers pass the iterator plus task from the single FIFO
+ * one exit. Callers pass the iterator plus task from the single canary
  * scan, so one scan moves up to sixteen in queue order with no
  * rescan per move. Skips drop no tree state with no park count so
  * transient misses stay quiet. Moves count one FIFO park at the
- * decision point through the batch account. Moves clear the head slot,
- * so a FIFO pid never lingers as a head for the next ordered pick.
- * Drops run at teardown, so the hot path keeps no deletes. Stays rare
- * since admits write rows synchronously and solely genuine affinity
- * misses reach here.
+ * decision point through the batch account, keeping the canary
+ * meaningful while ordered moves carry every parked task. Moves clear
+ * the head slot, so a fallback pid never lingers as a head for the
+ * next ordered pick. Drops run at teardown, so the hot path keeps no
+ * deletes. Stays as the empty or corrupt canary since task state plus
+ * tree land synchronously and solely genuine misses reach here.
  * Live stays proven once at entry, so the check pays one mask test
  * on the acquired task with no live branch and no iterator test
  * beyond the acquire. Runs inline so the iterator stays in the

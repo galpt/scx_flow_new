@@ -5,10 +5,13 @@
  * Parks at the overflow tail with plain insert and counts one insert.
  * Admission allocates one sequence then stores it plus the deadline
  * plus key from the same period helpers, then admits under
- * the bound with tree plus row or parks as reject with no key plus
- * no row then parks at the tail then notifies for observability
- * solely. Admitted parks also store one head plus one placement view
- * for later picks with no extra counter. Every park notifies best
+ * the bound with tree plus row or parks as reject at the top key
+ * with the far deadline then parks at the tail then notifies for
+ * observability solely. Rejects stay ordered at the lowest key so
+ * dispatch still picks them by key then deadline. Admitted parks
+ * also store one head plus one placement view for later picks with
+ * no extra counter, and rejects store the same views with the far
+ * deadline keeping the head behind admits. Every park notifies best
  * effort with loss irrelevant.
  * Callers pass the chosen CPU with zero for unknown so fail closed
  * parks still notify with no bypass. Plain park stays inline so the
@@ -26,11 +29,37 @@ static __always_inline void flow_park_plain(struct task_struct *p,
 }
 /* Park plus notify with BPF owned admission in one place. */
 /* Allocates one sequence then stores it then admits synchronously */
-/* with tree plus row or parks as reject with no key plus no row then */
-/* parks at the tail then notifies for observability solely. Every */
-/* park notifies best effort with loss irrelevant. Callers pass the */
-/* chosen CPU with zero for unknown so fail closed parks still notify */
-/* with no bypass. */
+/* with tree plus row or parks as reject at the top key with the far */
+/* deadline then parks at the tail then notifies for observability */
+/* solely. Rejects stay ordered through task state plus tree with no */
+/* row, so the ordered path still moves them. Every park notifies */
+/* best effort with loss irrelevant. Callers pass the chosen CPU with */
+/* zero for unknown so fail closed parks still notify with no bypass. */
+static __noinline void flow_reject_top(u32 pid, u32 cpu,
+	struct flow_task_ctx *tctx)
+{
+	u32 top;
+	u64 far;
+	if (pid == 0)
+		return;
+	top = (u32)FLOW_VEB_U - 1;
+	far = (u64)~0ULL;
+	if (tctx) {
+		WRITE_ONCE(tctx->admit_share, 0);
+		if ((u64)cpu < (u64)FLOW_MAX_CPUS)
+			WRITE_ONCE(tctx->admit_cpu, cpu);
+		else
+			WRITE_ONCE(tctx->admit_cpu, 0);
+		WRITE_ONCE(tctx->deadline, far);
+		WRITE_ONCE(tctx->key, top);
+	}
+	veb_insert(pid, far);
+	flow_order_delete(pid);
+	if ((u64)cpu < (u64)FLOW_MAX_CPUS) {
+		flow_head_store(pid, top, far, cpu);
+		flow_place_store(pid, cpu);
+	}
+}
 static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 enq_flags, u32 weight, u32 cpu,
 	struct flow_task_ctx *tctx)
@@ -65,14 +94,7 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	}
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS) {
 		flow_gate_reject();
-		if (tctx) {
-			WRITE_ONCE(tctx->admit_share, 0);
-			WRITE_ONCE(tctx->admit_cpu, 0);
-			WRITE_ONCE(tctx->deadline, 0);
-			WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
-		}
-		veb_remove(pid);
-		flow_order_delete(pid);
+		flow_reject_top(pid, 0, tctx);
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
 		__sync_fetch_and_add(&flow_stats.parks, 1);
 		flow_park_plain(p, enq_flags);
@@ -137,14 +159,7 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		flow_notify_enqueue(pid, cpu, weight, seq);
 		return;
 	}
-	if (tctx) {
-		WRITE_ONCE(tctx->admit_share, 0);
-		WRITE_ONCE(tctx->admit_cpu, 0);
-		WRITE_ONCE(tctx->deadline, 0);
-		WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
-	}
-	veb_remove(pid);
-	flow_order_delete(pid);
+	flow_reject_top(pid, cpu, tctx);
 	__sync_fetch_and_add(&flow_stats.rejects, 1);
 	__sync_fetch_and_add(&flow_stats.parks, 1);
 	flow_park_plain(p, enq_flags);

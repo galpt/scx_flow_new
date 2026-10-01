@@ -12,41 +12,41 @@
  * deadline, CPU and parks with plain insert. Task state also keeps
  * the deadline plus key from the same period plus deadline plus
  * quantize helpers with zero roundtrip, so dispatch compares without
- * touching order rows. Rejects park with no
- * key plus no row plus no run. One kick follows each park to the
+ * touching order rows. Rejects park at the top key with the far
+ * deadline plus no row plus no run, so every parked task stays
+ * ordered with rejects last. One kick follows each park to the
  * chosen CPU when idle else one idle peer else one directed preempt
  * to the owner solely when the wakeup runs earlier than the owner
  * task, so urgent arrivals preempt longer runs with at most one kick
- * per park and no storm. Dispatch moves admitted tasks in global
+ * per park and no storm. Dispatch moves every parked task in global
  * deadline order up to sixteen per pass with no sequence gate and
  * no CPU gate. Each pass picks the least key then deadline then owned
  * then pid among entries the dispatch CPU may run, so any CPU takes
  * the earliest work it may run.
  * Affinity plus liveness still gate every move through the same
- * entry check as the FIFO path, so the target class never widens.
+ * entry check as the fallback path, so the target class never widens.
  * Ordered checks run first
- * so admitted tasks stay preferred, while the FIFO drain moves the
- * remainder in queue order up to the batch bound. The pass keeps no
- * flood probe cap, so deep backlog still drains sixteen ordered per
- * pass with the earliest moves kept in order. Stale entries park and the core drops shares through stopping plus
+ * so every parked task stays preferred, while the fallback drain moves
+ * solely the empty or corrupt remainder in queue order up to the batch
+ * bound. The pass keeps no flood probe cap, so deep backlog still
+ * drains sixteen ordered per pass with the earliest moves kept in
+ * order. Stale entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
- * leaves at once with no scan. Stall drains up to
- * sixteen FIFO tasks with liveness plus affinity checks and no order
- * gate so runnable tasks never stall on live work.
- * Ordered moves count one vEB hit plus fail open moves count one
+ * leaves at once with no scan. Stall drains solely through the same
+ * fallback with liveness plus affinity checks and no order gate so
+ * runnable tasks never stall on live work.
+ * Ordered moves count one vEB hit plus fallback moves count one
  * FIFO park so every dispatched task lands in one bucket with
- * completions counted apart. Fail open stays rare in normal load
- * since order rows land synchronously and solely genuine affinity
- * misses reach it. Under flood it carries rejects in FIFO order up
- * to the batch bound so backlog drains. A single tail avoids cross tier moves that would bounce
+ * completions counted apart. Fallback stays as the empty or corrupt
+ * canary since task state plus tree land synchronously and solely
+ * genuine misses reach it. Flood backlog still drains sixteen ordered
+ * per pass with rejects ordered at the top key. A single tail avoids cross tier moves that would bounce
  * cache and NUMA locality. Undrained queues hold zero tasks and cost
  * solely at init. Counters use atomic adds from every CPU and stay
  * best effort for observability. Concurrent skips may count twice
  * with parks staying noisy but fail closed. Admits, rejects, misses
  * count in the core as source of truth and merge into the snapshot.
- * Ordered moves count vEB hits plus fail open moves count FIFO parks
- * so every dispatched task lands in one bucket with completions
- * counted apart. The wire stays at 112B. Reads poll at dashboard
+ * The wire stays at 112B. Reads poll at dashboard
  * cadence so line bouncing stays bounded by event rate. Shared
  * fields pair reads with writes through atomics plus volatile
  * access. The watchdog stays at twenty seconds. Admission plus order

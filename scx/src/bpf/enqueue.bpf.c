@@ -11,14 +11,15 @@
  * owner task so urgent arrivals never wait a full slice with no
  * storm. The core orders
  * through the tree and admits under the bound in the core. Dispatch
- * moves admitted tasks in global deadline order. The tail parks with plain
+ * moves every parked task in global deadline order with rejects at
+ * the top key last. The tail parks with plain
  * insert and the tree holds the key so order never uses kernel
  * queues. Rings stay best effort with loss irrelevant to decisions.
  * One sequence allocation serves task state plus order row plus
  * observability notify so the wire stays dense. Admit writes tree
  * plus row plus task deadline plus key synchronously with the same sequence, deadline, CPU so
- * dispatch needs no roundtrip. Reject parks with no key plus no row
- * plus no run. Placement picks with live checks alone and no
+ * dispatch needs no roundtrip. Rejects park at the top key with
+ * the far deadline plus no row plus no run. Placement picks with live checks alone and no
  * deadline quantize. An idle CPU wins first through the idle pick
  * when live plus allowed so load spreads with no scan. The cached
  * owner wins next when still live plus allowed so repeat tasks keep
@@ -26,8 +27,9 @@
  * CPU wins next when live plus allowed with no drain check so warmth
  * stays cheap under load. The first allowed live CPU wins last. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
- * park with no run. Dispatch order stays least key then deadline with
- * no change. Fail open stays rare since rows land synchronously.
+ * park ordered at the top with no run. Dispatch order stays least key
+ * then deadline with no change. Fallback stays as the empty or corrupt
+ * canary since task state plus tree land synchronously.
  *
  * The op splits across enqueue/notify, park, kick files. Notify plus
  * park plus admission stay noinline with scalar inputs and the kick
@@ -79,12 +81,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		flow_gate_reject();
 		seq_tmp = __sync_fetch_and_add(&flow_seq, 1) + 1;
 		WRITE_ONCE(tctx->seq, seq_tmp);
-		WRITE_ONCE(tctx->admit_share, 0);
-		WRITE_ONCE(tctx->admit_cpu, 0);
-		WRITE_ONCE(tctx->deadline, 0);
-		WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
-		veb_remove((u32)p->pid);
-		flow_order_delete((u32)p->pid);
+		flow_reject_top((u32)p->pid, 0, tctx);
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
 		__sync_fetch_and_add(&flow_stats.parks, 1);
 		flow_park_plain(p, enq_flags);
@@ -122,12 +119,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				seq_tmp = __sync_fetch_and_add(
 				    &flow_seq, 1) + 1;
 				WRITE_ONCE(tctx->seq, seq_tmp);
-				WRITE_ONCE(tctx->admit_share, 0);
-				WRITE_ONCE(tctx->admit_cpu, 0);
-				WRITE_ONCE(tctx->deadline, 0);
-				WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
-				veb_remove((u32)p->pid);
-				flow_order_delete((u32)p->pid);
+				flow_reject_top((u32)p->pid, 0, tctx);
 				__sync_fetch_and_add(
 				    &flow_stats.rejects, 1);
 				__sync_fetch_and_add(
@@ -143,12 +135,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		flow_gate_reject();
 		seq_tmp = __sync_fetch_and_add(&flow_seq, 1) + 1;
 		WRITE_ONCE(tctx->seq, seq_tmp);
-		WRITE_ONCE(tctx->admit_share, 0);
-		WRITE_ONCE(tctx->admit_cpu, 0);
-		WRITE_ONCE(tctx->deadline, 0);
-		WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
-		veb_remove((u32)p->pid);
-		flow_order_delete((u32)p->pid);
+		flow_reject_top((u32)p->pid, 0, tctx);
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
 		__sync_fetch_and_add(&flow_stats.parks, 1);
 		flow_park_plain(p, enq_flags);

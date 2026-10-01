@@ -8,9 +8,9 @@
  * eight node queues, machine, overflow as an ABI placeholder so
  * identifiers stay stable. The core parks and notifies for
  * observability solely. The core orders through the tree and admits
- * under the bound in the core. Dispatch moves admitted tasks in tree
- * order. Hotplug needs a restart. The watchdog stays at twenty
- * seconds.
+ * under the bound in the core. Dispatch moves every parked task in
+ * tree order with rejects at the top key last. Hotplug needs a
+ * restart. The watchdog stays at twenty seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
