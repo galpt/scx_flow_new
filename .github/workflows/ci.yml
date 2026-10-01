@@ -104,10 +104,11 @@ jobs:
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
             --no-build scx_flow || {
             echo '=== TEMP DIAG: verbose verifier log for flow_dispatch ==='
+            uname -r
             OBJ=$(find target/ci/build -path '*scx_flow*/out/bpf.bpf.o' \
               | head -1)
             echo "object: $OBJ"
-            veristat -vl1 --log-size=1048576 "$OBJ" > /tmp/vstat.log 2>&1 || true
-            tail -c 24000 /tmp/vstat.log
+            veristat -vl1 --log-size=16777216 "$OBJ" > /tmp/vstat.log 2>&1 || true
+            grep -B150 -E 'processed 6[0-9]{4} insns' /tmp/vstat.log | tail -160
             exit 1
           }
