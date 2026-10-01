@@ -1,65 +1,54 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fail open single move for the dispatch pass.
+ * Fail open move for the dispatch batch drain.
  *
- * Moves the first live affinity match at the overflow head so one
- * runnable task always lands on the dispatch CPU even when a stale
- * entry holds no order row. Skips drop no tree state with no park
- * count so transient misses stay quiet. Moves count one FIFO park
- * at the decision point. Drops run at teardown, so the hot path
- * keeps no deletes. Stays rare since admits write rows
- * synchronously and solely genuine affinity misses reach here.
- * Runs noinline with scalar CPU so the verifier stays small.
+ * Holds one overflow task check plus move with single release through
+ * one exit. Callers pass the iterator plus task from the single FIFO
+ * scan, so one scan moves up to sixteen in queue order with no
+ * rescan per move. Skips drop no tree state with no park count so
+ * transient misses stay quiet. Moves count one FIFO park at the
+ * decision point through the batch account. Drops run at teardown,
+ * so the hot path keeps no deletes. Stays rare since admits write
+ * rows synchronously and solely genuine affinity misses reach here.
+ * Live stays proven once at entry, so the check pays one mask test
+ * on the acquired task with no live branch and no iterator test
+ * beyond the acquire. Runs inline so the iterator stays in the
+ * caller with no extra call cost.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Fail open with liveness plus affinity solely and no order gate. */
-/* Moves the first live affinity match at the overflow head so one */
-/* runnable task always lands on the dispatch CPU even when a stale */
-/* entry holds no order row. Skips drop no tree state with no park */
-/* count so transient misses stay quiet. Moves count one FIFO park */
-/* at the decision point. Drops run at teardown with no hot path */
-/* delete. Stays rare since admits write rows synchronously and */
-/* solely genuine affinity misses reach here. */
-static __noinline bool veb_fail_open_one(s32 cpu)
+/* Fail open move with mask solely and no order gate in one place. */
+/* Gives true on move else false with no state. Iterator test skips */
+/* references on misses with live proven by the caller, so the */
+/* single scan pays one mask test on the acquired task. Callers pass */
+/* the loop iterator so the move stays in iterator context. */
+static __always_inline bool flow_fail_open_move(
+	struct bpf_iter_scx_dsq *it, s32 cpu, struct task_struct *p)
 {
-	bool moved = false;
-	struct task_struct *p;
-	if (cpu < 0)
+	struct task_struct *t;
+	u32 pid;
+	/* Iterator never holds null here, so no null branch. */
+	/* Live proven at entry, so mask gates the reference with */
+	/* misses rare through synchronous rows. */
+	if (!flow_mask_ok(cpu, p))
 		return false;
-	if (!flow_cpu_live((u32)cpu)) {
-		flow_gate_reject();
+	t = bpf_task_from_pid(p->pid);
+	if (!t)
 		return false;
-	}
-	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
-		return false;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
-		struct task_struct *t;
-		u32 pid;
-		if (moved)
-			break;
-		if (!flow_entry_ok(cpu, p, 0))
-			continue;
-		t = bpf_task_from_pid(p->pid);
-		if (!t)
-			continue;
-		pid = (u32)t->pid;
-		if (pid == 0) {
-			bpf_task_release(t);
-			continue;
-		}
-		if (!flow_entry_ok(cpu, t, 0)) {
-			bpf_task_release(t);
-			continue;
-		}
-		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, t,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0))
-			moved = true;
+	pid = (u32)t->pid;
+	if (pid == 0) {
 		bpf_task_release(t);
-		if (moved)
-			break;
+		return false;
 	}
-	bpf_rcu_read_unlock();
-	return moved;
+	if (!flow_mask_ok(cpu, t)) {
+		bpf_task_release(t);
+		return false;
+	}
+	if (scx_bpf_dsq_move(it, t,
+	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+		bpf_task_release(t);
+		return true;
+	}
+	bpf_task_release(t);
+	return false;
 }

@@ -22,9 +22,10 @@
  */
 /* One candidate with cheap skip, acquire, checks, move in one place. */
 /* Gives true with pid on move else false with no state. Pid match */
-/* checks the iterator pid first with no reference, then entry gate */
-/* through the iterator, so other entries never take a reference. */
-/* Callers pass the loop iterator so the move stays in iterator context. */
+/* checks the iterator pid first with no reference, then mask */
+/* through the iterator with live proven by the caller, so other */
+/* entries never take a reference. Callers pass the loop iterator */
+/* so the move stays in iterator context. */
 static __always_inline bool flow_move_candidate(
 	struct bpf_iter_scx_dsq *it, s32 cpu, struct task_struct *p,
 	u32 want_pid, u32 want_key, u64 want_deadline, u32 want_owner,
@@ -35,8 +36,7 @@ static __always_inline bool flow_move_candidate(
 	u32 pid;
 	struct flow_task_ctx *tctx;
 	bool moved = false;
-	if (!p)
-		return false;
+	/* Iterator never holds null here, so no null branch. */
 	/* Cheap skip with no reference for pids this move cannot take. */
 	/* Uses the picked pid from the least scan, so a deep tail pays */
 	/* a reference solely on the one picked entry. */
@@ -45,17 +45,19 @@ static __always_inline bool flow_move_candidate(
 		return false;
 	if (iter_pid != want_pid)
 		return false;
-	if (!flow_entry_ok(cpu, p, 0))
+	/* Live proven at entry, so mask alone gates here. */
+	if (!flow_mask_ok(cpu, p))
 		return false;
 	t = bpf_task_from_pid(p->pid);
 	if (!t)
 		return false;
 	pid = (u32)t->pid;
-	if (pid == 0)
-		goto out;
+	/* Want stays non zero from the least pick, so zero falls */
+	/* through the mismatch below with no extra branch. */
 	if (pid != want_pid)
 		goto out;
-	if (!flow_entry_ok(cpu, t, 0))
+	/* Live proven at entry, so mask alone gates here. */
+	if (!flow_mask_ok(cpu, t))
 		goto out;
 	tctx = flow_lookup(t);
 	if (!tctx)
@@ -71,8 +73,8 @@ static __always_inline bool flow_move_candidate(
 	if (scx_bpf_dsq_move(it, t,
 	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
 		moved = true;
-		if (out_pid)
-			*out_pid = pid;
+		/* Caller passes non null output, so no null branch. */
+		*out_pid = pid;
 	}
 out:
 	bpf_task_release(t);

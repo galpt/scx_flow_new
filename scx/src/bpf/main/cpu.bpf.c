@@ -99,6 +99,17 @@ static __always_inline bool flow_entry_ok(s32 cpu,
 		return false;
 	return true;
 }
+/* Mask check for dispatch inner scans with live proven outside. */
+/* Holds the mask test solely with no live plus null plus cpu branch, */
+/* so the per element cost stays one test after the pass proves live */
+/* once at entry. Callers prove live plus non null iterator before the */
+/* scan through the dispatch entry plus the iterator guarantee, so the */
+/* test never sees a bad pointer or CPU here. */
+static __always_inline bool flow_mask_ok(s32 cpu,
+	const struct task_struct *p)
+{
+	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
+}
 static __always_inline void flow_gate_reject(void)
 {
 	u64 cur = READ_ONCE(flow_stats.gate_rejects);

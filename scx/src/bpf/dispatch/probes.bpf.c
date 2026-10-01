@@ -5,9 +5,12 @@
  * Scans the overflow tail once to pick the least key then deadline
  * then owned then pid among entries the dispatch CPU may run. Task
  * state holds share plus key plus deadline from admit time, so the
- * entry check plus one state read gate admission with no extra index
+ * mask plus one state read gate admission with no extra index
  * lookup and no reference, and only the picked pid takes a reference
- * at move time. The move revalidates
+ * at move time. Live stays proven once at entry, so the per element
+ * cost stays one mask test with no live branch. The queue handle
+ * stays hoisted once at entry, so depth reads pay no dsq lookup per
+ * step beyond the call. The move revalidates
  * pid plus key plus deadline plus owner with affinity, liveness,
  * share checks and no sequence gate, so any CPU takes the earliest
  * work it may run with pid reuse safe. Key plus deadline may match
@@ -17,9 +20,9 @@
  * ordered first keeping admitted preferred. Stale keys clear at
  * teardown with the next remove retrying, so a lingering key costs at
  * most one pick scan before FIFO. Drops run at teardown, so the hot
- * path keeps no deletes. Runs noinline with scalar CPU so the
- * verifier stays small. The caller holds no outer RCU section since
- * each helper takes its own.
+ * path keeps no deletes. Runs noinline with scalar CPU with bounded
+ * loops, so the verifier stays small. The caller holds no outer RCU
+ * section since each helper takes its own.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -31,26 +34,30 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 	u64 best_deadline = (u64)~0ULL;
 	u32 best_owned = 0;
 	u32 best_owner = 0;
+	u64 ov;
 	struct task_struct *p;
 	if (cpu < 0)
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
+	/* Queue handle stays hoisted, so the scan pays no dsq lookup. */
+	ov = flow_overflow_dsq();
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
+	bpf_for_each(scx_dsq, p, ov, 0) {
 		u32 iter_pid;
 		struct flow_task_ctx *tctx;
 		u32 k;
 		u64 d;
 		u32 owner;
 		u32 owned;
-		if (!p)
-			continue;
+		bool better;
+		/* Iterator never holds null here, so no null branch. */
 		/* Task state alone gates rejects with no extra lookup. */
 		iter_pid = (u32)p->pid;
 		if (iter_pid == 0)
 			continue;
-		if (!flow_entry_ok(cpu, p, 0))
+		/* Live proven at entry, so mask alone gates here. */
+		if (!flow_mask_ok(cpu, p))
 			continue;
 		tctx = flow_lookup(p);
 		if (!tctx)
@@ -65,63 +72,34 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 			continue;
 		owner = READ_ONCE(tctx->admit_cpu);
 		owned = owner == (u32)cpu ? 1 : 0;
-		if (best_pid == 0) {
-			best_pid = iter_pid;
-			best_key = k;
-			best_deadline = d;
-			best_owned = owned;
-			best_owner = owner;
+		/* Single better check keeps one update site with no */
+		/* nested takes, so the verifier walks one flat chain. */
+		if (best_pid == 0)
+			better = true;
+		else if (k != best_key)
+			better = k < best_key;
+		else if (d != best_deadline)
+			better = d < best_deadline;
+		else if (owned != best_owned)
+			better = owned > best_owned;
+		else
+			better = iter_pid < best_pid;
+		if (!better)
 			continue;
-		}
-		if (k < best_key) {
-			best_pid = iter_pid;
-			best_key = k;
-			best_deadline = d;
-			best_owned = owned;
-			best_owner = owner;
-			continue;
-		}
-		if (k > best_key)
-			continue;
-		if (d < best_deadline) {
-			best_pid = iter_pid;
-			best_key = k;
-			best_deadline = d;
-			best_owned = owned;
-			best_owner = owner;
-			continue;
-		}
-		if (d > best_deadline)
-			continue;
-		if (owned > best_owned) {
-			best_pid = iter_pid;
-			best_key = k;
-			best_deadline = d;
-			best_owned = owned;
-			best_owner = owner;
-			continue;
-		}
-		if (owned < best_owned)
-			continue;
-		if (iter_pid < best_pid) {
-			best_pid = iter_pid;
-			best_key = k;
-			best_deadline = d;
-			best_owned = owned;
-			best_owner = owner;
-		}
+		best_pid = iter_pid;
+		best_key = k;
+		best_deadline = d;
+		best_owned = owned;
+		best_owner = owner;
 	}
 	bpf_rcu_read_unlock();
 	if (best_pid == 0)
 		return false;
-	if (out_pid)
-		*out_pid = best_pid;
-	if (out_key)
-		*out_key = best_key;
-	if (out_deadline)
-		*out_deadline = best_deadline;
-	if (out_owner)
-		*out_owner = best_owner;
+	/* Callers pass non null outputs, so no null branch here. */
+	*out_pid = best_pid;
+	*out_key = best_key;
+	*out_deadline = best_deadline;
+	*out_owner = best_owner;
 	return true;
 }
 static __noinline bool veb_consume_best(s32 cpu)
@@ -132,24 +110,28 @@ static __noinline bool veb_consume_best(s32 cpu)
 	u32 owner = 0;
 	u32 moved_pid = 0;
 	bool moved = false;
+	u64 ov;
 	struct task_struct *p;
 	if (cpu < 0)
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
-	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+	/* Queue handle stays hoisted, so depth plus scans pay no dsq */
+	/* lookup per step beyond the call. */
+	ov = flow_overflow_dsq();
+	if (scx_bpf_dsq_nr_queued(ov) == 0)
 		return false;
 	if (!flow_pick_least(cpu, &pid, &key, &deadline, &owner))
 		return false;
 	if (pid == 0 || key >= (u32)FLOW_VEB_U || deadline == 0)
 		return false;
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
-		if (moved)
-			break;
+	bpf_for_each(scx_dsq, p, ov, 0) {
 		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p,
-		    pid, key, deadline, owner, &moved_pid))
+		    pid, key, deadline, owner, &moved_pid)) {
 			moved = true;
+			break;
+		}
 	}
 	bpf_rcu_read_unlock();
 	return moved;
