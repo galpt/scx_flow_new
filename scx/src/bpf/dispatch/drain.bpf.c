@@ -20,7 +20,11 @@
 /* pass still drains queue ordered tasks up to sixteen. Ordered */
 /* checks run first so admitted tasks stay preferred, while this */
 /* FIFO step may move admitted tasks out of order under flood. */
-static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
+/* Inline so the batch wrapper costs no verifier call frame: the */
+/* flood fix added this layer over the single move and the dispatch */
+/* path already nests eight deep through remove plus root refresh */
+/* plus scan plus cluster plus bit scan. */
+static __always_inline u32 veb_fail_open_drain(s32 cpu, u32 budget)
 {
 	u32 moved = 0;
 	int i;

@@ -39,7 +39,9 @@
  *
  * The pass splits across dispatch/probes, failopen, drain, perf files
  * with one RCU section per helper. Each helper stays noinline with
- * scalar inputs and bounded loops, so the verifier stays small.
+ * scalar inputs and bounded loops, so the verifier stays small,
+ * except the bit scans plus the batch drain wrapper which stay
+ * inline so the deepest dispatch path keeps its call frames small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
