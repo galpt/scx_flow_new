@@ -7,9 +7,11 @@
  * scan, so one scan moves up to sixteen in queue order with no
  * rescan per move. Skips drop no tree state with no park count so
  * transient misses stay quiet. Moves count one FIFO park at the
- * decision point through the batch account. Drops run at teardown,
- * so the hot path keeps no deletes. Stays rare since admits write
- * rows synchronously and solely genuine affinity misses reach here.
+ * decision point through the batch account. Moves clear the head slot,
+ * so a FIFO pid never lingers as a head for the next ordered pick.
+ * Drops run at teardown, so the hot path keeps no deletes. Stays rare
+ * since admits write rows synchronously and solely genuine affinity
+ * misses reach here.
  * Live stays proven once at entry, so the check pays one mask test
  * on the acquired task with no live branch and no iterator test
  * beyond the acquire. Runs inline so the iterator stays in the
@@ -17,11 +19,13 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Fail open move with mask solely and no order gate in one place. */
+/* Fail open move with mask plus head clear in one place. */
 /* Gives true on move else false with no state. Iterator test skips */
-/* references on misses with live proven by the caller, so the */
-/* single scan pays one mask test on the acquired task. Callers pass */
-/* the loop iterator so the move stays in iterator context. */
+/* references on misses with live proven by the caller, so the single */
+/* scan pays one mask test on the acquired task. A move clears the head */
+/* slot when it still names the pid, so a running pid never lingers */
+/* while other keys stay. Callers pass the loop iterator so the move */
+/* stays in iterator context. */
 static __always_inline bool flow_fail_open_move(
 	struct bpf_iter_scx_dsq *it, s32 cpu, struct task_struct *p)
 {
@@ -46,6 +50,14 @@ static __always_inline bool flow_fail_open_move(
 	}
 	if (scx_bpf_dsq_move(it, t,
 	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+		struct flow_task_ctx *tctx = flow_lookup(t);
+		if (tctx) {
+			u32 k = READ_ONCE(tctx->key);
+			/* Clear frees the slot when it still names this pid, */
+			/* so the next ordered pick never sees a running head. */
+			/* Other slots stay with an empty key as a no op. */
+			flow_head_clear(pid, k);
+		}
 		bpf_task_release(t);
 		return true;
 	}

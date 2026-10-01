@@ -11,9 +11,10 @@
  * smallest pid wins within the same key plus deadline while the full
  * scan still uses owned then pid. Both stay best effort with
  * validation before use and no extra counter, so stale views fall
- * back with no wrong move. Heads clear on ordered moves plus the
- * teardown drop, so a stale head costs at most one miss before the
- * fallback scan. All helpers stay small with no loop so the verifier
+ * back with no wrong move. Heads clear on ordered plus FIFO moves
+ * plus the teardown drop, so a running pid never lingers as a head.
+ * A moved owner heals in place, so migration keeps the hit with no
+ * extra scan. All helpers stay small with no loop so the verifier
  * stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -46,8 +47,9 @@ struct {
 /* deadline then smallest pid for the same key and overwriting on a */
 /* new key with no extra lookup. Owned stays out here, so the */
 /* smallest pid wins within the same key plus deadline while the */
-/* full scan still uses owned then pid. Stale heads clear on moves */
-/* plus the teardown drop, so a miss falls back with no wrong move. */
+/* full scan still uses owned then pid. Stale heads clear on ordered */
+/* plus FIFO moves plus the teardown drop, so a miss falls back with */
+/* no wrong move. */
 /* Noinline with scalar inputs so the admit path verifies once apart */
 /* from the enqueue entry. */
 static __noinline void flow_head_store(u32 pid, u32 key,
@@ -96,14 +98,14 @@ static __noinline void flow_head_store(u32 pid, u32 key,
 /* Head pick with one cached pid in one place. */
 /* Reads the least key inside with the cached pid for that key, giving */
 /* true with the live task values when it still holds share plus key */
-/* plus owner with mask, so the least pick skips the full tail walk. */
-/* The cached owner must match the live owner, so a repark on another */
-/* CPU misses once before the fallback scan. Owned stays out of the */
-/* head order, so the smallest pid wins within the same key plus */
-/* deadline while the full scan still uses owned then pid. Stale views */
-/* miss with no state, so the caller falls back to the full scan. */
-/* Noinline with scalar CPU so the pick path verifies once apart from */
-/* the dispatch entry with no stack args. */
+/* with mask, so the least pick skips the full tail walk. A moved owner */
+/* heals in place, so a repark on another CPU keeps the hit with live */
+/* values while pid plus key plus deadline still guard reuse. Owned */
+/* stays out of the head order, so the smallest pid wins within the same */
+/* key plus deadline while the full scan still uses owned then pid. */
+/* Stale views miss with no state, so the caller falls back to the full */
+/* scan. Noinline with scalar CPU so the pick path verifies once apart */
+/* from the dispatch entry with no stack args. */
 static __noinline bool flow_head_pick(s32 cpu,
 	u32 *out_pid, u32 *out_key, u64 *out_deadline, u32 *out_owner)
 {
@@ -160,8 +162,12 @@ static __noinline bool flow_head_pick(s32 cpu,
 	if (d == 0)
 		goto out;
 	owner = READ_ONCE(tctx->admit_cpu);
-	if (owner != want_owner)
-		goto out;
+	if (owner != want_owner) {
+		/* Heal the slot to the live owner, so migration keeps */
+		/* warmth with no extra scan while pid plus key plus */
+		/* deadline still guard reuse. */
+		WRITE_ONCE(h->owner, owner);
+	}
 	/* Callers pass non null outputs, so no null branch here. */
 	*out_pid = tpid;
 	*out_key = k;
@@ -174,9 +180,9 @@ out:
 }
 /* Head clear with key plus pid match in one place. */
 /* Clears the slot solely when it still holds the given pid with the */
-/* same key, so ordered moves plus the teardown drop free the slot */
-/* while other keys stay. Noinline with scalar inputs so moves plus */
-/* drops verify once apart from their callers. */
+/* same key, so ordered plus FIFO moves plus the teardown drop free */
+/* the slot while other keys stay. Noinline with scalar inputs so moves */
+/* plus drops verify once apart from their callers. */
 static __noinline void flow_head_clear(u32 pid, u32 key)
 {
 	u32 slot;

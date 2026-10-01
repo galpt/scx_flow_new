@@ -17,12 +17,13 @@
  * revalidates pid plus key plus deadline plus owner with affinity,
  * liveness, share checks and no sequence gate, so any CPU takes the
  * earliest work it may run with pid reuse safe. Key plus deadline may
- * match across tasks in the same instant, so the owner check narrows
- * the reuse window with one cheap read. A recheck miss ends ordered
- * work and falls to FIFO, so one stale pick never burns extra scans
- * with ordered first keeping admitted preferred. Stale heads clear on
- * moves plus the teardown drop, so a lingering view costs at most one
- * pick before FIFO. Drops run at teardown, so the hot path keeps
+ * match across tasks in the same instant, so the owner view heals to
+ * the live owner with pid plus key plus deadline still guarding reuse.
+ * A recheck miss ends ordered work and falls to FIFO, so one stale
+ * pick never burns extra scans with ordered first keeping admitted
+ * preferred. Stale heads clear on ordered plus FIFO moves plus the
+ * teardown drop, so a running pid never lingers as a head. Drops run
+ * at teardown, so the hot path keeps
  * no deletes. Runs noinline with scalar CPU with
  * bounded loops, so the verifier stays small. The caller holds no
  * outer RCU section since each helper takes its own.
@@ -146,8 +147,8 @@ static __noinline bool veb_consume_best(s32 cpu)
 	bpf_rcu_read_unlock();
 	/* Head clears on both outcomes when it still names the wanted */
 	/* pid, so a running pid never lingers while other keys stay. */
-	/* A stale head costs at most one ordered miss before FIFO with */
-	/* the next pass falling back to the scan. */
+	/* FIFO moves clear the same way, so a FIFO pid never poisons the */
+	/* next ordered pick with the next pass falling back to the scan. */
 	flow_head_clear(pid, key);
 	return moved;
 }
