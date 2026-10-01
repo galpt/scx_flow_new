@@ -7,7 +7,9 @@
  * plus key from the same period helpers, then admits under
  * the bound with tree plus row or parks as reject with no key plus
  * no row then parks at the tail then notifies for observability
- * solely. Every park notifies best effort with loss irrelevant.
+ * solely. Admitted parks also store one head plus one placement view
+ * for later picks with no extra counter. Every park notifies best
+ * effort with loss irrelevant.
  * Callers pass the chosen CPU with zero for unknown so fail closed
  * parks still notify with no bypass. Plain park stays inline so the
  * insert stays cheap. Admission stays noinline with scalar weight
@@ -88,6 +90,9 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		if (flow_order_write(pid, seq, deadline, cpu)) {
 			__sync_fetch_and_add(&flow_stats.admits, 1);
 			admitted = true;
+			/* Zero share parks ordered as reject, so only the */
+			/* placement view learns the CPU with no head. */
+			flow_place_store(pid, cpu);
 		} else {
 			veb_remove(pid);
 			if (tctx) {
@@ -109,6 +114,12 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 			if (flow_order_write(pid, seq, deadline, cpu)) {
 				__sync_fetch_and_add(&flow_stats.admits, 1);
 				admitted = true;
+				/* Head keeps the earliest for the key with the */
+				/* placement view learning the owner, so later */
+				/* picks skip the tail walk and later parks */
+				/* reuse warmth with mask still checked. */
+				flow_head_store(pid, key, deadline, cpu);
+				flow_place_store(pid, cpu);
 			} else {
 				veb_remove(pid);
 				flow_admitted_sub(cpu, share);

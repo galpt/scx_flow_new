@@ -22,7 +22,7 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order with live checks, then FIFO for the remainder. Rejects skip via pid index. Past 128 queued, backlog drains 16 per pass. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order with live checks, then FIFO for the remainder. A per key head skips tail walks with fallback. Placement reuses the last owner when allowed. Past 128 queued, backlog drains 16 per pass. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -61,7 +61,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Draining four fixed priority tiers in order stays out by design, since tier order beats due time order and extra moves cost time.
 - Priority tiers lose to due time order, since tier order needs extra scans and moves while due time order runs the most urgent task first.
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
-- Placement uses an idle CPU when live, else the selected CPU when live, else the first live CPU, so load spreads with no extra scan.
+- Placement uses an idle CPU when live, else the last owner when live plus allowed, else the selected CPU when live, else the first live CPU, so load spreads with warmth and no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
 - Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs the earliest admitted in order while rejects drain FIFO up to `16` per pass with higher latency.
 - Flood throughput stays bounded by the fixed `2ms` slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus FIFO plus preempt work.

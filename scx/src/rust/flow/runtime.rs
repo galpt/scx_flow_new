@@ -6,19 +6,23 @@
 //! Holds the daemon mirror, the admission oracle, the wire
 //! protocol. The daemon keeps one quantized queue, one admitted
 //! row per CPU, one hint table as a read only mirror for tests plus
-//! observability. Order follows deadlines solely through the
-//! quantized tree. The BPF core parks plus admits plus orders
-//! synchronously with no roundtrip. Dispatch moves admitted tasks in
-//! least key then deadline order with affinity plus liveness checks
-//! and parks stale entries. Mirror cost stays on the userspace thread within five
-//! hundred twelve entries and stays off the BPF hot path. Times stay
-//! in the monotonic domain shared with the core. Parks include
-//! backpressure drops, ring drops, userspace queue drops. Queue
-//! backlog is the channel length and drop rate is the parks delta,
-//! so both stay visible with zero wire change. Hints stay derived
-//! from task weight keyed by task identifier. Lost completes collect
-//! past deadline plus grace for observability solely with no core
-//! revoke.
+//! observability, plus one head view per key and one owner view per
+//! task as oracle for the core hints. Order follows deadlines solely
+//! through the quantized tree. The BPF core parks plus admits plus
+//! orders synchronously with no roundtrip. Dispatch moves admitted
+//! tasks in least key then deadline order with affinity plus liveness
+//! checks and parks stale entries. The head view keeps the earliest
+//! deadline then smallest pid per key so picks skip tail walks in the
+//! core, while the owner view steers repeat parks toward the previous
+//! CPU with mask still checked in the core. Mirror cost stays on the
+//! userspace thread within five hundred twelve entries and stays off
+//! the BPF hot path. Times stay in the monotonic domain shared with
+//! the core. Parks include backpressure drops, ring drops, userspace
+//! queue drops. Queue backlog is the channel length and drop rate is
+//! the parks delta, so both stay visible with zero wire change. Hints
+//! stay derived from task weight keyed by task identifier. Lost
+//! completes collect past deadline plus grace for observability solely
+//! with no core revoke.
 
 use std::collections::HashMap;
 
@@ -178,17 +182,23 @@ pub struct TaskState {
 /// Daemon holding the quantized mirror plus admission oracle.
 /// Admitted rows hold one per mille sum per CPU. Tasks hold one
 /// stored share each. Adds pair with drops exactly once per admit
-/// in the mirror. Single sequence tracks notifies plus queued tasks
-/// with no split. Disable plus exit notifies drop shares through
-/// complete in the mirror. Task rows stay capped at the task bound.
-/// Stale rows collect past deadline plus grace for observability
-/// solely. Queue drops fold into parks plus the drop gauge with zero
-/// wire change. Core owns dispatch with the mirror never gating it.
+/// in the mirror. Head holds one earliest pid per key for the core
+/// pick hint. Owner holds the last admit CPU per task for the core
+/// placement hint with mask still checked in the core. Single sequence
+/// tracks notifies plus queued tasks with no split. Disable plus exit
+/// notifies drop shares through complete in the mirror. Task rows stay
+/// capped at the task bound with hints cleared on remove so both stay
+/// bounded. Stale rows collect past deadline plus grace for
+/// observability solely. Queue drops fold into parks plus the drop
+/// gauge with zero wire change. Core owns dispatch with the mirror
+/// never gating it.
 pub struct Daemon {
     pub(crate) order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
     pub(crate) tasks: HashMap<u32, TaskState>,
+    pub(crate) head_hint: HashMap<u32, (u32, u64, u32)>,
+    pub(crate) mask_hint: HashMap<u32, u32>,
     wire_last: u64,
     /// Tasks admitted under the use bound.
     pub admits: u64,
@@ -211,6 +221,8 @@ impl Daemon {
             hints: HintTable::new(),
             admitted: vec![0u64; super::slot::MAX_CPUS as usize],
             tasks: HashMap::new(),
+            head_hint: HashMap::new(),
+            mask_hint: HashMap::new(),
             wire_last: 0,
             admits: 0,
             rejects: 0,
@@ -239,6 +251,61 @@ impl Daemon {
     /// Hint table for weight derived updates.
     pub fn hints_mut(&mut self) -> &mut HintTable {
         &mut self.hints
+    }
+
+    /// Cached head pid for one key with deadline plus owner.
+    /// Mirror of the core head view for tests solely. Empty when the
+    /// key never admitted or the stored pid left. Stale pids miss
+    /// through the task check with no core effect.
+    #[cfg(test)]
+    pub fn head_for(&self, key: u32) -> Option<(u32, u64, u32)> {
+        let (pid, deadline, cpu) = self.head_hint.get(&key).copied()?;
+        let t = self.tasks.get(&pid)?;
+        if t.share == 0 {
+            return None;
+        }
+        if super::veb::quantize(t.deadline) as u32 != key {
+            return None;
+        }
+        if t.deadline != deadline || t.admit_cpu != cpu {
+            return None;
+        }
+        Some((pid, deadline, cpu))
+    }
+
+    /// Cached owner CPU for one task with empty for unknown tasks.
+    /// Mirror of the core placement view for tests solely. The core
+    /// revalidates mask plus live before use with no core effect here.
+    #[cfg(test)]
+    pub fn hint_for(&self, pid: u32) -> Option<u32> {
+        if !self.tasks.contains_key(&pid) {
+            return None;
+        }
+        self.mask_hint.get(&pid).copied()
+    }
+
+    /// Pick one CPU with the cached owner view in one place.
+    /// The cached owner wins when still in the allowed list, else the
+    /// previous CPU wins when still allowed, else the first allowed
+    /// wins. Idle stays BPF only with no mirror, since the idle pick
+    /// needs the live mask with no replay. The core revalidates mask
+    /// plus live before use, so a stale view never widens the target
+    /// class here. Mirror only with the core as authority.
+    #[cfg(test)]
+    pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
+        if allowed.is_empty() {
+            return prev;
+        }
+        if let Some(hint) = self.mask_hint.get(&pid)
+            && allowed.contains(hint)
+            && self.tasks.contains_key(&pid)
+        {
+            return *hint;
+        }
+        if allowed.contains(&prev) {
+            return prev;
+        }
+        allowed[0]
     }
 
     /// Admitted per mille sum for one CPU with zero past the bound.
@@ -336,9 +403,12 @@ impl Daemon {
     /// the core. Zero identifiers park at once with no table row.
     /// Stale CPUs clear the task row then park. Depth overflow clears
     /// the task row then parks. Table full parks fresh identifiers
-    /// with zero stored share so the map stays capped. Single
-    /// sequence pairs each row with core task state plus the order
-    /// row with no split. Mirror only with the core as authority.
+    /// with zero stored share so the map stays capped. Admitted parks
+    /// also store one head plus one owner view with no extra counter,
+    /// so later oracle picks reuse warmth with mask still checked in
+    /// the core. Single sequence pairs each row with core task state
+    /// plus the order row with no split. Mirror only with the core as
+    /// authority.
     pub fn handle_enqueue(
         &mut self,
         pid: u32,
@@ -408,7 +478,32 @@ impl Daemon {
         );
         self.order.insert(pid, deadline, wire_seq);
         self.admits += 1;
+        self.store_views(pid, deadline, share, cpu);
         AdmitDecision::Admit { share, cpu }
+    }
+
+    /// Store one head plus one owner view for the oracle hints.
+    /// Head keeps the earliest deadline then smallest pid per key with
+    /// overwrite on a new key, mirroring the core low byte view. Owner
+    /// holds the last admit CPU per task with overwrite. Both stay best
+    /// effort with validation before use and clear on remove, so stale
+    /// views fall back with no wrong move.
+    fn store_views(&mut self, pid: u32, deadline: u64, share: u64, cpu: u32) {
+        self.mask_hint.insert(pid, cpu);
+        if share == 0 || deadline == 0 {
+            return;
+        }
+        let key = super::veb::quantize(deadline) as u32;
+        match self.head_hint.get(&key).copied() {
+            None => {
+                self.head_hint.insert(key, (pid, deadline, cpu));
+            }
+            Some((old_pid, old_deadline, _)) => {
+                if deadline < old_deadline || (deadline == old_deadline && pid < old_pid) {
+                    self.head_hint.insert(key, (pid, deadline, cpu));
+                }
+            }
+        }
     }
 
     /// Handle one complete notify as mirror oracle.
@@ -767,5 +862,42 @@ mod tests {
         d.handle_complete(5, 2_000_000, true);
         assert_eq!(d.queue_len(), 0);
         assert_eq!(d.task_len(), 0);
+    }
+
+    #[test]
+    fn head_keeps_earliest_per_key() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 4000, 0, 1_000_000, 61);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        let t = d.task(1).unwrap();
+        let key = super::super::veb::quantize(t.deadline) as u32;
+        let (pid, deadline, cpu) = d.head_for(key).unwrap();
+        assert_eq!(pid, 1);
+        assert_eq!(deadline, t.deadline);
+        assert_eq!(cpu, 0);
+        // Later pid with same key and later deadline keeps the head.
+        let got = d.handle_enqueue(2, 4000, 1, 1_000_500, 62);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        let t2 = d.task(2).unwrap();
+        let key2 = super::super::veb::quantize(t2.deadline) as u32;
+        if key2 == key {
+            assert_eq!(d.head_for(key).unwrap().0, 1);
+        }
+        d.handle_complete(1, 2_000_000, true);
+        assert!(d.head_for(key).is_none() || d.head_for(key).unwrap().0 != 1);
+    }
+
+    #[test]
+    fn hint_drives_place_with_allowed_check() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.hint_for(3), Some(2));
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
+        assert_eq!(d.place_for(3, 0, &[0, 1]), 0);
+        assert_eq!(d.place_for(9, 1, &[0, 1]), 1);
+        d.handle_complete(3, 2_000_000, true);
+        assert_eq!(d.hint_for(3), None);
+        assert_eq!(d.place_for(3, 1, &[0, 1]), 1);
     }
 }

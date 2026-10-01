@@ -12,8 +12,9 @@
  * the remainder in queue order up to the batch bound. Past one hundred
  * twenty eight queued ordered stops after four moves with FIFO covering
  * the remainder to sixteen, so a deep tail never burns sixteen double
- * scans in one pass. Task state gates admission with no extra index
- * lookup, so only the picked pid takes a reference.
+ * scans in one pass. One head read plus task state gates admission
+ * with fallback to the tail scan, so hits skip the walk while only
+ * the picked pid takes a reference.
  * Drops run at teardown, so the hot path keeps no deletes and the
  * core drops shares through stopping plus disable plus exit. Empty
  * queue leaves at once with no scan so idle stays cheap. Stall drains
@@ -27,11 +28,11 @@
  * call on steady through one exit, so idle cannot be skipped.
  *
  * The pass splits across dispatch/probes, failopen, drain, flood,
- * ordered, perf files with one RCU section per scan. Ordered plus
- * drain plus flood plus pick plus consume stay noinline with scalar
- * inputs and bounded loops, so the verifier stays small with no
- * unrolled caller tree, while the single task moves plus the FIFO
- * account stay inline so the deepest path keeps its call frames
+ * ordered, head, perf files with one RCU section per scan. Ordered
+ * plus drain plus flood plus pick plus consume plus head stay noinline
+ * with scalar inputs and bounded loops, so the verifier stays small
+ * with no unrolled caller tree, while the single task moves plus the
+ * FIFO account stay inline so the deepest path keeps its call frames
  * small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

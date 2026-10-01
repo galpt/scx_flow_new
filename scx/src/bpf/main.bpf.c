@@ -71,6 +71,7 @@ volatile u64 flow_seq;
 #include "veb/min.bpf.c"
 #include "veb/remove.bpf.c"
 #include "veb/insert.bpf.c"
+#include "veb/head.bpf.c"
 #include "admit/share.bpf.c"
 #include "admit/row.bpf.c"
 #include "admit/drop.bpf.c"

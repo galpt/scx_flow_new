@@ -20,7 +20,9 @@
  * dispatch needs no roundtrip. Reject parks with no key plus no row
  * plus no run. Placement picks with live checks alone and no
  * deadline quantize. An idle CPU wins first through the idle pick
- * when live plus allowed so load spreads with no scan. The selected
+ * when live plus allowed so load spreads with no scan. The cached
+ * owner wins next when still live plus allowed so repeat tasks keep
+ * warmth with no scan. The selected
  * CPU wins next when live plus allowed with no drain check so warmth
  * stays cheap under load. The first allowed live CPU wins last. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
@@ -90,18 +92,24 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    cpu >= 0 ? (u32)cpu : 0, weight, seq_tmp);
 		return;
 	}
-	/* Placement with idle, selected, first in one place. */
-	/* Gives idle when allowed and live else selected when allowed */
-	/* and live else first when allowed and live else error with */
-	/* no drain check so spread stays cheap with warmth under load. */
-	/* The chosen CPU holds the share with per CPU rows and rejects */
-	/* park with no run. */
+	/* Placement with idle, hint, selected, first in one place. */
+	/* Gives idle when allowed and live else the cached owner when */
+	/* still allowed and live else selected when allowed and live */
+	/* else first when allowed and live else error with no drain */
+	/* check so spread stays cheap with warmth under load. The hint */
+	/* stays revalidated here with the move gate keeping safety, so */
+	/* a stale view never widens the target class. The chosen CPU */
+	/* holds the share with per CPU rows and rejects park with no run. */
 	{
 		s32 idle;
+		s32 hint;
 		s32 first;
 		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (flow_cpu_ok(p, idle)) {
 			cpu = idle;
+		} else if ((hint = flow_place_hint((u32)p->pid, p)) >= 0 &&
+		    flow_cpu_ok(p, hint)) {
+			cpu = hint;
 		} else if (sel >= 0 && flow_cpu_ok(p, sel)) {
 			cpu = sel;
 		} else {

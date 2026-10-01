@@ -2,27 +2,30 @@
 /*
  * Ordered pick plus consume for the dispatch pass.
  *
- * Scans the overflow tail once to pick the least key then deadline
- * then owned then pid among entries the dispatch CPU may run. Task
- * state holds share plus key plus deadline from admit time, so the
- * mask plus one state read gate admission with no extra index
+ * Tries one cached head for the least key first with a single task
+ * read, then scans the overflow tail once to pick the least key then
+ * deadline then owned then pid among entries the dispatch CPU may
+ * run. Task state holds share plus key plus deadline from admit time,
+ * so the mask plus one state read gate admission with no extra index
  * lookup and no reference, and only the picked pid takes a reference
- * at move time. Live stays proven once at entry, so the per element
- * cost stays one mask test with no live branch. The queue handle
- * stays hoisted once at entry, so depth reads pay no dsq lookup per
- * step beyond the call. The move revalidates
- * pid plus key plus deadline plus owner with affinity, liveness,
- * share checks and no sequence gate, so any CPU takes the earliest
- * work it may run with pid reuse safe. Key plus deadline may match
- * across tasks in the same instant, so the owner check narrows the
- * reuse window with one cheap read. A recheck miss ends ordered work
- * and falls to FIFO, so one stale pick never burns extra scans with
- * ordered first keeping admitted preferred. Stale keys clear at
- * teardown with the next remove retrying, so a lingering key costs at
- * most one pick scan before FIFO. Drops run at teardown, so the hot
- * path keeps no deletes. Runs noinline with scalar CPU with bounded
- * loops, so the verifier stays small. The caller holds no outer RCU
- * section since each helper takes its own.
+ * at move time. The head keeps the earliest deadline then smallest
+ * pid per low key byte with best effort order, so hits skip the full
+ * tail walk while misses fall back with no wrong move. Live stays
+ * proven once at entry, so the per element cost stays one mask test
+ * with no live branch. The queue handle stays hoisted once at entry,
+ * so depth reads pay no dsq lookup per step beyond the call. The move
+ * revalidates pid plus key plus deadline plus owner with affinity,
+ * liveness, share checks and no sequence gate, so any CPU takes the
+ * earliest work it may run with pid reuse safe. Key plus deadline may
+ * match across tasks in the same instant, so the owner check narrows
+ * the reuse window with one cheap read. A recheck miss ends ordered
+ * work and falls to FIFO, so one stale pick never burns extra scans
+ * with ordered first keeping admitted preferred. Stale heads clear on
+ * moves with stale keys clearing at teardown, so a lingering view
+ * costs at most one pick before FIFO. Drops run at teardown, so the
+ * hot path keeps no deletes. Runs noinline with scalar CPU with
+ * bounded loops, so the verifier stays small. The caller holds no
+ * outer RCU section since each helper takes its own.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -40,6 +43,13 @@ static __noinline bool flow_pick_least(s32 cpu, u32 *out_pid,
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
+	/* Head first skips the tail walk when the cached pid for the */
+	/* least key still holds share plus key with mask, so a deep */
+	/* tail pays one task read instead of one full scan per move. */
+	/* Stale views miss here with no state, so the scan below stays */
+	/* the fallback with no wrong move. */
+	if (flow_head_pick(cpu, out_pid, out_key, out_deadline, out_owner))
+		return true;
 	/* Queue handle stays hoisted, so the scan pays no dsq lookup. */
 	ov = flow_overflow_dsq();
 	bpf_rcu_read_lock();
@@ -134,5 +144,10 @@ static __noinline bool veb_consume_best(s32 cpu)
 		}
 	}
 	bpf_rcu_read_unlock();
+	/* Head clears on both outcomes when it still names the wanted */
+	/* pid, so a running pid never lingers while other keys stay. */
+	/* A stale head costs at most one ordered miss before FIFO with */
+	/* the next pass falling back to the scan. */
+	flow_head_clear(pid, key);
 	return moved;
 }
