@@ -6,7 +6,8 @@
  * The pass starts from the least key and follows successors with
  * at most twenty key probes so one pass never scans the tail more
  * than twenty times. Twenty covers sixteen moves plus four skip
- * slack so full batches never starve on sparse keys. Empty keys
+ * slack so full batches never starve on sparse keys. A drained tail
+ * exits the pass at once so empty probes never run. Empty keys
  * skip through counts with no tail
  * scan and drained keys advance at once so fruitless rescans never
  * run. Each key scans the overflow tail and moves the first admitted
@@ -147,6 +148,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if ((u64)moved >= (u64)FLOW_DISPATCH_MAX_BATCH)
 			break;
 		if (cur == (u32)FLOW_VEB_EMPTY)
+			break;
+		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
 			break;
 		cntp = veb_cnt_ptr(cur);
 		if (!cntp || READ_ONCE(*cntp) == 0) {

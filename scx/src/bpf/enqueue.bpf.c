@@ -11,11 +11,9 @@
  * count one park. One sequence allocation serves task state plus
  * wire notify so the wire stays dense. One park helper pairs sequence,
  * tree insert, notify through one exit so a parked task never misses
- * its notify. Placement derives one deadline from weight derived
- * period plus now then quantizes to one key with the same quantize
- * as the tree so placement shares the order source with dispatch.
- * The selected CPU wins when live plus allowed with no drain check
- * so warmth stays cheap. An idle CPU wins next through the idle pick
+ * its notify. Placement picks with live checks alone and no
+ * deadline quantize. The selected CPU wins when live plus allowed
+ * with no drain check so warmth stays cheap. An idle CPU wins next through the idle pick
  * when live plus allowed so light work lands with no scan. The first
  * allowed live CPU wins last. The chosen CPU feeds the notify so the
  * daemon admits against it with per CPU rows and rejects park with
@@ -108,23 +106,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* Placement with selected, idle, first in one place. */
 	/* Gives selected when allowed and live else idle when allowed */
-	/* and live else first when allowed and live else error. Shares */
-	/* the deadline source with the tree through the same quantize */
-	/* with no drain check so warmth stays cheap. The chosen CPU */
+	/* and live else first when allowed and live else error with */
+	/* no drain check so warmth stays cheap. The chosen CPU */
 	/* feeds the notify so the daemon admits against it with per CPU */
 	/* rows and rejects park with no run. */
 	{
-		u64 period = flow_period_ns(weight);
-		u64 deadline = flow_deadline_at(flow_now(), period);
-		u32 key = veb_quant(deadline);
 		s32 idle;
 		s32 first;
-		if (key >= (u32)FLOW_VEB_U) {
-			flow_gate_reject();
-			flow_enqueue_park(p, enq_flags, weight, 0,
-			    tctx);
-			return;
-		}
 		if (sel >= 0 && flow_cpu_ok(p, sel)) {
 			cpu = sel;
 		} else {

@@ -339,17 +339,23 @@ impl FlowVeb {
         self.pid_key.contains_key(&pid)
     }
 
-    /// Insert one task by deadline. Duplicate pids refresh in place.
-    /// Refresh drops the old position and joins the tail of the fresh key.
-    /// Zero identifiers pass through with no state change.
+    /// Insert one task by deadline. Duplicate pids join the fresh key.
+    /// A duplicate holding the same key stays in place with the old
+    /// deadline plus sequence, matching the core early return. A
+    /// duplicate with a fresh key drops the old position and joins
+    /// the tail of the fresh key. Zero identifiers pass through with
+    /// no state change.
     pub fn insert(&mut self, pid: u32, deadline: u64, seq: u64) {
         if pid == 0 {
             return;
         }
-        if self.pid_key.contains_key(&pid) {
+        let key = quantize(deadline);
+        if let Some(&old) = self.pid_key.get(&pid) {
+            if old == key {
+                return;
+            }
             self.remove(pid);
         }
-        let key = quantize(deadline);
         let entry = FlowEntry { pid, deadline, seq };
         match self.queues.get_mut(&key) {
             Some(q) => {
@@ -794,9 +800,7 @@ mod tests {
                     continue;
                 }
                 let h = w * 64 + b;
-                if h >= 256 {
-                    continue;
-                }
+                debug_assert!(h < 256);
                 if let Some(l) = self.cluster_first(h) {
                     return Some((h * 256 + l) as u16);
                 }
@@ -816,9 +820,7 @@ mod tests {
                 }
                 let b = 63 - v.leading_zeros() as usize;
                 let h = r * 64 + b;
-                if h >= 256 {
-                    continue;
-                }
+                debug_assert!(h < 256);
                 if let Some(l) = self.cluster_last(h) {
                     return Some((h * 256 + l) as u16);
                 }
@@ -873,9 +875,8 @@ mod tests {
                 let b = (v & mask).trailing_zeros() as usize;
                 if b < 64 {
                     let h2 = sh * 64 + b;
-                    if h2 < 256
-                        && let Some(l2) = self.cluster_first(h2)
-                    {
+                    debug_assert!(h2 < 256);
+                    if let Some(l2) = self.cluster_first(h2) {
                         return Some((h2 * 256 + l2) as u16);
                     }
                 }
@@ -894,9 +895,7 @@ mod tests {
                     continue;
                 }
                 let h2 = cand as usize * 64 + sb2;
-                if h2 >= 256 {
-                    continue;
-                }
+                debug_assert!(h2 < 256);
                 if let Some(l2) = self.cluster_first(h2) {
                     return Some((h2 * 256 + l2) as u16);
                 }
@@ -1202,6 +1201,28 @@ mod tests {
         assert!(q.is_empty());
         assert!(!q.remove_if_key(7, fresh));
         assert!(!q.remove_if_key(0, fresh));
+    }
+
+    #[test]
+    fn same_key_duplicate_stays_in_place() {
+        let mut q = FlowVeb::new();
+        q.insert(7, 8_000_000, 1);
+        assert_eq!(quantize(8_000_500), quantize(8_000_000));
+        q.insert(7, 8_000_500, 2);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.peek_min().unwrap().deadline, 8_000_000);
+        assert_eq!(q.peek_min().unwrap().seq, 1);
+        let mut m = BpfMirror::new();
+        m.insert(7, 8_000_000);
+        m.insert(7, 8_000_500);
+        assert_eq!(m.len(), 1);
+        assert_eq!(q.peek_min().map(|e| quantize(e.deadline)), m.min());
+        q.insert(7, 32_000_000, 3);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.peek_min().unwrap().seq, 3);
+        m.insert(7, 32_000_000);
+        assert_eq!(m.len(), 1);
+        assert_eq!(q.peek_min().map(|e| quantize(e.deadline)), m.min());
     }
 
     #[test]

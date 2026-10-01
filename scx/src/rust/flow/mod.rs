@@ -9,17 +9,13 @@
 pub mod cgrp;
 pub mod edf;
 pub mod helpers;
-pub mod preempt;
 pub mod runtime;
-pub mod select;
 pub mod slice;
 pub mod slot;
 pub mod veb;
 
 pub use cgrp::*;
 pub use edf::*;
-#[cfg(test)]
-pub use preempt::*;
 pub use runtime::*;
 pub use slice::*;
 #[cfg(test)]

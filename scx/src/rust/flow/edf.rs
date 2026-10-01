@@ -34,7 +34,7 @@ pub fn deadline_at(release: u64, period: u64) -> u64 {
 /// Per mille share of one slice in one period.
 /// Empty periods yield zero share. A two millisecond slice in a sixteen
 /// millisecond period takes one hundred twenty five per mille.
-pub fn slice_permillle(period: u64) -> u64 {
+pub fn slice_permille(period: u64) -> u64 {
     if period == 0 {
         return 0;
     }
@@ -76,8 +76,8 @@ mod tests {
 
     #[test]
     fn admission_holds_bound() {
-        assert_eq!(slice_permillle(16_000_000), 125);
-        assert_eq!(slice_permillle(0), 0);
+        assert_eq!(slice_permille(16_000_000), 125);
+        assert_eq!(slice_permille(0), 0);
         assert!(admit_ok(825, 125));
         assert!(!admit_ok(826, 125));
         assert!(!admit_ok(u64::MAX, 125));

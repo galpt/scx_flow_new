@@ -596,10 +596,7 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_PROBES as u64
         );
         assert_eq!(crate::flow::DISPATCH_PROBES, 20);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_VEB_EMPTY as u32,
-            0xFFFFFFFF
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_VEB_EMPTY, 0xFFFFFFFF);
     }
 
     #[test]
@@ -662,12 +659,6 @@ mod tests {
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             112
         );
-    }
-
-    #[test]
-    fn kick_rule_matches_header() {
-        assert!(crate::flow::arrival_kicks(10, 20));
-        assert!(!crate::flow::arrival_kicks(20, 20));
     }
 
     #[test]

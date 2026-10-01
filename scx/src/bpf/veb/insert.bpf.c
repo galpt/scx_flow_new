@@ -2,9 +2,9 @@
 /*
  * vEB insert helper for the flow core.
  *
- * Holds one key insert with duplicate refresh and saturate.
- * Duplicate pids drop the old key then join the fresh key.
- * Counts bump first then pid links then bits plus root follow
+ * Holds one key insert with duplicate check and saturate.
+ * Same key duplicates return at once with no refresh. Fresh keys
+ * drop the old key then join the fresh key. Counts bump first then pid links then bits plus root follow
  * so a full pid map never leaves phantom keys. Root least and
  * greatest move solely outward with compare and swap so concurrent
  * CPUs never miss live low keys. Bit sets retry four times then
@@ -103,8 +103,6 @@ static __noinline void veb_insert(u32 pid, u64 deadline)
 	if (pid == 0)
 		return;
 	k = veb_quant(deadline);
-	if (k >= (u32)FLOW_VEB_U)
-		k = (u32)FLOW_VEB_U - 1;
 	oldp = bpf_map_lookup_elem(&veb_pid, &pid);
 	if (oldp) {
 		u32 old = READ_ONCE(*oldp);

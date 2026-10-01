@@ -64,8 +64,8 @@ const _: () = assert!(ORDER_DEPTH_MAX <= 512);
 /// Order plus dispatch never emit from the core and hold at the core.
 const _: () = assert!(PROTO_ORDER == 2 && PROTO_DISPATCH == 3);
 /// Guard that the dispatch batch mirrors the BPF header.
-/// Userspace drains use the deeper drain cap while the core moves one
-/// per pass.
+/// Userspace drains use the deeper drain cap while the core moves
+/// sixteen per pass.
 const _: () = assert!(DISPATCH_BATCH == 16);
 /// Guard that the dispatch probes mirror the BPF header.
 /// Twenty probes cover sixteen moves plus four skip slack.
@@ -271,7 +271,7 @@ impl Daemon {
     #[cfg(test)]
     pub fn share_for(&self, hint_us: u32) -> u64 {
         let period = super::edf::task_period(hint_us);
-        super::edf::slice_permillle(period)
+        super::edf::slice_permille(period)
     }
 
     /// Drop the stored share of one task with floor at zero.
@@ -297,8 +297,8 @@ impl Daemon {
     /// Fresh hints flow through the hint table. Stored shares add
     /// once and drop once. Rejects park with no run at the core.
     /// Zero identifiers park at once with no table row. Stale CPUs
-    /// drop the stored share then park. Depth overflow drops the
-    /// stored share then parks. Table full parks fresh identifiers
+    /// clear the task row then park. Depth overflow clears the task
+    /// row then parks. Table full parks fresh identifiers
     /// with zero stored share so the map stays capped. Order sequence
     /// advances solely on admits while the wire sequence pairs each
     /// row with core task state for dispatch.
@@ -316,10 +316,12 @@ impl Daemon {
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
-            return self.reject_park(pid, true);
+            self.remove_row(pid);
+            return self.reject_park(pid, false);
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
-            return self.reject_park(pid, true);
+            self.remove_row(pid);
+            return self.reject_park(pid, false);
         }
         if !self.tasks.contains_key(&pid) && self.tasks.len() >= TASKS_CAP {
             return self.reject_park(pid, false);
@@ -334,7 +336,7 @@ impl Daemon {
         };
         let period = super::edf::task_period(hint);
         let deadline = super::edf::deadline_at(now, period);
-        let share = super::edf::slice_permillle(period);
+        let share = super::edf::slice_permille(period);
         let held = self.admitted(cpu);
         if share != 0 && !super::edf::admit_ok(held, share) {
             self.tasks.insert(
@@ -442,38 +444,6 @@ impl Daemon {
         self.wire_last = seq;
         FailAction::ParkFifo
     }
-
-    /// Pick one CPU for one task through the shared placement model.
-    /// Callers pass live depths in rank order.
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn pick_cpu(
-        &self,
-        idle: &[i32],
-        prev: i32,
-        allowed: &[i32],
-        live: &[i32],
-        depths: &[u64],
-        deadline: u64,
-        now: u64,
-    ) -> i32 {
-        super::select::place(idle, prev, allowed, live, depths, deadline, now)
-    }
-
-    /// True when one arrival preempts the occupant.
-    #[cfg(test)]
-    pub fn should_kick(&self, arrival: u64, occupant: u64) -> bool {
-        super::preempt::arrival_kicks(arrival, occupant)
-    }
-
-    /// Queue identifier for one CPU with overflow past the bound.
-    #[cfg(test)]
-    pub fn queue_for(&self, cpu: u32) -> u64 {
-        if (cpu as u64) < super::slot::MAX_CPUS {
-            return super::slot::local_dsq(cpu);
-        }
-        super::slot::slot_overflow_dsq()
-    }
 }
 
 impl Default for Daemon {
@@ -524,6 +494,19 @@ mod tests {
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.admitted(0), 0);
         assert_eq!(d.queue_len(), 0);
+        assert_eq!(d.task_len(), 0);
+        let mut full = Daemon::new();
+        for pid in 1..=(ORDER_DEPTH_MAX as u32) {
+            let got = full.handle_enqueue(pid, 4_000_000, 0, 2_000_000, pid as u64 + 100);
+            assert!(matches!(got, AdmitDecision::Admit { .. }));
+        }
+        assert_eq!(full.queue_len(), ORDER_DEPTH_MAX);
+        assert_eq!(full.task_len(), ORDER_DEPTH_MAX);
+        let got = full.handle_enqueue(1, 4_000_000, 0, 3_000_000, 900);
+        assert!(matches!(got, AdmitDecision::Park));
+        assert_eq!(full.queue_len(), ORDER_DEPTH_MAX - 1);
+        assert_eq!(full.task_len(), ORDER_DEPTH_MAX - 1);
+        assert!(full.task(1).is_none());
     }
 
     #[test]
@@ -582,15 +565,6 @@ mod tests {
         assert_eq!(EV_CAP, 1024);
         assert_eq!(TASKS_CAP, 4096);
         assert_eq!(STALE_GRACE_NS, 128_000_000);
-    }
-
-    #[test]
-    fn placement_and_kick_helpers_wire() {
-        let d = Daemon::new();
-        assert_eq!(d.pick_cpu(&[1], 0, &[0, 1], &[0, 1], &[0, 0], 100, 0), 1);
-        assert!(d.should_kick(10, 20));
-        assert_eq!(d.queue_for(0), crate::flow::slot::local_dsq(0));
-        assert_eq!(d.queue_for(9999), crate::flow::slot::slot_overflow_dsq());
     }
 
     #[test]
