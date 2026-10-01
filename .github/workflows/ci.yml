@@ -103,12 +103,12 @@ jobs:
           cargo metadata --format-version 1 > /tmp/meta.json
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
             --no-build scx_flow || {
-            echo '=== TEMP DIAG: verbose verifier log for flow_dispatch ==='
+            echo '=== TEMP DIAG v3: A/B objects with stock flags ==='
             uname -r
-            OBJ=$(find target/ci/build -path '*scx_flow*/out/bpf.bpf.o' \
-              | head -1)
-            echo "object: $OBJ"
-            veristat -vl1 --log-size=16777216 "$OBJ" > /tmp/vstat.log 2>&1 || true
-            grep -B150 -E 'processed 6[0-9]{4} insns' /tmp/vstat.log | tail -160
+            for OBJ in $(find target/ci/build -path '*scx_flow*/out/bpf.bpf.o'); do
+              echo "== $OBJ md5=$(md5sum < "$OBJ")"
+              veristat -o csv "$OBJ" > /tmp/v.csv 2>&1 || true
+              grep -E 'flow_dispatch' /tmp/v.csv | head -2
+            done
             exit 1
           }
