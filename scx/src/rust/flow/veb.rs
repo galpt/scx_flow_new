@@ -689,8 +689,9 @@ mod tests {
 
     /// Flat bitmap mirror of the BPF tree plus ledger for coverage.
     /// Replicates quantize, high, low, insert, remove, keyed remove,
-    /// cached plus scan least, greatest, successor exactly as the BPF
-    /// helpers behave single threaded. Admission plus order rows land
+    /// cached plus scan least plus greatest order exactly as the tree
+    /// behaves single threaded, with successor kept as a tree query
+    /// for tests. Admission plus order rows land
     /// synchronously in the core with the mirror kept as oracle for
     /// tests plus observability solely. Compare and swap loops
     /// collapse to one update here while contention fallbacks stay
@@ -1025,7 +1026,7 @@ mod tests {
         }
     }
 
-    /// Dispatch loop model mirroring the BPF pass shape.
+    /// Dispatch loop model mirroring the tree order shape.
     /// Starts from the least key, follows successors, caps key probes,
     /// stops at the batch bound, skips empty keys through counts, picks
     /// one pid per visited key. Returns moved plus probes spent.

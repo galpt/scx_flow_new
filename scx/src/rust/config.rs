@@ -55,10 +55,10 @@ impl Config {
     /// Faulty values mark a programming fault.
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
-    /// at sixteen milliseconds. The batch stays at sixteen. Flood stops
-    /// ordered probes after four plus moves quartered past one hundred
-    /// twenty eight queued with a twenty probe cap and up to four FIFO
-    /// within sixteen on moving flood. Admission
+    /// at sixteen milliseconds. The batch stays at sixteen with ordered
+    /// filling the batch and FIFO covering the remainder. Flood bound
+    /// stays at four plus one hundred twenty eight as deep backlog
+    /// shape with a twenty probe cap kept as ABI. Admission
     /// holds use under nine hundred fifty per mille with base capacity
     /// one thousand twenty four. Queues hold five hundred twelve local,
     /// eight node, machine, overflow. Hints hold four
@@ -237,9 +237,8 @@ mod tests {
         assert_eq!(DEF_BATCH, 16);
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
-        // Ordered probes under flood cap at four plus moves quartered,
-        // so early moves stay ordered and up to four FIFO fill to
-        // sixteen within the batch.
+        // Ordered fills the batch with FIFO covering the remainder,
+        // so deep backlog still drains sixteen per pass in order.
         let slack = DEF_BATCH - DEF_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DEF_FLOOD_PROBES + (DEF_BATCH >> 2), 8);

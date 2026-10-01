@@ -12,7 +12,7 @@
  * masks fail closed with an error and one gate count so callers never
  * run on a stale CPU. The core owns admit with per CPU rows and the
  * core proposes solely through the selected CPU so rejects park with
- * no run. Dispatch order stays least plus successor with no change.
+ * no run. Dispatch order stays least key then deadline with no change.
  * The core keeps mask wins and progress. One fallback helper pairs
  * the idle, previous, first checks with the gate count through one
  * exit so a missed gate cannot slip through.

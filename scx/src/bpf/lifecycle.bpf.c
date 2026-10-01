@@ -101,6 +101,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	WRITE_ONCE(tctx->seq, 0);
 	WRITE_ONCE(tctx->admit_share, 0);
 	WRITE_ONCE(tctx->admit_cpu, 0);
+	WRITE_ONCE(tctx->deadline, 0);
+	WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

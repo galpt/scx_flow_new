@@ -9,8 +9,8 @@
 //! observability. Order follows deadlines solely through the
 //! quantized tree. The BPF core parks plus admits plus orders
 //! synchronously with no roundtrip. Dispatch moves admitted tasks in
-//! core order with sequence plus liveness checks and parks stale
-//! entries. Mirror cost stays on the userspace thread within five
+//! least key then deadline order with affinity plus liveness checks
+//! and parks stale entries. Mirror cost stays on the userspace thread within five
 //! hundred twelve entries and stays off the BPF hot path. Times stay
 //! in the monotonic domain shared with the core. Parks include
 //! backpressure drops, ring drops, userspace queue drops. Queue
@@ -45,13 +45,12 @@ pub const ORDER_DEPTH_MAX: usize = 512;
 /// Max moves per dispatch pass. Mirrors the BPF header.
 pub const DISPATCH_BATCH: usize = 16;
 /// Max key probes per dispatch pass. Mirrors the BPF header.
-/// Twenty covers sixteen moves plus four skip slack so full batches
-/// never starve on sparse keys.
+/// Twenty stays as ABI while ordered fills sixteen per pass with FIFO
+/// covering the remainder so full batches never starve.
 pub const DISPATCH_PROBES: usize = 20;
-/// Max fruitless ordered probes under flood before FIFO drain.
-/// Mirrors the BPF header. Four plus moves quartered cap the flood cost
-/// with the earliest moves kept in order, and up to four FIFO fill to
-/// sixteen on moving flood so rejects never wait for a stalled pass.
+/// Deep backlog shape. Mirrors the BPF header. Past one hundred
+/// twenty eight queued the backlog still drains sixteen per pass with
+/// ordered first and FIFO covering the remainder.
 pub const DISPATCH_FLOOD_PROBES: usize = 4;
 /// Queue depth past which the flood cap applies. Mirrors the header.
 /// Past one hundred twenty eight queued the stall budget gates order.
@@ -82,18 +81,18 @@ const _: () = assert!(PROTO_ORDER == 2 && PROTO_DISPATCH == 3);
 /// sixteen per pass.
 const _: () = assert!(DISPATCH_BATCH == 16);
 /// Guard that the dispatch probes mirror the BPF header.
-/// Twenty probes cover sixteen moves plus four skip slack.
+/// Twenty stays as ABI with sixteen moves filling the batch.
 const _: () = assert!(DISPATCH_PROBES == 20);
 /// Guard that the flood stall budget mirrors the BPF header.
-/// Four plus moves quartered cap flood scans with early moves kept in
-/// order and up to four FIFO fill to sixteen on moving flood.
+/// Four plus one hundred twenty eight mark deep backlog shape with
+/// ordered first and FIFO covering the remainder.
 const _: () = assert!(DISPATCH_FLOOD_PROBES == 4);
 /// Guard that the flood queue bound mirrors the BPF header.
-/// Past one hundred twenty eight queued the stall budget applies.
+/// Past one hundred twenty eight queued the backlog still drains with
+/// ordered first and FIFO covering the remainder.
 const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 /// Guard that the flood budget stays inside the probe budget.
-/// Quartered moves keep the flood cap inside twenty with FIFO filling
-/// to sixteen on moving flood.
+/// Ordered fills sixteen with FIFO covering the remainder.
 const _: () = assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
 /// Guard that one batch never exceeds the probe budget.
 const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
@@ -261,9 +260,9 @@ impl Daemon {
 
     /// Admitted entries in dispatch order as oracle rows.
     /// Each row carries pid, sequence, deadline, admit CPU.
-    /// Parks stay out so rejects park with no run. The core checks
-    /// the sequence against task state plus CPU affinity and moves
-    /// admitted tasks in this order up to the batch bound. Mirror
+    /// Parks stay out so rejects park with no run. The core moves
+    /// admitted tasks in least key then deadline order up to the batch
+    /// bound with affinity plus liveness checks. Mirror
     /// only with the core as authority.
     #[cfg(test)]
     pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
@@ -614,9 +613,8 @@ mod tests {
         assert_eq!(DISPATCH_BATCH, 16);
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
-        // Ordered probes under flood cap at four plus moves quartered,
-        // so early moves stay ordered and up to four FIFO fill to
-        // sixteen within the batch.
+        // Ordered fills sixteen with FIFO covering the remainder,
+        // so deep backlog still drains in order per pass.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DISPATCH_FLOOD_PROBES + (DISPATCH_BATCH >> 2), 8);

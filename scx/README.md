@@ -22,11 +22,11 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks with order from the core tree. Dispatch moves admitted tasks in order with live checks, best effort under flood. Each pass moves at most `16` tasks in at most `20` checks and exits when drained. Under flood with more than `128` queued the pass stops ordered checks after `4` plus moves quartered, so deep backlog never burns `20` full scans and the earliest moves stay ordered. Foreign keys skip cheaply through counts plus the iterator pid plus mask with no reference, so only hits take a reference. Ordered checks run first so admitted tasks stay preferred, while the FIFO drain may move admitted tasks out of order under flood. A safety path drains up to `16` FIFO tasks when ordered checks find nothing, plus up to `4` FIFO within `16` when ordered moved under flood, so rejects never wait for a stalled pass and still drain in queue order. One kick follows each park to the chosen CPU when idle else one idle peer else one directed preempt to the owner solely when the wakeup runs earlier, so urgent arrivals preempt longer runs with at most one kick per park. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline order with live checks, then FIFO for the remainder. Rejects skip via pid index. Past 128 queued, backlog still drains 16 per pass in queue order. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
-Each due time becomes a `16 bit` number at `1024 nanos` per step with top values held. Close times share one number in arrival order. A repeat keeps its place. The tree finds least plus next without a scan and clears empty ones at once. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
+Each due time becomes a `16 bit` number at `1024 nanos` per step with top values held. Close times share one number in arrival order. A repeat keeps its place. The tree finds least without a scan and clears empty ones at once. See `src/bpf/veb/` and `src/rust/flow/veb.rs`.
 
 ### Admission
 
@@ -54,7 +54,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `24B`, `8B`, `8B`, `112B`.
+- State is `40B`, `8B`, `8B`, `112B`.
 - Needs kernels, `7.2` series and up.
 - Spreading wakeups across eight nearby CPUs stays out by design, since early tests showed no gain and more scans cost time.
 - Picking among local plus node plus machine queues with drain checks stays out by design, since the simple first live pick proved enough and extra checks cost time.
@@ -63,6 +63,6 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
 - Placement uses an idle CPU when live, else the selected CPU when live, else the first live CPU, so load spreads with no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
-- Oversubscription past about seven admitted tasks per CPU at default weight with share `125` per mille at `16ms` period parks the rest as rejects with no order, so a 496 thread flood on 16 CPUs runs the earliest admitted tasks in due time order while rejects drain FIFO up to `16` on stalled passes plus up to `4` within `16` on moving passes with higher latency.
+- Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs the earliest admitted in order while rejects drain FIFO up to `16` per pass with higher latency.
 - Flood throughput stays bounded by the fixed `2ms` slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus FIFO plus preempt work.
 - Preempt sends at most one directed kick per park to the owner CPU solely when the wakeup holds a row and runs earlier than the owner task, with a running reject counting as longer, so urgent arrivals preempt longer runs with no storm and equal or earlier owners never bounce.

@@ -3,7 +3,8 @@
  * Park plus admission for the enqueue path.
  *
  * Parks at the overflow tail with plain insert and counts one insert.
- * Admission allocates one sequence then stores it then admits under
+ * Admission allocates one sequence then stores it plus the deadline
+ * plus key from the same period helpers, then admits under
  * the bound with tree plus row or parks as reject with no key plus
  * no row then parks at the tail then notifies for observability
  * solely. Every park notifies best effort with loss irrelevant.
@@ -38,14 +39,20 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 share = flow_share_permille(period);
 	u64 seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	u32 pid = (u32)p->pid;
+	u32 key = veb_quant(deadline);
 	bool admitted = false;
-	if (tctx)
+	if (tctx) {
 		WRITE_ONCE(tctx->seq, seq);
+		WRITE_ONCE(tctx->deadline, deadline);
+		WRITE_ONCE(tctx->key, key);
+	}
 	if (pid == 0) {
 		flow_gate_reject();
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);
+			WRITE_ONCE(tctx->deadline, 0);
+			WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 		}
 		flow_order_delete(pid);
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
@@ -59,6 +66,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);
+			WRITE_ONCE(tctx->deadline, 0);
+			WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 		}
 		veb_remove(pid);
 		flow_order_delete(pid);
@@ -72,6 +81,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, cpu);
+			WRITE_ONCE(tctx->deadline, deadline);
+			WRITE_ONCE(tctx->key, key);
 		}
 		veb_insert(pid, deadline);
 		if (flow_order_write(pid, seq, deadline, cpu)) {
@@ -82,6 +93,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 			if (tctx) {
 				WRITE_ONCE(tctx->admit_share, 0);
 				WRITE_ONCE(tctx->admit_cpu, 0);
+				WRITE_ONCE(tctx->deadline, 0);
+				WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 			}
 		}
 	} else {
@@ -89,6 +102,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 			if (tctx) {
 				WRITE_ONCE(tctx->admit_share, (u32)share);
 				WRITE_ONCE(tctx->admit_cpu, cpu);
+				WRITE_ONCE(tctx->deadline, deadline);
+				WRITE_ONCE(tctx->key, key);
 			}
 			veb_insert(pid, deadline);
 			if (flow_order_write(pid, seq, deadline, cpu)) {
@@ -100,6 +115,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 				if (tctx) {
 					WRITE_ONCE(tctx->admit_share, 0);
 					WRITE_ONCE(tctx->admit_cpu, 0);
+					WRITE_ONCE(tctx->deadline, 0);
+					WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 				}
 			}
 		}
@@ -112,6 +129,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	if (tctx) {
 		WRITE_ONCE(tctx->admit_share, 0);
 		WRITE_ONCE(tctx->admit_cpu, 0);
+		WRITE_ONCE(tctx->deadline, 0);
+		WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 	}
 	veb_remove(pid);
 	flow_order_delete(pid);

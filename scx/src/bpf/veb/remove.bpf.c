@@ -4,11 +4,9 @@
  *
  * Holds one pid remove with last key cleanup and root refresh.
  * Lifecycle owns its pid row on stopping, disable, exit so unkeyed
- * remove drops solely its own key, while dispatch races with requeue
- * across CPUs so keyed remove guards reuse. Pid row deletes run
- * under RCU read lock on move plus outside locks on lifecycle with
- * HASH delete needing no deferral in either case.
- * Last key clears cluster and summary bits then refreshes root.
+ * remove drops solely its own key with teardown as the single reaper
+ * and the hot path keeping no deletes. Last key clears cluster and
+ * summary bits then refreshes root.
  * A zero count still clears stale bits so empty keys never linger.
  * Counts drop with compare and swap so concurrent CPUs stay
  * consistent. Four tries then give up with one park and the next
@@ -204,18 +202,4 @@ static __noinline bool veb_remove(u32 pid)
 	}
 	veb_root_remove(k);
 	return true;
-}
-static __noinline bool veb_remove_if_key(u32 pid, u32 expect)
-{
-	u32 *kp;
-	if (pid == 0)
-		return false;
-	if (expect >= (u32)FLOW_VEB_U)
-		return false;
-	kp = bpf_map_lookup_elem(&veb_pid, &pid);
-	if (!kp)
-		return false;
-	if (READ_ONCE(*kp) != expect)
-		return false;
-	return veb_remove(pid);
 }

@@ -41,11 +41,15 @@ static __noinline void flow_admit_drop_one(u32 pid,
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);
+			WRITE_ONCE(tctx->deadline, 0);
+			WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 		}
 	} else {
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);
+			WRITE_ONCE(tctx->deadline, 0);
+			WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
 		}
 	}
 	flow_order_delete_one(pid);

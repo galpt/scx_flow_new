@@ -9,26 +9,30 @@
  * so queue identifiers stay stable across releases. Enqueue admits
  * synchronously with share math plus bound check then inserts
  * one key derived from the deadline plus one order row with sequence,
- * deadline, CPU and parks with plain insert. Rejects park with no
+ * deadline, CPU and parks with plain insert. Task state also keeps
+ * the deadline plus key from the same period plus deadline plus
+ * quantize helpers with zero roundtrip, so dispatch compares without
+ * touching order rows. Rejects park with no
  * key plus no row plus no run. One kick follows each park to the
  * chosen CPU when idle else one idle peer else one directed preempt
  * to the owner solely when the wakeup runs earlier than the owner
  * task, so urgent arrivals preempt longer runs with at most one kick
- * per park and no storm. Dispatch moves admitted tasks in tree
- * order up to sixteen per pass with sequence, liveness, affinity
- * checks and best effort order under flood. Ordered checks run first
- * so admitted tasks stay preferred, while the FIFO drain may move
- * admitted tasks out of order under flood. Under flood with more than
- * one hundred twenty eight queued the pass stops ordered probes after
- * four plus moves quartered with cheap pid plus mask skips, so one
- * pass never burns twenty full tail scans and productive work keeps
- * the earliest moves in order. With moves under flood the pass still
- * drains up to four FIFO tasks within sixteen, so rejects never wait
- * for a fully stalled pass. Stale entries park and the core drops shares through stopping plus
+ * per park and no storm. Dispatch moves admitted tasks in global
+ * deadline order up to sixteen per pass with no sequence gate and
+ * no CPU gate. Each pass picks the least key then deadline among
+ * entries the dispatch CPU may run, with the stored CPU kept as a
+ * tiebreak solely, so any CPU takes the earliest work it may run.
+ * Affinity plus liveness still gate every move through the same
+ * entry check as the FIFO path, so the target class never widens.
+ * Ordered checks run first
+ * so admitted tasks stay preferred, while the FIFO drain moves the
+ * remainder in queue order up to the batch bound. The pass keeps no
+ * flood probe cap, so deep backlog still drains sixteen ordered per
+ * pass with the earliest moves kept in order. Stale entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
- * leaves at once with no scan. Empty tree or stall drains up to
- * sixteen FIFO tasks with liveness plus affinity checks plus keyed
- * drop and no order gate so runnable tasks never stall on live work.
+ * leaves at once with no scan. Stall drains up to
+ * sixteen FIFO tasks with liveness plus affinity checks and no order
+ * gate so runnable tasks never stall on live work.
  * Ordered moves count one vEB hit plus fail open moves count one
  * FIFO park so every dispatched task lands in one bucket with
  * completions counted apart. Fail open stays rare in normal load
@@ -118,6 +122,9 @@ struct flow_task_ctx {
 	u64 seq;
 	u32 admit_share;
 	u32 admit_cpu;
+	u64 deadline;
+	u32 key;
+	u32 pad2;
 };
 struct flow_cpu_state {
 	u32 running_pid;
@@ -158,8 +165,8 @@ struct flow_order_entry {
 	u32 cpu;
 	u32 pad;
 };
-_Static_assert(sizeof(struct flow_task_ctx) == 24,
-	"task state stays at 24B");
+_Static_assert(sizeof(struct flow_task_ctx) == 40,
+	"task state stays at 40B");
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
 _Static_assert(sizeof(struct flow_topo) == 8,
