@@ -9,10 +9,11 @@
  * every move through the same entry check as the FIFO path, so the
  * target class never widens. Ordered checks run first so admitted
  * tasks stay preferred, while the FIFO drain moves the remainder in
- * queue order up to the batch bound. The pass keeps no flood probe
- * cap, so deep backlog still drains sixteen ordered per pass with the
- * earliest moves kept in order. The per key pid index skips rejects
- * with no task lookup, so only the picked pid takes a reference.
+ * queue order up to the batch bound. Past one hundred twenty eight
+ * queued ordered stops after four moves with FIFO covering the
+ * remainder to sixteen, so a deep tail never burns sixteen double
+ * scans in one pass. Task state gates admission with no extra index
+ * lookup, so only the picked pid takes a reference.
  * Drops run at teardown, so the hot path keeps no deletes and the
  * core drops shares through stopping plus disable plus exit. Empty
  * queue leaves at once with no scan so idle stays cheap. Stall drains
@@ -65,9 +66,18 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		goto out;
 	}
 	bpf_for(i, 0, FLOW_DISPATCH_MAX_BATCH) {
+		u64 qlen;
 		if ((u64)moved >= (u64)FLOW_DISPATCH_MAX_BATCH)
 			break;
-		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+		qlen = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
+		if (qlen == 0)
+			break;
+		/* Past deep backlog ordered stops after four moves with */
+		/* FIFO covering the remainder below, so one pass never */
+		/* burns sixteen double scans on a deep tail while still */
+		/* draining sixteen with ordered first. */
+		if ((u64)moved >= (u64)FLOW_DISPATCH_FLOOD_PROBES &&
+		    qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED)
 			break;
 		/* A recheck miss ends ordered and falls to FIFO below, */
 		/* so one stale pick never burns extra scans. */

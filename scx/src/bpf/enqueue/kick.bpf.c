@@ -48,13 +48,16 @@ static __always_inline bool flow_preempt_want(u64 arrival, u64 occupant)
 /* only preempts a CPU it may run on. A zero running pid skips, so an */
 /* idle CPU never takes a directed kick. A self pid skips, so a task */
 /* never preempts itself. An exiting arrival skips, so teardown never */
-/* preempts. The order rows give both deadlines with the pure check */
-/* deciding, so the kick stays strictly earlier with at most one kick */
-/* per park through the single call site. */
+/* preempts. Task state gives the arrival deadline with the order */
+/* row giving the occupant deadline, so the wakeup path pays one */
+/* store lookup with the pure check deciding, and the kick stays */
+/* strictly earlier with at most one kick per park through the */
+/* single call site. */
 static __always_inline void flow_preempt_kick(s32 cpu,
 	struct task_struct *p)
 {
 	struct flow_cpu_state *st;
+	struct flow_task_ctx *wtctx;
 	u32 wpid;
 	u32 rpid;
 	u64 wdead;
@@ -76,7 +79,8 @@ static __always_inline void flow_preempt_kick(s32 cpu,
 		return;
 	if (wpid == rpid)
 		return;
-	wdead = flow_order_deadline(wpid);
+	wtctx = flow_lookup(p);
+	wdead = wtctx ? READ_ONCE(wtctx->deadline) : 0;
 	rdead = flow_order_deadline(rpid);
 	if (!flow_preempt_want(wdead, rdead))
 		return;
