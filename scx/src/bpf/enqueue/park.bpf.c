@@ -7,7 +7,7 @@
  * plus key from the same period helpers, then admits under
  * the bound with tree plus row or parks as reject at the top key
  * with the far deadline then parks at the tail then notifies for
- * observability solely. Rejects stay ordered at the lowest key so
+ * observability solely. Rejects stay ordered at the top key so
  * dispatch still picks them by key then deadline. Admitted parks
  * also store one head plus one placement view for later picks with
  * no extra counter, and rejects store the same views with the far
@@ -40,6 +40,8 @@ static __noinline void flow_reject_top(u32 pid, u32 cpu,
 {
 	u32 top;
 	u64 far;
+	/* Zero never keys the tree, so an early return stays safe with */
+	/* the pid zero path clearing only above. */
 	if (pid == 0)
 		return;
 	top = (u32)FLOW_VEB_U - 1;
@@ -79,6 +81,9 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	}
 	if (pid == 0) {
 		flow_gate_reject();
+		/* Zero never keys the tree plus head plus place, so clear */
+		/* only with no insert stays safe and matches the helper */
+		/* early return for zero. */
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);

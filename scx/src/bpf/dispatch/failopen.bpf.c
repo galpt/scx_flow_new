@@ -11,9 +11,9 @@
  * meaningful while ordered moves carry every parked task. Moves clear
  * the head slot, so a fallback pid never lingers as a head for the
  * next ordered pick. Drops run at teardown, so the hot path keeps no
- * deletes. Stays as the empty or corrupt canary since task state plus
- * tree land synchronously and solely genuine misses reach here.
- * Live stays proven once at entry, so the check pays one mask test
+ * deletes. Stays as the empty plus corrupt plus stale canary since
+ * task state plus tree land synchronously and solely genuine misses
+ * reach here. Live stays proven once at entry, so the check pays one mask test
  * on the acquired task with no live branch and no iterator test
  * beyond the acquire. Runs inline so the iterator stays in the
  * caller with no extra call cost.

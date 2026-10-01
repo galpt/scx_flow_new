@@ -54,7 +54,7 @@ pub const DISPATCH_BATCH: usize = 16;
 pub const DISPATCH_PROBES: usize = 20;
 /// Deep backlog shape. Mirrors the BPF header as ABI. Backlog still
 /// drains sixteen ordered per pass with the fallback solely on empty
-/// tree or corrupt state.
+/// plus corrupt plus stale.
 pub const DISPATCH_FLOOD_PROBES: usize = 4;
 /// Queue depth marking deep backlog. Mirrors the header as ABI.
 /// Ordered still drains sixteen per pass past this depth.
@@ -93,7 +93,7 @@ const _: () = assert!(DISPATCH_PROBES == 20);
 const _: () = assert!(DISPATCH_FLOOD_PROBES == 4);
 /// Guard that the flood queue bound mirrors the BPF header.
 /// Backlog still drains ordered past this depth with the fallback
-/// solely on empty tree or corrupt state.
+/// solely on empty plus corrupt plus stale.
 const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 /// Guard that the flood budget stays inside the probe budget.
 /// Ordered fills sixteen per pass as ABI.
@@ -256,9 +256,12 @@ impl Daemon {
 
     /// Cached head pid for one key with deadline plus owner.
     /// Mirror of the core low byte slot view for tests solely. Empty
-    /// when the key never admitted, when a colliding key evicted the
-    /// slot, or when the stored pid left. Stale pids miss through the
-    /// task check with no core effect.
+    /// when the key never parked, when a colliding key evicted the
+    /// slot, or when the stored pid left. Admits plus top key rejects
+    /// share the same view with the far deadline keeping rejects last.
+    /// Stale pids miss through the task check with no core effect. The
+    /// head keeps smallest pid best effort while the full scan orders
+    /// owned then pid.
     #[cfg(test)]
     pub fn head_for(&self, key: u32) -> Option<(u32, u64, u32)> {
         let (stored_key, pid, deadline, cpu) = self.head_hint.get(&(key & 255)).copied()?;
@@ -266,7 +269,7 @@ impl Daemon {
             return None;
         }
         let t = self.tasks.get(&pid)?;
-        if t.share == 0 {
+        if t.share == 0 && t.deadline != u64::MAX {
             return None;
         }
         if super::veb::quantize(t.deadline) as u32 != key {
@@ -332,19 +335,18 @@ impl Daemon {
         self.order.peek_min().cloned()
     }
 
-    /// Admitted entries in dispatch order as oracle rows.
+    /// Parked entries in dispatch order as oracle rows.
     /// Each row carries pid, sequence, deadline, admit CPU.
-    /// Parks stay out so rejects park with no run. The core moves
-    /// every parked task in least key then deadline order up to the
-    /// batch bound with rejects at the top key last with affinity plus
-    /// liveness checks. Mirror only with the core as authority.
+    /// Admits sort before top key rejects with the far deadline last.
+    /// The core moves every parked task in least key then deadline
+    /// order up to the batch bound with affinity plus liveness checks
+    /// and the fallback solely on empty plus corrupt plus stale.
+    /// Mirror only with the core as authority.
     #[cfg(test)]
     pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
         let mut out = Vec::with_capacity(self.order.len());
         for e in self.order.ordered() {
-            if let Some(t) = self.tasks.get(&e.pid)
-                && t.share != 0
-            {
+            if let Some(t) = self.tasks.get(&e.pid) {
                 out.push((e.pid, t.wire_seq, t.deadline, t.admit_cpu));
             }
         }
@@ -406,15 +408,18 @@ impl Daemon {
 
     /// Handle one enqueue notify as mirror oracle.
     /// Fresh hints flow through the hint table. Stored shares add
-    /// once and drop once in the mirror. Rejects park with no run at
-    /// the core. Zero identifiers park at once with no table row.
-    /// Stale CPUs clear the task row then park. Depth overflow clears
-    /// the task row then parks. Table full parks fresh identifiers
-    /// with zero stored share so the map stays capped. Admitted parks
-    /// also store one head plus one owner view with no extra counter,
-    /// so later oracle picks reuse warmth with mask still checked in
-    /// the core. Single sequence pairs each row with core task state
-    /// plus the order row with no split. Mirror only with the core as
+    /// once and drop once in the mirror. Rejects park keyed at the top
+    /// key with the far deadline plus head plus owner views, so they
+    /// drain ordered last with no run. Zero identifiers park at once
+    /// with no table row since zero never keys the tree. Stale CPUs
+    /// plus depth overflow clear the old row then park keyed at the top.
+    /// Table full parks fresh identifiers with no row so the map stays
+    /// capped. Admitted plus rejected parks store one head plus one
+    /// owner view with no extra counter, so later oracle picks reuse
+    /// warmth with mask still checked in the core. The head keeps
+    /// smallest pid best effort while the full scan orders owned then
+    /// pid. Single sequence pairs each row with core task state plus
+    /// the order row with no split. Mirror only with the core as
     /// authority.
     pub fn handle_enqueue(
         &mut self,
@@ -425,20 +430,20 @@ impl Daemon {
         wire_seq: u64,
     ) -> AdmitDecision {
         if pid == 0 {
-            return self.reject_park(pid);
+            return self.reject_park(pid, wire_seq, cpu, now);
         }
         if cpu as u64 >= super::slot::MAX_CPUS {
             let action = fail_open(&FailReason::BadCpu);
             debug_assert_eq!(action, FailAction::DropShare);
             self.remove_row(pid);
-            return self.reject_park(pid);
+            return self.reject_park(pid, wire_seq, cpu, now);
         }
         if self.order.len() >= ORDER_DEPTH_MAX {
             self.remove_row(pid);
-            return self.reject_park(pid);
+            return self.reject_park(pid, wire_seq, cpu, now);
         }
         if !self.tasks.contains_key(&pid) && self.tasks.len() >= TASKS_CAP {
-            return self.reject_park(pid);
+            return self.reject_park(pid, wire_seq, cpu, now);
         }
         if self.tasks.contains_key(&pid) {
             self.unpublish(pid);
@@ -453,20 +458,7 @@ impl Daemon {
         let share = super::edf::slice_permille(period);
         let held = self.admitted(cpu);
         if share != 0 && !super::edf::admit_ok(held, share) {
-            self.tasks.insert(
-                pid,
-                TaskState {
-                    release: now,
-                    deadline,
-                    share: 0,
-                    admit_cpu: 0,
-                    #[cfg(test)]
-                    wire_seq,
-                },
-            );
-            self.rejects += 1;
-            self.parks += 1;
-            return AdmitDecision::Park;
+            return self.reject_park(pid, wire_seq, cpu, now);
         }
         if share != 0 {
             let row = &mut self.admitted[cpu as usize];
@@ -493,15 +485,22 @@ impl Daemon {
     /// Head keeps the earliest deadline then smallest pid per low key
     /// byte with overwrite on a new key, mirroring the core slot view.
     /// Owner holds the last admit CPU per task with overwrite. Out of
-    /// bound CPUs store nothing, matching the core reject path. Both
-    /// stay best effort with validation before use and clear on remove,
-    /// so stale views fall back with no wrong move.
-    fn store_views(&mut self, pid: u32, deadline: u64, share: u64, cpu: u32) {
+    /// bound CPUs store nothing, matching the core reject path. Keyed
+    /// rejects at the far deadline store the same head plus owner with
+    /// the far deadline keeping them last, so dispatch still picks them
+    /// by key then deadline. Both stay best effort with validation
+    /// before use and clear on remove, so stale views fall back with no
+    /// wrong move. The head keeps smallest pid best effort while the
+    /// full scan orders owned then pid.
+    pub(crate) fn store_views(&mut self, pid: u32, deadline: u64, share: u64, cpu: u32) {
         if (cpu as u64) >= super::slot::MAX_CPUS {
             return;
         }
         self.mask_hint.insert(pid, cpu);
-        if share == 0 || deadline == 0 {
+        if deadline == 0 {
+            return;
+        }
+        if share == 0 && deadline != u64::MAX {
             return;
         }
         let key = super::veb::quantize(deadline) as u32;
@@ -641,8 +640,12 @@ mod tests {
         let got = d.handle_enqueue(1, 0, 9999, 2_000_000, 2);
         assert!(matches!(got, AdmitDecision::Park));
         assert_eq!(d.admitted(0), 0);
-        assert_eq!(d.queue_len(), 0);
-        assert_eq!(d.task_len(), 0);
+        assert_eq!(d.queue_len(), 1);
+        assert_eq!(d.task_len(), 1);
+        let t = d.task(1).unwrap();
+        assert_eq!(t.share, 0);
+        assert_eq!(t.deadline, u64::MAX);
+        assert_eq!(super::super::veb::quantize(t.deadline), 65535);
         let mut full = Daemon::new();
         for pid in 1..=(ORDER_DEPTH_MAX as u32) {
             let got = full.handle_enqueue(pid, 4_000_000, 0, 2_000_000, pid as u64 + 100);
@@ -652,9 +655,11 @@ mod tests {
         assert_eq!(full.task_len(), ORDER_DEPTH_MAX);
         let got = full.handle_enqueue(1, 4_000_000, 0, 3_000_000, 900);
         assert!(matches!(got, AdmitDecision::Park));
-        assert_eq!(full.queue_len(), ORDER_DEPTH_MAX - 1);
-        assert_eq!(full.task_len(), ORDER_DEPTH_MAX - 1);
-        assert!(full.task(1).is_none());
+        assert_eq!(full.queue_len(), ORDER_DEPTH_MAX);
+        assert_eq!(full.task_len(), ORDER_DEPTH_MAX);
+        let t = full.task(1).unwrap();
+        assert_eq!(t.share, 0);
+        assert_eq!(t.deadline, u64::MAX);
     }
 
     #[test]
@@ -725,7 +730,7 @@ mod tests {
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
         // Ordered fills sixteen per pass with the fallback solely on
-        // empty tree or corrupt state, so deep backlog still drains
+        // empty plus corrupt plus stale, so deep backlog still drains
         // in order per pass.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
@@ -776,9 +781,57 @@ mod tests {
         }
         let got = d.handle_enqueue(99, 0, 0, 1_000_000, 199);
         assert!(matches!(got, AdmitDecision::Park));
-        let view: Vec<u32> = d.ordered_entries().iter().map(|r| r.0).collect();
-        assert!(!view.contains(&99));
+        let rows = d.ordered_entries();
+        let view: Vec<u32> = rows.iter().map(|r| r.0).collect();
+        assert!(view.contains(&99));
+        assert_eq!(*view.last().unwrap(), 99);
+        let last = rows.last().unwrap();
+        assert_eq!(last.0, 99);
+        assert_eq!(last.2, u64::MAX);
         assert_eq!(d.task(99).unwrap().share, 0);
+        assert_eq!(super::super::veb::quantize(last.2), 65535);
+        for r in &rows {
+            if d.task(r.0).unwrap().share != 0 {
+                continue;
+            }
+            assert_eq!(r.2, u64::MAX);
+        }
+        let first_reject = rows
+            .iter()
+            .position(|r| d.task(r.0).unwrap().share == 0)
+            .unwrap();
+        for r in &rows[..first_reject] {
+            assert_ne!(d.task(r.0).unwrap().share, 0);
+        }
+    }
+
+    #[test]
+    fn top_key_rejects_sort_after_admits() {
+        let mut d = Daemon::new();
+        for pid in 1..=7u32 {
+            let got = d.handle_enqueue(pid, 0, 0, 1_000_000, pid as u64);
+            assert!(matches!(got, AdmitDecision::Admit { .. }));
+        }
+        let got = d.handle_enqueue(8, 0, 0, 1_000_000, 8);
+        assert!(matches!(got, AdmitDecision::Park));
+        let got = d.handle_enqueue(9, 0, 0, 1_000_000, 9);
+        assert!(matches!(got, AdmitDecision::Park));
+        let rows = d.ordered_entries();
+        assert_eq!(rows.len(), 9);
+        let view: Vec<u32> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(&view[..7], &[1, 2, 3, 4, 5, 6, 7]);
+        assert!(view.ends_with(&[8, 9]));
+        for pid in [8, 9] {
+            let t = d.task(pid).unwrap();
+            assert_eq!(t.share, 0);
+            assert_eq!(t.deadline, u64::MAX);
+            assert_eq!(t.admit_cpu, 0);
+        }
+        let head = d.head_for(65535).unwrap();
+        assert_eq!(head.0, 8);
+        assert_eq!(head.1, u64::MAX);
+        assert_eq!(d.hint_for(8), Some(0));
+        assert_eq!(d.hint_for(9), Some(0));
     }
 
     #[test]

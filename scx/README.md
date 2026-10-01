@@ -10,7 +10,7 @@ The goal is to test fast ordered queues in the kernel and see if urgent tasks re
 
 ### How it works?
 
-Arrivals pass a gate first. Tasks get due times from weight and the core admits under a bound. Admitted tasks wait in order with key plus row at once. Each CPU takes the earliest alone. Teardown frees load at once. Rings stay review only. See `src/bpf/veb/`, `src/bpf/admit/`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/runtime.rs`.
+Arrivals pass a gate. Tasks get due times from weight and the core admits under a bound. All gated tasks carry keys with admits plus top key rejects in order. Each CPU takes the earliest. Teardown frees load at once. Rings stay review only. See `src/bpf/veb/`, `src/bpf/admit/`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/runtime.rs`.
 
 ## Typical Use Cases
 
@@ -22,7 +22,7 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. FIFO runs solely on empty tree or corrupt state. A low byte head skips tail walks. Placement reuses the owner when allowed. Backlog drains 16 ordered per pass. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One queue holds tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. Fallback runs solely on empty plus corrupt plus stale. Low byte head skips tail walks. Placement reuses owner when allowed. Backlog drains 16 ordered per pass. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 

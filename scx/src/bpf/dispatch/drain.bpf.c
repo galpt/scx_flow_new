@@ -3,9 +3,9 @@
  * Fail open batch drain for the dispatch pass.
  *
  * Moves the first live affinity matches in queue order up to the
- * exact budget in one scan, so an empty tree or corrupt state still
- * drains up to sixteen while ordered passes never reach here with
- * live work. Ordered checks run first so every parked task stays
+ * exact budget in one scan, so an empty tree plus corrupt plus stale
+ * still drains up to sixteen while ordered passes never reach here
+ * with live work. Ordered checks run first so every parked task stays
  * preferred, while this fallback step moves solely the canary remainder
  * there. Each move stays affinity gated with drops at teardown, so no
  * dead task runs. Callers pass sixteen on empty tree plus the
@@ -22,10 +22,10 @@
 /* Fail open drain with batch progress and queue order in one place. */
 /* Moves up to the exact budget in queue order in one scan so an */
 /* empty tree still drains up to sixteen and a moving pass drains the */
-/* corrupt remainder within sixteen. Ordered checks run first so every */
-/* parked task stays preferred, while this fallback step moves solely */
-/* the canary remainder. Noinline with scalar inputs so the single */
-/* scan verifies once apart from the dispatch entry. */
+/* corrupt plus stale remainder within sixteen. Ordered checks run */
+/* first so every parked task stays preferred, while this fallback */
+/* step moves solely the canary remainder. Noinline with scalar inputs */
+/* so the single scan verifies once apart from the dispatch entry. */
 static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
 {
 	u32 moved = 0;

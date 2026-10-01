@@ -15,8 +15,8 @@
 //! progress with ordered moves counting vEB hits plus fallback moves
 //! counting FIFO parks so every dispatched task lands in one bucket.
 //! Ordered share stays near total since every parked task carries a
-//! key plus deadline with solely the empty or corrupt fallback
-//! reaching fail open.
+//! key plus deadline with solely the empty plus corrupt plus stale
+//! fallback reaching fail open.
 //! Dashboard timestamps use wall time for logs plus file names while
 //! deadlines plus runtime use monotonic time, so the two domains stay
 //! separate by intent.

@@ -6,28 +6,29 @@
  * pass with no sequence gate and no CPU gate. Each move picks the
  * least key then deadline then owned then pid among entries the
  * dispatch CPU may run, so admits sort before top key rejects while
- * rejects still drain ordered last. Affinity plus liveness gate
- * every move through the same mask as the fallback path with live
- * proven once at entry, so the target class never widens. Ordered
- * checks run first so every parked task stays preferred, while the
- * fallback drain moves solely the remainder when the tree reads empty
- * or state proves corrupt up to the batch bound. Deep backlog still
- * drains sixteen ordered per pass with the earliest moves kept in
- * order. One head read plus task state picks the least with fallback
- * to the tail scan, so hits skip the walk while only the picked pid
- * takes a reference.
+ * rejects still drain ordered last. The head keeps smallest pid best
+ * effort while the full scan orders owned then pid. Affinity plus
+ * liveness gate every move through the same mask as the fallback path
+ * with live proven once at entry, so the target class never widens.
+ * Ordered checks run first so every parked task stays preferred, while
+ * the fallback drain moves solely the remainder when the tree reads
+ * empty plus corrupt plus persistent stale up to the batch bound. Deep
+ * backlog still drains sixteen ordered per pass with the earliest
+ * moves kept in order. One head read plus task state picks the least
+ * with fallback to the tail scan, so hits skip the walk while only the
+ * picked pid takes a reference.
  * Drops run at teardown, so the hot path keeps no deletes and the
  * core drops shares through stopping plus disable plus exit. Empty
  * queue leaves at once with no scan so idle stays cheap. Stall drains
- * solely through the same empty or corrupt fallback with mask checks
- * and no order gate so runnable tasks never stall on live work. Fail
- * open stays as the empty or corrupt canary since task state plus
- * tree land synchronously and solely genuine misses reach it. Over
- * moves count progress with ordered moves counting vEB hits plus
- * fallback moves counting FIFO parks so every dispatched task lands
- * in one bucket. Level follows after ordered moves plus fallback with
- * the same CPU only and no call on steady through one exit, so idle
- * cannot be skipped.
+ * solely through the same empty plus corrupt plus stale fallback with
+ * mask checks and no order gate so runnable tasks never stall on live
+ * work. Fail open stays as the empty plus corrupt plus stale canary
+ * since task state plus tree land synchronously and solely genuine
+ * misses reach it. Over moves count progress with ordered moves
+ * counting vEB hits plus fallback moves counting FIFO parks so every
+ * dispatched task lands in one bucket. Level follows after ordered
+ * moves plus fallback with the same CPU only and no call on steady
+ * through one exit, so idle cannot be skipped.
  *
  * The pass splits across dispatch/probes, failopen, drain, ordered,
  * head, perf files with one RCU section per scan. Ordered plus drain

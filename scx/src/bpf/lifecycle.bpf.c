@@ -10,7 +10,8 @@
  * stopping drops plus notifies when queued like disable so shares
  * return at once with no stale wait. Stopping skips the notify when
  * the task never queued. Enable clears the task state with share plus
- * CPU cleared. Disable plus exit charge leftovers, drop the tree key
+ * CPU plus deadline plus key cleared and drops the tree key plus the
+ * order row plus the head slot, so top key rejects never linger. Disable plus exit charge leftovers, drop the tree key
  * plus the ledger share plus the order row, emit one observability
  * notify so every admit pairs one drop. One finish helper pairs key,
  * charge, pid, gauge, ledger, notify through one exit so a missed
@@ -90,6 +91,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
+	u32 pid;
+	u32 key;
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
 		return;
@@ -97,12 +100,19 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
+	pid = (u32)p->pid;
+	key = READ_ONCE(tctx->key);
 	WRITE_ONCE(tctx->run_at, 0);
 	WRITE_ONCE(tctx->seq, 0);
 	WRITE_ONCE(tctx->admit_share, 0);
 	WRITE_ONCE(tctx->admit_cpu, 0);
 	WRITE_ONCE(tctx->deadline, 0);
 	WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
+	/* Fresh tasks drop any prior top key plus row plus head, so a */
+	/* reused pid never leaves a stale ordered entry behind. */
+	veb_remove(pid);
+	flow_order_delete(pid);
+	flow_head_clear(pid, key);
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

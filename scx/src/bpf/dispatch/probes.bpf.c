@@ -5,28 +5,31 @@
  * Tries one cached head for the least key first with a single task
  * read, then scans the overflow tail once to pick the least key then
  * deadline then owned then pid among entries the dispatch CPU may
- * run. Task state holds key plus deadline plus owner from admit time,
- * so the mask plus one state read picks the least with no extra index
- * lookup and no reference, and only the picked pid takes a reference
- * at move time. The head keeps the earliest deadline then smallest
- * pid per low key byte with best effort order, so hits skip the full
- * tail walk while misses fall back with no wrong move. Live stays
- * proven once at entry, so the per element cost stays one mask test
- * with no live branch. The queue handle stays hoisted once at entry,
- * so depth reads pay no dsq lookup per step beyond the call. The move
- * revalidates pid plus key plus deadline plus owner with affinity,
- * liveness checks and no sequence gate, so any CPU takes the
- * earliest work it may run with pid reuse safe. Key plus deadline may
- * match across tasks in the same instant, so the owner view heals to
- * the live owner with pid plus key plus deadline still guarding reuse.
- * A recheck miss ends ordered work and falls to the empty or corrupt
- * fallback below, so one stale pick never burns extra scans with
- * ordered first keeping every parked task preferred. Stale heads clear
- * on ordered plus fallback moves plus the teardown drop, so a running
- * pid never lingers as a head. Drops run at teardown, so the hot path
- * keeps no deletes. Runs noinline with scalar CPU with
- * bounded loops, so the verifier stays small. The caller holds no
- * outer RCU section since each helper takes its own.
+ * run. The head keeps smallest pid best effort within one key plus
+ * deadline while the full scan orders owned then pid, so the two stay
+ * paired with validation before use. Task state holds key plus
+ * deadline plus owner from admit time, so the mask plus one state read
+ * picks the least with no extra index lookup and no reference, and
+ * only the picked pid takes a reference at move time. The head keeps
+ * the earliest deadline then smallest pid per low key byte with best
+ * effort order, so hits skip the full tail walk while misses fall back
+ * with no wrong move. Live stays proven once at entry, so the per
+ * element cost stays one mask test with no live branch. The queue
+ * handle stays hoisted once at entry, so depth reads pay no dsq lookup
+ * per step beyond the call. The move revalidates pid plus key plus
+ * deadline plus owner with affinity, liveness checks and no sequence
+ * gate, so any CPU takes the earliest work it may run with pid reuse
+ * safe. Key plus deadline may match across tasks in the same instant,
+ * so the owner view heals to the live owner with pid plus key plus
+ * deadline still guarding reuse. A recheck miss skips stale and keeps
+ * walking within the batch with the fallback left for empty plus
+ * corrupt plus persistent stale, so ordered first keeps every parked
+ * task preferred. Stale heads clear on ordered plus fallback moves
+ * plus the teardown drop, so a running pid never lingers as a head.
+ * Drops run at teardown, so the hot path keeps no deletes. Runs
+ * noinline with scalar CPU with bounded loops, so the verifier stays
+ * small. The caller holds no outer RCU section since each helper takes
+ * its own.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

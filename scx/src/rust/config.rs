@@ -24,11 +24,12 @@ const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 /// Default dispatch batch for the ops table. Mirrors the header batch
 /// so the ops table holds every pass.
 const DEF_BATCH: u32 = 16;
-/// Default flood stall budget. Mirrors the header flood probes so deep
-/// backlog never burns full scans with zero moves.
+/// Default flood stall budget kept as ABI with no core effect.
+/// Ordered drains sixteen per pass with the fallback on empty plus
+/// corrupt plus stale.
 const DEF_FLOOD_PROBES: u32 = 4;
-/// Default flood queue bound. Mirrors the header queued bound so the
-/// stall budget gates solely past deep backlog.
+/// Default flood queue bound kept as ABI with no core effect.
+/// Marks deep backlog shape solely with ordered still draining sixteen.
 const DEF_FLOOD_QUEUED: u32 = 128;
 
 /// Validated scheduling constants.
@@ -56,8 +57,8 @@ impl Config {
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
     /// at sixteen milliseconds. The batch stays at sixteen with ordered
-    /// filling the batch and the fallback solely on empty tree or
-    /// corrupt state. Flood bound stays at four plus one hundred twenty
+    /// filling the batch and the fallback solely on empty plus corrupt
+    /// plus stale. Flood bound stays at four plus one hundred twenty
     /// eight as ABI deep backlog shape with a twenty probe cap kept as
     /// ABI. Admission
     /// holds use under nine hundred fifty per mille with base capacity
@@ -240,7 +241,7 @@ mod tests {
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
         // Ordered fills the batch per pass with the fallback solely on
-        // empty tree or corrupt state, so deep backlog still drains
+        // empty plus corrupt plus stale, so deep backlog still drains
         // sixteen per pass in order.
         let slack = DEF_BATCH - DEF_FLOOD_PROBES;
         assert_eq!(slack, 12);

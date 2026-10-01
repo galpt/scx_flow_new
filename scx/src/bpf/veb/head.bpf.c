@@ -9,7 +9,10 @@
  * while the placement hint steers the next park toward the previous
  * owner when still allowed. The head skips the owned tiebreak, so the
  * smallest pid wins within the same key plus deadline while the full
- * scan still uses owned then pid. Both stay best effort with
+ * scan still uses owned then pid. The head stays best effort with the
+ * scan as the tiebreak authority, so a head hit may name a different
+ * pid than the scan would when owned differs with key plus deadline
+ * equal. Both stay best effort with
  * validation before use and no extra counter, so stale views fall
  * back with no wrong move. Heads clear on ordered plus fallback moves
  * plus the teardown drop, so a running pid never lingers as a head.

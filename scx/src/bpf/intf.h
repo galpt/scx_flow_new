@@ -22,24 +22,27 @@
  * deadline order up to sixteen per pass with no sequence gate and
  * no CPU gate. Each pass picks the least key then deadline then owned
  * then pid among entries the dispatch CPU may run, so any CPU takes
- * the earliest work it may run.
+ * the earliest work it may run. The head keeps smallest pid best
+ * effort while the full scan orders owned then pid.
  * Affinity plus liveness still gate every move through the same
  * entry check as the fallback path, so the target class never widens.
  * Ordered checks run first
  * so every parked task stays preferred, while the fallback drain moves
- * solely the empty or corrupt remainder in queue order up to the batch
- * bound. The pass keeps no flood probe cap, so deep backlog still
- * drains sixteen ordered per pass with the earliest moves kept in
- * order. Stale entries park and the core drops shares through stopping plus
+ * solely the empty plus corrupt plus stale remainder in queue order up
+ * to the batch bound. The pass keeps no flood probe cap, so deep
+ * backlog still drains sixteen ordered per pass with the earliest
+ * moves kept in order. A recheck miss skips stale and keeps walking
+ * within the batch with the fallback left for persistent stale. Stale
+ * entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
  * leaves at once with no scan. Stall drains solely through the same
  * fallback with liveness plus affinity checks and no order gate so
  * runnable tasks never stall on live work.
  * Ordered moves count one vEB hit plus fallback moves count one
  * FIFO park so every dispatched task lands in one bucket with
- * completions counted apart. Fallback stays as the empty or corrupt
- * canary since task state plus tree land synchronously and solely
- * genuine misses reach it. Flood backlog still drains sixteen ordered
+ * completions counted apart. Fallback stays as the empty plus corrupt
+ * plus stale canary since task state plus tree land synchronously and
+ * solely genuine misses reach it. Flood backlog still drains sixteen ordered
  * per pass with rejects ordered at the top key. A single tail avoids cross tier moves that would bounce
  * cache and NUMA locality. Undrained queues hold zero tasks and cost
  * solely at init. Counters use atomic adds from every CPU and stay

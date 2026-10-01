@@ -7,24 +7,65 @@
 //! single exit through one return. Every admit pairs an add with a
 //! drop exactly once in the mirror. Every remove pairs share drop,
 //! order remove, task clear, view clear in one place. Every reject
-//! pairs order cleanup with view cleanup plus parks accounting.
-//! Callers reach all three through here so a missed cleanup cannot
-//! leak shares or linger keys in the mirror. Core owns authority with
-//! the mirror never gating dispatch.
+//! parks keyed at the top key with order insert plus view store plus
+//! parks accounting, mirroring the core reject path. Zero plus capped
+//! parks stay rowless with counts solely. Callers reach all three
+//! through here so a missed cleanup cannot leak shares or linger keys
+//! in the mirror. Core owns authority with the mirror never gating
+//! dispatch.
 
 use super::Daemon;
 use super::runtime::AdmitDecision;
 
 impl Daemon {
-    /// Park with order plus view cleanup plus parks accounting.
-    /// Clears the order row plus cached views then counts one reject
-    /// plus one park. Zero identifiers park with no row change. Fresh
-    /// identifiers park with no share drop. Stale CPUs plus deep queues
-    /// park after the caller drops the stored share. Callers return the
-    /// parked decision at once with no extra work.
-    pub(crate) fn reject_park(&mut self, pid: u32) -> AdmitDecision {
-        self.order.remove(pid);
-        self.clear_views(pid);
+    /// Park keyed at the top key with order plus view store.
+    /// Stores the far deadline with the top key plus one head plus one
+    /// owner view when the CPU fits, mirroring the core reject path so
+    /// rejects drain ordered last. Zero identifiers park with no row
+    /// change since zero never keys the tree. Capped tables park fresh
+    /// identifiers with no row change so the map stays capped. Depth
+    /// full parks keep the task row plus views with no order insert so
+    /// order stays capped while the task cap still holds. Callers pass
+    /// the enqueue sequence plus CPU plus now for the stored row.
+    /// Callers return the parked decision at once.
+    pub(crate) fn reject_park(
+        &mut self,
+        pid: u32,
+        wire_seq: u64,
+        cpu: u32,
+        now: u64,
+    ) -> AdmitDecision {
+        if pid == 0 {
+            self.rejects += 1;
+            self.parks += 1;
+            return AdmitDecision::Park;
+        }
+        if !self.tasks.contains_key(&pid) && self.tasks.len() >= super::runtime::TASKS_CAP {
+            self.rejects += 1;
+            self.parks += 1;
+            return AdmitDecision::Park;
+        }
+        let store_cpu = if (cpu as u64) < super::slot::MAX_CPUS {
+            cpu
+        } else {
+            0
+        };
+        let far = u64::MAX;
+        self.tasks.insert(
+            pid,
+            super::runtime::TaskState {
+                release: now,
+                deadline: far,
+                share: 0,
+                admit_cpu: store_cpu,
+                #[cfg(test)]
+                wire_seq,
+            },
+        );
+        if self.order.len() < super::runtime::ORDER_DEPTH_MAX {
+            self.order.insert(pid, far, wire_seq);
+        }
+        self.store_views(pid, far, 0, store_cpu);
         self.rejects += 1;
         self.parks += 1;
         AdmitDecision::Park

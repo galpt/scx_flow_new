@@ -70,7 +70,7 @@ pub struct Metrics {
     #[stat(desc = "Ordered vEB dispatches in key plus deadline order")]
     #[serde(default)]
     pub veb_hits: u64,
-    #[stat(desc = "Empty or corrupt fallback dispatches as canary")]
+    #[stat(desc = "Empty plus corrupt plus stale fallback as canary")]
     #[serde(default)]
     pub fifo_parks: u64,
 }
