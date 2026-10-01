@@ -32,127 +32,16 @@
  * fail open with the same CPU only and no call on steady through one
  * exit, so idle cannot be skipped.
  *
+ * The pass splits across dispatch/probes, failopen, drain, perf files
+ * with one RCU section per helper. Each helper stays noinline with
+ * scalar inputs and bounded loops, so the verifier stays small.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include "dispatch/perf.bpf.c"
-static __noinline bool veb_try_move_one(u32 key, s32 cpu)
-{
-	bool moved = false;
-	struct task_struct *p;
-	if (key >= (u32)FLOW_VEB_U)
-		return false;
-	if (cpu < 0)
-		return false;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
-		u32 pid = 0;
-		u32 k2 = 0;
-		if (moved)
-			break;
-		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p, key,
-		    &pid, &k2)) {
-			moved = true;
-			veb_remove_if_key(pid, k2);
-			break;
-		}
-	}
-	bpf_rcu_read_unlock();
-	return moved;
-}
-/* Fail open with liveness plus affinity solely and no order gate. */
-/* Moves the first live affinity match at the overflow head so one */
-/* runnable task always lands on the dispatch CPU even when a stale */
-/* entry holds no order row. Skips drop no tree state with no park */
-/* count so transient misses stay quiet. Moves count one FIFO park */
-/* at the decision point. The moved pid drops its key solely when */
-/* the stored key still matches. Stays rare since admits write rows */
-/* synchronously and solely genuine affinity misses reach here. */
-static __noinline bool veb_fail_open_one(s32 cpu)
-{
-	bool moved = false;
-	u32 reap_pid = 0;
-	u32 reap_key = (u32)FLOW_VEB_EMPTY;
-	struct task_struct *p;
-	if (cpu < 0)
-		return false;
-	if (!flow_cpu_live((u32)cpu)) {
-		flow_gate_reject();
-		return false;
-	}
-	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
-		return false;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
-		struct task_struct *t;
-		u32 pid;
-		u32 *kp;
-		if (moved)
-			break;
-		if (!flow_entry_ok(cpu, p, 0))
-			continue;
-		t = bpf_task_from_pid(p->pid);
-		if (!t)
-			continue;
-		pid = (u32)t->pid;
-		if (pid == 0) {
-			bpf_task_release(t);
-			continue;
-		}
-		if (!flow_entry_ok(cpu, t, 0)) {
-			bpf_task_release(t);
-			continue;
-		}
-		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, t,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
-			moved = true;
-			reap_pid = pid;
-			kp = bpf_map_lookup_elem(&veb_pid, &pid);
-			if (kp && READ_ONCE(*kp) !=
-			    (u32)FLOW_VEB_EMPTY &&
-			    READ_ONCE(*kp) < (u32)FLOW_VEB_U)
-				reap_key = READ_ONCE(*kp);
-		}
-		bpf_task_release(t);
-		if (moved)
-			break;
-	}
-	bpf_rcu_read_unlock();
-	if (moved) {
-		if (reap_pid != 0 && reap_key != (u32)FLOW_VEB_EMPTY)
-			veb_remove_if_key(reap_pid, reap_key);
-		return true;
-	}
-	return false;
-}
-
-/* Fail open drain with batch progress and FIFO order in one place. */
-/* Calls the single head move up to the batch bound so a stalled pass */
-/* still drains up to sixteen queue ordered tasks. Under flood rejects */
-/* hold no key and ordered probes find nothing, so this loop carries */
-/* the backlog instead of one per pass. Each move stays affinity gated */
-/* with keyed drop, so order rows never leak and no dead task runs. */
-static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
-{
-	u32 moved = 0;
-	int i;
-	if (cpu < 0)
-		return 0;
-	if (budget == 0)
-		return 0;
-	if (budget > (u32)FLOW_DISPATCH_MAX_BATCH)
-		budget = (u32)FLOW_DISPATCH_MAX_BATCH;
-	bpf_for(i, 0, FLOW_DISPATCH_MAX_BATCH) {
-		if ((u64)moved >= (u64)budget)
-			break;
-		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
-			break;
-		if (!veb_fail_open_one(cpu))
-			break;
-		moved++;
-	}
-	return moved;
-}
-
+#include "dispatch/probes.bpf.c"
+#include "dispatch/failopen.bpf.c"
+#include "dispatch/drain.bpf.c"
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
