@@ -546,8 +546,12 @@
       var failShare = dispatched ? (fifo / dispatched) * 100 : 0;
       var receiving = vebBenefit(veb, fifo, done);
       var benefit = receiving
-        ? 'receiving the benefits of the vEB queues'
-        : 'struggling without the benefits of the vEB queues';
+        ? share.toFixed(1) +
+          '% of dispatched tasks receiving the benefits of the vEB queues'
+        : 'only ' + share.toFixed(1) +
+          '% of dispatched tasks receiving the benefits of the vEB queues ' +
+          '(below the ' + VEB_HEALTHY_PCT +
+          '% healthy mark), struggling without the full benefits of the vEB queues';
       var math = fmt(veb) + ' out of ' + fmt(dispatched) +
         ' dispatched over ' + fmt(done) +
         ' completions processed by vEB = ' + share.toFixed(1) +
@@ -570,13 +574,16 @@
           'no tasks have been placed yet. ' + math + '.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks, ' + share.toFixed(1) +
-          '% of dispatched tasks ' + benefit + '.';
+          (onCpu === 1 ? ' task, ' : ' tasks, ') +
+          benefit + '.';
         explanation = base + math + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
-          ' tasks and is now idle. ' + share.toFixed(1) +
-          '% of dispatched tasks ' + benefit + '.';
+          (placed === 1
+            ? ' task and is now idle. '
+            : ' tasks and is now idle. ') +
+          benefit.charAt(0).toUpperCase() +
+          benefit.slice(1) + '.';
         explanation = base + math + '.';
       }
       return { tldr: tldr, explanation: explanation };
