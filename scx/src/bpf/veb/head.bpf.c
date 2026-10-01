@@ -3,15 +3,18 @@
  * Head plus placement hints for the flow core.
  *
  * Holds one head entry per low key byte with the earliest deadline
- * then smallest pid for that key, plus one placement entry per task
+ * then smallest pid for that slot, plus one placement entry per task
  * hash with the last admitted CPU. The head lets the least pick try
  * one cached pid with a single task read instead of a full tail walk,
  * while the placement hint steers the next park toward the previous
- * owner when still allowed. Both stay best effort with validation
- * before use and no extra counter, so stale views fall back with no
- * wrong move. Drops run at teardown with clears on ordered moves, so
- * a running pid never lingers as a head. All helpers stay small with
- * no loop so the verifier stays small.
+ * owner when still allowed. The head skips the owned tiebreak, so the
+ * smallest pid wins within the same key plus deadline while the full
+ * scan still uses owned then pid. Both stay best effort with
+ * validation before use and no extra counter, so stale views fall
+ * back with no wrong move. Heads clear on ordered moves plus the
+ * teardown drop, so a stale head costs at most one miss before the
+ * fallback scan. All helpers stay small with no loop so the verifier
+ * stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -41,9 +44,12 @@ struct {
 /* Head store with earliest deadline then smallest pid in one place. */
 /* Gives the cached head for the low byte, keeping the earliest */
 /* deadline then smallest pid for the same key and overwriting on a */
-/* new key with no extra lookup. Stale heads clear on moves below, */
-/* so a running pid never stays cached. Noinline with scalar inputs */
-/* so the admit path verifies once apart from the enqueue entry. */
+/* new key with no extra lookup. Owned stays out here, so the */
+/* smallest pid wins within the same key plus deadline while the */
+/* full scan still uses owned then pid. Stale heads clear on moves */
+/* plus the teardown drop, so a miss falls back with no wrong move. */
+/* Noinline with scalar inputs so the admit path verifies once apart */
+/* from the enqueue entry. */
 static __noinline void flow_head_store(u32 pid, u32 key,
 	u64 deadline, u32 owner)
 {
@@ -90,7 +96,11 @@ static __noinline void flow_head_store(u32 pid, u32 key,
 /* Head pick with one cached pid in one place. */
 /* Reads the least key inside with the cached pid for that key, giving */
 /* true with the live task values when it still holds share plus key */
-/* with mask, so the least pick skips the full tail walk. Stale views */
+/* plus owner with mask, so the least pick skips the full tail walk. */
+/* The cached owner must match the live owner, so a repark on another */
+/* CPU misses once before the fallback scan. Owned stays out of the */
+/* head order, so the smallest pid wins within the same key plus */
+/* deadline while the full scan still uses owned then pid. Stale views */
 /* miss with no state, so the caller falls back to the full scan. */
 /* Noinline with scalar CPU so the pick path verifies once apart from */
 /* the dispatch entry with no stack args. */
@@ -107,6 +117,7 @@ static __noinline bool flow_head_pick(s32 cpu,
 	u32 k;
 	u64 d;
 	u32 owner;
+	u32 want_owner;
 	bool ok = false;
 	if (cpu < 0)
 		return false;
@@ -128,6 +139,7 @@ static __noinline bool flow_head_pick(s32 cpu,
 	pid = READ_ONCE(h->pid);
 	if (pid == 0)
 		return false;
+	want_owner = READ_ONCE(h->owner);
 	t = bpf_task_from_pid(pid);
 	if (!t)
 		return false;
@@ -148,6 +160,8 @@ static __noinline bool flow_head_pick(s32 cpu,
 	if (d == 0)
 		goto out;
 	owner = READ_ONCE(tctx->admit_cpu);
+	if (owner != want_owner)
+		goto out;
 	/* Callers pass non null outputs, so no null branch here. */
 	*out_pid = tpid;
 	*out_key = k;
@@ -159,9 +173,10 @@ out:
 	return ok;
 }
 /* Head clear with key plus pid match in one place. */
-/* Clears the slot solely when it still holds the moved pid with the */
-/* same key, so a running pid never lingers while other keys stay. */
-/* Noinline with scalar inputs so both move paths verify once. */
+/* Clears the slot solely when it still holds the given pid with the */
+/* same key, so ordered moves plus the teardown drop free the slot */
+/* while other keys stay. Noinline with scalar inputs so moves plus */
+/* drops verify once apart from their callers. */
 static __noinline void flow_head_clear(u32 pid, u32 key)
 {
 	u32 slot;

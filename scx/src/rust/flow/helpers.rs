@@ -55,8 +55,8 @@ impl Daemon {
     }
 
     /// Clear cached head plus owner views for one task.
-    /// Drops the owner view plus any head pointing at the pid, so a
-    /// removed task never lingers as a hint. Zero identifiers pass
+    /// Drops the owner view plus any low byte slot pointing at the pid,
+    /// so a removed task never lingers as a hint. Zero identifiers pass
     /// through with no change. Best effort with validation before use,
     /// so a missed clear still falls back with no wrong move.
     fn clear_views(&mut self, pid: u32) {
@@ -67,7 +67,7 @@ impl Daemon {
         let stale: Vec<u32> = self
             .head_hint
             .iter()
-            .filter_map(|(k, v)| (v.0 == pid).then_some(*k))
+            .filter_map(|(k, v)| (v.1 == pid).then_some(*k))
             .collect();
         for k in stale {
             self.head_hint.remove(&k);

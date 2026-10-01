@@ -29,8 +29,9 @@
 /* reject. Placement shares the deadline source with the tree through */
 /* the same quantize with no drain check so warmth stays cheap. Idle */
 /* first stays BPF only with no mirror, since the idle pick needs the */
-/* live mask with no replay. The hint stays revalidated here, so a */
-/* stale view never widens the target class. */
+/* live mask with no replay. The hint stays revalidated inside the */
+/* hint lookup, so no outer recheck is needed and a stale view never */
+/* widens the target class. */
 static __always_inline s32 flow_fallback_cpu(
 	const struct task_struct *p, s32 prev_cpu)
 {
@@ -41,7 +42,7 @@ static __always_inline s32 flow_fallback_cpu(
 	if (flow_cpu_ok(p, idle))
 		return idle;
 	hint = flow_place_hint((u32)p->pid, p);
-	if (hint >= 0 && flow_cpu_ok(p, hint))
+	if (hint >= 0)
 		return hint;
 	if (flow_cpu_ok(p, prev_cpu))
 		return prev_cpu;

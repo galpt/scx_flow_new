@@ -21,9 +21,9 @@
  * the reuse window with one cheap read. A recheck miss ends ordered
  * work and falls to FIFO, so one stale pick never burns extra scans
  * with ordered first keeping admitted preferred. Stale heads clear on
- * moves with stale keys clearing at teardown, so a lingering view
- * costs at most one pick before FIFO. Drops run at teardown, so the
- * hot path keeps no deletes. Runs noinline with scalar CPU with
+ * moves plus the teardown drop, so a lingering view costs at most one
+ * pick before FIFO. Drops run at teardown, so the hot path keeps
+ * no deletes. Runs noinline with scalar CPU with
  * bounded loops, so the verifier stays small. The caller holds no
  * outer RCU section since each helper takes its own.
  *

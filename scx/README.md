@@ -22,7 +22,7 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order with live checks, then FIFO for the remainder. A per key head skips tail walks with fallback. Placement reuses the last owner when allowed. Past 128 queued, backlog drains 16 per pass. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One shared queue holds waiting tasks. Each pass moves up to 16 in least key then deadline then owned then pid order with live checks, then FIFO for the remainder. A low byte head skips tail walks with fallback. Placement reuses the last owner when allowed. Past 128 queued, backlog drains 16 per pass. One kick per park with earlier-only preempt. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 

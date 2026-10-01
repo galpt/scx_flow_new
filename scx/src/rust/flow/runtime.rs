@@ -6,15 +6,15 @@
 //! Holds the daemon mirror, the admission oracle, the wire
 //! protocol. The daemon keeps one quantized queue, one admitted
 //! row per CPU, one hint table as a read only mirror for tests plus
-//! observability, plus one head view per key and one owner view per
-//! task as oracle for the core hints. Order follows deadlines solely
+//! observability, plus one head view per low key byte and one owner
+//! view per task as oracle for the core hints. Order follows deadlines solely
 //! through the quantized tree. The BPF core parks plus admits plus
 //! orders synchronously with no roundtrip. Dispatch moves admitted
 //! tasks in least key then deadline order with affinity plus liveness
 //! checks and parks stale entries. The head view keeps the earliest
-//! deadline then smallest pid per key so picks skip tail walks in the
-//! core, while the owner view steers repeat parks toward the previous
-//! CPU with mask still checked in the core. Mirror cost stays on the
+//! deadline then smallest pid per low key byte so picks skip tail walks
+//! in the core, while the owner view steers repeat parks toward the
+//! previous CPU with mask still checked in the core. Mirror cost stays on the
 //! userspace thread within five hundred twelve entries and stays off
 //! the BPF hot path. Times stay in the monotonic domain shared with
 //! the core. Parks include backpressure drops, ring drops, userspace
@@ -182,22 +182,23 @@ pub struct TaskState {
 /// Daemon holding the quantized mirror plus admission oracle.
 /// Admitted rows hold one per mille sum per CPU. Tasks hold one
 /// stored share each. Adds pair with drops exactly once per admit
-/// in the mirror. Head holds one earliest pid per key for the core
-/// pick hint. Owner holds the last admit CPU per task for the core
-/// placement hint with mask still checked in the core. Single sequence
-/// tracks notifies plus queued tasks with no split. Disable plus exit
-/// notifies drop shares through complete in the mirror. Task rows stay
-/// capped at the task bound with hints cleared on remove so both stay
-/// bounded. Stale rows collect past deadline plus grace for
-/// observability solely. Queue drops fold into parks plus the drop
-/// gauge with zero wire change. Core owns dispatch with the mirror
-/// never gating it.
+/// in the mirror. Head holds one earliest pid per low key byte for
+/// the core pick hint with overwrite on a new key, mirroring the
+/// core slot view. Owner holds the last admit CPU per task for the
+/// core placement hint with mask still checked in the core. Single
+/// sequence tracks notifies plus queued tasks with no split. Disable
+/// plus exit notifies drop shares through complete in the mirror.
+/// Task rows stay capped at the task bound with hints cleared on
+/// remove so both stay bounded. Stale rows collect past deadline plus
+/// grace for observability solely. Queue drops fold into parks plus
+/// the drop gauge with zero wire change. Core owns dispatch with the
+/// mirror never gating it.
 pub struct Daemon {
     pub(crate) order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
     pub(crate) tasks: HashMap<u32, TaskState>,
-    pub(crate) head_hint: HashMap<u32, (u32, u64, u32)>,
+    pub(crate) head_hint: HashMap<u32, (u32, u32, u64, u32)>,
     pub(crate) mask_hint: HashMap<u32, u32>,
     wire_last: u64,
     /// Tasks admitted under the use bound.
@@ -254,12 +255,16 @@ impl Daemon {
     }
 
     /// Cached head pid for one key with deadline plus owner.
-    /// Mirror of the core head view for tests solely. Empty when the
-    /// key never admitted or the stored pid left. Stale pids miss
-    /// through the task check with no core effect.
+    /// Mirror of the core low byte slot view for tests solely. Empty
+    /// when the key never admitted, when a colliding key evicted the
+    /// slot, or when the stored pid left. Stale pids miss through the
+    /// task check with no core effect.
     #[cfg(test)]
     pub fn head_for(&self, key: u32) -> Option<(u32, u64, u32)> {
-        let (pid, deadline, cpu) = self.head_hint.get(&key).copied()?;
+        let (stored_key, pid, deadline, cpu) = self.head_hint.get(&(key & 255)).copied()?;
+        if stored_key != key {
+            return None;
+        }
         let t = self.tasks.get(&pid)?;
         if t.share == 0 {
             return None;
@@ -285,12 +290,13 @@ impl Daemon {
     }
 
     /// Pick one CPU with the cached owner view in one place.
-    /// The cached owner wins when still in the allowed list, else the
-    /// previous CPU wins when still allowed, else the first allowed
-    /// wins. Idle stays BPF only with no mirror, since the idle pick
-    /// needs the live mask with no replay. The core revalidates mask
-    /// plus live before use, so a stale view never widens the target
-    /// class here. Mirror only with the core as authority.
+    /// The cached owner wins when still in the allowed list and inside
+    /// the CPU bound, else the previous CPU wins when still allowed,
+    /// else the first allowed wins. Idle stays BPF only with no mirror,
+    /// since the idle pick needs the live mask with no replay. The core
+    /// revalidates mask plus live before use, so a stale view never
+    /// widens the target class here. Mirror only with the core as
+    /// authority.
     #[cfg(test)]
     pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
         if allowed.is_empty() {
@@ -298,6 +304,7 @@ impl Daemon {
         }
         if let Some(hint) = self.mask_hint.get(&pid)
             && allowed.contains(hint)
+            && (*hint as u64) < super::slot::MAX_CPUS
             && self.tasks.contains_key(&pid)
         {
             return *hint;
@@ -483,24 +490,32 @@ impl Daemon {
     }
 
     /// Store one head plus one owner view for the oracle hints.
-    /// Head keeps the earliest deadline then smallest pid per key with
-    /// overwrite on a new key, mirroring the core low byte view. Owner
-    /// holds the last admit CPU per task with overwrite. Both stay best
-    /// effort with validation before use and clear on remove, so stale
-    /// views fall back with no wrong move.
+    /// Head keeps the earliest deadline then smallest pid per low key
+    /// byte with overwrite on a new key, mirroring the core slot view.
+    /// Owner holds the last admit CPU per task with overwrite. Out of
+    /// bound CPUs store nothing, matching the core reject path. Both
+    /// stay best effort with validation before use and clear on remove,
+    /// so stale views fall back with no wrong move.
     fn store_views(&mut self, pid: u32, deadline: u64, share: u64, cpu: u32) {
+        if (cpu as u64) >= super::slot::MAX_CPUS {
+            return;
+        }
         self.mask_hint.insert(pid, cpu);
         if share == 0 || deadline == 0 {
             return;
         }
         let key = super::veb::quantize(deadline) as u32;
-        match self.head_hint.get(&key).copied() {
+        let slot = key & 255;
+        match self.head_hint.get(&slot).copied() {
             None => {
-                self.head_hint.insert(key, (pid, deadline, cpu));
+                self.head_hint.insert(slot, (key, pid, deadline, cpu));
             }
-            Some((old_pid, old_deadline, _)) => {
-                if deadline < old_deadline || (deadline == old_deadline && pid < old_pid) {
-                    self.head_hint.insert(key, (pid, deadline, cpu));
+            Some((old_key, old_pid, old_deadline, _)) => {
+                if old_key != key
+                    || deadline < old_deadline
+                    || (deadline == old_deadline && pid < old_pid)
+                {
+                    self.head_hint.insert(slot, (key, pid, deadline, cpu));
                 }
             }
         }
@@ -885,6 +900,28 @@ mod tests {
         }
         d.handle_complete(1, 2_000_000, true);
         assert!(d.head_for(key).is_none() || d.head_for(key).unwrap().0 != 1);
+    }
+
+    #[test]
+    fn head_slot_overwrites_on_colliding_keys() {
+        let mut d = Daemon::new();
+        let now = 1_000_000u64;
+        let got = d.handle_enqueue(1, 0, 0, now, 71);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        let key1 = super::super::veb::quantize(d.task(1).unwrap().deadline) as u32;
+        assert_eq!(d.head_for(key1).unwrap().0, 1);
+        // Two hundred fifty six keys later shares the low byte slot,
+        // so the later admit evicts the earlier head like the core.
+        let shift = 256u64 << super::super::veb::QUANT_SHIFT;
+        let got = d.handle_enqueue(2, 0, 1, now + shift, 72);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        let key2 = super::super::veb::quantize(d.task(2).unwrap().deadline) as u32;
+        assert_eq!(key2, key1 + 256);
+        assert_eq!(key2 & 255, key1 & 255);
+        assert!(d.head_for(key1).is_none());
+        assert_eq!(d.head_for(key2).unwrap().0, 2);
+        d.handle_complete(2, now + shift + 1_000_000, true);
+        assert!(d.head_for(key2).is_none());
     }
 
     #[test]
