@@ -4,6 +4,8 @@
  *
  * Scans the overflow tail for the first task whose stored key still
  * matches the expected key with sequence, liveness, affinity checks.
+ * Foreign entries skip cheaply through the iterator pid plus mask
+ * with no reference, so only key plus mask hits take a reference.
  * Duplicates leave in park order within one key. Per CPU mismatch,
  * missing order, stale sequence skip with no tree drop. Reports the
  * pid plus key on move so callers drop the key with the stored match.

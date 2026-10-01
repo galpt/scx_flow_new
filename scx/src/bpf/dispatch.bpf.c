@@ -9,33 +9,35 @@
  * The pass starts from the least key and follows successors with
  * at most twenty key probes so one pass never scans the tail more
  * than twenty times. Twenty covers sixteen moves plus four skip
- * slack so full batches never starve on sparse keys. Under flood
- * with more than one hundred twenty eight queued the pass stops
- * ordered probes after four checks past moves while moving work
- * keeps probing, so productive batches never truncate on the
- * attempt count. A deep backlog never burns twenty full tail scans
- * with zero moves. A drained tail exits
- * the pass at once so empty probes never run. Empty keys skip through
- * counts with no tail scan and drained keys advance at once so
- * fruitless rescans never run. Each key scans the overflow tail and
- * moves the first admitted task with sequence, liveness, affinity
- * checks. Duplicates leave in park order within one key. Per CPU
- * mismatch, missing order, stale sequence skip with no tree drop and
- * the core drops shares through stopping plus disable plus exit. Only
- * the moved pid drops its key when the stored key still matches.
- * Empty queue leaves at once with no scan so idle stays cheap. Empty
- * tree or stall drains up to sixteen FIFO tasks with liveness plus
- * affinity checks plus keyed drop and no order or sequence gate so
- * runnable tasks never stall on live work. Under flood most parks
- * hold no key since per CPU rows saturate, so this FIFO drain carries
- * rejects in queue order up to the batch bound and one stalled pass
- * still makes batch progress. Fail open stays rare in normal load
- * since rows land synchronously and solely genuine affinity misses
- * reach it. Over moves count progress with ordered moves counting vEB
- * hits plus fail open moves counting FIFO parks so every dispatched
- * task lands in one bucket. Level follows after ordered moves plus
- * fail open with the same CPU only and no call on steady through one
- * exit, so idle cannot be skipped.
+ * slack so full batches never starve on sparse keys in normal load.
+ * Under flood with more than one hundred twenty eight queued the
+ * pass stops ordered probes after four plus moves quartered, so a
+ * deep backlog never burns twenty full tail scans and productive
+ * batches truncate early with the earliest moves kept in order. Each
+ * key skips cheaply through counts with no tail scan plus the
+ * iterator pid plus mask hint with no reference, so foreign keys
+ * never pay a reference per entry and drained keys advance at once.
+ * Each kept key scans the overflow tail and moves the first admitted
+ * task with sequence, liveness, affinity checks. Duplicates leave in
+ * park order within one key. Per CPU mismatch, missing order, stale
+ * sequence skip with no tree drop and the core drops shares through
+ * stopping plus disable plus exit. Only the moved pid drops its key
+ * when the stored key still matches. Empty queue leaves at once with
+ * no scan so idle stays cheap. Empty tree or stall drains up to
+ * sixteen FIFO tasks with liveness plus affinity checks plus keyed
+ * drop and no order or sequence gate so runnable tasks never stall
+ * on live work. Under flood with moves the pass still drains up to
+ * four FIFO tasks after ordered work, so rejects never wait for a
+ * fully stalled pass and one pass still makes batch progress within
+ * sixteen. Under flood most parks hold no key since per CPU rows
+ * saturate, so this FIFO drain carries rejects in queue order up to
+ * the bound. Fail open stays rare in normal load since rows land
+ * synchronously and solely genuine affinity misses reach it. Over
+ * moves count progress with ordered moves counting vEB hits plus fail
+ * open moves counting FIFO parks so every dispatched task lands in
+ * one bucket. Level follows after ordered moves plus fail open with
+ * the same CPU only and no call on steady through one exit, so idle
+ * cannot be skipped.
  *
  * The pass splits across dispatch/probes, failopen, drain, perf files
  * with one RCU section per helper. Each helper stays noinline with
@@ -91,7 +93,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (qlen == 0)
 			break;
 		if ((u64)attempt >= (u64)FLOW_DISPATCH_FLOOD_PROBES +
-		    (u64)moved &&
+		    ((u64)moved >> 2) &&
 		    qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED)
 			break;
 		cntp = veb_cnt_ptr(cur);
@@ -114,6 +116,21 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		    (u64)moved);
 		__sync_fetch_and_add(&flow_stats.veb_hits,
 		    (u64)moved);
+		qlen = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
+		if (qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED &&
+		    moved < (u32)FLOW_DISPATCH_MAX_BATCH) {
+			u32 left = (u32)FLOW_DISPATCH_MAX_BATCH - moved;
+			u32 budget = (u32)FLOW_DISPATCH_FLOOD_PROBES;
+			if (budget > left)
+				budget = left;
+			extra = veb_fail_open_drain(cpu, budget);
+			if (extra) {
+				__sync_fetch_and_add(&flow_stats.over_moves,
+				    (u64)extra);
+				__sync_fetch_and_add(&flow_stats.fifo_parks,
+				    (u64)extra);
+			}
+		}
 		/* Single exit covers the level, so idle cannot be skipped. */
 		goto out;
 	}

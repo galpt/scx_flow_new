@@ -49,9 +49,9 @@ pub const DISPATCH_BATCH: usize = 16;
 /// never starve on sparse keys.
 pub const DISPATCH_PROBES: usize = 20;
 /// Max fruitless ordered probes under flood before FIFO drain.
-/// Mirrors the BPF header. Four checks past moves cap the flood cost
-/// while moving work keeps probing, so productive batches never
-/// truncate on the attempt count.
+/// Mirrors the BPF header. Four plus moves quartered cap the flood cost
+/// with the earliest moves kept in order, and up to four FIFO fill to
+/// sixteen on moving flood so rejects never wait for a stalled pass.
 pub const DISPATCH_FLOOD_PROBES: usize = 4;
 /// Queue depth past which the flood cap applies. Mirrors the header.
 /// Past one hundred twenty eight queued the stall budget gates order.
@@ -85,13 +85,15 @@ const _: () = assert!(DISPATCH_BATCH == 16);
 /// Twenty probes cover sixteen moves plus four skip slack.
 const _: () = assert!(DISPATCH_PROBES == 20);
 /// Guard that the flood stall budget mirrors the BPF header.
-/// Four checks past moves cap flood scans while moves extend the budget.
+/// Four plus moves quartered cap flood scans with early moves kept in
+/// order and up to four FIFO fill to sixteen on moving flood.
 const _: () = assert!(DISPATCH_FLOOD_PROBES == 4);
 /// Guard that the flood queue bound mirrors the BPF header.
 /// Past one hundred twenty eight queued the stall budget applies.
 const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 /// Guard that the flood budget stays inside the probe budget.
-/// Moves extend the budget so productive batches still fill the batch.
+/// Quartered moves keep the flood cap inside twenty with FIFO filling
+/// to sixteen on moving flood.
 const _: () = assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
 /// Guard that one batch never exceeds the probe budget.
 const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
@@ -612,10 +614,12 @@ mod tests {
         assert_eq!(DISPATCH_BATCH, 16);
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
-        // Twelve moves past the four stall budget fill sixteen within
-        // twenty probes, so productive batches never truncate.
+        // Ordered probes under flood cap at four plus moves quartered,
+        // so early moves stay ordered and up to four FIFO fill to
+        // sixteen within the batch.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
+        assert_eq!(DISPATCH_FLOOD_PROBES + (DISPATCH_BATCH >> 2), 8);
         assert!(DISPATCH_FLOOD_QUEUED > DISPATCH_BATCH);
     }
 

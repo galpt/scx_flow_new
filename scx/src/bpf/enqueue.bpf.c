@@ -4,9 +4,12 @@
  *
  * Parks at the overflow tail and notifies for observability solely.
  * Exiting tasks run at once on the task CPU. The gate runs first
- * for other arrivals. One kick follows each admitted park to the chosen CPU
+ * for other arrivals. One kick follows each park to the chosen CPU
  * when its running view is empty else to one idle peer in the task
- * mask so backlog pulls work with no idle wait. The core orders
+ * mask so backlog pulls work with no idle wait, else one directed
+ * preempt to the owner solely when the wakeup runs earlier than the
+ * owner task so urgent arrivals never wait a full slice with no
+ * storm. The core orders
  * through the tree and admits under the bound in the core. Dispatch
  * moves admitted tasks in tree order. The tail parks with plain
  * insert and the tree holds the key so order never uses kernel

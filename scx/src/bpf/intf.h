@@ -10,15 +10,21 @@
  * synchronously with share math plus bound check then inserts
  * one key derived from the deadline plus one order row with sequence,
  * deadline, CPU and parks with plain insert. Rejects park with no
- * key plus no row plus no run. Dispatch moves admitted tasks in tree
+ * key plus no row plus no run. One kick follows each park to the
+ * chosen CPU when idle else one idle peer else one directed preempt
+ * to the owner solely when the wakeup runs earlier than the owner
+ * task, so urgent arrivals preempt longer runs with at most one kick
+ * per park and no storm. Dispatch moves admitted tasks in tree
  * order up to sixteen per pass with sequence, liveness, affinity
  * checks and best effort order under flood. Ordered checks run first
  * so admitted tasks stay preferred, while the FIFO drain may move
  * admitted tasks out of order under flood. Under flood with more than
  * one hundred twenty eight queued the pass stops ordered probes after
- * four checks past moves while moving work keeps probing, so one pass
- * never burns twenty full tail scans with zero moves and productive
- * batches never truncate on the attempt count. Stale entries park and the core drops shares through stopping plus
+ * four plus moves quartered with cheap pid plus mask skips, so one
+ * pass never burns twenty full tail scans and productive work keeps
+ * the earliest moves in order. With moves under flood the pass still
+ * drains up to four FIFO tasks within sixteen, so rejects never wait
+ * for a fully stalled pass. Stale entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
  * leaves at once with no scan. Empty tree or stall drains up to
  * sixteen FIFO tasks with liveness plus affinity checks plus keyed

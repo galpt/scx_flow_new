@@ -56,8 +56,9 @@ impl Config {
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
     /// at sixteen milliseconds. The batch stays at sixteen. Flood stops
-    /// ordered probes after four checks past moves past one hundred
-    /// twenty eight queued with a twenty probe cap. Admission
+    /// ordered probes after four plus moves quartered past one hundred
+    /// twenty eight queued with a twenty probe cap and up to four FIFO
+    /// within sixteen on moving flood. Admission
     /// holds use under nine hundred fifty per mille with base capacity
     /// one thousand twenty four. Queues hold five hundred twelve local,
     /// eight node, machine, overflow. Hints hold four
@@ -236,9 +237,11 @@ mod tests {
         assert_eq!(DEF_BATCH, 16);
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
-        // Twelve moves past the four stall budget fill sixteen within
-        // twenty probes, so productive batches never truncate.
+        // Ordered probes under flood cap at four plus moves quartered,
+        // so early moves stay ordered and up to four FIFO fill to
+        // sixteen within the batch.
         let slack = DEF_BATCH - DEF_FLOOD_PROBES;
         assert_eq!(slack, 12);
+        assert_eq!(DEF_FLOOD_PROBES + (DEF_BATCH >> 2), 8);
     }
 }

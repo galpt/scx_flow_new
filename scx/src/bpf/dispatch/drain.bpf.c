@@ -3,14 +3,16 @@
  * Fail open batch drain for the dispatch pass.
  *
  * Calls the single head move up to the exact budget so a stalled
- * pass still drains queue ordered tasks up to sixteen. Under flood
- * rejects hold no key and ordered probes find nothing, so this loop
- * carries the backlog instead of one per pass. Ordered checks run
- * first so admitted tasks stay preferred, while this FIFO step may
- * move admitted tasks out of order under flood with best effort
+ * pass still drains queue ordered tasks up to sixteen and a moving
+ * pass under flood still drains up to four within sixteen. Under
+ * flood rejects hold no key and ordered probes find little, so this
+ * loop carries the backlog instead of one per pass. Ordered checks
+ * run first so admitted tasks stay preferred, while this FIFO step
+ * may move admitted tasks out of order under flood with best effort
  * order there. Each move stays affinity gated with keyed drop, so
- * order rows never leak and no dead task runs. Callers pass sixteen,
- * so the budget stays exact with no clamp. Runs inline so the batch
+ * order rows never leak and no dead task runs. Callers pass sixteen
+ * on stall plus up to four within sixteen on moving flood, so the
+ * budget stays exact with no clamp. Runs inline so the batch
  * wrapper costs no call frame with scalar CPU plus budget and a
  * bounded loop so the verifier stays small.
  *
@@ -18,7 +20,8 @@
  */
 /* Fail open drain with batch progress and FIFO order in one place. */
 /* Calls the single head move up to the exact budget so a stalled */
-/* pass still drains queue ordered tasks up to sixteen. Ordered */
+/* pass still drains queue ordered tasks up to sixteen and a moving */
+/* flood pass still drains up to four within sixteen. Ordered */
 /* checks run first so admitted tasks stay preferred, while this */
 /* FIFO step may move admitted tasks out of order under flood. */
 /* Inline so the batch wrapper costs no verifier call frame: the */
