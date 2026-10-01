@@ -12,10 +12,13 @@
  * deadline, CPU and parks with plain insert. Rejects park with no
  * key plus no row plus no run. Dispatch moves admitted tasks in tree
  * order up to sixteen per pass with sequence, liveness, affinity
- * checks. Under flood with more than one hundred twenty eight queued
- * the pass stops ordered probes after four and drains FIFO, so one
- * pass never burns twenty full tail scans with zero moves. Stale
- * entries park and the core drops shares through stopping plus
+ * checks and best effort order under flood. Ordered checks run first
+ * so admitted tasks stay preferred, while the FIFO drain may move
+ * admitted tasks out of order under flood. Under flood with more than
+ * one hundred twenty eight queued the pass stops ordered probes after
+ * four checks past moves while moving work keeps probing, so one pass
+ * never burns twenty full tail scans with zero moves and productive
+ * batches never truncate on the attempt count. Stale entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
  * leaves at once with no scan. Empty tree or stall drains up to
  * sixteen FIFO tasks with liveness plus affinity checks plus keyed

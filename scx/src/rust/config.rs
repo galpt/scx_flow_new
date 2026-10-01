@@ -7,6 +7,9 @@
 
 use crate::flow::ADMIT_PERMILLE;
 use crate::flow::CAP_BASE;
+use crate::flow::DISPATCH_FLOOD_PROBES;
+use crate::flow::DISPATCH_FLOOD_QUEUED;
+use crate::flow::DISPATCH_PROBES;
 use crate::flow::HINT_MAX;
 use crate::flow::PERIOD_NS;
 use crate::flow::QUANTUM_NS;
@@ -21,6 +24,12 @@ const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 /// Default dispatch batch for the ops table. Mirrors the header batch
 /// so the ops table holds every pass.
 const DEF_BATCH: u32 = 16;
+/// Default flood stall budget. Mirrors the header flood probes so deep
+/// backlog never burns full scans with zero moves.
+const DEF_FLOOD_PROBES: u32 = 4;
+/// Default flood queue bound. Mirrors the header queued bound so the
+/// stall budget gates solely past deep backlog.
+const DEF_FLOOD_QUEUED: u32 = 128;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +55,9 @@ impl Config {
     /// Faulty values mark a programming fault.
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
-    /// at sixteen milliseconds. The batch stays at sixteen. Admission
+    /// at sixteen milliseconds. The batch stays at sixteen. Flood stops
+    /// ordered probes after four checks past moves past one hundred
+    /// twenty eight queued with a twenty probe cap. Admission
     /// holds use under nine hundred fifty per mille with base capacity
     /// one thousand twenty four. Queues hold five hundred twelve local,
     /// eight node, machine, overflow. Hints hold four
@@ -78,6 +89,21 @@ impl Config {
         }
         if HINT_MAX != 4096 {
             bail!("hint bound bad");
+        }
+        if DISPATCH_FLOOD_PROBES != 4 {
+            bail!("flood probes bad");
+        }
+        if DEF_FLOOD_PROBES != 4 {
+            bail!("flood probes bad");
+        }
+        if DISPATCH_FLOOD_QUEUED != 128 {
+            bail!("flood queued bad");
+        }
+        if DEF_FLOOD_QUEUED != 128 {
+            bail!("flood queued bad");
+        }
+        if DISPATCH_PROBES != 20 {
+            bail!("probe bound bad");
         }
         Ok(())
     }
@@ -174,6 +200,20 @@ mod tests {
         );
         assert_eq!(DEF_BATCH, 16);
         assert_eq!(
+            DEF_FLOOD_PROBES,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES
+        );
+        assert_eq!(DEF_FLOOD_PROBES, 4);
+        assert_eq!(
+            DEF_FLOOD_QUEUED,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED
+        );
+        assert_eq!(DEF_FLOOD_QUEUED, 128);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_PROBES as usize,
+            crate::flow::DISPATCH_PROBES
+        );
+        assert_eq!(
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
@@ -186,5 +226,19 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
             crate::flow::cgrp::HINT_MAX
         );
+    }
+
+    #[test]
+    fn flood_and_drain_bounds_hold() {
+        assert_eq!(DISPATCH_FLOOD_PROBES, 4);
+        assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
+        assert_eq!(DISPATCH_PROBES, 20);
+        assert_eq!(DEF_BATCH, 16);
+        assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
+        assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
+        // Twelve moves past the four stall budget fill sixteen within
+        // twenty probes, so productive batches never truncate.
+        let slack = DEF_BATCH - DEF_FLOOD_PROBES;
+        assert_eq!(slack, 12);
     }
 }

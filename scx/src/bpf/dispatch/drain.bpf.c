@@ -2,22 +2,24 @@
 /*
  * Fail open batch drain for the dispatch pass.
  *
- * Calls the single head move up to the batch bound so a stalled pass
- * still drains up to sixteen queue ordered tasks. Under flood rejects
- * hold no key and ordered probes find nothing, so this loop carries
- * the backlog instead of one per pass. Each move stays affinity gated
- * with keyed drop, so order rows never leak and no dead task runs.
- * Runs noinline with scalar CPU plus budget and a bounded loop so
- * the verifier stays small.
+ * Calls the single head move up to the exact budget so a stalled
+ * pass still drains queue ordered tasks up to sixteen. Under flood
+ * rejects hold no key and ordered probes find nothing, so this loop
+ * carries the backlog instead of one per pass. Ordered checks run
+ * first so admitted tasks stay preferred, while this FIFO step may
+ * move admitted tasks out of order under flood with best effort
+ * order there. Each move stays affinity gated with keyed drop, so
+ * order rows never leak and no dead task runs. Callers pass sixteen,
+ * so the budget stays exact with no clamp. Runs noinline with scalar
+ * CPU plus budget and a bounded loop so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Fail open drain with batch progress and FIFO order in one place. */
-/* Calls the single head move up to the batch bound so a stalled pass */
-/* still drains up to sixteen queue ordered tasks. Under flood rejects */
-/* hold no key and ordered probes find nothing, so this loop carries */
-/* the backlog instead of one per pass. Each move stays affinity gated */
-/* with keyed drop, so order rows never leak and no dead task runs. */
+/* Calls the single head move up to the exact budget so a stalled */
+/* pass still drains queue ordered tasks up to sixteen. Ordered */
+/* checks run first so admitted tasks stay preferred, while this */
+/* FIFO step may move admitted tasks out of order under flood. */
 static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
 {
 	u32 moved = 0;
@@ -26,8 +28,7 @@ static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
 		return 0;
 	if (budget == 0)
 		return 0;
-	if (budget > (u32)FLOW_DISPATCH_MAX_BATCH)
-		budget = (u32)FLOW_DISPATCH_MAX_BATCH;
+	/* Callers pass sixteen, so the budget stays exact. */
 	bpf_for(i, 0, FLOW_DISPATCH_MAX_BATCH) {
 		if ((u64)moved >= (u64)budget)
 			break;

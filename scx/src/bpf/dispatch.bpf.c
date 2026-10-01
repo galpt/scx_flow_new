@@ -2,14 +2,19 @@
 /*
  * Dispatch op for the flow core.
  *
- * Moves admitted tasks in tree order up to sixteen per pass.
+ * Moves admitted tasks in tree order up to sixteen per pass
+ * with best effort under flood. Ordered checks run first so
+ * admitted tasks stay preferred, while the FIFO drain may
+ * move admitted tasks out of order under flood.
  * The pass starts from the least key and follows successors with
  * at most twenty key probes so one pass never scans the tail more
  * than twenty times. Twenty covers sixteen moves plus four skip
  * slack so full batches never starve on sparse keys. Under flood
  * with more than one hundred twenty eight queued the pass stops
- * ordered probes after four and drains FIFO, so a deep backlog never
- * burns twenty full tail scans with zero moves. A drained tail exits
+ * ordered probes after four checks past moves while moving work
+ * keeps probing, so productive batches never truncate on the
+ * attempt count. A deep backlog never burns twenty full tail scans
+ * with zero moves. A drained tail exits
  * the pass at once so empty probes never run. Empty keys skip through
  * counts with no tail scan and drained keys advance at once so
  * fruitless rescans never run. Each key scans the overflow tail and
@@ -48,6 +53,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 moved = 0;
 	u32 cur;
 	u32 extra = 0;
+	u64 qlen = 0;
 	int attempt;
 	(void)prev;
 	if (cpu < 0)
@@ -79,11 +85,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			break;
 		if (cur == (u32)FLOW_VEB_EMPTY)
 			break;
-		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+		qlen = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
+		if (qlen == 0)
 			break;
-		if (attempt >= (int)FLOW_DISPATCH_FLOOD_PROBES &&
-		    scx_bpf_dsq_nr_queued(flow_overflow_dsq()) >
-		        (u64)FLOW_DISPATCH_FLOOD_QUEUED)
+		if ((u64)attempt >= (u64)FLOW_DISPATCH_FLOOD_PROBES +
+		    (u64)moved &&
+		    qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED)
 			break;
 		cntp = veb_cnt_ptr(cur);
 		if (!cntp || READ_ONCE(*cntp) == 0) {

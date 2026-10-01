@@ -22,7 +22,7 @@ Arrivals pass a gate first. Tasks get due times from weight and the core admits 
 
 ### Queues
 
-One shared queue holds waiting tasks with order from the core tree. Dispatch moves admitted tasks in order with live checks. Each pass moves at most `16` tasks in at most `20` checks and exits when drained. Under flood with more than `128` queued the pass stops ordered checks after `4` and drains FIFO, so deep backlog never burns `20` full scans. A safety path drains up to `16` FIFO tasks when ordered checks find nothing, so rejects with no key still drain in queue order. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One shared queue holds waiting tasks with order from the core tree. Dispatch moves admitted tasks in order with live checks, best effort under flood. Each pass moves at most `16` tasks in at most `20` checks and exits when drained. Under flood with more than `128` queued the pass stops ordered checks after `4` checks past moves while moving work keeps probing, so deep backlog never burns `20` full scans with zero moves. Ordered checks run first so admitted tasks stay preferred, while the FIFO drain may move admitted tasks out of order under flood. A safety path drains up to `16` FIFO tasks when ordered checks find nothing, so rejects with no key still drain in queue order. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -63,4 +63,4 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
 - Placement uses an idle CPU when live, else the selected CPU when live, else the first live CPU, so load spreads with no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
-- Oversubscription past about seven admitted tasks per CPU parks the rest as rejects with no order, so a 496 thread flood on 16 CPUs runs admitted tasks in due time order while rejects drain FIFO up to `16` per pass per CPU with higher latency.
+- Oversubscription past about seven admitted tasks per CPU at default weight with share `125` per mille at `16ms` period parks the rest as rejects with no order, so a 496 thread flood on 16 CPUs runs admitted tasks in due time order best effort under flood while rejects drain FIFO up to `16` per pass per CPU with higher latency.
