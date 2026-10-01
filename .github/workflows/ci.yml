@@ -102,13 +102,4 @@ jobs:
           cargo build --profile ci -p scx_flow
           cargo metadata --format-version 1 > /tmp/meta.json
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
-            --no-build scx_flow || {
-            echo '=== TEMP DIAG v3: A/B objects with stock flags ==='
-            uname -r
-            for OBJ in $(find target/ci/build -path '*scx_flow*/out/bpf.bpf.o'); do
-              echo "== $OBJ md5=$(md5sum < "$OBJ")"
-              veristat -o csv "$OBJ" > /tmp/v.csv 2>&1 || true
-              grep -E 'flow_dispatch' /tmp/v.csv | head -2
-            done
-            exit 1
-          }
+            --no-build scx_flow
