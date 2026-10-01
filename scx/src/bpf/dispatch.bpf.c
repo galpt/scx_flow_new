@@ -1,77 +1,186 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Dispatch op.
+ * Dispatch op for the flow core.
  *
- * Each pass moves one task per tier to local in fixed order across
- * local plus node plus machine plus overflow. One move per tier moves
- * four tasks at most with no shared math and no pre scan, and an
- * empty tier moves nothing with no scan. The overflow tail holds
- * homeless parks plus missed parks plus rejected parks plus pinned
- * tasks, and every park arrives with a direct kick and no wait, so no
- * timer wakes the pass. Per tier moves count once with no lock.
- * Level follows with the same CPU only. See intf.h for the batch and
- * enqueue.bpf.c for admission plus the deadline choice.
- *
- * The pass splits the tier moves into dispatch/drain plus perf with
- * no lock here. Each move stays noinline with a scalar input, so
- * the verifier stays small. Level follows with no call on steady.
+ * Moves admitted tasks in tree order up to sixteen per pass.
+ * The pass starts from the least key and follows successors with
+ * at most twenty key probes so one pass never scans the tail more
+ * than twenty times. Twenty covers sixteen moves plus four skip
+ * slack so full batches never starve on sparse keys. A drained tail
+ * exits the pass at once so empty probes never run. Empty keys
+ * skip through counts with no tail scan and drained keys advance at
+ * once so fruitless rescans never run. Each key scans the overflow
+ * tail and moves the first admitted task with sequence, liveness,
+ * affinity checks. Duplicates leave in park order within one key.
+ * Per CPU mismatch, missing order, stale sequence skip with no tree
+ * drop and the core drops shares through stopping plus disable plus
+ * exit. Only the moved pid drops its key when the stored key still
+ * matches. Empty queue leaves at once with no scan so idle stays
+ * cheap. Empty tree or stall moves one affinity gated head task with
+ * liveness plus affinity checks plus keyed drop and no order or
+ * sequence gate so runnable tasks never stall on live work. Fail
+ * open stays rare since rows land synchronously and solely genuine
+ * affinity misses reach it. Over moves count progress with ordered
+ * moves counting vEB hits plus fail open moves counting FIFO parks
+ * so every dispatched task lands in one bucket. Level follows after
+ * ordered moves plus fail open with the same CPU only and no call on
+ * steady through one exit, so idle cannot be skipped.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#include "dispatch/drain.bpf.c"
 #include "dispatch/perf.bpf.c"
-
+static __noinline bool veb_try_move_one(u32 key, s32 cpu)
+{
+	bool moved = false;
+	struct task_struct *p;
+	if (key >= (u32)FLOW_VEB_U)
+		return false;
+	if (cpu < 0)
+		return false;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
+		u32 pid = 0;
+		u32 k2 = 0;
+		if (moved)
+			break;
+		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p, key,
+		    &pid, &k2)) {
+			moved = true;
+			veb_remove_if_key(pid, k2);
+			break;
+		}
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
+/* Fail open with liveness plus affinity solely and no order gate. */
+/* Moves the first live affinity match at the overflow head so one */
+/* runnable task always lands on the dispatch CPU even when a stale */
+/* entry holds no order row. Skips drop no tree state with no park */
+/* count so transient misses stay quiet. Moves count one FIFO park */
+/* at the decision point. The moved pid drops its key solely when */
+/* the stored key still matches. Stays rare since admits write rows */
+/* synchronously and solely genuine affinity misses reach here. */
+static __noinline bool veb_fail_open_one(s32 cpu)
+{
+	bool moved = false;
+	u32 reap_pid = 0;
+	u32 reap_key = (u32)FLOW_VEB_EMPTY;
+	struct task_struct *p;
+	if (cpu < 0)
+		return false;
+	if (!flow_cpu_live((u32)cpu)) {
+		flow_gate_reject();
+		return false;
+	}
+	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+		return false;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, flow_overflow_dsq(), 0) {
+		struct task_struct *t;
+		u32 pid;
+		u32 *kp;
+		if (moved)
+			break;
+		if (!flow_entry_ok(cpu, p, 0))
+			continue;
+		t = bpf_task_from_pid(p->pid);
+		if (!t)
+			continue;
+		pid = (u32)t->pid;
+		if (pid == 0) {
+			bpf_task_release(t);
+			continue;
+		}
+		if (!flow_entry_ok(cpu, t, 0)) {
+			bpf_task_release(t);
+			continue;
+		}
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, t,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
+			moved = true;
+			reap_pid = pid;
+			kp = bpf_map_lookup_elem(&veb_pid, &pid);
+			if (kp && READ_ONCE(*kp) !=
+			    (u32)FLOW_VEB_EMPTY &&
+			    READ_ONCE(*kp) < (u32)FLOW_VEB_U)
+				reap_key = READ_ONCE(*kp);
+		}
+		bpf_task_release(t);
+		if (moved)
+			break;
+	}
+	bpf_rcu_read_unlock();
+	if (moved) {
+		if (reap_pid != 0 && reap_key != (u32)FLOW_VEB_EMPTY)
+			veb_remove_if_key(reap_pid, reap_key);
+		return true;
+	}
+	return false;
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
-	/* One move per tier moves four tasks at most with no stall. */
-	/* Tiers take scalars only and verify once with no cross inline. */
-	u32 local_moved = 0;
-	u32 node_moved = 0;
-	u32 machine_moved = 0;
-	u32 over_moved = 0;
-	u64 own_local;
-	u32 node;
-
+	u32 moved = 0;
+	u32 cur;
+	int attempt;
 	(void)prev;
-	/* A negative CPU is a core idle call with no queue work, so it */
-	/* returns with no gate count. A stale live CPU fails closed with */
-	/* one count below, so only real rejects count. */
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu)) {
 		flow_gate_reject();
 		return;
 	}
-	own_local = flow_local_dsq((u32)cpu);
-	node = flow_cpu_node((u32)cpu);
-	/* Fold past the derived count to zero like enqueue, so the node */
-	/* turn always names a created queue with no stale id. */
-	if (node >= (u32)FLOW_MAX_NODES ||
-	    (u64)node >= nr_node_ids)
-		node = 0;
-	/* Local tier first with one move and no scan on empty. */
-	local_moved = flow_move_one(own_local);
-	/* Node tier next with one move and no scan on empty. */
-	node_moved = flow_move_one(flow_node_dsq(node));
-	/* Machine tier next with one move and no scan on empty. */
-	machine_moved = flow_move_one(flow_machine_dsq());
-	/* Overflow tail last with one move and no scan on empty. */
-	/* Homeless parks move here with all other parks, so the kernel */
-	/* global queue stays out of the pass. */
-	over_moved = flow_move_one(flow_overflow_dsq());
-	/* Level follows with the same CPU only. */
-	flow_perf_update(cpu);
-	if (local_moved != 0)
-		__sync_fetch_and_add(&flow_stats.local_moves,
-		    (u64)local_moved);
-	if (node_moved != 0)
-		__sync_fetch_and_add(&flow_stats.node_moves,
-		    (u64)node_moved);
-	if (machine_moved != 0)
-		__sync_fetch_and_add(&flow_stats.machine_moves,
-		    (u64)machine_moved);
-	if (over_moved != 0)
+	if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+		goto out;
+	cur = veb_min();
+	if (cur == (u32)FLOW_VEB_EMPTY) {
+		if (veb_fail_open_one(cpu)) {
+			__sync_fetch_and_add(&flow_stats.over_moves, 1);
+			__sync_fetch_and_add(&flow_stats.fifo_parks, 1);
+		}
+		/* Single exit covers the level, so idle cannot be skipped. */
+		goto out;
+	}
+	bpf_for(attempt, 0, FLOW_DISPATCH_MAX_PROBES) {
+		u32 *cntp;
+		bool got;
+		u32 *after;
+		if ((u64)moved >= (u64)FLOW_DISPATCH_MAX_BATCH)
+			break;
+		if (cur == (u32)FLOW_VEB_EMPTY)
+			break;
+		if (scx_bpf_dsq_nr_queued(flow_overflow_dsq()) == 0)
+			break;
+		cntp = veb_cnt_ptr(cur);
+		if (!cntp || READ_ONCE(*cntp) == 0) {
+			cur = veb_succ(cur);
+			continue;
+		}
+		got = veb_try_move_one(cur, cpu);
+		if (got) {
+			moved++;
+			after = veb_cnt_ptr(cur);
+			if (!after || READ_ONCE(*after) == 0)
+				cur = veb_succ(cur);
+			continue;
+		}
+		cur = veb_succ(cur);
+	}
+	if (moved) {
 		__sync_fetch_and_add(&flow_stats.over_moves,
-		    (u64)over_moved);
+		    (u64)moved);
+		__sync_fetch_and_add(&flow_stats.veb_hits,
+		    (u64)moved);
+		/* Single exit covers the level, so idle cannot be skipped. */
+		goto out;
+	}
+	if (veb_fail_open_one(cpu)) {
+		__sync_fetch_and_add(&flow_stats.over_moves, 1);
+		__sync_fetch_and_add(&flow_stats.fifo_parks, 1);
+	}
+out:
+	/* Level follows after ordered moves plus fail open */
+	/* with the same CPU only through one exit. */
+	flow_perf_update(cpu);
 }

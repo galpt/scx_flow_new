@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Topology view for the flow scheduler.
+//! Topology view for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Reads the host CPU lists plus the node rows for the BPF seed.
 //! Node reads use the kernel NUMA view with zero on fault and a cap
-//! at eight, so large hosts fold to the machine queue with no panic.
+//! at eight. Large hosts fold to the machine queue.
 
-/// CPU ids past this bound never seed, mirroring FLOW_MAX_CPUS.
+/// CPU identifiers past this bound stay out. Mirrors the header bound.
 const CPU_BOUND: u32 = 512;
 
-/// Online CPU ids in rank order with empty on read fault.
+/// Online CPU identifiers in rank order with empty on read fault.
 pub fn online_cpus() -> Vec<u32> {
     read_cpu_list_file("/sys/devices/system/cpu/online")
 }
 
 /// One topology row per CPU with sibling plus node.
-/// Sibling reads the thread list with all ones on fault, and node
-/// reads the NUMA view with zero on fault and a cap at eight.
+/// Sibling reads the thread list with all ones on fault. Node reads
+/// the NUMA view with zero on fault and a cap at eight.
 pub fn topo_rows() -> Vec<(u32, u32, u32)> {
     let online = online_cpus();
     let mut rows = Vec::new();
@@ -37,15 +37,15 @@ pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
 
 /// True when the CPU is the second thread of one core.
 /// Sibling holds all ones on single thread, so single thread stays
-/// false with no panic. A lower sibling marks the second thread, so
-/// only one card per core shows SMT with no extra sysfs use.
+/// false. A lower sibling marks the second thread, so solely one card
+/// per core shows SMT.
 pub fn is_smt_thread(cpu: u32, sib: u32) -> bool {
     sib != u32::MAX && sib < cpu
 }
 
-/// Parse a kernel CPU list like 0-3 plus 5 into ids.
-/// Ranges clamp to the CPU bound before the walk, so a faulty list
-/// never loops the full u32 range. Ids past the bound never seed.
+/// Parse a kernel CPU list such as zero through three plus five.
+/// Ranges clamp to the CPU bound before the walk. Faulty lists stay
+/// short and identifiers past the bound stay out.
 pub fn parse_cpu_list(s: &str) -> Vec<u32> {
     let mut out = Vec::new();
     for part in s.split(',') {
@@ -75,25 +75,24 @@ pub fn parse_cpu_list(s: &str) -> Vec<u32> {
     out
 }
 
-/// Read one kernel CPU list file into ids with empty on fault.
+/// Read one kernel CPU list file into identifiers with empty on fault.
 pub fn read_cpu_list_file(path: &str) -> Vec<u32> {
     std::fs::read_to_string(path)
         .map(|s| parse_cpu_list(&s))
         .unwrap_or_default()
 }
 
-/// Thread sibling of one CPU with None on fault.
+/// Thread sibling of one CPU with empty on fault.
 fn thread_sibling(cpu: u32) -> Option<u32> {
     let path = format!("/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list");
     let ids = read_cpu_list_file(&path);
     ids.into_iter().find(|id| *id != cpu)
 }
 
-/// Node of one CPU with None on fault.
+/// Node of one CPU with empty on fault.
 /// Reads the NUMA view through the per CPU node links with a fallback
-/// to the node cpulists, so package ids never shape placement.
-/// A missing link plus a missing cpulist means unknown, so the caller
-/// folds to zero with no panic.
+/// to the node cpulists. Package identifiers stay out of placement.
+/// Missing links fold to zero at the caller.
 fn cpu_node(cpu: u32) -> Option<u32> {
     let dir = format!("/sys/devices/system/cpu/cpu{cpu}");
     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -110,9 +109,9 @@ fn cpu_node(cpu: u32) -> Option<u32> {
     node_from_cpulists(cpu)
 }
 
-/// Node of one CPU from the node cpulists with None on fault.
+/// Node of one CPU from the node cpulists with empty on fault.
 /// Scans the online nodes and returns the first node whose cpulist
-/// holds the CPU, so hosts without per CPU links still seed.
+/// holds the CPU. Hosts lacking per CPU links still seed.
 fn node_from_cpulists(cpu: u32) -> Option<u32> {
     let ids = read_cpu_list_file("/sys/devices/system/node/online");
     for node in ids {

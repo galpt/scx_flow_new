@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Validated scheduling constants for the flow scheduler.
+//! Validated scheduling constants for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the validated constants with defaults that match intf.h.
+//! Holds the validated constants with defaults matching the header.
 
 use crate::flow::ADMIT_PERMILLE;
 use crate::flow::CAP_BASE;
@@ -18,17 +18,16 @@ use anyhow::bail;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
-/// Default dispatch batch for the ops table with no knob. Mirrors
-/// FLOW_DISPATCH_MAX_BATCH in intf.h, so the ops table holds every
-/// pass with room and no shared math.
+/// Default dispatch batch for the ops table. Mirrors the header batch
+/// so the ops table holds every pass.
 const DEF_BATCH: u32 = 16;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos. Always 2ms with no knob.
+    /// Fixed slice in nanos. Always two milliseconds.
     pub quantum_ns: u64,
-    /// Dispatch batch for the ops table. Always 16 with no knob.
+    /// Dispatch batch for the ops table. Always sixteen.
     pub dispatch_batch: u32,
 }
 
@@ -43,14 +42,15 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Validate the constants against the bounds the BPF side relies on.
-    /// An invalid value is a programming fault, not a runtime state.
-    /// The slice stays fixed at 2ms with base weight 128 in range
-    /// 1 to 16384. The period stays at 16ms. The batch stays fixed
-    /// at 16. Admission holds use under 950 per mille with base capacity
-    /// 1024. Queues hold 512 local plus 8 node plus machine plus
-    /// overflow with ids in the 0x5100 region. Hints hold 4096 flat
-    /// rows with no timer wait.
+    /// Validate the constants against the bounds used by the core.
+    /// Faulty values mark a programming fault.
+    /// The slice stays at two milliseconds with base weight one hundred
+    /// twenty eight in range one to sixteen thousand. The period stays
+    /// at sixteen milliseconds. The batch stays at sixteen. Admission
+    /// holds use under nine hundred fifty per mille with base capacity
+    /// one thousand twenty four. Queues hold five hundred twelve local,
+    /// eight node, machine, overflow. Hints hold four
+    /// thousand ninety six flat rows.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -93,7 +93,7 @@ impl Config {
     }
 }
 
-/// Builder for Config used only by tests.
+/// Builder for Config used solely by tests.
 /// Production uses Config default directly.
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
@@ -109,7 +109,7 @@ impl ConfigBuilder {
         self.quantum_ns = Some(v);
         self
     }
-    /// Set the fixed dispatch batch. Only 16 passes.
+    /// Set the fixed dispatch batch. Solely sixteen passes.
     pub fn dispatch_batch(mut self, v: u32) -> Self {
         self.dispatch_batch = Some(v);
         self
@@ -160,7 +160,6 @@ mod tests {
     }
 
     #[test]
-    /// Summary holds the fixed slice with no knob.
     fn describe_is_stable() {
         let s = Config::default().describe();
         assert!(s.contains("quantum=2000us"));
@@ -168,7 +167,6 @@ mod tests {
     }
 
     #[test]
-    /// Defaults match the shared header with local plus shared queues.
     fn defaults_match_intf_h() {
         assert_eq!(
             DEF_BATCH,
@@ -186,7 +184,7 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
-            crate::flow_cgrp::HINT_MAX
+            crate::flow::cgrp::HINT_MAX
         );
     }
 }

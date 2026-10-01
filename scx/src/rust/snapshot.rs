@@ -1,11 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Snapshot reads for the flow scheduler.
+//! Snapshot reads for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Builds the counters view plus the dashboard view from the BPF maps.
-//! Each poll reads the counters plus the per CPU pid view with no
-//! extra sysfs use, so the page stays cheap beside the slice.
+//! Builds the counters view and the dashboard view from the core.
+//! Each poll reads the counters and the per CPU pid view through
+//! map reads. Counter reads stay cheap with one BSS view while per
+//! CPU reads cost one syscall per online CPU and run throttled at
+//! dashboard cadence on the hot thread. Admission counters come from
+//! the core as source of truth with the mirror kept for tests plus
+//! observability solely. Parks sum core parks plus userspace queue
+//! drops with no double count. Dispatch moves admitted tasks in core
+//! order and over moves count progress with ordered moves counting
+//! vEB hits plus fail open moves counting FIFO parks so every
+//! dispatched task lands in one bucket. Ordered share stays high
+//! since rows land synchronously with solely genuine affinity misses
+//! reaching fail open.
+//! Dashboard timestamps use wall time for logs plus file names while
+//! deadlines plus runtime use monotonic time, so the two domains stay
+//! separate by intent.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -18,6 +31,7 @@ impl<'a> Scheduler<'a> {
     pub(crate) fn get_metrics(&self) -> stats::Metrics {
         let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
         let s = &bss.flow_stats;
+        let ev = self.ev_drops.load(std::sync::atomic::Ordering::Relaxed);
         stats::Metrics {
             on_cpu: s.on_cpu,
             total_runtime: s.total_runtime,
@@ -25,25 +39,24 @@ impl<'a> Scheduler<'a> {
             inserts: s.inserts,
             requeues: s.requeues,
             completions: s.completions,
-            local_moves: s.local_moves,
-            node_moves: s.node_moves,
-            machine_moves: s.machine_moves,
             over_moves: s.over_moves,
             kicks: s.kicks,
             admits: s.admits,
             rejects: s.rejects,
             misses: s.misses,
-            parks: s.parks,
+            parks: s.parks.saturating_add(ev),
             gate_rejects: s.gate_rejects,
+            veb_hits: s.veb_hits,
+            fifo_parks: s.fifo_parks,
         }
     }
 
-    /// Read one CPU pid view without heap use.
-    /// Failed lookups yield an idle view with zero pid.
+    /// Read one CPU pid view through a direct map read.
+    /// Faulty lookups yield an idle view with zero pid.
     pub(crate) fn read_cpu(&self, cpu: usize) -> crate::bpf_intf::flow_cpu_state {
         let idle = crate::bpf_intf::flow_cpu_state {
             running_pid: 0,
-            cursor: 0,
+            pad: 0,
         };
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             return idle;
@@ -66,12 +79,13 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Dashboard snapshot with raw counters plus live pid cards.
-    /// Counters stay raw with no deltas and the on CPU gauge passes
-    /// through with the live pid view. SMT comes from the cached init
-    /// flags with no sysfs use on poll and stays display only. Offline
-    /// stays out, so per CPU count matches the cached online count.
-    /// Version plus timestamp plus topology join the counters for the
-    /// page plus the log.
+    /// Counters stay raw and the on CPU gauge passes through with the
+    /// live pid view. SMT comes from the cached init flags and stays
+    /// display solely. Offline CPUs stay out, so per CPU count matches
+    /// the cached online count. Version, timestamp, topology
+    /// join the counters for the page plus the log. Timestamp uses wall
+    /// time for file names plus logs while runtime plus deadlines use
+    /// monotonic time shared with the core.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
         for (rank, &id) in self.online_cpus.iter().enumerate() {
@@ -81,7 +95,7 @@ impl<'a> Scheduler<'a> {
                 id,
                 smt,
                 running_pid: st.running_pid,
-                slice_ns: crate::flow_slice::QUANTUM_NS,
+                slice_ns: crate::flow::slice::QUANTUM_NS,
             });
         }
         let timestamp_ns = std::time::SystemTime::now()

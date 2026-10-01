@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Stats server for the flow scheduler.
+//! Stats server for the flow daemon.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Exports the counters view plus the dashboard view from the BPF maps.
+//! Exports the counters view and the dashboard view from the core.
 //! The stats server carries deltas while the dashboard carries raw
-//! counters plus per CPU cards for the loopback page.
+//! counters and per CPU cards for the loopback page.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -23,8 +23,8 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Counters with placement, admission, and miss detail.
-/// BPF holds 15 counters, Rust adds display-only uptime for 16.
+/// Counters with placement, admission, miss detail.
+/// BPF holds fourteen counters. Rust adds display-only uptime for fifteen.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -32,8 +32,8 @@ pub struct Metrics {
     #[stat(desc = "Total runtime in nanoseconds")]
     #[serde(default)]
     pub total_runtime: u64,
-    /// Display-only uptime since attach in nanos with no BPF use.
-    /// Filled from the start instant, never from the BPF counters.
+    /// Display-only uptime since attach in nanos from the start instant.
+    /// Filled from the start instant through the dashboard poll.
     #[stat(desc = "Uptime since attach in nanoseconds")]
     #[serde(default)]
     pub uptime_ns: u64,
@@ -46,15 +46,6 @@ pub struct Metrics {
     #[stat(desc = "Blocks and exits with release")]
     #[serde(default)]
     pub completions: u64,
-    #[stat(desc = "Moves from the local tier")]
-    #[serde(default)]
-    pub local_moves: u64,
-    #[stat(desc = "Moves from the node tier")]
-    #[serde(default)]
-    pub node_moves: u64,
-    #[stat(desc = "Moves from the machine tier")]
-    #[serde(default)]
-    pub machine_moves: u64,
     #[stat(desc = "Moves from the overflow tail")]
     #[serde(default)]
     pub over_moves: u64,
@@ -67,29 +58,35 @@ pub struct Metrics {
     #[stat(desc = "Tasks parked on admission reject")]
     #[serde(default)]
     pub rejects: u64,
-    #[stat(desc = "Wall completions past release plus deadline")]
+    #[stat(desc = "Monotonic completions past release plus deadline")]
     #[serde(default)]
     pub misses: u64,
-    #[stat(desc = "Overflow parks from misses plus rejects")]
+    #[stat(desc = "Overflow parks from misses, rejects, drops")]
     #[serde(default)]
     pub parks: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
+    #[stat(desc = "Ordered vEB dispatches with admitted order match")]
+    #[serde(default)]
+    pub veb_hits: u64,
+    #[stat(desc = "Fail open dispatches with no ordered dispatch")]
+    #[serde(default)]
+    pub fifo_parks: u64,
 }
 
 /// One card of the per CPU grid.
-/// Id plus SMT stay fixed while pid plus slice refresh on each poll.
+/// Identifier plus SMT stay fixed while pid plus slice refresh per poll.
 /// Pid holds zero when idle and slice holds the shared quantum.
-/// SMT marks the second thread of one core for display only with
-/// no placement use and false on old JSON.
+/// SMT marks the second thread of one core for display solely and
+/// false on old payloads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerCpuMetrics {
-    /// CPU id.
+    /// CPU identifier.
     #[serde(default)]
     pub id: u32,
     /// True for the second thread of one core with false on single thread.
-    /// Display only with no placement use plus false on old JSON.
+    /// Display solely plus false on old payloads.
     #[serde(default)]
     pub smt: bool,
     /// Pid now on the CPU with zero when idle.
@@ -102,8 +99,11 @@ pub struct PerCpuMetrics {
 
 /// Snapshot for the web dashboard.
 /// Counters stay raw with the on CPU gauge plus the live pid view.
-/// The run loop pushes one per poll and the web thread keeps the
-/// newest behind a lock for the page plus the JSON routes.
+/// The run loop pushes throttled snapshots at dashboard cadence and
+/// the web thread keeps the newest behind a lock for the page plus
+/// the JSON routes. Timestamp uses wall time for logs plus file names
+/// while runtime plus deadlines use monotonic time shared with the
+/// core, so the two domains stay separate by intent.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
     /// Scheduler wide counters with raw values.
@@ -114,7 +114,8 @@ pub struct WebMetrics {
     /// Scheduler version for the page plus the log.
     #[serde(default)]
     pub version: String,
-    /// Wall time in nanos since epoch for the log.
+    /// Wall time in nanos since epoch for the log plus file names.
+    /// Monotonic time serves deadlines plus runtime elsewhere.
     #[serde(default)]
     pub timestamp_ns: u64,
     /// One line topology summary for the page.
@@ -123,7 +124,7 @@ pub struct WebMetrics {
 }
 
 /// Stats printer loop for the monitor flag.
-/// Polls the stats server on the interval with plain text lines.
+/// Polls the stats server per interval with plain text lines.
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
         &[],
@@ -134,7 +135,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
 }
 
 /// Server data for the stats server.
-/// A single top op reports interval deltas of the counters.
+/// A single top operation reports interval deltas of the counters.
 pub fn server_data() -> StatsServerData<(), Metrics> {
     let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {
         req_ch.send(())?;
@@ -158,8 +159,8 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
-             local={} node={} machine={} over={} kick={} adm={} rej={} \
-             miss={} park={} gate={}",
+             over={} kick={} adm={} rej={} \
+             miss={} park={} gate={} veb={} fifo={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -167,9 +168,6 @@ impl Metrics {
             self.inserts,
             self.requeues,
             self.completions,
-            self.local_moves,
-            self.node_moves,
-            self.machine_moves,
             self.over_moves,
             self.kicks,
             self.admits,
@@ -177,12 +175,14 @@ impl Metrics {
             self.misses,
             self.parks,
             self.gate_rejects,
+            self.veb_hits,
+            self.fifo_parks,
         )?;
         Ok(())
     }
 
     /// Interval delta of the counters over the poll interval.
-    /// Gauges like on_cpu plus uptime_ns pass through as live values.
+    /// Gauges for on CPU plus uptime pass through as live values.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             on_cpu: self.on_cpu,
@@ -191,9 +191,6 @@ impl Metrics {
             inserts: self.inserts.wrapping_sub(rhs.inserts),
             requeues: self.requeues.wrapping_sub(rhs.requeues),
             completions: self.completions.wrapping_sub(rhs.completions),
-            local_moves: self.local_moves.wrapping_sub(rhs.local_moves),
-            node_moves: self.node_moves.wrapping_sub(rhs.node_moves),
-            machine_moves: self.machine_moves.wrapping_sub(rhs.machine_moves),
             over_moves: self.over_moves.wrapping_sub(rhs.over_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             admits: self.admits.wrapping_sub(rhs.admits),
@@ -201,6 +198,8 @@ impl Metrics {
             misses: self.misses.wrapping_sub(rhs.misses),
             parks: self.parks.wrapping_sub(rhs.parks),
             gate_rejects: self.gate_rejects.wrapping_sub(rhs.gate_rejects),
+            veb_hits: self.veb_hits.wrapping_sub(rhs.veb_hits),
+            fifo_parks: self.fifo_parks.wrapping_sub(rhs.fifo_parks),
         }
     }
 }
