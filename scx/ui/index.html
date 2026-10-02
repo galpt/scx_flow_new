@@ -109,8 +109,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Slice stays single line with ellipsis. The base */
-    /* stays fixed so every card shows the base slice. */
+    /* Slice stays single line with ellipsis. The quantum */
+    /* is fixed so every card shows the same slice. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
@@ -253,7 +253,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU deadline queues, base quantum and placement
+          per-CPU deadline queues, fixed quantum and placement
         </p>
         <p style="font-size:0.75rem;
           color:var(--text-muted);margin-top:2px;
@@ -327,6 +327,18 @@
           <span class="stat-value" id="completions">0</span>
         </div>
         <div><span style="color:var(--text-muted)">
+          Local moves:</span>
+          <span class="stat-value" id="local-moves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Node moves:</span>
+          <span class="stat-value" id="node-moves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Machine moves:</span>
+          <span class="stat-value" id="machine-moves">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
           Overflow moves:</span>
           <span class="stat-value" id="over-moves">0</span>
         </div>
@@ -354,14 +366,6 @@
           Gate rejects:</span>
           <span class="stat-value" id="gate-rejects">0</span>
         </div>
-        <div><span style="color:var(--text-muted)">
-          Processed using vEB:</span>
-          <span class="stat-value" id="veb-hits">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          Processed using FIFO (parks):</span>
-          <span class="stat-value" id="fifo-parks">0</span>
-        </div>
       </div>
     </div>
 
@@ -374,18 +378,6 @@
 
   <script>
     const el = (id) => document.getElementById(id);
-
-    /* Healthy share for the vEB benefit verdict with no knob. */
-    /* Ninety five keeps the ordered path dominant while fail open */
-    /* stays quiet. The dashboard refreshes each second. */
-    const VEB_HEALTHY_PCT = 95;
-
-    /* Previous dispatched totals for the recent window check. */
-    /* The recent window covers one dashboard poll with the same */
-    /* healthy share as the cumulative window. */
-    var prevVebHits = 0;
-    var prevFifoParks = 0;
-    var prevVebSeen = false;
 
     function clamp(v) { return v < 0 ? 0 : v; }
 
@@ -425,7 +417,7 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per CPU cards with base slice plus pid plus SMT. They show */
+    /* Per CPU cards with fixed slice plus pid plus SMT. They show */
     /* the pid plus the slice with no rate sampling plus the SMT mark */
     /* on the second thread. Slice stays single line with full text */
     /* in the title. */
@@ -469,9 +461,8 @@
     }
 
     /* Summary prose built from the live gauges. */
-    /* The tldr names the running count plus the vEB benefit share. */
-    /* The explanation walks joins plus moves plus admission plus misses */
-    /* plus the vEB share math over the completions window. */
+    /* The tldr names the running count. The explanation */
+    /* walks joins plus moves plus admission plus misses. */
     /* Live pid count from the per CPU cards. */
     /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
@@ -493,98 +484,53 @@
       return raw;
     }
 
-    /* Ordered share in percent over dispatched total. */
-    /* Zero dispatched yields zero so idle stays quiet. */
-    function vebPct(veb, fifo) {
-      var total = veb + fifo;
-      if (!total) return 0;
-      return (veb / total) * 100;
-    }
-
-    /* Recent window health over one dashboard poll. */
-    /* Empty deltas stay healthy so idle never flaps. */
-    /* First poll uses the cumulative window alone. */
-    function recentVebHealthy(curVeb, curFifo) {
-      var dVeb, dFifo, dTotal;
-      if (!prevVebSeen) return true;
-      dVeb = curVeb - prevVebHits;
-      dFifo = curFifo - prevFifoParks;
-      if (dVeb < 0) dVeb = 0;
-      if (dFifo < 0) dFifo = 0;
-      dTotal = dVeb + dFifo;
-      if (!dTotal) return true;
-      return ((dVeb / dTotal) * 100) >= VEB_HEALTHY_PCT;
-    }
-
-    /* Benefit verdict over the completions window. */
-    /* Cumulative share at or above the healthy mark with */
-    /* completions present plus a healthy recent poll means */
-    /* the running tasks gain from ordered queues. */
-    function vebBenefit(veb, fifo, done) {
-      var total = veb + fifo;
-      if (!total || !done) return false;
-      if (vebPct(veb, fifo) < VEB_HEALTHY_PCT) return false;
-      return recentVebHealthy(veb, fifo);
-    }
-
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
       var req = s.requeues || 0;
       var done = s.completions || 0;
+      var local = s.local_moves || 0;
+      var node = s.node_moves || 0;
+      var machine = s.machine_moves || 0;
       var over = s.over_moves || 0;
       var adm = s.admits || 0;
       var rej = s.rejects || 0;
       var miss = s.misses || 0;
       var park = s.parks || 0;
       var gate = s.gate_rejects || 0;
-      var veb = s.veb_hits || 0;
-      var fifo = s.fifo_parks || 0;
-      var dispatched = veb + fifo;
       var placed = ins + req;
-      var share = vebPct(veb, fifo);
-      var failShare = dispatched ? (fifo / dispatched) * 100 : 0;
-      var receiving = vebBenefit(veb, fifo, done);
-      var benefit = receiving
-        ? share.toFixed(1) +
-          '% of dispatched tasks receiving the benefits of the vEB queues'
-        : 'only ' + share.toFixed(1) +
-          '% of dispatched tasks receiving the benefits of the vEB queues ' +
-          '(below the ' + VEB_HEALTHY_PCT +
-          '% healthy mark), struggling without the full benefits of the vEB queues';
-      var math = fmt(veb) + ' out of ' + fmt(dispatched) +
-        ' dispatched over ' + fmt(done) +
-        ' completions processed by vEB = ' + share.toFixed(1) +
-        '%, computed as vEB hits divided by dispatched total ' +
-        'over the completions window since attach with fail-open share ' +
-        failShare.toFixed(1) + '% refreshed each second';
+      var shared = node + machine + over;
       var tldr, explanation;
-      var base = 'As you can see from the gauges, ' +
-        'joins cover ' + fmt(placed) +
-        ' with completions ' + fmt(done) +
-        '. Overflow moves cover ' + fmt(over) +
-        '. Admits cover ' + fmt(adm) +
-        ' with rejects ' + fmt(rej) +
-        ' and misses ' + fmt(miss) +
-        ' with parks ' + fmt(park) +
-        ' and gate rejects ' + fmt(gate) + '. ';
-      if (!placed && !onCpu && !dispatched && !done) {
+      if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet. ' + math + '.';
+          'no tasks have been placed yet.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          (onCpu === 1 ? ' task, ' : ' tasks, ') +
-          benefit + '.';
-        explanation = base + math + '.';
+          ' tasks.';
+        explanation = 'As you can see from the gauges, ' +
+          'joins cover ' + fmt(placed) +
+          ' with completions ' + fmt(done) +
+          '. Local moves cover ' + fmt(local) +
+          ' and shared moves cover ' + fmt(shared) +
+          '. Admits cover ' + fmt(adm) +
+          ' with rejects ' + fmt(rej) +
+          ' and misses ' + fmt(miss) +
+          ' with parks ' + fmt(park) +
+          ' and gate rejects ' + fmt(gate) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
-          (placed === 1
-            ? ' task and is now idle. '
-            : ' tasks and is now idle. ') +
-          benefit.charAt(0).toUpperCase() +
-          benefit.slice(1) + '.';
-        explanation = base + math + '.';
+          ' tasks and is now idle.';
+        explanation = 'As you can see from the gauges, ' +
+          'joins cover ' + fmt(placed) +
+          ' with completions ' + fmt(done) +
+          '. Local moves cover ' + fmt(local) +
+          ' and shared moves cover ' + fmt(shared) +
+          '. Admits cover ' + fmt(adm) +
+          ' with rejects ' + fmt(rej) +
+          ' and misses ' + fmt(miss) +
+          ' with parks ' + fmt(park) +
+          ' and gate rejects ' + fmt(gate) + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -620,7 +566,7 @@
       if (ver && topo) meta += ', ';
       if (topo) meta += topo;
       el('meta-line').textContent = meta ||
-        'per-CPU deadline queues, base quantum and placement';
+        'per-CPU deadline queues, fixed quantum and placement';
 
       el('on-cpu').textContent = fmt(shown);
       el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
@@ -636,6 +582,12 @@
         fmt(s.requeues || 0);
       el('completions').textContent =
         fmt(s.completions || 0);
+      el('local-moves').textContent =
+        fmt(s.local_moves || 0);
+      el('node-moves').textContent =
+        fmt(s.node_moves || 0);
+      el('machine-moves').textContent =
+        fmt(s.machine_moves || 0);
       el('over-moves').textContent =
         fmt(s.over_moves || 0);
       el('kicks').textContent =
@@ -650,16 +602,6 @@
         fmt(s.parks || 0);
       el('gate-rejects').textContent =
         fmt(s.gate_rejects || 0);
-      el('veb-hits').textContent =
-        fmt(s.veb_hits || 0);
-      el('fifo-parks').textContent =
-        fmt(s.fifo_parks || 0);
-
-      /* Track dispatched totals for the next recent window check. */
-      /* Runs after the summary so the verdict uses the prior poll. */
-      prevVebHits = s.veb_hits || 0;
-      prevFifoParks = s.fifo_parks || 0;
-      prevVebSeen = true;
 
       renderCoreCards(data);
     }
