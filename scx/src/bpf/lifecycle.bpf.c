@@ -9,7 +9,10 @@
  * eight milliseconds solely while the tail reads empty, while a held
  * tail keeps the base so a long slice never delays waiting wakeups,
  * and a blocking end clears it, so steady work keeps the base slice
- * and repeat exhaust grows it with no extra map.
+ * and repeat steps grow it with no extra map. Running warms the
+ * stay count toward hot on the same CPU and resets to cold on a
+ * move, while blocking plus enable clear it and requeues keep it,
+ * so steady work stays while migrants cool with no extra map.
  * Stopping drops the tree key plus the ledger share plus the order
  * row so dispatched keys never linger and use never leaks. Gate fail
  * stopping drops plus notifies when queued like disable so shares
@@ -44,10 +47,17 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	tctx = flow_lookup(p);
 	now = flow_now();
 	if (tctx) {
+		u32 old;
+		u32 next;
 		stamp = now ? now : 1;
 		prev = __sync_val_compare_and_swap(&tctx->run_at,
 		    0, stamp);
 		claimed = prev == 0;
+		/* Same CPU warms toward hot while a move resets to */
+		/* cold, so steady work stays while migrants cool. */
+		old = READ_ONCE(tctx->exhaust);
+		next = flow_warmth_bump_or_reset(old, cpu);
+		WRITE_ONCE(tctx->exhaust, next);
 	}
 	st = flow_cpu_state_for(cpu);
 	if (st)
@@ -91,8 +101,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		struct flow_task_ctx *stctx = flow_lookup(p);
 		if (stctx && !flow_saturated()) {
 			u32 cur = READ_ONCE(stctx->exhaust);
-			if (cur < (u32)FLOW_QUANTUM_MAX_STEP)
-				WRITE_ONCE(stctx->exhaust, cur + 1);
+			u32 step = flow_exhaust_step(cur);
+			if (step < (u32)FLOW_QUANTUM_MAX_STEP)
+				WRITE_ONCE(stctx->exhaust,
+				    (cur & ~(u32)FLOW_EXHAUST_STEP_MASK) |
+				    (step + 1U));
 		}
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;

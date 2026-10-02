@@ -330,7 +330,6 @@ impl FlowVeb {
     }
 
     /// True when the queue holds zero entries.
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

@@ -15,9 +15,9 @@
  * key with the far deadline then parks at the tail then notifies for
  * observability solely. Rejects stay ordered at the top key so
  * dispatch still picks them by key then deadline. Admitted parks
- * also store one head plus one placement view for later picks with
- * no extra counter, and rejects store the same views with the far
- * deadline keeping the head behind admits. Every park notifies best
+ * also store one head for later picks with no extra counter, and
+ * rejects store the same head with the far deadline keeping rejects
+ * last. Every park notifies best
  * effort with loss irrelevant.
  * Callers pass the chosen CPU with zero for unknown so fail closed
  * parks still notify with no bypass. Plain park stays inline so the
@@ -32,7 +32,7 @@ static __always_inline void flow_park_plain(struct task_struct *p,
 	u64 slice = (u64)FLOW_QUANTUM_NS;
 	struct flow_task_ctx *park_ctx = flow_lookup((struct task_struct *)p);
 	if (park_ctx) {
-		u32 ex = READ_ONCE(park_ctx->exhaust);
+		u32 ex = flow_exhaust_step(READ_ONCE(park_ctx->exhaust));
 		/* Held tails park base so a long slice never delays */
 		/* wakeups waiting behind it, while an empty tail keeps */
 		/* the grown slice with no extra knob. */
@@ -73,10 +73,8 @@ static __noinline void flow_reject_top(u32 pid, u32 cpu,
 	}
 	veb_insert(pid, far);
 	flow_order_delete(pid);
-	if ((u64)cpu < (u64)FLOW_MAX_CPUS) {
+	if ((u64)cpu < (u64)FLOW_MAX_CPUS)
 		flow_head_store(pid, top, far, cpu);
-		flow_place_store(pid, cpu);
-	}
 }
 static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 enq_flags, u32 weight, u32 cpu,
@@ -85,7 +83,7 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 now = flow_now();
 	u64 period = flow_period_ns(weight);
 	u64 deadline = flow_deadline_at(now, period);
-	u32 exhaust = tctx ? READ_ONCE(tctx->exhaust) : 0;
+	u32 exhaust = flow_exhaust_step(tctx ? READ_ONCE(tctx->exhaust) : 0);
 	u64 share;
 	/* Held tails admit at the base share so the ledger never */
 	/* over reserves while wakeups wait, matching the capped park */
@@ -104,9 +102,9 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	}
 	if (pid == 0) {
 		flow_gate_reject();
-		/* Zero never keys the tree plus head plus place, so clear */
-		/* only with no insert stays safe and matches the helper */
-		/* early return for zero. */
+		/* Zero never keys the tree plus head, so clear only with */
+		/* no insert stays safe and matches the helper early */
+		/* return for zero. */
 		if (tctx) {
 			WRITE_ONCE(tctx->admit_share, 0);
 			WRITE_ONCE(tctx->admit_cpu, 0);
@@ -140,9 +138,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 		if (flow_order_write(pid, seq, deadline, cpu)) {
 			__sync_fetch_and_add(&flow_stats.admits, 1);
 			admitted = true;
-			/* Zero share parks ordered as reject, so only the */
-			/* placement view learns the CPU with no head. */
-			flow_place_store(pid, cpu);
+			/* Zero share parks ordered as reject with no head. */
+			/* No placement view is stored here. */
 		} else {
 			veb_remove(pid);
 			if (tctx) {
@@ -164,12 +161,10 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 			if (flow_order_write(pid, seq, deadline, cpu)) {
 				__sync_fetch_and_add(&flow_stats.admits, 1);
 				admitted = true;
-				/* Head keeps the earliest for the key with the */
-				/* placement view learning the owner, so later */
-				/* picks skip the tail walk and later parks */
-				/* reuse warmth with mask still checked. */
+				/* Head keeps the earliest for the key, so */
+				/* later picks skip the tail walk with mask */
+				/* still checked. */
 				flow_head_store(pid, key, deadline, cpu);
-				flow_place_store(pid, cpu);
 			} else {
 				veb_remove(pid);
 				flow_admitted_sub(cpu, share);

@@ -106,7 +106,7 @@ static __always_inline void flow_preempt_kick(s32 cpu,
 			struct flow_task_ctx *rtctx = flow_lookup(rt);
 			if (rtctx) {
 				u64 start = READ_ONCE(rtctx->run_at);
-				u32 ex = READ_ONCE(rtctx->exhaust);
+				u32 ex = flow_exhaust_step(READ_ONCE(rtctx->exhaust));
 				u64 slice;
 				u64 now;
 				if (ex != 0 && flow_saturated())

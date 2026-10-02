@@ -19,15 +19,10 @@
  * observability notify so the wire stays dense. Admit writes tree
  * plus row plus task deadline plus key synchronously with the same sequence, deadline, CPU so
  * dispatch needs no roundtrip. Rejects park at the top key with
- * the far deadline plus no row plus no run. Placement picks with live checks alone and no
- * deadline quantize. Fresh tasks take idle first even when the
- * tail holds work so urgent wakeups spread with no scan, while the
- * cached owner wins first for repeats when the tail holds work with
- * headroom so steady work keeps warmth without stacking, else the
+ * the far deadline plus no row plus no run. Placement picks hot
+ * first with headroom else idle else warm with headroom else the
  * least loaded allowed CPU from a bounded scan with early exit on
- * idle. The selected
- * CPU wins next when live plus allowed with headroom so warmth
- * stays cheap without stacking under load. The first allowed live CPU wins last. The
+ * idle else first. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
  * park ordered at the top with no run. Dispatch order stays least key
  * then deadline then owned then pid with the head best effort. Queue
@@ -93,50 +88,46 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		    cpu >= 0 ? (u32)cpu : 0, weight, seq_tmp);
 		return;
 	}
-	/* Placement with idle, hint, selected, least, first in one place. */
-	/* Fresh tasks take idle first even when the tail holds work */
-	/* so urgent wakeups spread to an idle CPU instead of queueing */
-	/* behind a busy owner, while repeats keep warmth first when */
-	/* held with headroom so steady work stays on cache without */
-	/* stacking. Gives idle when fresh or when the tail is empty */
-	/* and idle is allowed and live else the cached owner when still */
-	/* allowed and live with headroom else selected when allowed */
-	/* and live with headroom else the least loaded allowed CPU */
-	/* from a bounded scan with early exit on idle when held else */
+	/* Placement with hot, idle, warm, least, first in one place. */
+	/* Hot stays keep the last CPU first with headroom so steady */
+	/* work stays, else idle spreads wakeups with no scan, else warm */
+	/* stays keep the last CPU with headroom, else the least loaded */
+	/* allowed CPU from a bounded scan with early exit on idle else */
 	/* first when allowed and live else error with no drain check */
-	/* so spread stays cheap with warmth under load. The scan folds */
-	/* the held idle pick with early exit, so no held repeat waits */
-	/* behind a busy owner while an idle CPU stays free. The hint */
-	/* stays revalidated inside the hint lookup with the move gate */
-	/* keeping safety, so no outer recheck is needed and a stale */
-	/* view never widens the target class. The chosen CPU holds the */
-	/* share with per CPU rows and rejects park with no run. */
+	/* so spread stays cheap with stays under load. The scan folds */
+	/* the idle pick with early exit, so no repeat waits behind a */
+	/* busy owner while an idle CPU stays free. The chosen CPU */
+	/* holds the share with per CPU rows and rejects park with no */
+	/* run. */
 	{
 		s32 idle;
-		s32 hint;
 		s32 least;
 		s32 first;
 		bool done = false;
-		bool held = flow_saturated();
-		bool fresh = READ_ONCE(tctx->exhaust) == 0;
-		if (!held || fresh) {
+		u32 packed = READ_ONCE(tctx->exhaust);
+		u32 warmth = flow_warmth_get(packed);
+		s32 warm_cpu = flow_warm_cpu_get(packed);
+		if (warmth >= (u32)FLOW_HOT && warm_cpu >= 0 &&
+		    flow_cpu_ok(p, warm_cpu) &&
+		    flow_cpu_headroom(warm_cpu)) {
+			cpu = warm_cpu;
+			done = true;
+		}
+		if (!done) {
 			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (flow_cpu_ok(p, idle)) {
 				cpu = idle;
 				done = true;
 			}
 		}
-		if (!done && (hint = flow_place_hint((u32)p->pid, p)) >= 0 &&
-		    (!held || flow_cpu_headroom(hint))) {
-			cpu = hint;
+		if (!done && warmth >= (u32)FLOW_WARM &&
+		    warmth < (u32)FLOW_HOT && warm_cpu >= 0 &&
+		    flow_cpu_ok(p, warm_cpu) &&
+		    flow_cpu_headroom(warm_cpu)) {
+			cpu = warm_cpu;
 			done = true;
 		}
-		if (!done && sel >= 0 && flow_cpu_ok(p, sel) &&
-		    (!held || flow_cpu_headroom(sel))) {
-			cpu = sel;
-			done = true;
-		}
-		if (!done && held &&
+		if (!done &&
 		    (least = flow_least_loaded(p)) >= 0 &&
 		    flow_cpu_ok(p, least)) {
 			cpu = least;

@@ -6,15 +6,15 @@
 //! Holds the daemon mirror, the admission oracle, the wire
 //! protocol. The daemon keeps one quantized queue, one admitted
 //! row per CPU, one hint table as a read only mirror for tests plus
-//! observability, plus one head view per low key byte and one owner
-//! view per task as oracle for the core hints. Order follows deadlines solely
+//! observability, plus one head view per low key byte and one packed
+//! repeat per task as oracle for the core stays. Order follows deadlines solely
 //! through the quantized tree. The BPF core parks plus admits plus
 //! orders synchronously with no roundtrip. Dispatch moves every parked
 //! task in least key then deadline order with rejects at the top key
 //! last with affinity plus liveness checks and parks stale entries. The head view keeps the earliest
 //! deadline then smallest pid per low key byte so picks skip tail walks
-//! in the core, while the owner view steers repeat parks toward the
-//! previous CPU with mask still checked in the core. Mirror cost stays on the
+//! in the core, while the packed repeat steers hot plus warm stays
+//! toward the last CPU with mask still checked in the core. Mirror cost stays on the
 //! userspace thread within five hundred twelve entries and stays off
 //! the BPF hot path. Times stay in the monotonic domain shared with
 //! the core. Parks include backpressure drops, ring drops, userspace
@@ -74,6 +74,24 @@ pub const TASKS_CAP: usize = 4096;
 /// Grace past deadline before lost complete collection in nanos.
 /// Eight periods cover slow wakeups while leaked shares still return.
 pub const STALE_GRACE_NS: u64 = 128_000_000;
+/// Shift for the last CPU plus one in the packed repeat word.
+/// Two step bits sit below with nine CPU bits above.
+pub const WARM_CPU_SHIFT: u32 = 2;
+/// Mask for the last CPU plus one in the packed repeat word.
+/// Zero means unknown with five hundred eleven usable ids.
+#[cfg(test)]
+pub const WARM_CPU_MASK: u32 = 511;
+/// Shift for the stay count in the packed repeat word.
+/// Eleven skips two step bits plus nine CPU bits.
+pub const WARMTH_SHIFT: u32 = 11;
+/// Largest stay count kept saturating at the top.
+pub const WARMTH_MAX: u32 = 255;
+/// Stay count marking a warm repeat with one stay.
+pub const WARM: u32 = 1;
+/// Stay count marking a hot repeat with three stays.
+pub const HOT: u32 = 3;
+/// Mask for the repeat step in the packed repeat word.
+pub const EXHAUST_STEP_MASK: u32 = 3;
 /// Guard that depth growth needs a position index for removal.
 /// Removal scans one key queue within depth, so deeper bounds need an
 /// index to stay cheap.
@@ -101,6 +119,62 @@ const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 const _: () = assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
 /// Guard that one batch never exceeds the probe budget.
 const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
+/// Guard that the warmth pack mirrors the BPF header.
+/// Two step bits plus nine CPU bits plus eight stay bits fill nineteen
+/// with thirteen reserved at the top.
+const _: () = assert!(WARM_CPU_SHIFT == 2);
+const _: () = assert!(WARMTH_SHIFT == 11);
+const _: () = assert!(WARMTH_MAX == 255);
+const _: () = assert!(WARM == 1);
+const _: () = assert!(HOT == 3);
+
+/// Repeat step in the packed repeat word with two bits.
+/// Zero takes two milliseconds, one takes four, two and above take eight.
+pub fn exhaust_step(exhaust: u32) -> u32 {
+    exhaust & EXHAUST_STEP_MASK
+}
+
+/// Stay count in the packed repeat word with eight bits.
+/// Zero stays cold with no stick, one to two stay warm, three and above
+/// stay hot saturating at the top.
+#[cfg(test)]
+pub fn warmth_get(exhaust: u32) -> u32 {
+    (exhaust >> WARMTH_SHIFT) & WARMTH_MAX
+}
+
+/// Last CPU in the packed repeat word with empty for unknown.
+/// Nine bits hold CPU plus one with zero for unknown, so the top CPU
+/// wraps to unknown and stays cold.
+#[cfg(test)]
+pub fn warm_cpu_get(exhaust: u32) -> Option<u32> {
+    let raw = (exhaust >> WARM_CPU_SHIFT) & WARM_CPU_MASK;
+    if raw == 0 {
+        return None;
+    }
+    Some(raw - 1)
+}
+
+/// Bump the stay count on the same CPU else reset to cold.
+/// Same CPU grows toward hot saturating at the top, while a move clears
+/// to cold so the next stay must warm again. The step stays kept with
+/// thirteen reserved bits held zero. Mirror of the core helper with the
+/// core as authority.
+#[cfg(test)]
+pub fn warmth_bump_or_reset(old: u32, cpu: u32) -> u32 {
+    if u64::from(cpu) >= super::slot::MAX_CPUS {
+        return old;
+    }
+    let step = old & EXHAUST_STEP_MASK;
+    let warm = warmth_get(old);
+    let prev = warm_cpu_get(old);
+    let next_warm = if prev == Some(cpu) {
+        warm.saturating_add(1).min(WARMTH_MAX)
+    } else {
+        0
+    };
+    let raw = (cpu + 1) & WARM_CPU_MASK;
+    step | (raw << WARM_CPU_SHIFT) | (next_warm << WARMTH_SHIFT)
+}
 
 /// Admission decision for one enqueue.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,22 +259,21 @@ pub struct TaskState {
 /// stored share each. Adds pair with drops exactly once per admit
 /// in the mirror. Head holds one earliest pid per low key byte for
 /// the core pick hint with overwrite on a new key, mirroring the
-/// core slot view. Owner holds the last admit CPU per task for the
-/// core placement hint with mask still checked in the core. Single
-/// sequence tracks notifies plus queued tasks with no split. Disable
-/// plus exit notifies drop shares through complete in the mirror.
-/// Task rows stay capped at the task bound with hints cleared on
-/// remove so both stay bounded. Stale rows collect past deadline plus
-/// grace for observability solely. Queue drops fold into parks plus
-/// the drop gauge with zero wire change. Core owns dispatch with the
-/// mirror never gating it.
+/// core slot view. Packed repeats hold two step bits plus nine last
+/// CPU bits plus eight stay bits for the stay tiers with mask still
+/// checked in the core. Single sequence tracks notifies plus queued
+/// tasks with no split. Disable plus exit notifies drop shares through
+/// complete in the mirror. Task rows stay capped at the task bound
+/// with heads cleared on remove so both stay bounded. Stale rows
+/// collect past deadline plus grace for observability solely. Queue
+/// drops fold into parks plus the drop gauge with zero wire change.
+/// Core owns dispatch with the mirror never gating it.
 pub struct Daemon {
     pub(crate) order: FlowVeb,
     hints: HintTable,
     admitted: Vec<u64>,
     pub(crate) tasks: HashMap<u32, TaskState>,
     pub(crate) head_hint: HashMap<u32, (u32, u32, u64, u32)>,
-    pub(crate) mask_hint: HashMap<u32, u32>,
     exhaust: HashMap<u32, u32>,
     wire_last: u64,
     /// Tasks admitted under the use bound.
@@ -225,7 +298,6 @@ impl Daemon {
             admitted: vec![0u64; super::slot::MAX_CPUS as usize],
             tasks: HashMap::new(),
             head_hint: HashMap::new(),
-            mask_hint: HashMap::new(),
             exhaust: HashMap::new(),
             wire_last: 0,
             admits: 0,
@@ -284,109 +356,81 @@ impl Daemon {
         Some((pid, deadline, cpu))
     }
 
-    /// Cached owner CPU for one task with empty for unknown tasks.
-    /// Mirror of the core placement view for tests solely. The core
-    /// revalidates mask plus live before use with no core effect here.
+    /// Pick one CPU with the stay count plus load in one place.
+    /// Hot stays keep the last CPU first with headroom, else the core
+    /// takes idle with no mirror pick, else warm stays keep the last
+    /// CPU with headroom, else the least loaded allowed CPU from a
+    /// bounded scan of sixteen with early exit on idle, else the first
+    /// allowed. The load probe folds queued depth plus running plus the
+    /// admitted sum like the core, with zero meaning headroom. Idle
+    /// stays BPF only with no mirror pick, so this mirror matches the
+    /// post idle order where warmth leads with headroom. The scan bound
+    /// matches the core sixteen with the core order by CPU id
+    /// approximated here by allowed order. The core revalidates mask
+    /// plus live before use, so a stale view never widens the target
+    /// class here. Mirror only with the core as authority.
     #[cfg(test)]
-    pub fn hint_for(&self, pid: u32) -> Option<u32> {
-        if !self.tasks.contains_key(&pid) {
-            return None;
-        }
-        self.mask_hint.get(&pid).copied()
-    }
-
-    /// Pick one CPU with the cached owner view plus load in one place.
-    /// Empty tails take the cached owner when still allowed, else the
-    /// previous CPU when still allowed, else the first allowed. Held
-    /// tails keep the cached owner solely with headroom, else the
-    /// previous CPU solely with headroom, else the least loaded
-    /// allowed CPU from a bounded scan of sixteen with early exit on
-    /// idle, else the first allowed. The load probe folds queued depth
-    /// plus running plus the admitted sum like the core, with zero
-    /// meaning headroom. Idle stays BPF only with no mirror pick, and
-    /// fresh tasks take idle first even when held in the core, while
-    /// this mirror matches the held branch post idle where warmth
-    /// leads with headroom. The scan bound matches the core sixteen
-    /// with the core order by CPU id approximated here by allowed
-    /// order. The core revalidates mask plus live before use, so a
-    /// stale view never widens the target class here. Mirror only with
-    /// the core as authority.
-    #[cfg(test)]
-    pub fn place_for(
-        &self,
-        pid: u32,
-        prev: u32,
-        allowed: &[u32],
-        load: impl Fn(u32) -> u64,
-    ) -> u32 {
+    pub fn place_for(&self, pid: u32, allowed: &[u32], load: impl Fn(u32) -> u64) -> u32 {
         if allowed.is_empty() {
-            return prev;
+            return 0;
         }
-        let held = !self.order.is_empty();
-        let hinted = self
-            .mask_hint
-            .get(&pid)
-            .filter(|h| {
-                allowed.contains(h)
-                    && (**h as u64) < super::slot::MAX_CPUS
-                    && self.tasks.contains_key(&pid)
-            })
-            .copied();
-        if let Some(hint) = hinted
-            && (!held || load(hint) == 0)
+        let packed = self.exhaust.get(&pid).copied().unwrap_or(0);
+        let warmth = warmth_get(packed);
+        let warm_cpu = warm_cpu_get(packed);
+        if warmth >= HOT
+            && let Some(cpu) = warm_cpu
+            && allowed.contains(&cpu)
+            && (cpu as u64) < super::slot::MAX_CPUS
+            && self.tasks.contains_key(&pid)
+            && load(cpu) == 0
         {
-            return hint;
+            return cpu;
         }
-        if allowed.contains(&prev) && (!held || load(prev) == 0) {
-            return prev;
+        if (WARM..HOT).contains(&warmth)
+            && let Some(cpu) = warm_cpu
+            && allowed.contains(&cpu)
+            && (cpu as u64) < super::slot::MAX_CPUS
+            && self.tasks.contains_key(&pid)
+            && load(cpu) == 0
+        {
+            return cpu;
         }
-        if held {
-            let mut best = allowed[0];
-            let mut best_load = u64::MAX;
-            for cpu in allowed.iter().take(16) {
-                let depth = load(*cpu);
-                if depth < best_load {
-                    best_load = depth;
-                    best = *cpu;
-                }
-                if depth == 0 {
-                    break;
-                }
+        let mut best = allowed[0];
+        let mut best_load = u64::MAX;
+        for cpu in allowed.iter().take(16) {
+            let depth = load(*cpu);
+            if depth < best_load {
+                best_load = depth;
+                best = *cpu;
             }
-            return best;
+            if depth == 0 {
+                break;
+            }
         }
-        allowed[0]
+        best
     }
 
     /// True when the shared tail holds work for tests solely.
-    /// Mirrors the core backlog check where empty takes idle first,
-    /// held repeats take warmth first, and held fresh tasks still take
-    /// idle first with no extra threshold. The threshold stays at zero
-    /// depth in both, so empty means idle first and any held work means
-    /// repeats take warmth first. Idle stays BPF only since the live
-    /// pick needs the live mask with no replay, while this mirror
-    /// covers the warmth order plus the threshold.
+    /// Mirrors the core backlog check with zero depth meaning empty.
+    /// Idle stays BPF only since the live pick needs the live mask with
+    /// no replay, while this mirror covers the stay order plus the
+    /// threshold.
     #[cfg(test)]
     pub fn is_saturated(&self) -> bool {
         !self.order.is_empty()
     }
 
-    /// Candidate order for the saturated branch as test oracle.
-    /// Empty lists idle then hint then previous then first, while held
-    /// repeats list hint then previous then least then first, matching
-    /// the core fallback with no extra threshold. Warmth needs headroom
-    /// in both, and the least scan folds idle with early exit, so no
-    /// held repeat waits behind a busy owner while idle stays free.
-    /// Held fresh tasks take idle first like empty through the core pre
-    /// scan, so this names the repeat order for branch coverage solely
-    /// with the core as authority. Idle stays BPF only with no mirror pick.
+    /// Candidate order for the placement tiers as test oracle.
+    /// Hot stays lead before idle, warm stays follow idle, then least
+    /// then first, matching the core fallback with no extra threshold.
+    /// Stay counts need headroom in both, and the least scan folds idle
+    /// with early exit, so no repeat waits behind a busy owner while an
+    /// idle CPU stays free. Idle stays BPF only with no mirror pick, so
+    /// this names the tier order for branch coverage solely with the
+    /// core as authority.
     #[cfg(test)]
-    pub fn branch_order(held: bool) -> [&'static str; 4] {
-        if held {
-            ["hint", "prev", "least", "first"]
-        } else {
-            ["idle", "hint", "prev", "first"]
-        }
+    pub fn branch_order() -> [&'static str; 5] {
+        ["hot", "idle", "warm", "least", "first"]
     }
 
     /// Queue order budget for the remainder gate as test oracle.
@@ -513,20 +557,18 @@ impl Daemon {
     /// once and drop once in the mirror. Held tails admit at the base
     /// share so the ledger never over reserves while wakeups wait,
     /// matching the capped park slice with one rule. Rejects park
-    /// keyed at the top key with the far deadline plus head plus owner
-    /// views, so they drain ordered last with no run. Zero identifiers
-    /// park at once with no table row since zero never keys the tree.
-    /// Stale CPUs plus depth overflow clear the old row then park
-    /// keyed at the top. Table full parks fresh identifiers with no
-    /// row so the map stays capped. Admitted plus rejected parks store
-    /// one head plus one owner view with no extra counter, so later
-    /// oracle picks reuse warmth with mask still checked in the core.
-    /// Fresh tasks take idle first even when held in the core with the
-    /// idle pick staying BPF only, so this mirror keeps hint order
-    /// post idle. The head keeps smallest pid best effort while the
-    /// full scan orders owned then pid. Single sequence pairs each row
-    /// with core task state plus the order row with no split. Mirror
-    /// only with the core as authority.
+    /// keyed at the top key with the far deadline plus head, so they
+    /// drain ordered last with no run. Zero identifiers park at once
+    /// with no table row since zero never keys the tree. Stale CPUs
+    /// plus depth overflow clear the old row then park keyed at the
+    /// top. Table full parks fresh identifiers with no row so the map
+    /// stays capped. Admitted plus rejected parks store one head with
+    /// no extra counter. Fresh tasks spread through idle in the core
+    /// with the idle pick staying BPF only, so this mirror keeps the
+    /// post idle order. The head keeps smallest pid best effort while
+    /// the full scan orders owned then pid. Single sequence pairs each
+    /// row with core task state plus the order row with no split.
+    /// Mirror only with the core as authority.
     pub fn handle_enqueue(
         &mut self,
         pid: u32,
@@ -563,11 +605,13 @@ impl Daemon {
         let deadline = super::edf::deadline_at(now, period);
         let raw = self.exhaust.get(&pid).copied().unwrap_or(0);
         // Held tails admit at the base share, matching the capped park
-        // slice in the core with one rule and no extra knob.
-        let exhaust = if raw != 0 && self.order.len() != 0 {
+        // slice in the core with one rule and no extra knob. The stay
+        // count stays packed with the step masked here.
+        let step = exhaust_step(raw);
+        let exhaust = if step != 0 && !self.order.is_empty() {
             0
         } else {
-            raw
+            step
         };
         let share = super::edf::slice_permille_for(period, exhaust);
         let held = self.admitted(cpu);
@@ -595,22 +639,20 @@ impl Daemon {
         AdmitDecision::Admit { share, cpu }
     }
 
-    /// Store one head plus one owner view for the oracle hints.
+    /// Store one head view for the oracle hint.
     /// Head keeps the earliest deadline then smallest pid per low key
     /// byte with overwrite on a new key, mirroring the core slot view.
-    /// Owner holds the last admit CPU per task with overwrite. Out of
-    /// bound CPUs store nothing, matching the core reject path. Keyed
-    /// rejects at the far deadline store the same head plus owner with
-    /// the far deadline keeping them last, so dispatch still picks them
-    /// by key then deadline. Both stay best effort with validation
-    /// before use and clear on remove, so stale views fall back with no
-    /// wrong move. The head keeps smallest pid best effort while the
-    /// full scan orders owned then pid.
+    /// Out of bound CPUs store nothing, matching the core reject path.
+    /// Keyed rejects at the far deadline store the same head with the
+    /// far deadline keeping them last, so dispatch still picks them by
+    /// key then deadline. It stays best effort with validation before
+    /// use and clear on remove, so stale views fall back with no wrong
+    /// move. The head keeps smallest pid best effort while the full
+    /// scan orders owned then pid.
     pub(crate) fn store_views(&mut self, pid: u32, deadline: u64, share: u64, cpu: u32) {
         if (cpu as u64) >= super::slot::MAX_CPUS {
             return;
         }
-        self.mask_hint.insert(pid, cpu);
         if deadline == 0 {
             return;
         }
@@ -638,17 +680,19 @@ impl Daemon {
     /// Models the charged stopping path. Drops the stored share exactly
     /// once in the mirror. Misses count when monotonic time passes
     /// release plus deadline on a blocking complete. A runnable end
-    /// steps the repeat count toward eight milliseconds capped there
+    /// steps the repeat step toward eight milliseconds capped there
     /// solely while the tail reads empty, while a held tail keeps the
     /// base so a long slice never delays waiting wakeups, and a
-    /// blocking end clears it, so steady work keeps the base slice with
-    /// no extra threshold. The bump runs solely when the task row was
-    /// present plus the tail reads empty, so zero plus unknown
-    /// identifiers pass through with no bump since run charge stays BPF
-    /// only. Disable plus exit skip the bump in the core and use the
-    /// dedicated handlers here. Runtime charge stays in the core total.
-    /// Unknown identifiers pass through after order cleanup, so a lost
-    /// enqueue never leaks a share. Mirror only.
+    /// blocking end clears the packed word, so steady work keeps the
+    /// base slice with no extra threshold. The step bump keeps the stay
+    /// count plus the last CPU, while the blocking clear drops all
+    /// three. The bump runs solely when the task row was present plus
+    /// the tail reads empty, so zero plus unknown identifiers pass
+    /// through with no bump since run charge stays BPF only. Disable
+    /// plus exit skip the bump in the core and use the dedicated
+    /// handlers here. Runtime charge stays in the core total. Unknown
+    /// identifiers pass through after order cleanup, so a lost enqueue
+    /// never leaks a share. Mirror only.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         if pid == 0 {
             return;
@@ -664,13 +708,16 @@ impl Daemon {
         self.remove_row(pid);
         if runnable {
             // Held tails keep the base, matching the core gate on the
-            // shared tail depth with no extra knob.
-            if self.order.len() == 0 {
+            // shared tail depth with no extra knob. The stay count plus
+            // the last CPU stay kept here.
+            if self.order.is_empty() {
                 let cur = self.exhaust.get(&pid).copied().unwrap_or(0);
-                if cur < super::slice::QUANTUM_MAX_STEP {
-                    self.exhaust.insert(pid, cur + 1);
+                let step = exhaust_step(cur);
+                if step < super::slice::QUANTUM_MAX_STEP {
+                    let next = (cur & !EXHAUST_STEP_MASK) | (step + 1);
+                    self.exhaust.insert(pid, next);
                 } else {
-                    self.exhaust.insert(pid, super::slice::QUANTUM_MAX_STEP);
+                    self.exhaust.insert(pid, cur);
                 }
             }
         } else {
@@ -683,13 +730,13 @@ impl Daemon {
     }
 
     /// Handle one enable as mirror oracle.
-    /// Clears task plus order plus views plus repeat count with no
-    /// counters, so a reused pid restarts at the base slice like the
-    /// core enable path that drops the tree key plus the order row plus
-    /// the head slot. Zero passes with no change. Missing rows still
-    /// clear a lingering repeat count, so a prior runnable end never
-    /// leaks into the next life of the pid. Mirror only with the core
-    /// as authority.
+    /// Clears task plus order plus views plus the packed word with no
+    /// counters, so a reused pid restarts cold at the base slice like
+    /// the core enable path that drops the tree key plus the order row
+    /// plus the head slot. Zero passes with no change. Missing rows
+    /// still clear a lingering packed word, so a prior runnable end
+    /// never leaks into the next life of the pid. Mirror only with the
+    /// core as authority.
     #[cfg(test)]
     pub fn handle_enable(&mut self, pid: u32) {
         if pid == 0 {
@@ -702,8 +749,8 @@ impl Daemon {
     /// Handle one disable as mirror oracle.
     /// Drops the stored share plus order plus views with no repeat
     /// bump and no miss, matching the core disable path that finishes
-    /// with runnable set but keeps exhaust for the next enable to
-    /// clear. Zero plus unknown pass through with no bump since the
+    /// with runnable set but keeps the packed word for the next enable
+    /// to clear. Zero plus unknown pass through with no bump since the
     /// drop stays idempotent. Mirror only with the core as authority.
     #[cfg(test)]
     pub fn handle_disable(&mut self, pid: u32) {
@@ -716,8 +763,8 @@ impl Daemon {
     /// Handle one exit as mirror oracle.
     /// Drops the stored share plus order plus views with no repeat
     /// bump, matching the core exit path that shares the disable
-    /// finish without touching exhaust. Mirror only with the core as
-    /// authority.
+    /// finish without touching the packed word. Mirror only with the
+    /// core as authority.
     #[cfg(test)]
     pub fn handle_exit(&mut self, pid: u32) {
         if pid == 0 {
@@ -726,11 +773,56 @@ impl Daemon {
         self.remove_row(pid);
     }
 
-    /// Repeat count for one task with zero for fresh tasks.
-    /// Mirror of the core exhaust view for tests solely.
+    /// Packed repeat word for one task with zero for fresh tasks.
+    /// Holds two step bits plus nine last CPU bits plus eight stay bits
+    /// with thirteen reserved at zero. Mirror of the core packed view
+    /// for tests solely.
     #[cfg(test)]
     pub fn exhaust_for(&self, pid: u32) -> u32 {
         self.exhaust.get(&pid).copied().unwrap_or(0)
+    }
+
+    /// Repeat step for one task with zero for fresh tasks.
+    /// Masks the packed word to two bits for slice math. Mirror only
+    /// with the core as authority.
+    #[cfg(test)]
+    pub fn step_for(&self, pid: u32) -> u32 {
+        exhaust_step(self.exhaust_for(pid))
+    }
+
+    /// Stay count for one task with zero for cold tasks.
+    /// Masks the packed word to eight bits. Cold stays at zero, warm
+    /// holds one to two, hot holds three and above. Mirror only with
+    /// the core as authority.
+    #[cfg(test)]
+    pub fn warmth_for(&self, pid: u32) -> u32 {
+        warmth_get(self.exhaust_for(pid))
+    }
+
+    /// Last CPU for one task with empty for unknown tasks.
+    /// Mirrors the core stay owner for tests solely. The core
+    /// revalidates mask plus live before use with no core effect here.
+    #[cfg(test)]
+    pub fn warm_cpu_for(&self, pid: u32) -> Option<u32> {
+        warm_cpu_get(self.exhaust_for(pid))
+    }
+
+    /// Note one running stay as mirror oracle.
+    /// Bumps the stay count on the same CPU else resets to cold with
+    /// the step kept, mirroring the core running path. Unknown plus
+    /// out of bound CPUs pass through with no change. Mirror only with
+    /// the core as authority.
+    #[cfg(test)]
+    pub fn note_running(&mut self, pid: u32, cpu: u32) {
+        if pid == 0 {
+            return;
+        }
+        if u64::from(cpu) >= super::slot::MAX_CPUS {
+            return;
+        }
+        let old = self.exhaust.get(&pid).copied().unwrap_or(0);
+        let next = warmth_bump_or_reset(old, cpu);
+        self.exhaust.insert(pid, next);
     }
 
     /// Collect stale rows past deadline plus grace as mirror only.
@@ -1018,8 +1110,6 @@ mod tests {
         let head = d.head_for(65535).unwrap();
         assert_eq!(head.0, 8);
         assert_eq!(head.1, u64::MAX);
-        assert_eq!(d.hint_for(8), Some(0));
-        assert_eq!(d.hint_for(9), Some(0));
     }
 
     #[test]
@@ -1168,17 +1258,22 @@ mod tests {
     }
 
     #[test]
-    fn hint_drives_place_with_allowed_check() {
+    fn stay_drives_place_with_allowed_check() {
         let mut d = Daemon::new();
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
-        assert_eq!(d.hint_for(3), Some(2));
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
-        assert_eq!(d.place_for(3, 0, &[0, 1], |_| 0), 0);
-        assert_eq!(d.place_for(9, 1, &[0, 1], |_| 0), 1);
+        // Cold stays fall through to least, so an empty stay never pins.
+        assert_eq!(d.warmth_for(3), 0);
+        assert_eq!(d.place_for(3, &[0, 1, 2], |_| 0), 0);
+        // Warm stays keep the last CPU with headroom after idle.
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        assert_eq!(d.warmth_for(3), 1);
+        assert_eq!(d.warm_cpu_for(3), Some(2));
+        assert_eq!(d.place_for(3, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(d.place_for(3, &[0, 1], |_| 0), 0);
         d.handle_complete(3, 2_000_000, true);
-        assert_eq!(d.hint_for(3), None);
-        assert_eq!(d.place_for(3, 1, &[0, 1], |_| 0), 1);
+        assert_eq!(d.warm_cpu_for(3), Some(2));
     }
 
     #[test]
@@ -1258,44 +1353,47 @@ mod tests {
     }
 
     #[test]
-    fn saturated_tail_keeps_warmth_first() {
+    fn saturated_tail_keeps_stay_first() {
         let mut d = Daemon::new();
         assert!(!d.is_saturated());
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
-        assert_eq!(d.place_for(3, 1, &[0, 1, 2], |_| 0), 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        assert!(d.warmth_for(3) >= HOT);
+        assert_eq!(d.place_for(3, &[0, 1, 2], |_| 0), 2);
         d.handle_complete(3, 2_000_000, true);
         assert!(!d.is_saturated());
     }
 
     #[test]
-    fn saturation_branches_split_idle_first_and_warmth_first() {
-        // Empty tail takes idle first while any held work takes warmth
-        // first, with the threshold at zero depth and the idle pick
-        // staying BPF only. The mirror covers the threshold plus the
-        // warmth order here.
+    fn saturation_branches_split_idle_first_and_stay_first() {
+        // Hot stays lead before idle while warm stays follow idle, with
+        // the idle pick staying BPF only. The mirror covers the tier
+        // order here.
         assert_eq!(
-            Daemon::branch_order(false),
-            ["idle", "hint", "prev", "first"]
-        );
-        assert_eq!(
-            Daemon::branch_order(true),
-            ["hint", "prev", "least", "first"]
+            Daemon::branch_order(),
+            ["hot", "idle", "warm", "least", "first"]
         );
         let mut d = Daemon::new();
         assert!(!d.is_saturated());
-        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "idle");
+        assert_eq!(Daemon::branch_order()[1], "idle");
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
-        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "hint");
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
-        assert_eq!(d.place_for(3, 1, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(Daemon::branch_order()[0], "hot");
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        assert!(d.warmth_for(3) >= HOT);
+        assert_eq!(d.place_for(3, &[0, 1, 2], |_| 0), 2);
         d.handle_complete(3, 2_000_000, true);
         assert!(!d.is_saturated());
-        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "idle");
+        assert_eq!(Daemon::branch_order()[1], "idle");
     }
 
     #[test]
@@ -1470,47 +1568,52 @@ mod tests {
     }
 
     #[test]
-    fn fresh_tail_still_spreads_while_repeat_holds_warmth() {
-        // Fresh tasks hold no repeat count, so the core takes idle first
-        // even when held while repeats keep warmth first. The mirror
-        // keeps hint order post idle with the idle pick staying BPF only.
+    fn fresh_tail_still_spreads_while_repeat_holds_stay() {
+        // Fresh tasks hold no stay count, so the mirror falls through to
+        // least while the core takes idle first. Warm repeats keep their
+        // CPU after idle with the idle pick staying BPF only.
         let mut d = Daemon::new();
         let got = d.handle_enqueue(1, 0, 0, 1_000_000, 551);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.exhaust_for(9), 0);
         assert!(d.is_saturated());
-        assert_eq!(d.place_for(1, 0, &[0, 1], |_| 0), 0);
+        assert_eq!(d.place_for(1, &[0, 1], |_| 0), 0);
         d.handle_complete(1, 2_000_000, true);
-        assert_eq!(d.exhaust_for(1), 1);
+        assert_eq!(d.step_for(1), 1);
         let got = d.handle_enqueue(2, 0, 1, 2_500_000, 552);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
-        assert_eq!(Daemon::branch_order(true)[0], "hint");
-        assert_eq!(Daemon::branch_order(false)[0], "idle");
+        assert_eq!(Daemon::branch_order()[0], "hot");
+        assert_eq!(Daemon::branch_order()[1], "idle");
     }
 
     #[test]
-    fn overloaded_hint_falls_to_least_loaded() {
-        // A busy owner never keeps the task while held: an idle peer
-        // wins first, else the least loaded allowed CPU wins. Warmth
+    fn overloaded_stay_falls_to_least_loaded() {
+        // A busy owner never keeps the task: the stay tiers need
+        // headroom, else the least loaded allowed CPU wins. Warmth
         // returns once the owner reads idle again.
         let mut d = Daemon::new();
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        d.note_running(3, 2);
+        assert!(d.warmth_for(3) >= HOT);
         let busy = |cpu: u32| match cpu {
             2 => 5,
             1 => 3,
             _ => 0,
         };
-        assert_eq!(d.place_for(3, 1, &[0, 1, 2], busy), 0);
+        assert_eq!(d.place_for(3, &[0, 1, 2], busy), 0);
         let full = |cpu: u32| match cpu {
             2 => 5,
             0 => 3,
             _ => 1,
         };
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2], full), 1);
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(d.place_for(3, &[0, 1, 2], full), 1);
+        assert_eq!(d.place_for(3, &[0, 1, 2], |_| 0), 2);
     }
 
     #[test]
@@ -1529,6 +1632,109 @@ mod tests {
             }
             (20 - cpu) as u64
         };
-        assert_eq!(d.place_for(9, 7, &allowed, load), 15);
+        assert_eq!(d.place_for(9, &allowed, load), 15);
+    }
+
+    #[test]
+    fn stay_saturates_at_top_with_step_kept() {
+        // Repeats on one CPU grow toward hot saturating at the top with
+        // the step kept and reserved bits held zero.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 2, 1_000_000, 701);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.step_for(1), 1);
+        for _ in 0..300 {
+            d.note_running(1, 2);
+        }
+        assert_eq!(d.warmth_for(1), WARMTH_MAX);
+        assert_eq!(d.warm_cpu_for(1), Some(2));
+        assert_eq!(d.step_for(1), 1);
+        assert_eq!(d.exhaust_for(1) >> 19, 0);
+        d.note_running(1, 2);
+        assert_eq!(d.warmth_for(1), WARMTH_MAX);
+    }
+
+    #[test]
+    fn migrate_resets_stay_to_cold() {
+        // A move clears to cold with the new CPU stored, so the next
+        // stay must warm again.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 2, 1_000_000, 711);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        assert!(d.warmth_for(1) >= WARM);
+        d.note_running(1, 5);
+        assert_eq!(d.warmth_for(1), 0);
+        assert_eq!(d.warm_cpu_for(1), Some(5));
+        assert_eq!(d.step_for(1), 0);
+        d.note_running(1, 5);
+        assert_eq!(d.warmth_for(1), 1);
+    }
+
+    #[test]
+    fn blocking_end_clears_stay_to_cold() {
+        // A blocking end drops the packed word, so the next life starts
+        // cold at the base slice.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 2, 1_000_000, 721);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        assert!(d.warmth_for(1) >= WARM);
+        d.handle_complete(1, 8_000_000, false);
+        assert_eq!(d.exhaust_for(1), 0);
+        assert_eq!(d.warmth_for(1), 0);
+        assert_eq!(d.warm_cpu_for(1), None);
+    }
+
+    #[test]
+    fn enable_clears_stay_for_pid_reuse() {
+        // Enable clears the packed word, so a reused pid never inherits
+        // the prior stay.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 2, 1_000_000, 731);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        assert!(d.warmth_for(1) >= WARM);
+        d.handle_enable(1);
+        assert_eq!(d.exhaust_for(1), 0);
+        assert_eq!(d.warmth_for(1), 0);
+        d.note_running(1, 2);
+        assert_eq!(d.warmth_for(1), 0);
+    }
+
+    #[test]
+    fn tier_ordering_keeps_hot_before_warm() {
+        // Hot stays win first with headroom, warm stays win after idle
+        // with headroom, cold falls to least then first. The idle pick
+        // stays BPF only, so the mirror checks the post idle order.
+        assert_eq!(
+            Daemon::branch_order(),
+            ["hot", "idle", "warm", "least", "first"]
+        );
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 2, 1_000_000, 741);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        // Cold falls to least with all idle.
+        assert_eq!(d.warmth_for(1), 0);
+        assert_eq!(d.place_for(1, &[0, 1, 2], |_| 0), 0);
+        // Warm keeps its CPU after idle.
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        assert_eq!(d.warmth_for(1), 1);
+        assert_eq!(d.place_for(1, &[0, 1, 2], |_| 0), 2);
+        // Hot keeps its CPU before idle.
+        d.note_running(1, 2);
+        d.note_running(1, 2);
+        assert!(d.warmth_for(1) >= HOT);
+        assert_eq!(d.place_for(1, &[0, 1, 2], |_| 0), 2);
+        // A busy owner falls to least.
+        let busy = |cpu: u32| if cpu == 2 { 1 } else { 0 };
+        assert_eq!(d.place_for(1, &[0, 1, 2], busy), 0);
     }
 }

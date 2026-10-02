@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Head plus placement hints for the flow core.
+ * Head hint for the flow core.
  *
  * Holds one head entry per low key byte with the earliest deadline
- * then smallest pid for that slot, plus one placement entry per task
- * hash with the last admitted CPU. The head lets the least pick try
- * one cached pid with a single task read instead of a full tail walk,
- * while the placement hint steers the next park toward the previous
- * owner when still allowed. The head skips the owned tiebreak, so the
+ * then smallest pid for that slot. The head lets the least pick try
+ * one cached pid with a single task read instead of a full tail walk.
+ * The head skips the owned tiebreak, so the
  * smallest pid wins within the same key plus deadline while the full
  * scan still uses owned then pid. The head stays best effort with the
  * scan as the tiebreak authority, so a head hit may name a different
  * pid than the scan would when owned differs with key plus deadline
- * equal. Both stay best effort with
+ * equal. It stays best effort with
  * validation before use and no extra counter, so stale views fall
  * back with no wrong move. Heads clear on ordered plus fallback moves
  * plus the teardown drop, so a running pid never lingers as a head.
@@ -29,22 +27,12 @@ struct flow_head {
 	u32 owner;
 	u32 pad;
 };
-struct flow_place {
-	u32 pid;
-	u32 cpu;
-};
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 256);
 	__type(key, u32);
 	__type(value, struct flow_head);
 } head_by_low SEC(".maps");
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1024);
-	__type(key, u32);
-	__type(value, struct flow_place);
-} place_by_pid SEC(".maps");
 /* Head store with earliest deadline then smallest pid in one place. */
 /* Gives the cached head for the low byte, keeping the earliest */
 /* deadline then smallest pid for the same key and overwriting on a */
@@ -208,57 +196,4 @@ static __noinline void flow_head_clear(u32 pid, u32 key)
 	WRITE_ONCE(h->pid, 0);
 	WRITE_ONCE(h->deadline, 0);
 	WRITE_ONCE(h->owner, 0);
-}
-/* Placement store with task hash in one place. */
-/* Holds the last admitted CPU for the task hash with overwrite, so */
-/* the next park can try the previous owner when still allowed. */
-/* Best effort with no clear, since revalidation drops stale views. */
-/* Noinline with scalar inputs so the admit path verifies once. */
-static __noinline void flow_place_store(u32 pid, u32 cpu)
-{
-	u32 slot;
-	struct flow_place *h;
-	if (pid == 0)
-		return;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		return;
-	slot = pid & 1023;
-	if (slot >= 1024)
-		return;
-	h = bpf_map_lookup_elem(&place_by_pid, &slot);
-	if (!h)
-		return;
-	WRITE_ONCE(h->pid, pid);
-	WRITE_ONCE(h->cpu, cpu);
-}
-/* Placement hint with mask revalidation in one place. */
-/* Gives the cached CPU solely when it still matches the task pid */
-/* with live plus allowed, so a pinned task reuses its owner while */
-/* other tasks fall back with no wrong CPU. Safety stays with the */
-/* caller recheck plus the move affinity gate. Noinline so both */
-/* placement paths verify once. */
-static __noinline s32 flow_place_hint(u32 pid,
-	const struct task_struct *p)
-{
-	u32 slot;
-	struct flow_place *h;
-	u32 cpu;
-	if (pid == 0)
-		return -1;
-	if (!p)
-		return -1;
-	slot = pid & 1023;
-	if (slot >= 1024)
-		return -1;
-	h = bpf_map_lookup_elem(&place_by_pid, &slot);
-	if (!h)
-		return -1;
-	if (READ_ONCE(h->pid) != pid)
-		return -1;
-	cpu = READ_ONCE(h->cpu);
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		return -1;
-	if (!flow_cpu_ok(p, (s32)cpu))
-		return -1;
-	return (s32)cpu;
 }

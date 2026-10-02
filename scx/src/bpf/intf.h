@@ -20,8 +20,9 @@
  * the margin with the owner slice still long, so urgent arrivals
  * preempt longer runs with at most one kick per park and no storm
  * while near ties plus nearly done owners never bounce. Placement
- * keeps warmth solely with headroom else the least loaded allowed
- * CPU from a bounded scan, so repeats reuse cache without stacking.
+ * keeps hot stays first with headroom else idle else warm stays with
+ * headroom else the least loaded allowed CPU from a bounded scan, so
+ * steady work stays while wakeups still spread without stacking.
  * Dispatch moves every parked task in global
  * deadline order up to sixteen per pass with no sequence gate and
  * no CPU gate. Each pass picks the least key then deadline then owned
@@ -134,6 +135,18 @@ enum flow_consts {
 	/* plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
+	/* Repeat step keeps two bits with three levels and no knob. */
+	FLOW_EXHAUST_STEP_MASK = 3ULL,
+	/* Last CPU plus one keeps nine bits with zero for unknown. */
+	FLOW_WARM_CPU_SHIFT = 2ULL,
+	FLOW_WARM_CPU_MASK = 511ULL,
+	/* Warmth score keeps eight bits saturating at the top. */
+	FLOW_WARMTH_SHIFT = 11ULL,
+	FLOW_WARMTH_MAX = 255ULL,
+	/* Warm needs one stay while hot needs three stays. Cold stays */
+	/* at zero with no stick. */
+	FLOW_WARM = 1ULL,
+	FLOW_HOT = 3ULL,
 };
 struct flow_task_ctx {
 	u64 run_at;
@@ -272,11 +285,55 @@ static __always_inline u64 flow_deadline_at(u64 now,
 {
 	return flow_sat_add(now, period);
 }
+static __always_inline u32 flow_exhaust_step(u32 exhaust)
+{
+	return exhaust & (u32)FLOW_EXHAUST_STEP_MASK;
+}
+static __always_inline u32 flow_warmth_get(u32 exhaust)
+{
+	return (exhaust >> (u32)FLOW_WARMTH_SHIFT) &
+	    (u32)FLOW_WARMTH_MAX;
+}
+static __always_inline s32 flow_warm_cpu_get(u32 exhaust)
+{
+	u32 raw = (exhaust >> (u32)FLOW_WARM_CPU_SHIFT) &
+	    (u32)FLOW_WARM_CPU_MASK;
+	if (!raw)
+		return -1;
+	return (s32)(raw - 1U);
+}
+/* Bump warmth on same CPU else reset to cold with the step kept. */
+/* Same CPU grows toward hot saturating at the top, while a move */
+/* clears to cold so the next stay must warm again. The top CPU */
+/* wraps to unknown and stays cold, which is rare and fail closed. */
+static __always_inline u32 flow_warmth_bump_or_reset(u32 old,
+	s32 cpu)
+{
+	u32 step = old & (u32)FLOW_EXHAUST_STEP_MASK;
+	u32 warm = (old >> (u32)FLOW_WARMTH_SHIFT) &
+	    (u32)FLOW_WARMTH_MAX;
+	u32 raw = (old >> (u32)FLOW_WARM_CPU_SHIFT) &
+	    (u32)FLOW_WARM_CPU_MASK;
+	s32 prev = raw ? (s32)(raw - 1U) : -1;
+	u32 nwarm;
+	u32 nraw;
+	if (cpu < 0 || (u64)cpu >= (u64)FLOW_MAX_CPUS)
+		return old;
+	if (prev == cpu)
+		nwarm = warm >= (u32)FLOW_WARMTH_MAX ?
+		    (u32)FLOW_WARMTH_MAX : warm + 1U;
+	else
+		nwarm = 0;
+	nraw = ((u32)cpu + 1U) & (u32)FLOW_WARM_CPU_MASK;
+	return step | (nraw << (u32)FLOW_WARM_CPU_SHIFT) |
+	    (nwarm << (u32)FLOW_WARMTH_SHIFT);
+}
 static __always_inline u64 flow_quantum_ns(u32 exhaust)
 {
-	if (exhaust == 0)
+	u32 step = flow_exhaust_step(exhaust);
+	if (step == 0)
 		return (u64)FLOW_QUANTUM_NS;
-	if (exhaust == 1)
+	if (step == 1)
 		return (u64)FLOW_QUANTUM_MID_NS;
 	return (u64)FLOW_QUANTUM_MAX_NS;
 }

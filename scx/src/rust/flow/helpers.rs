@@ -7,7 +7,7 @@
 //! single exit through one return. Every admit pairs an add with a
 //! drop exactly once in the mirror. Every remove pairs share drop,
 //! order remove, task clear, view clear in one place. Every reject
-//! parks keyed at the top key with order insert plus view store plus
+//! parks keyed at the top key with order insert plus head store plus
 //! parks accounting, mirroring the core reject path. Zero plus capped
 //! parks stay rowless with counts solely. Callers reach all three
 //! through here so a missed cleanup cannot leak shares or linger keys
@@ -18,16 +18,16 @@ use super::Daemon;
 use super::runtime::AdmitDecision;
 
 impl Daemon {
-    /// Park keyed at the top key with order plus view store.
-    /// Stores the far deadline with the top key plus one head plus one
-    /// owner view when the CPU fits, mirroring the core reject path so
-    /// rejects drain ordered last. Zero identifiers park with no row
-    /// change since zero never keys the tree. Capped tables park fresh
-    /// identifiers with no row change so the map stays capped. Depth
-    /// full parks keep the task row plus views with no order insert so
-    /// order stays capped while the task cap still holds. Callers pass
-    /// the enqueue sequence plus CPU plus now for the stored row.
-    /// Callers return the parked decision at once.
+    /// Park keyed at the top key with order plus head store.
+    /// Stores the far deadline with the top key plus one head when the
+    /// CPU fits, mirroring the core reject path so rejects drain ordered
+    /// last. Zero identifiers park with no row change since zero never
+    /// keys the tree. Capped tables park fresh identifiers with no row
+    /// change so the map stays capped. Depth full parks keep the task
+    /// row plus views with no order insert so order stays capped while
+    /// the task cap still holds. Callers pass the enqueue sequence plus
+    /// CPU plus now for the stored row. Callers return the parked
+    /// decision at once.
     pub(crate) fn reject_park(
         &mut self,
         pid: u32,
@@ -87,7 +87,7 @@ impl Daemon {
     /// Drops the stored share then clears the order row then clears the
     /// task row plus cached views. Complete plus stale collection use
     /// this so admitted sums never leak and stale order never runs.
-    /// Missing rows pass through with no state change. Repeat count
+    /// Missing rows pass through with no state change. Packed repeat
     /// stays untouched here like the core drop, so only the blocking
     /// complete plus the enable path clear it. Best effort with the
     /// core as authority.
@@ -98,16 +98,15 @@ impl Daemon {
         self.clear_views(pid);
     }
 
-    /// Clear cached head plus owner views for one task.
-    /// Drops the owner view plus any low byte slot pointing at the pid,
-    /// so a removed task never lingers as a hint. Zero identifiers pass
-    /// through with no change. Best effort with validation before use,
-    /// so a missed clear still falls back with no wrong move.
+    /// Clear the cached head view for one task.
+    /// Drops any low byte slot pointing at the pid, so a removed task
+    /// never lingers as a head. Zero identifiers pass through with no
+    /// change. Best effort with validation before use, so a missed
+    /// clear still falls back with no wrong move.
     fn clear_views(&mut self, pid: u32) {
         if pid == 0 {
             return;
         }
-        self.mask_hint.remove(&pid);
         let stale: Vec<u32> = self
             .head_hint
             .iter()

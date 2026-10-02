@@ -11,8 +11,13 @@ use crate::flow::DISPATCH_FLOOD_PROBES;
 use crate::flow::DISPATCH_FLOOD_QUEUED;
 use crate::flow::DISPATCH_PROBES;
 use crate::flow::HINT_MAX;
+use crate::flow::HOT;
 use crate::flow::PERIOD_NS;
 use crate::flow::QUANTUM_NS;
+use crate::flow::WARM;
+use crate::flow::WARM_CPU_SHIFT;
+use crate::flow::WARMTH_MAX;
+use crate::flow::WARMTH_SHIFT;
 use crate::flow::WEIGHT_BASE;
 use crate::flow::WEIGHT_MAX;
 use crate::flow::WEIGHT_MIN;
@@ -105,6 +110,21 @@ impl Config {
         }
         if DISPATCH_PROBES != 20 {
             bail!("probe bound bad");
+        }
+        if WARM_CPU_SHIFT != 2 {
+            bail!("warm cpu shift bad");
+        }
+        if WARMTH_SHIFT != 11 {
+            bail!("warmth shift bad");
+        }
+        if WARMTH_MAX != 255 {
+            bail!("warmth max bad");
+        }
+        if WARM != 1 {
+            bail!("warm bad");
+        }
+        if HOT != 3 {
+            bail!("hot bad");
         }
         Ok(())
     }
@@ -242,6 +262,25 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
             crate::flow::cgrp::HINT_MAX
         );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARM_CPU_SHIFT,
+            crate::flow::WARM_CPU_SHIFT
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARMTH_SHIFT,
+            crate::flow::WARMTH_SHIFT
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARMTH_MAX,
+            crate::flow::WARMTH_MAX
+        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_WARM, crate::flow::WARM);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_HOT, crate::flow::HOT);
+        assert_eq!(crate::flow::WARM_CPU_SHIFT, 2);
+        assert_eq!(crate::flow::WARMTH_SHIFT, 11);
+        assert_eq!(crate::flow::WARMTH_MAX, 255);
+        assert_eq!(crate::flow::WARM, 1);
+        assert_eq!(crate::flow::HOT, 3);
     }
 
     #[test]
