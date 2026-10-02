@@ -17,7 +17,10 @@ pub const HINT_MAX: u64 = 4096;
 /// periods, so the hint tunes admission with no share use.
 #[cfg(test)]
 pub fn hint_period_us(weight: u32) -> u64 {
-    let w = weight.clamp(crate::flow_slice::WEIGHT_MIN, crate::flow_slice::WEIGHT_MAX);
+    let w = weight.clamp(
+        crate::flow::slice::WEIGHT_MIN,
+        crate::flow::slice::WEIGHT_MAX,
+    );
     if w < 64 {
         32_000
     } else if w < 128 {

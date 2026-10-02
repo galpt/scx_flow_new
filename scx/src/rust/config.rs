@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
-            crate::flow_cgrp::HINT_MAX
+            crate::flow::cgrp::HINT_MAX
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS as u64,

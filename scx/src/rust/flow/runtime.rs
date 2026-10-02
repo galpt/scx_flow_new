@@ -12,7 +12,10 @@
 /// Zero or oversize shares fail closed to the nearer bound.
 #[cfg(test)]
 pub fn clamp_share(w: u32) -> u32 {
-    w.clamp(crate::flow_slice::WEIGHT_MIN, crate::flow_slice::WEIGHT_MAX)
+    w.clamp(
+        crate::flow::slice::WEIGHT_MIN,
+        crate::flow::slice::WEIGHT_MAX,
+    )
 }
 
 /// Advanced runtime after one execution segment.
@@ -24,7 +27,7 @@ pub fn clamp_share(w: u32) -> u32 {
 #[cfg(test)]
 pub fn runtime_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
     let w = clamp_share(weight) as u64;
-    let base = crate::flow_slice::WEIGHT_BASE as u64;
+    let base = crate::flow::slice::WEIGHT_BASE as u64;
     let q = delta / w;
     if q > u64::MAX / base {
         return u64::MAX;
@@ -38,8 +41,8 @@ pub fn runtime_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
 /// to 1 to 16384 with no trap.
 #[cfg(test)]
 pub fn runtime_advance_nice(vruntime: u64, delta: u64, nice: i32) -> u64 {
-    let w = crate::flow_slice::weight_of(nice);
-    runtime_advance(vruntime, delta, crate::flow_slice::clamp_weight(w))
+    let w = crate::flow::slice::weight_of(nice);
+    runtime_advance(vruntime, delta, crate::flow::slice::clamp_weight(w))
 }
 
 #[cfg(test)]

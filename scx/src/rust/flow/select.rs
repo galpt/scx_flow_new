@@ -17,7 +17,7 @@ pub const SHARED_SCAN_BOUND: u32 = 8;
 /// an idle view.
 #[cfg(test)]
 pub fn drain_ns(depth: u64) -> u64 {
-    depth.saturating_mul(crate::flow_slice::QUANTUM_NS)
+    depth.saturating_mul(crate::flow::slice::QUANTUM_NS)
 }
 
 /// True when one CPU can finish its drain before a deadline.

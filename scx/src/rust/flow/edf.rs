@@ -49,7 +49,7 @@ pub fn slice_permillle(period: u64) -> u64 {
     if period == 0 {
         return 0;
     }
-    crate::flow_slice::QUANTUM_NS * 1000 / period
+    crate::flow::slice::QUANTUM_NS * 1000 / period
 }
 
 /// Admission share of one task from the hint period always.
