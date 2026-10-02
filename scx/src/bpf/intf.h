@@ -87,15 +87,22 @@ enum flow_consts {
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
 	/* Dispatch batch of 16 moves per pass with no knob. One pass */
-	/* moves one task per tier for four moves at most, so the ops */
-	/* table holds every pass with room and no shared math. */
+	/* moves up to sixteen across tiers with one pop per priority */
+	/* tier plus the overflow fill to budget, so the ops table holds */
+	/* every pass with room and no shared math. */
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
 	/* Flood bound of 4 ordered moves past 128 queued with no knob. */
 	/* Past deep backlog ordered stops after four moves with queue */
 	/* order covering the remainder to sixteen, so a deep tail never */
-	/* burns sixteen double scans in one pass. */
+	/* burns sixteen double scans in one pass. A step cap of 32 */
+	/* entries bounds the single scan regardless of moves, so a */
+	/* mask miss walk never holds RCU across the whole queue. */
 	FLOW_DISPATCH_FLOOD_PROBES = 4ULL,
 	FLOW_DISPATCH_FLOOD_QUEUED = 128ULL,
+	/* Scan step bound of 32 entries with no knob. Caps visited */
+	/* entries per pass regardless of moved, so fail open progress */
+	/* stays while a miss heavy tail cannot walk the whole queue. */
+	FLOW_DISPATCH_SCAN_STEPS = 32ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Admission bound of 950 per mille with no knob. Holds use */
 	/* under ninety five percent, so admitted work keeps idle time */

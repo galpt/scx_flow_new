@@ -24,7 +24,7 @@
 /* a leftover segment still trains later deadlines. Outlined to keep */
 /* disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
-	struct flow_task_ctx *tctx, s32 cpu)
+	struct flow_task_ctx *tctx)
 {
 	u64 start;
 	u64 now;
@@ -32,7 +32,6 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	u64 got;
 	if (!tctx)
 		return;
-	(void)cpu;
 	start = READ_ONCE(tctx->run_at);
 	if (start == 0)
 		return;

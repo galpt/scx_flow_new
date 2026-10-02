@@ -200,7 +200,7 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	/* The gauge drop follows the claim with no owner gate. */
 	/* A stored share drops here too, so a task that leaves without */
 	/* a stop never leaks its debit. */
-	flow_charge_leftover(p, tctx, cpu);
+	flow_charge_leftover(p, tctx);
 	flow_admit_drop_stored(tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
@@ -215,7 +215,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */
 	/* A stored share drops here too with no leak on exit. */
-	flow_charge_leftover(p, tctx, cpu);
+	flow_charge_leftover(p, tctx);
 	flow_admit_drop_stored(tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }

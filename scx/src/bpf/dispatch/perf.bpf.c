@@ -27,15 +27,20 @@ struct {
 } cpu_perf_last SEC(".maps");
 /* Depth probe with own plus local plus running and no shared use. */
 /* Pure read with no set, so a bad read drops with no boost and a */
-/* missing queue stays idle. Guards live in the set core, so the */
-/* probe stays small with one duty. An invalid CPU reads bad ids that */
-/* drop to idle, then the core skips with no set. */
+/* missing queue stays idle. Guards live here as well as in the set */
+/* core, so a stale CPU reads idle even when called apart. An invalid */
+/* CPU reads idle at once with no queue poll. */
 static __noinline bool flow_perf_busy(s32 cpu)
 {
 	s32 own;
 	s32 local;
 	u64 depth = 0;
 	struct flow_cpu_state *st;
+	/* Unknown CPUs hold no depth, so skip with no poll. */
+	if (cpu < 0)
+		return false;
+	if (!flow_cpu_live((u32)cpu))
+		return false;
 	/* Own plus local shape the depth with two polls only and no tier */
 	/* pre scan, so the pass pays no shared walk. A bad read drops */
 	/* with no boost, so a missing queue stays idle. */

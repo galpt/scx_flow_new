@@ -44,7 +44,7 @@ pub fn weight_of(nice: i32) -> u32 {
     if nice == 0 {
         return 1024;
     }
-    if nice < -20 || nice > 19 {
+    if !(-20..=19).contains(&nice) {
         return 1024;
     }
     WEIGHT_TABLE[(nice + 20) as usize] as u32
