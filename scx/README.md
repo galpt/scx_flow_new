@@ -44,7 +44,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 
 - Rules live in `src/bpf/intf.h`.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`.
-- Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood plus step cap against the kernel logic, since no kernel test harness runs here.
+- Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood plus tier probes plus step cap against the kernel logic, since no kernel test harness runs here.
 - Admission lives in `src/bpf/main/deadline.bpf.c` with share, row, drop parts plus a mirror in `src/rust/flow_edf.rs` for tests only. The mirror keeps the same hint share plus bound math with no effect on order.
 - Task burst and runtime bookkeeping lives in `src/rust/flow_runtime.rs` and `src/rust/flow_slice.rs` with checks in `src/rust/config.rs`.
 - Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
@@ -57,9 +57,9 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - State is `88B`, `8B`, `8B`, `120B`.
 - Needs kernels, `7.2` series and up.
 - Priority and FIFO never mix on one queue, since the kernel keeps one order per queue and a mix fails closed with an error.
-- Mask wins on drain, since affinity gates every move with priority pops blocking on an unmatching head while the overflow scan skips to the next match.
+- Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match within four probes while the overflow scan skips to the next match.
 - Overflow stays FIFO with fail open drain, so stale deadlines never block live work and every pass still moves queued tasks in queue order up to `32` per pass.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline, so light work never takes a fast CPU that other work needs.
 - Flood past `128` queued caps ordered moves at `8` with queue order covering the rest to `32` plus `32` visited entries at most, so a deep tail never burns extra scans in one pass.
-- Affinity stress with many foreign heads stalls priority tiers for that pass while overflow still skips, so keep pinned work narrow and test with mixed masks before trusting tail latency.
+- Affinity stress with many foreign heads past four per tier stalls that tier for the pass while overflow still skips, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Preempt sends at most one kick per park when the arrival leads by `500us` with more than `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.

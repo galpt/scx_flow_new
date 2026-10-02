@@ -3,11 +3,12 @@
  * Move candidate for the dispatch pass.
  *
  * Holds one task move with no reference and no release. Callers pass
- * the iterator plus task from the single scan, so one scan moves up
- * to budget in queue order with no rescan per move. The BPF mask test
- * gates affinity with liveness proven by the caller, so a mismatched
- * entry skips with no kernel error while mask still wins on drain.
- * Runs inline so the iterator stays in the caller with no extra cost.
+ * the iterator plus task from the scan, so the tier bounded skip plus
+ * the overflow single scan share one move with no rescan per move.
+ * The BPF mask test gates affinity with liveness proven by the caller,
+ * so a mismatched entry skips with no kernel error while mask still
+ * wins on drain. Runs inline so the iterator stays in the caller with
+ * no extra cost.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

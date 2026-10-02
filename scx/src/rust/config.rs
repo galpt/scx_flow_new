@@ -49,12 +49,12 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 2ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
-    /// The batch stays fixed at 32 with flood 8 past 128 plus a step
-    /// cap of 32 visited entries. Admission stays hint based always
-    /// under 950 per mille with base capacity 1024. Queues
-    /// hold 512 local plus 8 node plus machine plus overflow with ids
-    /// in the 0x5100 region. Hints hold 4096 flat rows with no timer
-    /// wait. Preempt needs 500us margin plus 500us tail strictly.
+    /// The batch stays fixed at 32 with flood 8 past 128 plus tier
+    /// probes 4 plus a step cap of 32 visited entries. Admission stays
+    /// hint based always under 950 per mille with base capacity 1024.
+    /// Queues hold 512 local plus 8 node plus machine plus overflow
+    /// with ids in the 0x5100 region. Hints hold 4096 flat rows with
+    /// no timer wait. Preempt needs 500us margin plus 500us tail strictly.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -94,6 +94,9 @@ impl Config {
         }
         if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64 != 8 {
             bail!("flood probes bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_TIER_PROBES as u64 != 4 {
+            bail!("tier probes bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64 != 128 {
             bail!("flood queued bad");
@@ -229,6 +232,10 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64,
             8
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_TIER_PROBES as u64,
+            4
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64,

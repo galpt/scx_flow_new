@@ -33,6 +33,9 @@ pub const MAX_NODES: u64 = 8;
 /// Flood probes at 8. Caps ordered moves past deep backlog.
 #[cfg(test)]
 pub const FLOOD_PROBES: u64 = 8;
+/// Tier probes at 4. Caps visited heads per priority tier with skips.
+#[cfg(test)]
+pub const TIER_PROBES: u64 = 4;
 /// Flood queued at 128. Past this depth ordered caps at eight.
 #[cfg(test)]
 pub const FLOOD_QUEUED: u64 = 128;
@@ -127,12 +130,17 @@ mod tests {
     #[test]
     fn flood_and_batch_match_header() {
         assert_eq!(FLOOD_PROBES, 8);
+        assert_eq!(TIER_PROBES, 4);
         assert_eq!(FLOOD_QUEUED, 128);
         assert_eq!(SCAN_STEPS, 32);
         assert_eq!(DISPATCH_BATCH, 32);
         assert_eq!(
             FLOOD_PROBES,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64
+        );
+        assert_eq!(
+            TIER_PROBES,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_TIER_PROBES as u64
         );
         assert_eq!(
             FLOOD_QUEUED,

@@ -2,20 +2,21 @@
 /*
  * Dispatch op.
  *
- * Each pass drains local plus node plus machine with one pop each in
+ * Each pass drains local plus node plus machine with one move each in
  * priority order plus overflow with one single scan in queue order up
  * to thirty two with no shared math. The kernel keeps each priority queue
- * list in deadline order, so each pop takes the earliest deadline with
- * mask wins on drain and no BPF sort. A pop blocks on an unmatching
- * head, so one foreign task can stall its tier for that pass. The
- * overflow tail stays FIFO with one single scan and mask wins on
- * drain, so stale work never stalls live work since the scan skips
- * unmatching entries through the BPF mask gate. Past deep backlog
- * the single scan stops after eight moves and after thirty two visited
- * entries regardless of moves, so one pass never burns thirty two scans
- * on a deep tail and never walks the whole queue on mask misses. The budget
- * hoists the remaining dispatch slots once at entry with a clamp to
- * thirty two, so every tier shares one exact bound with no overfill. Per tier moves count once
+ * list in deadline order, so each tier takes the earliest matching
+ * deadline within four probes with mask wins on drain and no BPF sort.
+ * Each tier skips up to four heads, so one foreign task never stalls
+ * its tier for that pass. The overflow tail stays FIFO with one single
+ * scan and mask wins on drain, so stale work never stalls live work
+ * since the scan skips unmatching entries through the shared BPF mask
+ * gate. Past deep backlog the single scan stops after eight moves and
+ * after thirty two visited entries regardless of moves, so one pass
+ * never burns thirty two scans on a deep tail and never walks the whole
+ * queue on mask misses. The budget hoists the remaining dispatch slots
+ * once at entry with a clamp to thirty two, so every tier shares one
+ * exact bound with no overfill. Per tier moves count once
  * with no lock through one exit, and the level follows after all moves
  * with the same CPU only, so idle cannot be skipped. An empty queue
  * leaves at once with no scan, so idle stays cheap. See intf.h for the
@@ -23,11 +24,11 @@
  * the deadline choice.
  *
  * The pass splits across dispatch/probes, drain, failopen, perf plus
- * helpers/move plus helpers/finish with one RCU section in the single
- * scan. The single scan stays noinline with scalar inputs and a bounded
- * loop, so the verifier stays small with no unrolled caller tree, while
- * the single task move plus the account stay inline so the deepest path
- * keeps its call frames small.
+ * helpers/move plus helpers/finish with one RCU section per tier scan
+ * plus the single overflow scan. Each scan stays noinline with scalar
+ * inputs and a bounded loop, so the verifier stays small with no
+ * unrolled caller tree, while the single task move plus the account
+ * stay inline so the deepest path keeps its call frames small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -79,22 +80,23 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	node_dsq = flow_node_dsq(node);
 	machine_dsq = flow_machine_dsq();
 	left = budget;
-	/* Local tier first with one pop and no scan on empty. The kernel */
-	/* holds deadline order plus mask wins, so the head moves at once. */
+	/* Local tier first with one move within four probes and no scan */
+	/* on empty. The kernel holds deadline order plus mask wins, so */
+	/* the earliest matching deadline moves at once. */
 	if (left) {
 		local_moved = flow_move_one(own_local, cpu);
 		if (local_moved > left)
 			local_moved = left;
 		left -= local_moved;
 	}
-	/* Node tier next with one pop and no scan on empty. */
+	/* Node tier next with one move within four probes and no scan on empty. */
 	if (left) {
 		node_moved = flow_move_one(node_dsq, cpu);
 		if (node_moved > left)
 			node_moved = left;
 		left -= node_moved;
 	}
-	/* Machine tier next with one pop and no scan on empty. */
+	/* Machine tier next with one move within four probes and no scan on empty. */
 	if (left) {
 		machine_moved = flow_move_one(machine_dsq, cpu);
 		if (machine_moved > left)
@@ -107,9 +109,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* the scan stops after eight moves and after thirty two visited */
 	/* entries regardless of moves, so a deep tail never burns */
 	/* thirty two scans at once and a miss heavy tail never walks the */
-	/* whole queue under RCU. Unlike the priority pops that block on */
-	/* an unmatching head, this scan skips unmatching entries through */
-	/* the BPF mask gate with the remaining budget as the move bound. */
+	/* whole queue under RCU. Tiers plus overflow share the mask gate */
+	/* with the remaining budget as the move bound, and tiers cap at */
+	/* four probes each while this scan caps at thirty two. */
 	if (left)
 		over_moved = flow_overflow_fill(cpu, left);
 	flow_account_local(local_moved);

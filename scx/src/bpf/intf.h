@@ -92,6 +92,11 @@ enum flow_consts {
 	/* table holds every pass with room and no shared math. The pass */
 	/* clamps remaining slots to this bound with no overfill. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
+	/* Tier probe bound of 4 entries per tier with no knob. Each */
+	/* priority tier visits at most four heads with skips, so one */
+	/* foreign head never stalls the tier while the scan stays small. */
+	/* Shares the step style with the overflow scan cap below. */
+	FLOW_DISPATCH_TIER_PROBES = 4ULL,
 	/* Flood bound of 8 ordered moves past 128 queued with no knob. */
 	/* Past deep backlog ordered stops after eight moves with queue */
 	/* order covering the remainder to thirty two, so a deep tail */

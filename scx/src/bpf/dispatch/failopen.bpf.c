@@ -15,12 +15,12 @@
  * beyond the two breaks. Live stays proven once at entry through the
  * dispatch gate, so the scan pays no live branch. The BPF mask test
  * gates affinity on the move, so a mismatched entry skips with no
- * kernel error while mask still wins on drain. Unlike
- * the priority tiers that block on an unmatching head, this scan
- * skips unmatching entries, so one foreign task never stalls live
- * work. The move bound stays at remaining budget else eight past deep
- * backlog with the step cap at thirty two, so the fill never overfills.
- * Runs noinline with scalar CPU plus budget and a bounded scan,
+ * kernel error while mask still wins on drain. Tiers skip the same
+ * way within four probes through the shared move, so one foreign task
+ * never stalls live work while this scan covers the remainder with a
+ * larger step cap. The move bound stays at remaining budget else eight
+ * past deep backlog with the step cap at thirty two, so the fill never
+ * overfills. Runs noinline with scalar CPU plus budget and a bounded scan,
  * so the verifier stays small with no unrolled caller tree and no
  * rescan per move.
  *
