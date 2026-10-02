@@ -11,27 +11,25 @@
  * liveness gate every move through the same mask as the fallback path
  * with live proven once at entry, so the target class never widens.
  * Ordered checks run first so every parked task stays preferred, while
- * the fallback drain moves solely when the tree reads empty plus a
- * zero move plus persistent stale up to the batch bound. A partial
- * ordered pass leaves the rest for ordered while the tree still holds
- * keys, so live work never slips to FIFO in the same pass. Deep
- * backlog still drains sixteen ordered per pass with the earliest
- * moves kept in order. One head read plus task state picks the least
- * with fallback to the tail scan, so hits skip the walk while only the
- * picked pid takes a reference.
+ * the fallback drain moves the remainder in queue order up to the
+ * batch bound. Past deep backlog ordered stops after four moves with
+ * queue order covering the remainder to sixteen, so a deep tail never
+ * burns sixteen double scans in one pass. One head read plus task
+ * state picks the least with fallback to the tail scan, so hits skip
+ * the walk while only the picked pid takes a reference.
  * Drops run at teardown, so the hot path keeps no deletes and the
  * core drops shares through stopping plus disable plus exit. Empty
  * queue leaves at once with no scan so idle stays cheap. Stall drains
- * solely through the same empty plus corrupt plus stale fallback with
- * mask checks and no order gate so runnable tasks never stall on live
- * work. Fail open stays as the empty plus corrupt plus stale canary
- * since task state plus tree land synchronously and solely genuine
- * misses reach it. Over moves count progress with ordered moves
- * counting vEB hits plus fallback moves counting FIFO parks so every
- * dispatched task lands in one bucket with the two arms split by the
- * existing counters and no new wire. Level follows after ordered
- * moves plus fallback with the same CPU only and no call on steady
- * through one exit, so idle cannot be skipped.
+ * up to sixteen in queue order with mask checks and no order gate so
+ * runnable tasks never stall on live work. Fail open stays rare since
+ * task state plus tree land synchronously and solely genuine misses
+ * reach it with deep backlog draining through the same queue order.
+ * Over moves count progress with ordered moves counting vEB hits plus
+ * fallback moves counting FIFO parks so every dispatched task lands
+ * in one bucket with the two arms split by the existing counters and
+ * no new wire. Level follows after ordered moves plus fallback with
+ * the same CPU only and no call on steady through one exit, so idle
+ * cannot be skipped.
  *
  * The pass splits across dispatch/probes, failopen, drain, ordered,
  * head, perf files with one RCU section per scan. Ordered plus drain
@@ -86,13 +84,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		    (u64)moved);
 		__sync_fetch_and_add(&flow_stats.veb_hits,
 		    (u64)moved);
-		/* A partial ordered pass leaves the rest for ordered */
-		/* while the tree still holds keys, so live work never */
-		/* slips to FIFO here. The fallback below runs solely */
-		/* when the tree reads empty with corrupt plus stale */
-		/* remainder, keeping the canary honest with no new wire. */
+		/* Ordered first keeps admits preferred while the queue */
+		/* order remainder drains rejects plus overflow within the */
+		/* same sixteen, so deep backlog never starves live work */
+		/* behind early deadlines. */
 		if (moved < (u32)FLOW_DISPATCH_MAX_BATCH &&
-		    veb_min() == (u32)FLOW_VEB_EMPTY) {
+		    scx_bpf_dsq_nr_queued(flow_overflow_dsq()) != 0) {
 			u32 left = (u32)FLOW_DISPATCH_MAX_BATCH - moved;
 			extra = veb_fail_open_drain(cpu, left);
 			flow_fifo_account(extra);

@@ -32,22 +32,24 @@
  * entry check as the fallback path, so the target class never widens.
  * Ordered checks run first
  * so every parked task stays preferred, while the fallback drain moves
- * solely the empty plus corrupt plus stale remainder in queue order up
- * to the batch bound. The pass keeps no flood probe cap, so deep
- * backlog still drains sixteen ordered per pass with the earliest
- * moves kept in order. A recheck miss skips stale and keeps walking
- * within the batch with the fallback left for persistent stale. Stale
+ * the remainder in queue order up to the batch bound. Past deep
+ * backlog ordered stops after four moves with queue order covering the
+ * remainder to sixteen, so a deep tail never burns sixteen double
+ * scans in one pass. A recheck miss skips stale and keeps walking
+ * within the batch with the queue order drain left for the remainder.
+ * Stale
  * entries park and the core drops shares through stopping plus
  * disable plus exit plus gate fail paths exactly once. Empty queue
- * leaves at once with no scan. Stall drains solely through the same
- * fallback with liveness plus affinity checks and no order gate so
+ * leaves at once with no scan. Stall drains up to sixteen in queue
+ * order with liveness plus affinity checks and no order gate so
  * runnable tasks never stall on live work.
  * Ordered moves count one vEB hit plus fallback moves count one
  * FIFO park so every dispatched task lands in one bucket with
- * completions counted apart. Fallback stays as the empty plus corrupt
- * plus stale canary since task state plus tree land synchronously and
- * solely genuine misses reach it. Flood backlog still drains sixteen ordered
- * per pass with rejects ordered at the top key. A single tail avoids cross tier moves that would bounce
+ * completions counted apart. Fallback stays rare since task state plus
+ * tree land synchronously with deep backlog draining through the same
+ * queue order. Flood backlog still drains sixteen per pass with
+ * ordered first plus queue order remainder and rejects ordered at the
+ * top key. A single tail avoids cross tier moves that would bounce
  * cache and NUMA locality. Undrained queues hold zero tasks and cost
  * solely at init. Counters use atomic adds from every CPU and stay
  * best effort for observability. Concurrent skips may count twice

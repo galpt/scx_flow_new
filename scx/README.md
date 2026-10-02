@@ -22,7 +22,7 @@ Arrivals pass a gate. Tasks get due times from weight and the core admits under 
 
 ### Queues
 
-One queue holds tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. Fallback covers empty plus corrupt plus stale. Head skips tail walks. Fresh tasks take idle first when held while repeats reuse owner with headroom when allowed. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One queue holds tasks. Each pass moves up to 16 in least key then deadline then owned then pid order, then queue order for the remainder. Past 128 queued ordered caps at four. Head skips tail walks. Fresh tasks take idle first when held while repeats reuse owner with headroom when allowed. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -63,7 +63,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
 - Placement uses idle when live for fresh when held and repeats when empty, else last owner for repeats when held plus allowed plus idle, else the least loaded among the first sixteen CPU ids with idle exit, else first live, so fresh spread while repeats keep warmth without stacking.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
-- Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain ordered at the top key with higher latency.
-- Flood throughput stays bounded by the `2ms` base slice plus queue wait under backlog with grown slices kept for empty tails only, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
+- Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain in queue order up to `16` per pass with higher latency.
+- Flood throughput stays bounded by the `2ms` base slice plus queue wait under backlog with grown slices kept for empty tails only, so a deep flood still shows higher wakeup delay than light load even with ordered plus queue order plus preempt work.
 - Held tails park base, so a grown task parks base under backlog with one capped rule for admits plus rejects.
 - Preempt sends at most one kick per park to the owner when the wakeup holds a row and leads by a margin with slice still long, with a running reject as longer while far rejects never preempt a reject run, so urgent gaps preempt longer runs with no storm.

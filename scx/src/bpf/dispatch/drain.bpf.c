@@ -3,29 +3,29 @@
  * Fail open batch drain for the dispatch pass.
  *
  * Moves the first live affinity matches in queue order up to the
- * exact budget in one scan, so an empty tree plus corrupt plus stale
- * still drains up to sixteen while ordered passes never reach here
- * with live work. Ordered checks run first so every parked task stays
- * preferred, while this fallback step moves solely the canary remainder
- * there. Each move stays affinity gated with drops at teardown, so no
- * dead task runs. Callers pass sixteen on empty tree plus the
- * remainder on moving passes, so the budget stays exact with no clamp.
- * The queue handle stays hoisted once at entry, so the scan pays no
- * dsq lookup. Live stays proven once at entry through the dispatch
- * gate, so the scan pays one mask test per entry with no live branch.
- * Runs noinline with scalar CPU plus budget and a bounded scan so the
- * verifier stays small with no unrolled caller tree and no rescan per
- * move.
+ * exact budget in one scan, so a stalled pass still drains queue
+ * ordered tasks up to sixteen and a moving pass drains the remainder
+ * after ordered work within sixteen. Ordered checks run first so
+ * every parked task stays preferred, while this queue order step moves
+ * the remainder with best effort order there. Each move stays affinity
+ * gated with drops at teardown, so no dead task runs. Callers pass
+ * sixteen on stall plus the remainder on moving passes, so the
+ * budget stays exact with no clamp. The queue handle stays hoisted
+ * once at entry, so the scan pays no dsq lookup. Live stays proven
+ * once at entry through the dispatch gate, so the scan pays one mask
+ * test per entry with no live branch. Runs noinline with scalar CPU
+ * plus budget and a bounded scan so the verifier stays small with no
+ * unrolled caller tree and no rescan per move.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Fail open drain with batch progress and queue order in one place. */
-/* Moves up to the exact budget in queue order in one scan so an */
-/* empty tree still drains up to sixteen and a moving pass drains the */
-/* corrupt plus stale remainder within sixteen. Ordered checks run */
-/* first so every parked task stays preferred, while this fallback */
-/* step moves solely the canary remainder. Noinline with scalar inputs */
-/* so the single scan verifies once apart from the dispatch entry. */
+/* Moves up to the exact budget in queue order in one scan so a */
+/* stalled pass still drains up to sixteen and a moving pass drains */
+/* the remainder within sixteen. Ordered checks run first so every */
+/* parked task stays preferred, while this queue order step moves the */
+/* remainder with best effort order. Noinline with scalar inputs so */
+/* the single scan verifies once apart from the dispatch entry. */
 static __noinline u32 veb_fail_open_drain(s32 cpu, u32 budget)
 {
 	u32 moved = 0;

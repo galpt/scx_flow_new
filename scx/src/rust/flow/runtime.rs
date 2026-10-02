@@ -88,15 +88,15 @@ const _: () = assert!(DISPATCH_BATCH == 16);
 /// Twenty stays as ABI with sixteen moves filling the batch.
 const _: () = assert!(DISPATCH_PROBES == 20);
 /// Guard that the flood stall budget mirrors the BPF header.
-/// Four plus one hundred twenty eight mark deep backlog shape as ABI
-/// with ordered draining sixteen per pass.
+/// Four plus one hundred twenty eight cap ordered past deep backlog
+/// with queue order covering the remainder to sixteen.
 const _: () = assert!(DISPATCH_FLOOD_PROBES == 4);
 /// Guard that the flood queue bound mirrors the BPF header.
-/// Backlog still drains ordered past this depth with the fallback
-/// solely on empty plus corrupt plus stale.
+/// Past this depth ordered caps at four with queue order draining the
+/// remainder to sixteen.
 const _: () = assert!(DISPATCH_FLOOD_QUEUED == 128);
 /// Guard that the flood budget stays inside the probe budget.
-/// Ordered fills sixteen per pass as ABI.
+/// Ordered fills sixteen with queue order covering the remainder.
 const _: () = assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
 /// Guard that one batch never exceeds the probe budget.
 const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
@@ -388,23 +388,31 @@ impl Daemon {
         }
     }
 
-    /// FIFO budget for the remainder gate as test oracle.
-    /// Zero moved drains the full batch as canary, while a partial
-    /// pass drains the rest solely when the tree reads empty after the
-    /// ordered moves. A partial pass with the tree still holding keys
-    /// suppresses FIFO with zero, so live work never slips to FIFO in
-    /// the same pass. The canary stays honest since tree plus state
-    /// land together, so solely empty plus corrupt plus stale reach
-    /// FIFO with the empty read taken after ordered moves in the same
-    /// pass. Mirror only with the core as authority.
+    /// Queue order budget for the remainder gate as test oracle.
+    /// Zero moved drains the full batch, while a partial pass drains
+    /// the rest whenever the tail still holds work after the ordered
+    /// moves. Past deep backlog ordered caps at four with queue order
+    /// covering the remainder to sixteen, so live work never starves
+    /// behind early deadlines in the same pass. Mirror only with the
+    /// core as authority.
     #[cfg(test)]
-    pub fn remainder_budget(moved: usize, tree_empty: bool) -> usize {
-        if moved == 0 {
-            DISPATCH_BATCH
-        } else if moved < DISPATCH_BATCH && tree_empty {
-            DISPATCH_BATCH - moved
+    pub fn remainder_budget(moved: usize, queued: usize) -> usize {
+        if moved >= DISPATCH_BATCH {
+            return 0;
+        }
+        (DISPATCH_BATCH - moved).min(queued)
+    }
+
+    /// Ordered budget past deep backlog as test oracle.
+    /// Past one hundred twenty eight queued ordered caps at four with
+    /// queue order covering the remainder, else ordered fills sixteen.
+    /// Mirror only with the core as authority.
+    #[cfg(test)]
+    pub fn ordered_budget(queued: usize) -> usize {
+        if queued > DISPATCH_FLOOD_QUEUED {
+            DISPATCH_FLOOD_PROBES
         } else {
-            0
+            DISPATCH_BATCH
         }
     }
 
@@ -430,7 +438,7 @@ impl Daemon {
     /// Admits sort before top key rejects with the far deadline last.
     /// The core moves every parked task in least key then deadline
     /// order up to the batch bound with affinity plus liveness checks
-    /// and the fallback solely on empty plus corrupt plus stale.
+    /// and queue order covering the remainder to sixteen.
     /// Mirror only with the core as authority.
     #[cfg(test)]
     pub fn ordered_entries(&self) -> Vec<(u32, u64, u64, u32)> {
@@ -905,9 +913,8 @@ mod tests {
         assert_eq!(DISPATCH_BATCH, 16);
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
-        // Ordered fills sixteen per pass with the fallback solely on
-        // empty plus corrupt plus stale, so deep backlog still drains
-        // in order per pass.
+        // Ordered fills sixteen with queue order covering the remainder,
+        // so deep backlog still drains sixteen per pass in order.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DISPATCH_FLOOD_PROBES + (DISPATCH_BATCH >> 2), 8);
@@ -1287,13 +1294,19 @@ mod tests {
     }
 
     #[test]
-    fn remainder_gate_suppresses_fifo_while_tree_holds_keys() {
-        // A partial ordered pass with the tree still holding keys keeps
-        // the rest for ordered with zero FIFO, so live work never slips
-        // to FIFO in the same pass.
-        assert_eq!(Daemon::remainder_budget(16, false), 0);
-        assert_eq!(Daemon::remainder_budget(10, false), 0);
-        assert_eq!(Daemon::remainder_budget(1, false), 0);
+    fn remainder_drains_queue_order_after_ordered() {
+        // A partial ordered pass drains the rest in queue order whenever
+        // the tail still holds work, so live work never starves behind
+        // early deadlines in the same pass. Past deep backlog ordered
+        // caps at four with queue order covering twelve.
+        assert_eq!(Daemon::remainder_budget(16, 4), 0);
+        assert_eq!(Daemon::remainder_budget(10, 10), 6);
+        assert_eq!(Daemon::remainder_budget(4, 200), 12);
+        assert_eq!(Daemon::remainder_budget(1, 20), 15);
+        assert_eq!(Daemon::ordered_budget(200), 4);
+        assert_eq!(Daemon::ordered_budget(20), 16);
+        assert_eq!(Daemon::ordered_budget(128), 16);
+        assert_eq!(Daemon::ordered_budget(129), 4);
         let mut d = Daemon::new();
         for pid in 1..=20u32 {
             let hint = if pid % 2 == 0 { 4000 } else { 32000 };
@@ -1303,25 +1316,23 @@ mod tests {
         let moved = DISPATCH_BATCH.min(d.queue_len());
         assert_eq!(moved, 16);
         assert!(!d.ordered_entries().is_empty());
-        assert_eq!(Daemon::remainder_budget(moved, false), 0);
+        assert_eq!(Daemon::remainder_budget(4, 20 - 4), 12);
     }
 
     #[test]
-    fn remainder_gate_drains_canary_when_tree_empty() {
-        // Zero moved drains the full batch as canary, while a partial
-        // pass with the tree reading empty after ordered moves drains
-        // the rest. The empty read lands after ordered moves in the same
-        // pass, so solely empty plus corrupt plus stale reach FIFO since
-        // tree plus state land together.
-        assert_eq!(Daemon::remainder_budget(0, true), DISPATCH_BATCH);
-        assert_eq!(Daemon::remainder_budget(0, false), DISPATCH_BATCH);
-        assert_eq!(Daemon::remainder_budget(10, true), DISPATCH_BATCH - 10);
-        assert_eq!(Daemon::remainder_budget(15, true), 1);
-        assert_eq!(Daemon::remainder_budget(16, true), 0);
+    fn remainder_drains_stall_and_partial() {
+        // Zero moved drains the full batch when the tail holds work,
+        // while a partial pass drains the rest. Empty tails drain
+        // nothing. Queue order carries rejects plus overflow there.
+        assert_eq!(Daemon::remainder_budget(0, 16), DISPATCH_BATCH);
+        assert_eq!(Daemon::remainder_budget(0, 0), 0);
+        assert_eq!(Daemon::remainder_budget(10, 10), DISPATCH_BATCH - 10);
+        assert_eq!(Daemon::remainder_budget(15, 5), 1);
+        assert_eq!(Daemon::remainder_budget(16, 4), 0);
         let d = Daemon::new();
         assert_eq!(d.queue_len(), 0);
         assert!(d.order.is_empty());
-        assert_eq!(Daemon::remainder_budget(0, d.order.is_empty()), 16);
+        assert_eq!(Daemon::remainder_budget(0, d.queue_len()), 0);
     }
 
     #[test]

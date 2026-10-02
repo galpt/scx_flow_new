@@ -23,9 +23,8 @@
  * safe. Key plus deadline may match across tasks in the same instant,
  * so the owner view heals to the live owner with pid plus key plus
  * deadline still guarding reuse. A recheck miss skips stale and keeps
- * walking within the batch with the fallback left for empty plus
- * corrupt plus persistent stale, so ordered first keeps every parked
- * task preferred. Stale heads clear on ordered plus fallback moves
+ * walking within the batch with the queue order drain left for the
+ * remainder, so ordered first keeps every parked task preferred. Stale heads clear on ordered plus fallback moves
  * plus the teardown drop, so a running pid never lingers as a head.
  * Drops run at teardown, so the hot path keeps no deletes. Runs
  * noinline with scalar CPU with bounded loops, so the verifier stays
