@@ -10,7 +10,7 @@
  * head, so one foreign task can stall its tier for that pass. The
  * overflow tail stays FIFO with one single scan and mask wins on
  * drain, so stale work never stalls live work since the scan skips
- * unmatching entries through the kernel gated move. Past deep backlog
+ * unmatching entries through the BPF mask gate. Past deep backlog
  * the single scan stops after four moves and after thirty two visited
  * entries regardless of moves, so one pass never burns sixteen scans
  * on a deep tail and never walks the whole queue on mask misses. The budget
@@ -82,21 +82,21 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Local tier first with one pop and no scan on empty. The kernel */
 	/* holds deadline order plus mask wins, so the head moves at once. */
 	if (left) {
-		local_moved = flow_move_one(own_local);
+		local_moved = flow_move_one(own_local, cpu);
 		if (local_moved > left)
 			local_moved = left;
 		left -= local_moved;
 	}
 	/* Node tier next with one pop and no scan on empty. */
 	if (left) {
-		node_moved = flow_move_one(node_dsq);
+		node_moved = flow_move_one(node_dsq, cpu);
 		if (node_moved > left)
 			node_moved = left;
 		left -= node_moved;
 	}
 	/* Machine tier next with one pop and no scan on empty. */
 	if (left) {
-		machine_moved = flow_move_one(machine_dsq);
+		machine_moved = flow_move_one(machine_dsq, cpu);
 		if (machine_moved > left)
 			machine_moved = left;
 		left -= machine_moved;
@@ -109,7 +109,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* sixteen scans at once and a miss heavy tail never walks the */
 	/* whole queue under RCU. Unlike the priority pops that block on */
 	/* an unmatching head, this scan skips unmatching entries through */
-	/* the kernel gated move. */
+	/* the BPF mask gate. */
 	if (left)
 		over_moved = flow_overflow_fill(cpu, left);
 	flow_account_local(local_moved);

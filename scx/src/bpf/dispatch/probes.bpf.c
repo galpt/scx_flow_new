@@ -4,10 +4,10 @@
  *
  * Holds the single affinity check for shared placement checks. Live
  * stays proven once at entry, so the per element cost stays one mask
- * test with no live branch. The overflow scan gates affinity in the
- * kernel move with no BPF test to keep the verifier small, so a BPF
- * miss still fails closed with mask wins on drain. Runs inline so
- * the iterator stays in the caller with no extra call cost.
+ * test with no live branch. The overflow scan plus the tier peek gate
+ * affinity through this BPF test, so a BPF miss skips with no kernel
+ * error while mask still wins on drain. Runs inline so the iterator
+ * stays in the caller with no extra call cost.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
