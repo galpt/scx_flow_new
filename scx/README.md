@@ -43,6 +43,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
+- Changes live in `CHANGELOG.md` with the `4.7.1` bounds.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`.
 - Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood plus tier probes plus step cap against the kernel logic, since no kernel test harness runs here.
 - Admission lives in `src/bpf/main/deadline.bpf.c` with share, row, drop parts plus a mirror in `src/rust/flow_edf.rs` for tests only. The mirror keeps the same hint share plus bound math with no effect on order.

@@ -87,10 +87,11 @@ enum flow_consts {
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
 	/* Dispatch batch of 32 moves per pass with no knob. One pass */
-	/* moves up to thirty two across tiers with one pop per priority */
-	/* tier plus the overflow fill to remaining budget, so the ops */
-	/* table holds every pass with room and no shared math. The pass */
-	/* clamps remaining slots to this bound with no overfill. */
+	/* moves up to thirty two across tiers with one move per priority */
+	/* tier within four probes plus the overflow fill to remaining */
+	/* budget, so the ops table holds every pass with room and no */
+	/* shared math. The pass clamps remaining slots to this bound */
+	/* with no overfill. */
 	FLOW_DISPATCH_MAX_BATCH = 32ULL,
 	/* Tier probe bound of 4 entries per tier with no knob. Each */
 	/* priority tier visits at most four heads with skips, so one */

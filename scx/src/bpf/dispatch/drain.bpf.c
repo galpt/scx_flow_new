@@ -23,8 +23,8 @@
 /* covers the CPU, and the shared move gates affinity with no kernel */
 /* error, so an empty queue returns zero with no scan and no miss */
 /* count. An unmatching head skips to the next entry within four */
-/* probes, unlike the old single head block. The bound shares the */
-/* step style with the overflow scan cap at thirty two. */
+/* probes. The bound shares the step style with the overflow scan */
+/* cap at thirty two. */
 static __noinline u32 flow_move_one(u64 dsq, s32 cpu)
 {
 	struct task_struct *p;

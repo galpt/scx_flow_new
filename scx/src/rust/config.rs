@@ -60,9 +60,6 @@ impl Config {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
         }
-        if self.quantum_ns != 2_000_000 {
-            bail!("quantum bad {}", self.quantum_ns);
-        }
         if WEIGHT_MIN != 1 || WEIGHT_BASE != 128 || WEIGHT_MAX != 16_384 {
             bail!("weight bounds bad");
         }
@@ -73,9 +70,6 @@ impl Config {
             bail!("predictor bounds bad");
         }
         if self.dispatch_batch != DEF_BATCH {
-            bail!("batch bad {}", self.dispatch_batch);
-        }
-        if self.dispatch_batch != 32 {
             bail!("batch bad {}", self.dispatch_batch);
         }
         if ADMIT_PERMILLE != 950 {
