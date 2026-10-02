@@ -10,11 +10,13 @@ use crate::flow::CAP_BASE;
 use crate::flow::DISPATCH_FLOOD_PROBES;
 use crate::flow::DISPATCH_FLOOD_QUEUED;
 use crate::flow::DISPATCH_PROBES;
+use crate::flow::EXHAUST_STEP_MASK;
 use crate::flow::HINT_MAX;
 use crate::flow::HOT;
 use crate::flow::PERIOD_NS;
 use crate::flow::QUANTUM_NS;
 use crate::flow::WARM;
+use crate::flow::WARM_CPU_MASK;
 use crate::flow::WARM_CPU_SHIFT;
 use crate::flow::WARMTH_MAX;
 use crate::flow::WARMTH_SHIFT;
@@ -113,6 +115,12 @@ impl Config {
         }
         if WARM_CPU_SHIFT != 2 {
             bail!("warm cpu shift bad");
+        }
+        if WARM_CPU_MASK != 511 {
+            bail!("warm cpu mask bad");
+        }
+        if EXHAUST_STEP_MASK != 3 {
+            bail!("exhaust step mask bad");
         }
         if WARMTH_SHIFT != 11 {
             bail!("warmth shift bad");
@@ -267,6 +275,14 @@ mod tests {
             crate::flow::WARM_CPU_SHIFT
         );
         assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARM_CPU_MASK,
+            crate::flow::WARM_CPU_MASK
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_EXHAUST_STEP_MASK,
+            crate::flow::EXHAUST_STEP_MASK
+        );
+        assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_WARMTH_SHIFT,
             crate::flow::WARMTH_SHIFT
         );
@@ -277,6 +293,8 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_WARM, crate::flow::WARM);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_HOT, crate::flow::HOT);
         assert_eq!(crate::flow::WARM_CPU_SHIFT, 2);
+        assert_eq!(crate::flow::WARM_CPU_MASK, 511);
+        assert_eq!(crate::flow::EXHAUST_STEP_MASK, 3);
         assert_eq!(crate::flow::WARMTH_SHIFT, 11);
         assert_eq!(crate::flow::WARMTH_MAX, 255);
         assert_eq!(crate::flow::WARM, 1);

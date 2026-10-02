@@ -119,10 +119,10 @@ static __always_inline void flow_gate_reject(void)
 	__sync_fetch_and_add(&flow_stats.gate_rejects, 1);
 }
 /* Backlog check with the shared tail depth in one place. */
-/* Gives true when the tail holds work, so repeats keep warmth while */
-/* fresh tasks still take idle first and held parks stay base. Empty */
-/* keeps idle first with no extra threshold, so light load still */
-/* spreads and grows slices. */
+/* Gives true when the tail holds work, so held parks plus steps stay */
+/* base with hot stays still leading before idle while warm stays */
+/* follow idle. Empty keeps grown slices with no extra threshold, so */
+/* light load still spreads and grows slices. */
 static __always_inline bool flow_saturated(void)
 {
 	return scx_bpf_dsq_nr_queued(flow_overflow_dsq()) != 0;

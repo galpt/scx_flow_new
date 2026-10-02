@@ -79,16 +79,17 @@ pub const STALE_GRACE_NS: u64 = 128_000_000;
 pub const WARM_CPU_SHIFT: u32 = 2;
 /// Mask for the last CPU plus one in the packed repeat word.
 /// Zero means unknown with five hundred eleven usable ids.
-#[cfg(test)]
 pub const WARM_CPU_MASK: u32 = 511;
 /// Shift for the stay count in the packed repeat word.
 /// Eleven skips two step bits plus nine CPU bits.
 pub const WARMTH_SHIFT: u32 = 11;
 /// Largest stay count kept saturating at the top.
 pub const WARMTH_MAX: u32 = 255;
-/// Stay count marking a warm repeat with one stay.
+/// Stay count marking a warm repeat with one stay after placement.
+/// Two runnings total with the first placement staying cold.
 pub const WARM: u32 = 1;
-/// Stay count marking a hot repeat with three stays.
+/// Stay count marking a hot repeat with three stays after placement.
+/// Four runnings total with the first placement staying cold.
 pub const HOT: u32 = 3;
 /// Mask for the repeat step in the packed repeat word.
 pub const EXHAUST_STEP_MASK: u32 = 3;
@@ -123,6 +124,8 @@ const _: () = assert!(DISPATCH_BATCH <= DISPATCH_PROBES);
 /// Two step bits plus nine CPU bits plus eight stay bits fill nineteen
 /// with thirteen reserved at the top.
 const _: () = assert!(WARM_CPU_SHIFT == 2);
+const _: () = assert!(WARM_CPU_MASK == 511);
+const _: () = assert!(EXHAUST_STEP_MASK == 3);
 const _: () = assert!(WARMTH_SHIFT == 11);
 const _: () = assert!(WARMTH_MAX == 255);
 const _: () = assert!(WARM == 1);
@@ -136,7 +139,8 @@ pub fn exhaust_step(exhaust: u32) -> u32 {
 
 /// Stay count in the packed repeat word with eight bits.
 /// Zero stays cold with no stick, one to two stay warm, three and above
-/// stay hot saturating at the top.
+/// stay hot saturating at the top. Warm needs one stay after placement
+/// with two runnings total while hot needs three stays with four total.
 #[cfg(test)]
 pub fn warmth_get(exhaust: u32) -> u32 {
     (exhaust >> WARMTH_SHIFT) & WARMTH_MAX
@@ -361,18 +365,23 @@ impl Daemon {
     /// takes idle with no mirror pick, else warm stays keep the last
     /// CPU with headroom, else the least loaded allowed CPU from a
     /// bounded scan of sixteen with early exit on idle, else the first
-    /// allowed. The load probe folds queued depth plus running plus the
-    /// admitted sum like the core, with zero meaning headroom. Idle
-    /// stays BPF only with no mirror pick, so this mirror matches the
-    /// post idle order where warmth leads with headroom. The scan bound
-    /// matches the core sixteen with the core order by CPU id
-    /// approximated here by allowed order. The core revalidates mask
-    /// plus live before use, so a stale view never widens the target
-    /// class here. Mirror only with the core as authority.
+    /// allowed. Warm loses when an idle CPU exists since the core idle
+    /// pick runs before the warm check with no mirror replay. The load
+    /// probe folds queued depth plus running plus the admitted sum like
+    /// the core, with zero meaning headroom. Idle stays BPF only with
+    /// no mirror pick, so this mirror matches the post idle order where
+    /// warmth leads with headroom. Stay tiers apply solely for admitted
+    /// tasks with a live row, so unknown pids fall to least; oracle valid
+    /// for admitted only. Empty allowed fails closed with an error
+    /// sentinel, never CPU zero. The scan bound matches the core sixteen
+    /// with the core order by CPU id approximated here by allowed order.
+    /// The core revalidates mask plus live before use, so a stale view
+    /// never widens the target class here. Mirror only with the core as
+    /// authority.
     #[cfg(test)]
     pub fn place_for(&self, pid: u32, allowed: &[u32], load: impl Fn(u32) -> u64) -> u32 {
         if allowed.is_empty() {
-            return 0;
+            return u32::MAX;
         }
         let packed = self.exhaust.get(&pid).copied().unwrap_or(0);
         let warmth = warmth_get(packed);
@@ -411,7 +420,8 @@ impl Daemon {
     }
 
     /// True when the shared tail holds work for tests solely.
-    /// Mirrors the core backlog check with zero depth meaning empty.
+    /// Mirrors the core backlog check with zero depth meaning empty and
+    /// hot stays still leading before idle while warm stays follow idle.
     /// Idle stays BPF only since the live pick needs the live mask with
     /// no replay, while this mirror covers the stay order plus the
     /// threshold.
@@ -423,6 +433,7 @@ impl Daemon {
     /// Candidate order for the placement tiers as test oracle.
     /// Hot stays lead before idle, warm stays follow idle, then least
     /// then first, matching the core fallback with no extra threshold.
+    /// Warm loses when an idle CPU exists since idle runs before warm.
     /// Stay counts need headroom in both, and the least scan folds idle
     /// with early exit, so no repeat waits behind a busy owner while an
     /// idle CPU stays free. Idle stays BPF only with no mirror pick, so
@@ -1713,6 +1724,7 @@ mod tests {
         // Hot stays win first with headroom, warm stays win after idle
         // with headroom, cold falls to least then first. The idle pick
         // stays BPF only, so the mirror checks the post idle order.
+        // Warm loses when an idle CPU exists since idle runs first.
         assert_eq!(
             Daemon::branch_order(),
             ["hot", "idle", "warm", "least", "first"]
@@ -1736,5 +1748,14 @@ mod tests {
         // A busy owner falls to least.
         let busy = |cpu: u32| if cpu == 2 { 1 } else { 0 };
         assert_eq!(d.place_for(1, &[0, 1, 2], busy), 0);
+    }
+
+    #[test]
+    fn empty_allowed_fails_closed_with_sentinel() {
+        // Empty allowed never returns CPU zero, so callers fail closed
+        // with an error sentinel instead of parking on the wrong CPU.
+        let d = Daemon::new();
+        assert_eq!(d.place_for(1, &[], |_| 0), u32::MAX);
+        assert!(u64::from(u32::MAX) >= crate::flow::slot::MAX_CPUS);
     }
 }

@@ -27,7 +27,8 @@
 /* CPU from a bounded scan with early exit on idle else first when */
 /* allowed and live else error with one gate count. Warmth needs */
 /* headroom so a repeat never stacks onto an overloaded owner, and */
-/* the scan folds idle so no repeat waits behind a busy owner when */
+/* warm loses when an idle CPU exists since idle runs before warm. */
+/* The scan folds idle so no repeat waits behind a busy owner when */
 /* an idle CPU stays free. Callers reach the gate solely here so */
 /* every failure counts once with no missed reject. Placement shares */
 /* the deadline source with the tree through the same quantize with */

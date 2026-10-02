@@ -143,8 +143,9 @@ enum flow_consts {
 	/* Warmth score keeps eight bits saturating at the top. */
 	FLOW_WARMTH_SHIFT = 11ULL,
 	FLOW_WARMTH_MAX = 255ULL,
-	/* Warm needs one stay while hot needs three stays. Cold stays */
-	/* at zero with no stick. */
+	/* Warm needs one stay after placement with two runnings total */
+	/* while hot needs three stays after placement with four runnings */
+	/* total. Cold stays at zero with no stick. */
 	FLOW_WARM = 1ULL,
 	FLOW_HOT = 3ULL,
 };

@@ -94,11 +94,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* stays keep the last CPU with headroom, else the least loaded */
 	/* allowed CPU from a bounded scan with early exit on idle else */
 	/* first when allowed and live else error with no drain check */
-	/* so spread stays cheap with stays under load. The scan folds */
-	/* the idle pick with early exit, so no repeat waits behind a */
-	/* busy owner while an idle CPU stays free. The chosen CPU */
-	/* holds the share with per CPU rows and rejects park with no */
-	/* run. */
+	/* so spread stays cheap with stays under load. Warm loses when */
+	/* an idle CPU exists since idle runs before warm. Idle stays */
+	/* BPF only with no mirror, since the pick needs the live mask */
+	/* with no replay. The scan folds the idle pick with early exit, */
+	/* so no repeat waits behind a busy owner while an idle CPU */
+	/* stays free. The chosen CPU holds the share with per CPU rows */
+	/* and rejects park with no run. */
 	{
 		s32 idle;
 		s32 least;
