@@ -20,10 +20,10 @@
  * plus row plus task deadline plus key synchronously with the same sequence, deadline, CPU so
  * dispatch needs no roundtrip. Rejects park at the top key with
  * the far deadline plus no row plus no run. Placement picks with live checks alone and no
- * deadline quantize. An idle CPU wins first when the tail is empty
- * so light load spreads with no scan. The cached owner wins first
- * when the tail holds work so repeat tasks keep warmth with no
- * scan. The selected
+ * deadline quantize. Fresh tasks take idle first even when the
+ * tail holds work so urgent wakeups spread with no scan, while the
+ * cached owner wins first for repeats when the tail holds work so
+ * steady work keeps warmth with no scan. The selected
  * CPU wins next when live plus allowed with no drain check so warmth
  * stays cheap under load. The first allowed live CPU wins last. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
@@ -91,14 +91,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		return;
 	}
 	/* Placement with idle, hint, selected, first in one place. */
-	/* Gives idle when the tail is empty and idle is allowed and */
-	/* live else the cached owner when still allowed and live else */
-	/* selected when allowed and live else first when allowed and */
-	/* live else error with no drain check so spread stays cheap */
-	/* with warmth under load. Warmth leads when the tail holds */
-	/* work so a transient idle never pulls a repeat task off its */
-	/* cache, with the idle scan kept solely on that held branch so */
-	/* the empty branch pays one scan. The hint stays revalidated */
+	/* Fresh tasks take idle first even when the tail holds work */
+	/* so urgent wakeups spread to an idle CPU instead of queueing */
+	/* behind a busy owner, while repeats keep warmth first when */
+	/* held so steady work stays on cache. Gives idle when fresh */
+	/* or when the tail is empty and idle is allowed and live else */
+	/* the cached owner when still allowed and live else selected */
+	/* when allowed and live else idle when held for repeats else */
+	/* first when allowed and live else error with no drain check */
+	/* so spread stays cheap with warmth under load. The held idle */
+	/* scan stays solely on the repeat branch so fresh pays one */
+	/* scan up front with no duplicate. The hint stays revalidated */
 	/* inside the hint lookup with the move gate keeping safety, so */
 	/* no outer recheck is needed and a stale view never widens the */
 	/* target class. The chosen CPU holds the share with per CPU */
@@ -109,7 +112,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		s32 first;
 		bool done = false;
 		bool held = flow_saturated();
-		if (!held) {
+		bool fresh = READ_ONCE(tctx->exhaust) == 0;
+		if (!held || fresh) {
 			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (flow_cpu_ok(p, idle)) {
 				cpu = idle;
@@ -124,7 +128,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			cpu = sel;
 			done = true;
 		}
-		if (!done && held) {
+		if (!done && held && !fresh) {
 			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (flow_cpu_ok(p, idle)) {
 				cpu = idle;

@@ -298,15 +298,15 @@ impl Daemon {
     /// The cached owner wins when still in the allowed list and inside
     /// the CPU bound, else the previous CPU wins when still allowed,
     /// else the first allowed wins. Idle stays BPF only with no mirror,
-    /// since the idle pick needs the live mask with no replay. The core
-    /// takes idle first when the tail is empty and warmth first when
-    /// the tail holds work, so this mirror matches the saturated branch
-    /// where warmth leads. The threshold stays at zero depth with no
-    /// extra count, so any held work flips the branch in the core with
-    /// the idle scan kept solely on the held side there. The core
-    /// revalidates mask plus live before use, so a stale view never
-    /// widens the target class here. Mirror only with the core as
-    /// authority.
+    /// since the idle pick needs the live mask with no replay. Fresh
+    /// tasks take idle first even when held in the core, while repeats
+    /// keep warmth first when held, so this mirror matches the held
+    /// branch post idle where warmth leads. The threshold stays at zero
+    /// depth with no extra count, so any held work flips the repeat
+    /// branch in the core with the held idle scan kept solely there.
+    /// The core revalidates mask plus live before use, so a stale view
+    /// never widens the target class here. Mirror only with the core
+    /// as authority.
     #[cfg(test)]
     pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
         if allowed.is_empty() {
@@ -326,12 +326,13 @@ impl Daemon {
     }
 
     /// True when the shared tail holds work for tests solely.
-    /// Mirrors the core backlog check where an empty tail takes idle
-    /// first and a held tail takes warmth first with no extra threshold.
-    /// The threshold stays at zero depth in both, so empty means idle
-    /// first and any held work means warmth first. Idle stays BPF only
-    /// since the live pick needs the live mask with no replay, while
-    /// this mirror covers the warmth order plus the threshold.
+    /// Mirrors the core backlog check where empty takes idle first,
+    /// held repeats take warmth first, and held fresh tasks still take
+    /// idle first with no extra threshold. The threshold stays at zero
+    /// depth in both, so empty means idle first and any held work means
+    /// repeats take warmth first. Idle stays BPF only since the live
+    /// pick needs the live mask with no replay, while this mirror
+    /// covers the warmth order plus the threshold.
     #[cfg(test)]
     pub fn is_saturated(&self) -> bool {
         !self.order.is_empty()
@@ -339,10 +340,11 @@ impl Daemon {
 
     /// Candidate order for the saturated branch as test oracle.
     /// Empty lists idle then hint then previous then first, while held
-    /// lists hint then previous then idle then first, matching the core
-    /// fallback with no extra threshold. Idle stays BPF only with no
-    /// mirror pick, so this names the order for branch coverage solely
-    /// with the core as authority.
+    /// repeats list hint then previous then idle then first, matching
+    /// the core fallback with no extra threshold. Held fresh tasks take
+    /// idle first like empty through the core pre scan, so this names
+    /// the repeat order for branch coverage solely with the core as
+    /// authority. Idle stays BPF only with no mirror pick.
     #[cfg(test)]
     pub fn branch_order(held: bool) -> [&'static str; 4] {
         if held {
@@ -462,19 +464,23 @@ impl Daemon {
 
     /// Handle one enqueue notify as mirror oracle.
     /// Fresh hints flow through the hint table. Stored shares add
-    /// once and drop once in the mirror. Rejects park keyed at the top
-    /// key with the far deadline plus head plus owner views, so they
-    /// drain ordered last with no run. Zero identifiers park at once
-    /// with no table row since zero never keys the tree. Stale CPUs
-    /// plus depth overflow clear the old row then park keyed at the top.
-    /// Table full parks fresh identifiers with no row so the map stays
-    /// capped. Admitted plus rejected parks store one head plus one
-    /// owner view with no extra counter, so later oracle picks reuse
-    /// warmth with mask still checked in the core. The head keeps
-    /// smallest pid best effort while the full scan orders owned then
-    /// pid. Single sequence pairs each row with core task state plus
-    /// the order row with no split. Mirror only with the core as
-    /// authority.
+    /// once and drop once in the mirror. Held tails admit at the base
+    /// share so the ledger never over reserves while wakeups wait,
+    /// matching the capped park slice with one rule. Rejects park
+    /// keyed at the top key with the far deadline plus head plus owner
+    /// views, so they drain ordered last with no run. Zero identifiers
+    /// park at once with no table row since zero never keys the tree.
+    /// Stale CPUs plus depth overflow clear the old row then park
+    /// keyed at the top. Table full parks fresh identifiers with no
+    /// row so the map stays capped. Admitted plus rejected parks store
+    /// one head plus one owner view with no extra counter, so later
+    /// oracle picks reuse warmth with mask still checked in the core.
+    /// Fresh tasks take idle first even when held in the core with the
+    /// idle pick staying BPF only, so this mirror keeps hint order
+    /// post idle. The head keeps smallest pid best effort while the
+    /// full scan orders owned then pid. Single sequence pairs each row
+    /// with core task state plus the order row with no split. Mirror
+    /// only with the core as authority.
     pub fn handle_enqueue(
         &mut self,
         pid: u32,
@@ -509,7 +515,14 @@ impl Daemon {
         };
         let period = super::edf::task_period(hint);
         let deadline = super::edf::deadline_at(now, period);
-        let exhaust = self.exhaust.get(&pid).copied().unwrap_or(0);
+        let raw = self.exhaust.get(&pid).copied().unwrap_or(0);
+        // Held tails admit at the base share, matching the capped park
+        // slice in the core with one rule and no extra knob.
+        let exhaust = if raw != 0 && self.order.len() != 0 {
+            0
+        } else {
+            raw
+        };
         let share = super::edf::slice_permille_for(period, exhaust);
         let held = self.admitted(cpu);
         if share != 0 && !super::edf::admit_ok(held, share) {
@@ -579,15 +592,17 @@ impl Daemon {
     /// Models the charged stopping path. Drops the stored share exactly
     /// once in the mirror. Misses count when monotonic time passes
     /// release plus deadline on a blocking complete. A runnable end
-    /// steps the repeat count toward eight milliseconds capped there,
-    /// while a blocking end clears it, so steady work keeps the base
-    /// slice with no extra threshold. The bump runs solely when the
-    /// task row was present, so zero plus unknown identifiers pass
-    /// through with no bump since run charge stays BPF only. Disable
-    /// plus exit skip the bump in the core and use the dedicated
-    /// handlers here. Runtime charge stays in the core total. Unknown
-    /// identifiers pass through after order cleanup, so a lost enqueue
-    /// never leaks a share. Mirror only.
+    /// steps the repeat count toward eight milliseconds capped there
+    /// solely while the tail reads empty, while a held tail keeps the
+    /// base so a long slice never delays waiting wakeups, and a
+    /// blocking end clears it, so steady work keeps the base slice with
+    /// no extra threshold. The bump runs solely when the task row was
+    /// present plus the tail reads empty, so zero plus unknown
+    /// identifiers pass through with no bump since run charge stays BPF
+    /// only. Disable plus exit skip the bump in the core and use the
+    /// dedicated handlers here. Runtime charge stays in the core total.
+    /// Unknown identifiers pass through after order cleanup, so a lost
+    /// enqueue never leaks a share. Mirror only.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         if pid == 0 {
             return;
@@ -602,11 +617,15 @@ impl Daemon {
         let miss = !runnable && super::edf::missed(release, deadline, now);
         self.remove_row(pid);
         if runnable {
-            let cur = self.exhaust.get(&pid).copied().unwrap_or(0);
-            if cur < super::slice::QUANTUM_MAX_STEP {
-                self.exhaust.insert(pid, cur + 1);
-            } else {
-                self.exhaust.insert(pid, super::slice::QUANTUM_MAX_STEP);
+            // Held tails keep the base, matching the core gate on the
+            // shared tail depth with no extra knob.
+            if self.order.len() == 0 {
+                let cur = self.exhaust.get(&pid).copied().unwrap_or(0);
+                if cur < super::slice::QUANTUM_MAX_STEP {
+                    self.exhaust.insert(pid, cur + 1);
+                } else {
+                    self.exhaust.insert(pid, super::slice::QUANTUM_MAX_STEP);
+                }
             }
         } else {
             self.exhaust.remove(&pid);
@@ -1361,5 +1380,62 @@ mod tests {
         assert_eq!(d.exhaust_for(1), 0);
         let got = d.handle_enqueue(1, 0, 0, 4_000_000, 523);
         assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+    }
+
+    #[test]
+    fn held_tail_keeps_base_share_for_grown_tasks() {
+        // A grown task parks base while the tail holds work, so a long
+        // slice never delays waiting wakeups while an empty tail keeps
+        // the grown share. Mirrors the core capped admit with one rule.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 531);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 1);
+        let got = d.handle_enqueue(2, 0, 0, 2_500_000, 532);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        assert!(d.is_saturated());
+        let got = d.handle_enqueue(1, 0, 0, 3_000_000, 533);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        assert_eq!(d.task(1).unwrap().share, 125);
+    }
+
+    #[test]
+    fn held_complete_skips_repeat_bump() {
+        // A runnable end while others wait keeps the base, so hogs never
+        // grow while wakeups wait. The bump returns once the tail reads
+        // empty, matching the core gate on the shared tail depth.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 541);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        let got = d.handle_enqueue(2, 0, 1, 1_000_000, 542);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 0);
+        assert!(d.is_saturated());
+        d.handle_complete(2, 2_500_000, true);
+        assert_eq!(d.exhaust_for(2), 1);
+        assert!(!d.is_saturated());
+    }
+
+    #[test]
+    fn fresh_tail_still_spreads_while_repeat_holds_warmth() {
+        // Fresh tasks hold no repeat count, so the core takes idle first
+        // even when held while repeats keep warmth first. The mirror
+        // keeps hint order post idle with the idle pick staying BPF only.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 551);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.exhaust_for(9), 0);
+        assert!(d.is_saturated());
+        assert_eq!(d.place_for(1, 0, &[0, 1]), 0);
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 1);
+        let got = d.handle_enqueue(2, 0, 1, 2_500_000, 552);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        assert_eq!(Daemon::branch_order(true)[0], "hint");
+        assert_eq!(Daemon::branch_order(false)[0], "idle");
     }
 }

@@ -2,9 +2,14 @@
 /*
  * Park plus admission for the enqueue path.
  *
- * Parks at the overflow tail with the repeat aware slice and counts
- * one insert. Rejects keep the same repeat slice as admits, so a
- * grown task parks grown with no separate slice path. Admission allocates one sequence then stores it plus
+ * Parks at the overflow tail with the repeat aware slice capped to
+ * the base while the tail holds work, so a grown hog never holds a
+ * long slice while wakeups wait and light load still keeps up to
+ * eight milliseconds with no extra threshold. Admission keeps the
+ * same capped share with the ledger, so a held tail admits at the
+ * base use with no over reserve. Rejects keep the same capped slice
+ * as admits, so a grown task parks base under backlog with one slice
+ * rule. Admission allocates one sequence then stores it plus
  * the deadline plus key from the same period helpers, then admits
  * under the bound with tree plus row or parks as reject at the top
  * key with the far deadline then parks at the tail then notifies for
@@ -26,8 +31,15 @@ static __always_inline void flow_park_plain(struct task_struct *p,
 {
 	u64 slice = (u64)FLOW_QUANTUM_NS;
 	struct flow_task_ctx *park_ctx = flow_lookup((struct task_struct *)p);
-	if (park_ctx)
-		slice = flow_quantum_ns(READ_ONCE(park_ctx->exhaust));
+	if (park_ctx) {
+		u32 ex = READ_ONCE(park_ctx->exhaust);
+		/* Held tails park base so a long slice never delays */
+		/* wakeups waiting behind it, while an empty tail keeps */
+		/* the grown slice with no extra knob. */
+		if (ex != 0 && flow_saturated())
+			ex = 0;
+		slice = flow_quantum_ns(ex);
+	}
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(), slice, enq_flags);
 	__sync_fetch_and_add(&flow_stats.inserts, 1);
 }
@@ -74,7 +86,13 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 period = flow_period_ns(weight);
 	u64 deadline = flow_deadline_at(now, period);
 	u32 exhaust = tctx ? READ_ONCE(tctx->exhaust) : 0;
-	u64 share = flow_slice_permille(period, exhaust);
+	u64 share;
+	/* Held tails admit at the base share so the ledger never */
+	/* over reserves while wakeups wait, matching the capped park */
+	/* slice with one rule and no extra knob. */
+	if (exhaust != 0 && flow_saturated())
+		exhaust = 0;
+	share = flow_slice_permille(period, exhaust);
 	u64 seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	u32 pid = (u32)p->pid;
 	u32 key = veb_quant(deadline);

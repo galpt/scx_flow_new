@@ -6,8 +6,10 @@
  * CPU gauge. Stopping charges the segment to total runtime and counts
  * one requeue else one completion and emits one observability notify.
  * A requeue steps the repeat count toward the larger slice capped at
- * eight milliseconds, while a blocking end clears it, so steady work
- * keeps the base slice and repeat exhaust grows it with no extra map.
+ * eight milliseconds solely while the tail reads empty, while a held
+ * tail keeps the base so a long slice never delays waiting wakeups,
+ * and a blocking end clears it, so steady work keeps the base slice
+ * and repeat exhaust grows it with no extra map.
  * Stopping drops the tree key plus the ledger share plus the order
  * row so dispatched keys never linger and use never leaks. Gate fail
  * stopping drops plus notifies when queued like disable so shares
@@ -87,7 +89,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		return;
 	if (runnable) {
 		struct flow_task_ctx *stctx = flow_lookup(p);
-		if (stctx) {
+		if (stctx && !flow_saturated()) {
 			u32 cur = READ_ONCE(stctx->exhaust);
 			if (cur < (u32)FLOW_QUANTUM_MAX_STEP)
 				WRITE_ONCE(stctx->exhaust, cur + 1);
