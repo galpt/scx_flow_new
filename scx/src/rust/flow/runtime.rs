@@ -294,33 +294,65 @@ impl Daemon {
         self.mask_hint.get(&pid).copied()
     }
 
-    /// Pick one CPU with the cached owner view in one place.
-    /// The cached owner wins when still in the allowed list and inside
-    /// the CPU bound, else the previous CPU wins when still allowed,
-    /// else the first allowed wins. Idle stays BPF only with no mirror,
-    /// since the idle pick needs the live mask with no replay. Fresh
-    /// tasks take idle first even when held in the core, while repeats
-    /// keep warmth first when held, so this mirror matches the held
-    /// branch post idle where warmth leads. The threshold stays at zero
-    /// depth with no extra count, so any held work flips the repeat
-    /// branch in the core with the held idle scan kept solely there.
-    /// The core revalidates mask plus live before use, so a stale view
-    /// never widens the target class here. Mirror only with the core
-    /// as authority.
+    /// Pick one CPU with the cached owner view plus load in one place.
+    /// Empty tails take the cached owner when still allowed, else the
+    /// previous CPU when still allowed, else the first allowed. Held
+    /// tails keep the cached owner solely with headroom, else the
+    /// previous CPU solely with headroom, else the least loaded
+    /// allowed CPU from a bounded scan of sixteen with early exit on
+    /// idle, else the first allowed. The load probe folds queued depth
+    /// plus running plus the admitted sum like the core, with zero
+    /// meaning headroom. Idle stays BPF only with no mirror pick, and
+    /// fresh tasks take idle first even when held in the core, while
+    /// this mirror matches the held branch post idle where warmth
+    /// leads with headroom. The scan bound matches the core sixteen
+    /// with the core order by CPU id approximated here by allowed
+    /// order. The core revalidates mask plus live before use, so a
+    /// stale view never widens the target class here. Mirror only with
+    /// the core as authority.
     #[cfg(test)]
-    pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
+    pub fn place_for(
+        &self,
+        pid: u32,
+        prev: u32,
+        allowed: &[u32],
+        load: impl Fn(u32) -> u64,
+    ) -> u32 {
         if allowed.is_empty() {
             return prev;
         }
-        if let Some(hint) = self.mask_hint.get(&pid)
-            && allowed.contains(hint)
-            && (*hint as u64) < super::slot::MAX_CPUS
-            && self.tasks.contains_key(&pid)
+        let held = !self.order.is_empty();
+        let hinted = self
+            .mask_hint
+            .get(&pid)
+            .filter(|h| {
+                allowed.contains(h)
+                    && (**h as u64) < super::slot::MAX_CPUS
+                    && self.tasks.contains_key(&pid)
+            })
+            .copied();
+        if let Some(hint) = hinted
+            && (!held || load(hint) == 0)
         {
-            return *hint;
+            return hint;
         }
-        if allowed.contains(&prev) {
+        if allowed.contains(&prev) && (!held || load(prev) == 0) {
             return prev;
+        }
+        if held {
+            let mut best = allowed[0];
+            let mut best_load = u64::MAX;
+            for cpu in allowed.iter().take(16) {
+                let depth = load(*cpu);
+                if depth < best_load {
+                    best_load = depth;
+                    best = *cpu;
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            return best;
         }
         allowed[0]
     }
@@ -340,15 +372,17 @@ impl Daemon {
 
     /// Candidate order for the saturated branch as test oracle.
     /// Empty lists idle then hint then previous then first, while held
-    /// repeats list hint then previous then idle then first, matching
-    /// the core fallback with no extra threshold. Held fresh tasks take
-    /// idle first like empty through the core pre scan, so this names
-    /// the repeat order for branch coverage solely with the core as
-    /// authority. Idle stays BPF only with no mirror pick.
+    /// repeats list hint then previous then least then first, matching
+    /// the core fallback with no extra threshold. Warmth needs headroom
+    /// in both, and the least scan folds idle with early exit, so no
+    /// held repeat waits behind a busy owner while idle stays free.
+    /// Held fresh tasks take idle first like empty through the core pre
+    /// scan, so this names the repeat order for branch coverage solely
+    /// with the core as authority. Idle stays BPF only with no mirror pick.
     #[cfg(test)]
     pub fn branch_order(held: bool) -> [&'static str; 4] {
         if held {
-            ["hint", "prev", "idle", "first"]
+            ["hint", "prev", "least", "first"]
         } else {
             ["idle", "hint", "prev", "first"]
         }
@@ -1127,12 +1161,12 @@ mod tests {
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.hint_for(3), Some(2));
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
-        assert_eq!(d.place_for(3, 0, &[0, 1]), 0);
-        assert_eq!(d.place_for(9, 1, &[0, 1]), 1);
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(d.place_for(3, 0, &[0, 1], |_| 0), 0);
+        assert_eq!(d.place_for(9, 1, &[0, 1], |_| 0), 1);
         d.handle_complete(3, 2_000_000, true);
         assert_eq!(d.hint_for(3), None);
-        assert_eq!(d.place_for(3, 1, &[0, 1]), 1);
+        assert_eq!(d.place_for(3, 1, &[0, 1], |_| 0), 1);
     }
 
     #[test]
@@ -1218,8 +1252,8 @@ mod tests {
         let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
-        assert_eq!(d.place_for(3, 1, &[0, 1, 2]), 2);
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(d.place_for(3, 1, &[0, 1, 2], |_| 0), 2);
         d.handle_complete(3, 2_000_000, true);
         assert!(!d.is_saturated());
     }
@@ -1236,7 +1270,7 @@ mod tests {
         );
         assert_eq!(
             Daemon::branch_order(true),
-            ["hint", "prev", "idle", "first"]
+            ["hint", "prev", "least", "first"]
         );
         let mut d = Daemon::new();
         assert!(!d.is_saturated());
@@ -1245,8 +1279,8 @@ mod tests {
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert!(d.is_saturated());
         assert_eq!(Daemon::branch_order(d.is_saturated())[0], "hint");
-        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
-        assert_eq!(d.place_for(3, 1, &[0, 1, 2]), 2);
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
+        assert_eq!(d.place_for(3, 1, &[0, 1, 2], |_| 0), 2);
         d.handle_complete(3, 2_000_000, true);
         assert!(!d.is_saturated());
         assert_eq!(Daemon::branch_order(d.is_saturated())[0], "idle");
@@ -1429,7 +1463,7 @@ mod tests {
         assert!(matches!(got, AdmitDecision::Admit { .. }));
         assert_eq!(d.exhaust_for(9), 0);
         assert!(d.is_saturated());
-        assert_eq!(d.place_for(1, 0, &[0, 1]), 0);
+        assert_eq!(d.place_for(1, 0, &[0, 1], |_| 0), 0);
         d.handle_complete(1, 2_000_000, true);
         assert_eq!(d.exhaust_for(1), 1);
         let got = d.handle_enqueue(2, 0, 1, 2_500_000, 552);
@@ -1437,5 +1471,48 @@ mod tests {
         assert!(d.is_saturated());
         assert_eq!(Daemon::branch_order(true)[0], "hint");
         assert_eq!(Daemon::branch_order(false)[0], "idle");
+    }
+
+    #[test]
+    fn overloaded_hint_falls_to_least_loaded() {
+        // A busy owner never keeps the task while held: an idle peer
+        // wins first, else the least loaded allowed CPU wins. Warmth
+        // returns once the owner reads idle again.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        let busy = |cpu: u32| match cpu {
+            2 => 5,
+            1 => 3,
+            _ => 0,
+        };
+        assert_eq!(d.place_for(3, 1, &[0, 1, 2], busy), 0);
+        let full = |cpu: u32| match cpu {
+            2 => 5,
+            0 => 3,
+            _ => 1,
+        };
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2], full), 1);
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2], |_| 0), 2);
+    }
+
+    #[test]
+    fn least_scan_stays_bounded_at_sixteen() {
+        // The scan covers sixteen allowed CPUs with early exit on idle,
+        // so an idle CPU past the bound never wins while the least of
+        // the covered set does.
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        let allowed: Vec<u32> = (0..20).collect();
+        let load = |cpu: u32| {
+            if cpu == 19 {
+                return 0;
+            }
+            (20 - cpu) as u64
+        };
+        assert_eq!(d.place_for(9, 7, &allowed, load), 15);
     }
 }

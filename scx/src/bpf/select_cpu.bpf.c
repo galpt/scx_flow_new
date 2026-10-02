@@ -8,10 +8,13 @@
  * source with dispatch. Fresh tasks take idle first even when the
  * shared tail holds work so urgent wakeups spread with no scan,
  * while the cached owner wins first for repeats when the tail
- * holds work so steady work keeps warmth under load with no scan.
- * The previous
- * CPU wins next when live plus allowed with no drain check so warmth
- * stays cheap under load. The first allowed live CPU wins last. Stale
+ * holds work with headroom so steady work keeps warmth without
+ * stacking, else the least loaded allowed CPU from a bounded scan
+ * with early exit on idle. The previous
+ * CPU wins next when live plus allowed with headroom so warmth
+ * stays cheap without stacking under load. The least loaded allowed
+ * CPU from a bounded scan wins next when held, so an overloaded
+ * owner never keeps the task. The first allowed live CPU wins last. Stale
  * masks fail closed with an error and one gate count so callers never
  * run on a stale CPU. The core owns admit with per CPU rows and the
  * core proposes solely through the selected CPU so rejects park with
@@ -22,50 +25,53 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Fallback with idle, hint, previous, first, gate in one place. */
+/* Fallback with idle, hint, previous, least, first, gate in one place. */
 /* Fresh tasks take idle first even when the tail holds work so */
 /* urgent wakeups spread instead of queueing behind a busy owner, */
 /* while repeats keep warmth first when held so steady work stays */
 /* on cache. Gives idle when fresh or when the tail is empty and */
 /* idle is allowed and live else the cached owner when still */
-/* allowed and live else previous when allowed and live else idle */
-/* when held for repeats else first when allowed and live else */
-/* error with one gate count. Callers reach the gate solely here */
-/* so every failure counts once with no missed reject. Placement */
-/* shares the deadline source with the tree through the same */
-/* quantize with no drain check so warmth stays cheap. Idle first */
-/* stays BPF only with no mirror, since the idle pick needs the */
-/* live mask with no replay. The hint stays revalidated inside the */
-/* hint lookup, so no outer recheck is needed and a stale view never */
-/* widens the target class. */
+/* allowed and live with headroom else previous when allowed and */
+/* live with headroom else the least loaded allowed CPU from a */
+/* bounded scan with early exit on idle else first when allowed and */
+/* live else error with one gate count. Warmth needs headroom so a */
+/* repeat never stacks onto an overloaded owner, and the scan folds */
+/* idle so no held repeat waits behind a busy owner when an idle CPU */
+/* stays free. Callers reach the gate solely here so every failure */
+/* counts once with no missed reject. Placement shares the deadline */
+/* source with the tree through the same quantize with no drain check */
+/* so warmth stays cheap. Idle first stays BPF only with no mirror, */
+/* since the idle pick needs the live mask with no replay. The hint */
+/* stays revalidated inside the hint lookup, so no outer recheck is */
+/* needed and a stale view never widens the target class. */
 static __always_inline s32 flow_fallback_cpu(
 	const struct task_struct *p, s32 prev_cpu)
 {
 	s32 idle;
 	s32 hint;
+	s32 least;
 	s32 first;
 	struct flow_task_ctx *fctx;
 	bool fresh;
+	bool held;
 	fctx = flow_lookup((struct task_struct *)p);
 	fresh = !fctx || READ_ONCE(fctx->exhaust) == 0;
-	if (!flow_saturated() || fresh) {
+	held = flow_saturated();
+	if (!held || fresh) {
 		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (flow_cpu_ok(p, idle))
 			return idle;
-		hint = flow_place_hint((u32)p->pid, p);
-		if (hint >= 0)
-			return hint;
-		if (flow_cpu_ok(p, prev_cpu))
-			return prev_cpu;
-	} else {
-		hint = flow_place_hint((u32)p->pid, p);
-		if (hint >= 0)
-			return hint;
-		if (flow_cpu_ok(p, prev_cpu))
-			return prev_cpu;
-		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (flow_cpu_ok(p, idle))
-			return idle;
+	}
+	hint = flow_place_hint((u32)p->pid, p);
+	if (hint >= 0 && (!held || flow_cpu_headroom(hint)))
+		return hint;
+	if (flow_cpu_ok(p, prev_cpu) &&
+	    (!held || flow_cpu_headroom(prev_cpu)))
+		return prev_cpu;
+	if (held) {
+		least = flow_least_loaded(p);
+		if (least >= 0 && flow_cpu_ok(p, least))
+			return least;
 	}
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))

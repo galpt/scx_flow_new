@@ -16,9 +16,13 @@
  * deadline plus no row plus no run, so every parked task stays
  * ordered with rejects last. One kick follows each park to the
  * chosen CPU when idle else one idle peer else one directed preempt
- * to the owner solely when the wakeup runs earlier than the owner
- * task, so urgent arrivals preempt longer runs with at most one kick
- * per park and no storm. Dispatch moves every parked task in global
+ * to the owner solely when the wakeup leads the owner deadline by
+ * the margin with the owner slice still long, so urgent arrivals
+ * preempt longer runs with at most one kick per park and no storm
+ * while near ties plus nearly done owners never bounce. Placement
+ * keeps warmth solely with headroom else the least loaded allowed
+ * CPU from a bounded scan, so repeats reuse cache without stacking.
+ * Dispatch moves every parked task in global
  * deadline order up to sixteen per pass with no sequence gate and
  * no CPU gate. Each pass picks the least key then deadline then owned
  * then pid among entries the dispatch CPU may run, so any CPU takes
@@ -118,6 +122,12 @@ enum flow_consts {
 	FLOW_QUANT_SHIFT = 10ULL,
 	FLOW_VEB_EMPTY = 0xFFFFFFFFULL,
 	FLOW_ADMIT_PERMILLE = 950ULL,
+	/* Preempt leads by a quarter base slice with no knob, so near */
+	/* ties never bounce while urgent gaps still preempt at once. */
+	FLOW_PREEMPT_MARGIN_NS = 500000ULL,
+	/* Preempt waits out a quarter base slice tail with no knob, so */
+	/* a nearly done owner finishes instead of taking a kick. */
+	FLOW_PREEMPT_TAIL_NS = 500000ULL,
 	/* CPU performance levels at half plus max with no knob. Any local */
 	/* plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,

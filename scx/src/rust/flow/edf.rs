@@ -18,6 +18,14 @@ pub const ADMIT_PERMILLE: u64 = 950;
 /// Base capacity in units at one thousand twenty four. Symmetric hosts
 /// offer the same units on every CPU.
 pub const CAP_BASE: u32 = 1024;
+/// Lead margin in nanos for one directed preempt. A quarter of the
+/// base slice, so near ties never bounce while urgent gaps preempt.
+#[cfg(test)]
+pub const PREEMPT_MARGIN_NS: u64 = 500_000;
+/// Tail in nanos that waits out a nearly done owner. A quarter of
+/// the base slice, so a finishing owner never takes a kick.
+#[cfg(test)]
+pub const PREEMPT_TAIL_NS: u64 = 500_000;
 
 /// Period for one task from hint micros else default.
 /// Empty hints use the default period. Large hints saturate.
@@ -79,6 +87,30 @@ pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
     true
 }
 
+/// True when one arrival preempts one occupant under margin plus tail.
+/// Empty arrivals never preempt. A far arrival never preempts a
+/// rowless occupant, so two rowless tasks never churn. A rowless
+/// occupant counts as longer, so an admitted arrival still preempts
+/// a reject run. A nearly done occupant finishes instead, and the
+/// arrival must lead by the margin, so near ties never bounce.
+/// Mirrors the core paired check with the core as authority.
+#[cfg(test)]
+pub fn preempt_want(arrival: u64, occupant: u64, remain: u64, margin: u64) -> bool {
+    if arrival == 0 {
+        return false;
+    }
+    if arrival == u64::MAX && occupant == 0 {
+        return false;
+    }
+    if occupant == 0 {
+        return true;
+    }
+    if remain < PREEMPT_TAIL_NS {
+        return false;
+    }
+    (arrival.saturating_add(margin).wrapping_sub(occupant) as i64) < 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +142,53 @@ mod tests {
         assert!(!missed(10, 0, 200));
         assert!(!missed(10, 100, 100));
         assert!(missed(10, 100, 101));
+    }
+
+    #[test]
+    fn preempt_needs_margin_and_long_tail() {
+        // Urgent gaps preempt while near ties hold.
+        assert!(preempt_want(
+            1_000_000,
+            10_000_000,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
+        assert!(!preempt_want(
+            9_900_000,
+            10_000_000,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
+        assert!(!preempt_want(
+            10_000_000,
+            10_000_000,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
+        assert!(!preempt_want(
+            11_000_000,
+            10_000_000,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
+        // A nearly done owner finishes instead of taking a kick.
+        assert!(!preempt_want(
+            1_000_000,
+            10_000_000,
+            100_000,
+            PREEMPT_MARGIN_NS
+        ));
+        assert!(preempt_want(
+            1_000_000,
+            10_000_000,
+            PREEMPT_TAIL_NS,
+            PREEMPT_MARGIN_NS
+        ));
+        // Rowless pairs keep the old guards.
+        assert!(!preempt_want(0, 10_000_000, u64::MAX, PREEMPT_MARGIN_NS));
+        assert!(!preempt_want(u64::MAX, 0, u64::MAX, PREEMPT_MARGIN_NS));
+        assert!(preempt_want(1_000_000, 0, u64::MAX, PREEMPT_MARGIN_NS));
+        assert_eq!(PREEMPT_MARGIN_NS, 500_000);
+        assert_eq!(PREEMPT_TAIL_NS, 500_000);
     }
 }
