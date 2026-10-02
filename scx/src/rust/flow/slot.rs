@@ -10,7 +10,7 @@
 //! in the overflow tail with all other parks, so no queue id names the
 //! kernel global queue. Dispatch drains local plus node plus machine in
 //! priority order plus overflow in queue order up to sixteen with flood
-//! cap past deep backlog.
+//! cap past deep backlog plus a step cap on visited entries.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -36,6 +36,9 @@ pub const FLOOD_PROBES: u64 = 4;
 /// Flood queued at 128. Past this depth ordered caps at four.
 #[cfg(test)]
 pub const FLOOD_QUEUED: u64 = 128;
+/// Scan steps at 32. Caps visited entries per pass regardless of moves.
+#[cfg(test)]
+pub const SCAN_STEPS: u64 = 32;
 /// Dispatch batch at 16. Caps moves per pass.
 #[cfg(test)]
 pub const DISPATCH_BATCH: u64 = 16;
@@ -125,6 +128,7 @@ mod tests {
     fn flood_and_batch_match_header() {
         assert_eq!(FLOOD_PROBES, 4);
         assert_eq!(FLOOD_QUEUED, 128);
+        assert_eq!(SCAN_STEPS, 32);
         assert_eq!(DISPATCH_BATCH, 16);
         assert_eq!(
             FLOOD_PROBES,
@@ -133,6 +137,10 @@ mod tests {
         assert_eq!(
             FLOOD_QUEUED,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64
+        );
+        assert_eq!(
+            SCAN_STEPS,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_SCAN_STEPS as u64
         );
         assert_eq!(
             DISPATCH_BATCH,

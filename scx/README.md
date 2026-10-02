@@ -10,7 +10,7 @@ The goal is to test deadline order with prediction in the kernel and see if shor
 
 ### How it works?
 
-Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint period and the core admits under a bound. Each CPU takes the earliest deadline it may run. Teardown drops load at once with predictor update. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow_runtime.rs`.
+Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint period and the core admits shares from the hint period under a bound. Each CPU takes the earliest deadline it may run. Teardown drops load at once with predictor update. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow_runtime.rs`.
 
 ## Typical Use Cases
 
@@ -22,7 +22,7 @@ Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint peri
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order up to `16`. Past `128` queued ordered caps at `4`. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order up to `16`. Past `128` queued ordered caps at `4` with `32` visited entries at most. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -30,7 +30,7 @@ Each deadline orders as priority value with virtual runtime for ties. The predic
 
 ### Admission
 
-Tasks carry shares of one slice in the task period and the core holds load under `950 per mille` per CPU. Shares add once and drop once through stored values. Rejects park in overflow with no run. Misses count past due on blocking ends. See `src/bpf/main/deadline.bpf.c` and `src/rust/flow_edf.rs`.
+Tasks carry shares of one slice in the hint period always with the predictor for deadlines only and the core holds load under `950 per mille` per CPU. Shares add once and drop once through stored values. Rejects park in overflow with no run. Misses count past due on blocking ends. See `src/bpf/main/deadline.bpf.c` and `src/rust/flow_edf.rs`.
 
 ### Gates
 
@@ -44,8 +44,8 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 
 - Rules live in `src/bpf/intf.h`.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`.
-- Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood against the kernel logic, since no kernel test harness runs here.
-- Admission lives in `src/bpf/main/deadline.bpf.c` with share, row, drop parts plus a mirror in `src/rust/flow_edf.rs` for tests only. The mirror keeps the same share plus bound math with no effect on order.
+- Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood plus step cap against the kernel logic, since no kernel test harness runs here.
+- Admission lives in `src/bpf/main/deadline.bpf.c` with share, row, drop parts plus a mirror in `src/rust/flow_edf.rs` for tests only. The mirror keeps the same hint share plus bound math with no effect on order.
 - Task burst and runtime bookkeeping lives in `src/rust/flow_runtime.rs` and `src/rust/flow_slice.rs` with checks in `src/rust/config.rs`.
 - Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
 - Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses as source of truth.
@@ -57,8 +57,9 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - State is `88B`, `8B`, `8B`, `120B`.
 - Needs kernels, `7.2` series and up.
 - Priority and FIFO never mix on one queue, since the kernel keeps one order per queue and a mix fails closed with an error.
-- Mask wins on drain, since affinity gates every move and the kernel skips heads that cannot run on the dealing CPU.
+- Mask wins on drain, since affinity gates every move with priority pops blocking on an unmatching head while the overflow scan skips to the next match.
 - Overflow stays FIFO with fail open drain, so stale deadlines never block live work and every pass still moves queued tasks in queue order up to `16` per pass.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline, so light work never takes a fast CPU that other work needs.
-- Flood past `128` queued caps ordered moves at `4` with queue order covering the rest to `16`, so a deep tail never burns extra scans in one pass.
-- Preempt sends at most one kick per park when the arrival leads by `500us` with `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.
+- Flood past `128` queued caps ordered moves at `4` with queue order covering the rest to `16` plus `32` visited entries at most, so a deep tail never burns extra scans in one pass.
+- Affinity stress with many foreign heads stalls priority tiers for that pass while overflow still skips, so keep pinned work narrow and test with mixed masks before trusting tail latency.
+- Preempt sends at most one kick per park when the arrival leads by `500us` with more than `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.

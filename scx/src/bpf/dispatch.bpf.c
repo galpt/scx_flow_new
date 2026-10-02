@@ -6,17 +6,21 @@
  * priority order plus overflow with one single scan in queue order up
  * to sixteen with no shared math. The kernel keeps each priority queue
  * list in deadline order, so each pop takes the earliest deadline with
- * mask wins on drain and no BPF sort. The overflow tail stays FIFO with
- * one single scan and mask wins on drain, so stale work never stalls
- * live work. Past deep backlog the single scan stops after four moves,
- * so one pass never burns sixteen scans on a deep tail. The budget
+ * mask wins on drain and no BPF sort. A pop blocks on an unmatching
+ * head, so one foreign task can stall its tier for that pass. The
+ * overflow tail stays FIFO with one single scan and mask wins on
+ * drain, so stale work never stalls live work since the scan skips
+ * unmatching entries through the kernel gated move. Past deep backlog
+ * the single scan stops after four moves and after thirty two visited
+ * entries regardless of moves, so one pass never burns sixteen scans
+ * on a deep tail and never walks the whole queue on mask misses. The budget
  * hoists the remaining dispatch slots once at entry, so every tier
  * shares one exact bound with no overfill. Per tier moves count once
  * with no lock through one exit, and the level follows after all moves
  * with the same CPU only, so idle cannot be skipped. An empty queue
  * leaves at once with no scan, so idle stays cheap. See intf.h for the
- * batch plus flood and enqueue.bpf.c for admission plus the deadline
- * choice.
+ * batch plus flood plus step cap and enqueue.bpf.c for admission plus
+ * the deadline choice.
  *
  * The pass splits across dispatch/probes, drain, failopen, perf plus
  * helpers/move plus helpers/finish with one RCU section in the single
@@ -100,10 +104,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Overflow tail last with one single scan and no scan on empty. */
 	/* Homeless parks move here with all other parks FIFO, so the */
 	/* kernel global queue stays out of the pass. Past deep backlog */
-	/* the scan stops after four with no extra pass, so a deep tail */
-	/* never burns sixteen scans at once. */
+	/* the scan stops after four moves and after thirty two visited */
+	/* entries regardless of moves, so a deep tail never burns */
+	/* sixteen scans at once and a miss heavy tail never walks the */
+	/* whole queue under RCU. Unlike the priority pops that block on */
+	/* an unmatching head, this scan skips unmatching entries through */
+	/* the kernel gated move. */
 	if (left)
-		over_moved = flow_priq_fill(cpu, left);
+		over_moved = flow_overflow_fill(cpu, left);
 	flow_account_local(local_moved);
 	flow_account_node(node_moved);
 	flow_account_machine(machine_moved);

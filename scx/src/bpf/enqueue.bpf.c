@@ -16,9 +16,9 @@
  * with shift updates from stopping, so short bursts earn tight
  * deadlines with no table walk. The admitted share pairs one add with
  * one drop through the stored value, so a hint change plus a move
- * never drifts the row. One idle helper plus one direct block form the
- * single kick site, so every park meets at most one kick with no
- * storm. A direct preempt needs a margin lead with the owner slice
+ * never drifts the row. The exiting fast path plus one idle helper
+ * plus one direct block form the three kick points, so every park
+ * meets at most one kick with no storm. A direct preempt needs a margin lead with the owner slice
  * still long, so near ties plus nearly done owners never bounce.
  * Slice expiry paces the rest, so no slice write and no stamp run
  * here. See intf.h for the deadline helpers and dispatch.bpf.c for
@@ -122,11 +122,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A zero average means no history, so the hint period applies */
 	/* with the default when the hint is zero. Later releases add */
 	/* average plus deviation with saturation, so short bursts earn */
-	/* tight deadlines with no table walk. The hint still stores for */
-	/* admission lag on purpose, but the predictor shapes the period */
-	/* once history exists. A miss on the last release counts before */
-	/* the new release, so the miss count tracks wall completion past */
-	/* release plus deadline. */
+	/* tight deadlines with no table walk. The hint stores for the */
+	/* admission share with no lag, while the predictor shapes only */
+	/* the deadline once history exists. A miss on the last release */
+	/* counts before the new release, so the miss count tracks wall */
+	/* completion past release plus deadline. */
 	hint = flow_task_hint(p);
 	avg = READ_ONCE(tctx->avg_ns);
 	dev = READ_ONCE(tctx->dev_ns);
@@ -157,17 +157,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx->deadline = deadline;
 	tctx->wait_at = now;
 	/* Admission holds declared use under the bound per CPU. */
-	/* The share is one slice in the task period with predictor else */
-	/* hint, and a reject parks in overflow with one idle kick and no */
+	/* The share is one slice in the hint period always, so steady */
+	/* work keeps a small share while the predictor shapes only the */
+	/* deadline. A reject parks in overflow with one idle kick and no */
 	/* wait. The added share stores on the task, so the stop drops the */
 	/* stored value with no drift on hint change and no wrong CPU */
 	/* debit on move. The stored share drops before the miss check */
 	/* above, so a double enqueue without a stop never holds two */
 	/* shares. */
-	if (avg == 0)
-		share = flow_admit_share(hint);
-	else
-		share = flow_slice_permillle(period);
+	share = flow_admit_share(hint);
 	if (share && !flow_admit_ok(flow_cpu_admitted((u32)cpu),
 	    share)) {
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
@@ -199,7 +197,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The idle flag clears first so the kick sticks. The pid read */
 	/* uses a relaxed load to match the running stores. The single */
 	/* direct block holds both the idle plus the preempt kick, so no */
-	/* second site can storm. */
+	/* fourth point beyond the three can storm. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;

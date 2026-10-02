@@ -7,6 +7,8 @@
 //! plus predictor models shared by BPF and userspace tests. The BPF
 //! deadline lives in intf.h with the admission rows in
 //! main/deadline.bpf.c, and this file mirrors the math with no map use.
+//! Admission stays hint based always while the predictor shapes only
+//! the deadline, so steady work keeps a small share.
 
 /// Default period in nanos at 16ms. Holds eight slices.
 pub const PERIOD_NS: u64 = 16_000_000;
@@ -50,17 +52,25 @@ pub fn slice_permillle(period: u64) -> u64 {
     crate::flow_slice::QUANTUM_NS * 1000 / period
 }
 
+/// Admission share of one task from the hint period always.
+/// A zero hint means no hint, so the default period applies. The
+/// predictor never shapes this share, so steady work keeps a small
+/// share while short bursts earn only tight deadlines.
+#[cfg(test)]
+pub fn admit_share(hint_us: u32) -> u64 {
+    slice_permillle(task_period(hint_us))
+}
+
 /// True when one CPU can admit one more per mille share.
 /// The admitted sum plus the new share must stay under the bound, so
-/// admitted work keeps idle time for late wakeups. Saturated sums
-/// fail closed, so a wrapped sum never admits.
+/// admitted work keeps idle time for late wakeups. A wrapped sum fails
+/// closed, so an overflow never admits.
 #[cfg(test)]
 pub fn admit_ok(admitted: u64, share: u64) -> bool {
-    let sum = admitted.saturating_add(share);
-    if sum < admitted {
-        return false;
+    match admitted.checked_add(share) {
+        None => false,
+        Some(sum) => sum <= ADMIT_PERMILLE,
     }
-    sum <= ADMIT_PERMILLE
 }
 
 /// True when one task missed its deadline at the given time.
@@ -117,7 +127,7 @@ pub fn pred_avg(avg: u64, delta: u64) -> u64 {
 pub fn pred_dev(dev: u64, avg: u64, delta: u64) -> u64 {
     let d = pred_clamp(if delta == 0 { PRED_MIN_NS } else { delta });
     let a = if avg == 0 { d } else { avg };
-    let err_raw = if d > a { d - a } else { a - d };
+    let err_raw = d.abs_diff(a);
     let err = pred_clamp(if err_raw == 0 { PRED_MIN_NS } else { err_raw });
     if dev == 0 {
         return err;
@@ -175,6 +185,19 @@ mod tests {
         assert!(admit_ok(825, 125));
         assert!(!admit_ok(826, 125));
         assert!(!admit_ok(u64::MAX, 125));
+        assert!(!admit_ok(u64::MAX - 10, 20));
+    }
+
+    #[test]
+    fn admission_stays_hint_based() {
+        assert_eq!(admit_share(0), 125);
+        assert_eq!(admit_share(8000), 250);
+        assert_eq!(admit_share(4000), 500);
+        // A short predictor period must not inflate the share: a 2.5ms
+        // predicted window would take 800 per mille, while the hint
+        // share stays small for the same task.
+        assert_eq!(slice_permillle(2_500_000), 800);
+        assert_eq!(admit_share(0), 125);
     }
 
     #[test]
