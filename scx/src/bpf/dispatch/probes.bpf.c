@@ -118,13 +118,17 @@ static __noinline bool veb_consume_best(s32 cpu)
 			/* stay below bit 31 while unowned sets it. */
 			rank = iter_pid |
 			    (own == (u32)cpu ? 0u : 0x80000000u);
+			/* Key folds into deadline with no extra level: key */
+			/* stays quantize of deadline with saturate at top, */
+			/* so deadline order already implies key order with */
+			/* equal deadlines sharing one key. Key stays above */
+			/* solely to skip corrupt plus to carry the move */
+			/* recheck, while deadline then rank order the pick. */
 			/* Single better check keeps one update site with */
 			/* no nested takes, so the verifier walks one flat */
 			/* chain. */
 			if (best_pid == 0)
 				better = true;
-			else if (k != best_key)
-				better = k < best_key;
 			else if (d != best_deadline)
 				better = d < best_deadline;
 			else
