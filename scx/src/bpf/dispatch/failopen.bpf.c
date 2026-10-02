@@ -1,67 +1,60 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fail open move for the dispatch batch drain.
+ * Priority fill for the dispatch pass.
  *
- * Holds one overflow task check plus move with single release through
- * one exit. Callers pass the iterator plus task from the single queue
- * order scan, so one scan moves up to sixteen in queue order with no
- * rescan per move. Skips drop no tree state with no park count so
- * transient misses stay quiet. Moves count one queue order park at the
- * decision point through the batch account, keeping every dispatched
- * task in one bucket while ordered moves carry the early deadlines.
- * Moves clear the head slot, so a queue order pid never lingers as a
- * head for the next ordered pick. Drops run at teardown, so the hot
- * path keeps no deletes. Stays rare since task state plus tree land
- * synchronously and solely genuine misses plus the deep remainder
- * reach here. Live stays proven once at entry, so the check pays one mask test
- * on the acquired task with no live branch and no iterator test
- * beyond the acquire. Runs inline so the iterator stays in the
- * caller with no extra call cost.
+ * Moves up to budget tasks from the overflow tail in queue order in one
+ * scan, so a deep tail pays one scan for sixteen moves with no rescan
+ * per move. The overflow tail stays FIFO with plain inserts, so this
+ * queue order step moves the remainder with best effort order there.
+ * Past deep backlog the fill stops after four moves, so one pass never
+ * burns sixteen scans on a deep tail while still draining with fail
+ * open progress. The queue handle stays hoisted once at entry, so the
+ * scan pays no DSQ lookup per step beyond the depth call. The budget
+ * hoists the remaining dispatch slots once at entry through the caller,
+ * so the fill shares one exact bound with no overfill. Live stays
+ * proven once at entry through the dispatch gate, so the scan pays one
+ * mask test per entry with no live branch. Runs noinline with scalar
+ * CPU plus budget and a bounded scan, so the verifier stays small with
+ * no unrolled caller tree and no rescan per move.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Fail open move with mask plus head clear in one place. */
-/* Gives true on move else false with no state. Iterator test skips */
-/* references on misses with live proven by the caller, so the single */
-/* scan pays one mask test on the acquired task. A move clears the head */
-/* slot when it still names the pid, so a running pid never lingers */
-/* while other keys stay. Callers pass the loop iterator so the move */
-/* stays in iterator context. */
-static __always_inline bool flow_fail_open_move(
-	struct bpf_iter_scx_dsq *it, s32 cpu, struct task_struct *p)
+/* Priority fill with flood cap plus mask in one place. */
+/* Gives the moved count up to budget with four past deep backlog, so */
+/* a deep tail never burns sixteen scans in one pass. Noinline with */
+/* scalar inputs so the single scan verifies once apart from the */
+/* dispatch entry. */
+static __noinline u32 flow_priq_fill(s32 cpu, u32 budget)
 {
-	struct task_struct *t;
-	u32 pid;
-	/* Iterator never holds null here, so no null branch. */
-	/* Live proven at entry, so mask gates the reference with */
-	/* misses rare through synchronous rows. */
-	if (!flow_mask_ok(cpu, p))
-		return false;
-	t = bpf_task_from_pid(p->pid);
-	if (!t)
-		return false;
-	pid = (u32)t->pid;
-	if (pid == 0) {
-		bpf_task_release(t);
-		return false;
+	u32 moved = 0;
+	u64 ov;
+	u64 qlen;
+	struct task_struct *p;
+	if (cpu < 0)
+		return 0;
+	if (budget == 0)
+		return 0;
+	if (!flow_cpu_live((u32)cpu))
+		return 0;
+	/* Queue handle stays hoisted, so the scan pays no DSQ lookup. */
+	ov = flow_overflow_dsq();
+	qlen = (u64)scx_bpf_dsq_nr_queued(ov);
+	if (qlen == 0)
+		return 0;
+	/* Single scan moves up to budget in queue order with no rescan */
+	/* per move, so a deep tail pays one scan for sixteen moves. */
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, ov, 0) {
+		if ((u64)moved >= (u64)budget)
+			break;
+		/* Past deep backlog the fill stops after four moves, so */
+		/* one pass never burns sixteen scans on a deep tail. */
+		if ((u64)moved >= (u64)FLOW_DISPATCH_FLOOD_PROBES &&
+		    qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED)
+			break;
+		if (flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p))
+			moved++;
 	}
-	if (!flow_mask_ok(cpu, t)) {
-		bpf_task_release(t);
-		return false;
-	}
-	if (scx_bpf_dsq_move(it, t,
-	    (u64)SCX_DSQ_LOCAL_ON | (u64)cpu, 0)) {
-		struct flow_task_ctx *tctx = flow_lookup(t);
-		if (tctx) {
-			u32 k = READ_ONCE(tctx->key);
-			/* Clear frees the slot when it still names this pid, */
-			/* so the next ordered pick never sees a running head. */
-			/* Other slots stay with an empty key as a no op. */
-			flow_head_clear(pid, k);
-		}
-		bpf_task_release(t);
-		return true;
-	}
-	bpf_task_release(t);
-	return false;
+	bpf_rcu_read_unlock();
+	return moved;
 }

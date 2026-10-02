@@ -2,19 +2,18 @@
 /*
  * Performance level helper for the dispatch pass.
  *
- * Holds the per CPU depth check plus the transition only set with
- * no knob and no extra walk. Any local plus running picks max else
- * half, and a steady level makes no call. Boost and idle stay paired
- * through one apply entry, so a busy CPU takes max and an idle CPU
- * returns to half with no forgotten deboost. Dispatch reaches the
+ * Holds the per CPU depth check plus the transition only set with no
+ * knob and no extra walk. Any own plus local plus running picks max
+ * else half, and a steady level makes no call. Boost and idle stay
+ * paired through one apply entry, so a busy CPU takes max and an idle
+ * CPU returns to half with no forgotten deboost. Dispatch reaches the
  * helper through one exit label, so every pass covers the level with
- * no skipped tail. Runs after ordered moves plus fail open with the
+ * no skipped tail. Runs after priority moves plus fail open with the
  * dispatch CPU only and no remote use, so the same CPU proof holds
- * with no extra guard. Old kernels skip with no set, and unknown
- * CPUs skip with no set. The choice stays in the allowlist before
- * the cap, the cap may step outside it within range, so no trap
- * fires. Kicks pull backlog to idle CPUs, so only the dealing CPU
- * takes max.
+ * with no extra guard. Old kernels skip with no set, and unknown CPUs
+ * skip with no set. The choice stays in the allowlist before the cap,
+ * the cap may step outside it within range, so no trap fires. Kicks
+ * pull backlog to idle CPUs, so only the dealing CPU takes max.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,18 +25,23 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } cpu_perf_last SEC(".maps");
-/* Depth probe with local plus running and no shared use. */
+/* Depth probe with own plus local plus running and no shared use. */
 /* Pure read with no set, so a bad read drops with no boost and a */
 /* missing queue stays idle. Guards live in the set core, so the */
-/* probe stays small with one duty. An invalid CPU reads bad ids */
-/* that drop to idle, then the core skips with no set. */
+/* probe stays small with one duty. An invalid CPU reads bad ids that */
+/* drop to idle, then the core skips with no set. */
 static __noinline bool flow_perf_busy(s32 cpu)
 {
+	s32 own;
 	s32 local;
 	u64 depth = 0;
 	struct flow_cpu_state *st;
-	/* Local shapes the depth with no shared use. */
-	/* A bad read drops with no boost, so a missing queue stays idle. */
+	/* Own plus local shape the depth with two polls only and no tier */
+	/* pre scan, so the pass pays no shared walk. A bad read drops */
+	/* with no boost, so a missing queue stays idle. */
+	own = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
+	if (own > 0)
+		depth += (u64)own;
 	local = scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
 	    (u64)(u32)cpu);
 	if (local > 0)
@@ -50,15 +54,13 @@ static __noinline bool flow_perf_busy(s32 cpu)
 }
 /* Core set with every guard plus the transition only store. */
 /* Holds the ksym plus live plus bound plus allowlist plus cap plus */
-/* transition checks in one place, so callers cannot split them. */
-/* Any local plus running picks max else half with no knob through */
-/* the paired entry, never a bare want. The kfunc check runs */
-/* first, so old kernels skip with no set. The live check runs next, */
-/* so unknown CPUs skip with no set. The allowlist guards the pre cap */
-/* choice only, the cap may step outside it within range, so no trap */
-/* fires. The last level check holds, so a steady level makes no set. */
-/* Runs after ordered moves plus fail open with the dispatch CPU only */
-/* and no remote use. */
+/* transition checks in one place, so callers cannot split them. The */
+/* kfunc check runs first, so old kernels skip with no set. The live */
+/* check runs next, so unknown CPUs skip with no set. The allowlist */
+/* guards the pre cap choice only, the cap may step outside it within */
+/* range, so no trap fires. The last level check holds, so a steady */
+/* level makes no set. Runs after priority moves plus fail open with */
+/* the dispatch CPU only and no remote use. */
 static __noinline void flow_perf_set(s32 cpu, u32 want)
 {
 	u32 cap;
