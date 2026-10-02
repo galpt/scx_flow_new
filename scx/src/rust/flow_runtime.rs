@@ -3,8 +3,10 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the virtual runtime advance shared by tests. The BPF runtime
-//! lives in intf.h, and this file mirrors the math with no map use.
+//! Holds the virtual runtime advance plus the burst predictor update
+//! shared by tests. The BPF runtime lives in intf.h with updates in
+//! lifecycle.bpf.c plus main/timer.bpf.c, and this file mirrors the
+//! math with no map use.
 
 /// Clamp one share into 1 to 16384.
 /// Zero or oversize shares fail closed to the nearer bound.
@@ -31,6 +33,15 @@ pub fn runtime_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
     vruntime.saturating_add(adv)
 }
 
+/// Runtime advance from one nice level through the table.
+/// Maps nice through the table with 1024 on out of range, then clamps
+/// to 1 to 16384 with no trap.
+#[cfg(test)]
+pub fn runtime_advance_nice(vruntime: u64, delta: u64, nice: i32) -> u64 {
+    let w = crate::flow_slice::weight_of(nice);
+    runtime_advance(vruntime, delta, crate::flow_slice::clamp_weight(w))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +63,15 @@ mod tests {
     fn huge_inputs_saturate() {
         assert_eq!(runtime_advance(u64::MAX, u64::MAX, 128), u64::MAX);
         assert_eq!(runtime_advance(0, u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn nice_table_drives_runtime() {
+        assert_eq!(runtime_advance_nice(0, 2_000_000, 0), 250_000);
+        let heavy = runtime_advance_nice(0, 2_000_000, -20);
+        let light = runtime_advance_nice(0, 2_000_000, 19);
+        assert!(heavy < 250_000);
+        assert!(light > 250_000);
+        assert_eq!(runtime_advance_nice(0, 2_000_000, 99), 250_000);
     }
 }

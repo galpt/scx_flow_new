@@ -2,19 +2,27 @@
 /*
  * Enqueue op.
  *
- * Every release earns one absolute deadline at release plus period,
- * and admission holds declared use under ninety five percent before
- * the task joins a queue. Admitted tasks join direct when the target
- * can drain before the deadline, else they join the shared home, so
- * no task waits for a busy CPU while shared room stays open. Missed
- * tasks park in overflow with a miss count and one direct kick
- * and no wait. Pinned tasks rest in overflow with
- * wait set and one idle kick. Exiting tasks run at once on the task
- * CPU with no queue wait and no gate. The gate runs first for all
- * other arrivals, so a stale CPU plus a moved task fails closed with
- * one counter. Slice expiry paces the rest, so no slice write and no
- * stamp run here. See intf.h for the deadline helpers and
- * dispatch.bpf.c for the matching four single moves.
+ * Every release earns one absolute deadline from the burst predictor
+ * else the hint period, and admission holds declared use under ninety
+ * five percent before the task joins a queue. Admitted tasks join
+ * direct when the target can drain before the deadline, else they join
+ * the shared home, so no task waits for a busy CPU while shared room
+ * stays open. Missed tasks park in overflow with a miss count and one
+ * idle kick and no wait. Pinned tasks rest in overflow with wait set
+ * and one idle kick. Exiting tasks run at once on the task CPU with
+ * no queue wait and no gate. The gate runs first for all other
+ * arrivals, so a stale CPU plus a moved task fails closed with one
+ * counter. The predictor average plus deviation shape later deadlines
+ * with shift updates from stopping, so short bursts earn tight
+ * deadlines with no table walk. The admitted share pairs one add with
+ * one drop through the stored value, so a hint change plus a move
+ * never drifts the row. One idle helper plus one direct block form the
+ * single kick site, so every park meets at most one kick with no
+ * storm. A direct preempt needs a margin lead with the owner slice
+ * still long, so near ties plus nearly done owners never bounce.
+ * Slice expiry paces the rest, so no slice write and no stamp run
+ * here. See intf.h for the deadline helpers and dispatch.bpf.c for
+ * the single scan.
  *
  * The op splits across enqueue/target, insert, and kick files with
  * the enqueue body here. Each helper stays inline except the kick,
@@ -38,6 +46,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 deadline;
 	u64 share;
 	u32 hint;
+	u64 avg = 0;
+	u64 dev = 0;
 	(void)enq_flags;
 	/* Exiting tasks run at once on the task CPU with no queue wait. */
 	/* The gate never runs here, so exiting work stays exempt. */
@@ -108,15 +118,23 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
-	/* One release plus one period plus one absolute deadline. */
-	/* The hint tunes the period only with no group use. The period */
-	/* keeps the stored hint for one release while admission already */
-	/* uses the fresh hint, so the share stays exact and the period */
-	/* lags one release on purpose. A miss on the last release counts */
-	/* before the new release, so the miss count tracks wall */
-	/* completion past release plus deadline. */
+	/* One release plus one predictor period plus one deadline. */
+	/* A zero average means no history, so the hint period applies */
+	/* with the default when the hint is zero. Later releases add */
+	/* average plus deviation with saturation, so short bursts earn */
+	/* tight deadlines with no table walk. The hint still stores for */
+	/* admission lag on purpose, but the predictor shapes the period */
+	/* once history exists. A miss on the last release counts before */
+	/* the new release, so the miss count tracks wall completion past */
+	/* release plus deadline. */
 	hint = flow_task_hint(p);
-	period = flow_task_period(tctx->hint_us ? tctx->hint_us : hint);
+	avg = READ_ONCE(tctx->avg_ns);
+	dev = READ_ONCE(tctx->dev_ns);
+	if (avg == 0)
+		period = flow_task_period(tctx->hint_us ?
+		    tctx->hint_us : hint);
+	else
+		period = flow_pred_period(avg, dev);
 	tctx->hint_us = hint;
 	/* A stale stored share drops before the miss check, so a double */
 	/* enqueue without a stop never holds two shares. The normal pass */
@@ -128,22 +146,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		tctx->wait_at = now;
 		tctx->release = now;
 		tctx->period = period;
-		tctx->deadline = flow_deadline_at(now, period);
+		tctx->deadline = flow_pred_deadline(now, avg, dev, hint);
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	tctx->release = now;
 	tctx->period = period;
-	deadline = flow_deadline_at(now, period);
+	deadline = flow_pred_deadline(now, avg, dev, hint);
 	tctx->deadline = deadline;
 	tctx->wait_at = now;
 	/* Admission holds declared use under the bound per CPU. */
-	/* The share is one slice in the task period, and a reject parks */
-	/* in overflow with one direct kick and no wait. The added */
-	/* share stores on the task, so the stop drops the stored value */
-	/* with no drift on hint change and no wrong CPU debit on move. */
-	share = flow_admit_share(hint);
+	/* The share is one slice in the task period with predictor else */
+	/* hint, and a reject parks in overflow with one idle kick and no */
+	/* wait. The added share stores on the task, so the stop drops the */
+	/* stored value with no drift on hint change and no wrong CPU */
+	/* debit on move. The stored share drops before the miss check */
+	/* above, so a double enqueue without a stop never holds two */
+	/* shares. */
+	if (avg == 0)
+		share = flow_admit_share(hint);
+	else
+		share = flow_slice_permillle(period);
 	if (share && !flow_admit_ok(flow_cpu_admitted((u32)cpu),
 	    share)) {
 		__sync_fetch_and_add(&flow_stats.rejects, 1);
@@ -173,12 +197,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* Idle targets kick at once with no rate window. */
 	/* The idle flag clears first so the kick sticks. The pid read */
-	/* uses a relaxed load to match the running stores. */
+	/* uses a relaxed load to match the running stores. The single */
+	/* direct block holds both the idle plus the preempt kick, so no */
+	/* second site can storm. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
 		struct task_struct *trusted;
 		struct flow_task_ctx *octx;
+		u64 occ_deadline;
+		u64 margin;
+		u64 occ_start;
+		u64 occ_end;
+		u64 tail;
 		if (!st)
 			return;
 		if (READ_ONCE(st->running_pid) == 0) {
@@ -214,23 +245,64 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			bpf_rcu_read_unlock();
 			return;
 		}
-		if (octx->deadline == 0) {
+		occ_deadline = READ_ONCE(octx->deadline);
+		occ_start = READ_ONCE(octx->run_at);
+		if (occ_deadline == 0) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
 			return;
 		}
-		/* A strictly earlier deadline kicks at once. */
-		/* Equal or later deadlines pace at slice expiry with no */
-		/* count, so the hot path pays one global store at most. */
-		if (flow_time_before(deadline, octx->deadline)) {
+		/* An urgent arrival leads by a margin with the owner slice */
+		/* still long, so near ties plus nearly done owners never */
+		/* bounce. The margin adds a quarter base slice to the */
+		/* arrival with saturation, and the tail needs a quarter */
+		/* slice left on the owner, so only a truly earlier arrival */
+		/* with work left preempts at once. Equal or later arrivals */
+		/* pace at slice expiry with no count. */
+		if (!flow_time_before(deadline, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-			__sync_fetch_and_add(
-			    &flow_stats.kicks, 1);
+			return;
+		}
+		margin = flow_sat_add(deadline,
+		    (u64)FLOW_PREEMPT_MARGIN_NS);
+		if (margin == (u64)~0ULL) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			return;
+		}
+		if (!flow_time_before(margin, occ_deadline)) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			return;
+		}
+		if (occ_start == 0) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			return;
+		}
+		occ_end = flow_sat_add(occ_start,
+		    (u64)FLOW_QUANTUM_NS);
+		if (occ_end == (u64)~0ULL) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			return;
+		}
+		tail = flow_sat_add(now,
+		    (u64)FLOW_PREEMPT_TAIL_NS);
+		if (tail == (u64)~0ULL) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
+			return;
+		}
+		if (!flow_time_before(tail, occ_end)) {
+			bpf_task_release(trusted);
+			bpf_rcu_read_unlock();
 			return;
 		}
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		__sync_fetch_and_add(&flow_stats.kicks, 1);
 	}
 }

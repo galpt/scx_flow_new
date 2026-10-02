@@ -90,6 +90,17 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 		return 0;
 	return READ_ONCE(h->period_us);
 }
+/* Nice of one task from static prio minus 120. */
+/* Null maps to zero, so weight falls back to 1024 with no trap. */
+static __always_inline s32 flow_nice_of(
+	const struct task_struct *p)
+{
+	s32 prio;
+	if (!p)
+		return 0;
+	prio = BPF_CORE_READ(p, static_prio);
+	return prio - 120;
+}
 /* Acquired hierarchy of one task with paired release. */
 /* Uses the scheduler view with a reference, so the caller releases */
 /* with release when non null. A null return means the root with */

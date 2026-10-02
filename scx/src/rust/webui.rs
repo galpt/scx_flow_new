@@ -172,13 +172,13 @@ mod tests {
     /* Old snapshots without new fields still decode. */
     #[test]
     fn web_metrics_missing_fields_default() {
-        let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.5.1\"}";
+        let txt = "{\"stats\":{\"on_cpu\":1},\"version\":\"4.7.0\"}";
         let m: WebMetrics = serde_json::from_str(txt).unwrap();
         assert_eq!(m.stats.on_cpu, 1);
         assert_eq!(m.stats.local_moves, 0);
         assert_eq!(m.stats.gate_rejects, 0);
         assert!(m.per_cpu.is_empty());
-        assert_eq!(m.version, "4.5.1");
+        assert_eq!(m.version, "4.7.0");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
         let old = "{\"id\":1,\"running_pid\":5,\"slice_ns\":2000000}";
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(v.as_object().map(|o| o.len()), Some(5));
         let back: WebMetrics = serde_json::from_value(v).unwrap();
         assert_eq!(back.stats.on_cpu, 1);
-        assert_eq!(back.version, "4.5.1");
+        assert_eq!(back.version, "4.7.0");
     }
 
     /* Full snapshot round trips through JSON with live counters. */
@@ -229,7 +229,7 @@ mod tests {
                     slice_ns: 2_000_000,
                 },
             ],
-            version: "4.5.1".to_string(),
+            version: "4.7.0".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "cpus=4 seeded".to_string(),
         };
@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(back.per_cpu[0].running_pid, 7);
         assert_eq!(back.per_cpu[0].slice_ns, 2_000_000);
         assert_eq!(back.per_cpu[1].id, 1);
-        assert_eq!(back.version, "4.5.1");
+        assert_eq!(back.version, "4.7.0");
         assert_eq!(back.topology, "cpus=4 seeded");
         let v = merged(&snap);
         assert_eq!(v.as_object().map(|o| o.len()), Some(5));

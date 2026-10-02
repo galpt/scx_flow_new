@@ -19,7 +19,10 @@
 /* check gates the pid clear in the caller only, so a migrated stop */
 /* still pairs. A backward clock charges zero time but still pairs */
 /* the gauge. Runtime advances by scaled time with the task weight */
-/* beside the raw charge. Outlined to keep disable and exit small. */
+/* from the nice table beside the raw charge, and the predictor */
+/* average plus deviation update from the same delta with shifts, so */
+/* a leftover segment still trains later deadlines. Outlined to keep */
+/* disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
 	struct flow_task_ctx *tctx, s32 cpu)
 {
@@ -29,7 +32,7 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	u64 got;
 	if (!tctx)
 		return;
-	(void)p;
+	(void)cpu;
 	start = READ_ONCE(tctx->run_at);
 	if (start == 0)
 		return;
@@ -44,9 +47,18 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 		return;
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	{
-		u32 w = flow_weight_clamp(p->scx.weight);
+		u32 w = flow_weight_clamp(flow_weight_of(
+		    flow_nice_of(p)));
 		tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
 		    delta, w);
+		if (delta) {
+			u64 avg = READ_ONCE(tctx->avg_ns);
+			u64 dev = READ_ONCE(tctx->dev_ns);
+			u64 n_avg = flow_pred_avg(avg, delta);
+			u64 n_dev = flow_pred_dev(dev, avg, delta);
+			__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
+			__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
+		}
 	}
 	flow_on_cpu_dec();
 }

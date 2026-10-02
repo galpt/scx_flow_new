@@ -2,15 +2,21 @@
 /*
  * Queue inserts for the enqueue pass.
  *
- * Holds the local, node, machine, and overflow inserts with
- * a fixed slice. Homeless tasks park in the overflow tail with all
- * other parks, so no insert touches the kernel global queue. Runs
- * inline with no walk, so the verifier stays small. Runs under the
- * caller with no lock.
+ * Holds the local, node, machine, and overflow inserts with a fixed
+ * slice. Local plus node plus machine use the kernel priority queue
+ * with the deadline as vtime, so each queue drains in deadline order
+ * with no BPF scan. The overflow tail stays FIFO with plain insert,
+ * so a stale deadline never blocks the fail open drain. Homeless tasks
+ * park in the overflow tail with all other parks, so no insert touches
+ * the kernel global queue and no queue mixes FIFO plus priority tasks.
+ * Runs inline with no walk, so the verifier stays small. Runs under
+ * the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Insert one task into its local queue with its deadline. */
+/* Uses the priority queue with the deadline as vtime, so the head */
+/* holds the earliest deadline with mask wins on drain. */
 static __always_inline void flow_local_insert(
 	struct task_struct *p, s32 cpu, u64 deadline)
 {
@@ -18,6 +24,7 @@ static __always_inline void flow_local_insert(
 	    (u64)FLOW_QUANTUM_NS, deadline, 0);
 }
 /* Insert one task into its node queue with its deadline. */
+/* Uses the priority queue the same way with mask wins on drain. */
 static __always_inline void flow_node_insert(
 	struct task_struct *p, u32 node, u64 deadline)
 {
@@ -25,6 +32,7 @@ static __always_inline void flow_node_insert(
 	    (u64)FLOW_QUANTUM_NS, deadline, 0);
 }
 /* Insert one task into the machine queue with its deadline. */
+/* Uses the priority queue the same way with mask wins on drain. */
 static __always_inline void flow_machine_insert(
 	struct task_struct *p, u64 deadline)
 {
@@ -33,8 +41,8 @@ static __always_inline void flow_machine_insert(
 }
 /* Insert one task into the shared overflow tail. */
 /* Pinned tasks plus missed parks plus rejected parks plus homeless */
-/* tasks rest here with one direct kick on insert, so every park meets */
-/* a dispatch pass with no wait. */
+/* tasks rest here FIFO with one idle kick on insert, so every park */
+/* meets a dispatch pass with no wait and no priority mix. */
 static __always_inline void flow_over_insert(
 	struct task_struct *p)
 {

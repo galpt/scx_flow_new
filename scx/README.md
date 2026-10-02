@@ -1,37 +1,64 @@
 # scx_flow
 
-scx_flow is a Linux deadline scheduler in Rust with a BPF core and 2ms slice.
+### What is it?
+
+scx_flow runs the earliest deadline task first. It keeps deadline order in kernel priority queues with a burst predictor from recent runs. The core admits load under a bound with a fixed `2ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+
+### Why?
+
+The goal is to test deadline order with prediction in the kernel and see if short bursts reach a CPU sooner. Finding the earliest deadline without a full scan matters when order decides who runs next. Bounded search keeps the test fair. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
+
+### How it works?
+
+Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint period and the core admits under a bound. Each CPU takes the earliest deadline it may run. Teardown drops load at once with predictor update. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow_runtime.rs`.
+
+## Typical Use Cases
+
+- Latency sensitive apps. Tasks with the earliest deadline run first, so short arrivals never wait behind long work and stay responsive under load.
+- Desktop use. A `2ms` slice keeps interaction smooth while background work continues, so typing stays fluid with no extra tuning.
+- Mixed batch work. Admission keeps overload feasible, so heavy jobs still finish while urgent tasks move ahead in deadline order.
+
+## More details
 
 ### Queues
 
-One local queue per CPU plus one shared queue per node plus one queue per machine plus one overflow tail order by deadline with homeless parks in overflow. Drain takes one move per tier in local plus node plus machine plus overflow order. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order up to `16`. Past `128` queued ordered caps at `4`. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
-Release sets release plus period plus deadline with virtual runtime for ties. Hints tune the period only with placement taking idle then the previous CPU then the home. See `src/bpf/select_cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
+Each deadline orders as priority value with virtual runtime for ties. The predictor average plus deviation shapes later deadlines with shift updates. The weight table maps nice to weight for scaled runtime. See `src/bpf/intf.h` and `src/rust/flow_edf.rs`.
 
 ### Admission
 
-Admission holds use under 95 percent per CPU with 4096 hints. Rejects plus misses park in overflow with one direct kick and no wait. See `src/bpf/cgroup.bpf.c` and `src/bpf/main/deadline.bpf.c`.
+Tasks carry shares of one slice in the task period and the core holds load under `950 per mille` per CPU. Shares add once and drop once through stored values. Rejects park in overflow with no run. Misses count past due on blocking ends. See `src/bpf/main/deadline.bpf.c` and `src/rust/flow_edf.rs`.
 
 ### Gates
 
-Gate runs first in every op with fail closed. Stale CPUs plus moved tasks count one gate reject with exiting work exempt. See `src/bpf/main/cpu.bpf.c` and `src/bpf/enqueue.bpf.c`.
+A gate runs first at each step so stale tasks and CPUs wait safely. Exiting work runs at once. Fails drop the ledger with no leak. The drain stays affinity gated with mask wins. One counter tracks held work. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow_runtime.rs`.
 
 ### Reporting
 
-Scheduling stays fixed. Reporting uses `--stats`, `--monitor`, and `--no-webui`. The dashboard serves loopback port `50005` with one IPv6 first bind plus counters plus per CPU pids plus SMT plus a snapshot download. Counters cover on CPU plus runtime plus inserts plus requeues plus completions plus local plus node plus machine plus over plus kicks plus admits plus rejects plus misses plus parks plus gate rejects. See `src/rust/stats.rs`.
+Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a local page at `50005`. The page keeps local, node, machine, overflow, kicks apart. Snapshots share one moment for review. See `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`.
 
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Maps live in `src/bpf/main.bpf.c` with splits in `main/`, `enqueue/`, `dispatch/`.
-- Mirrors live in `flow*.rs` with facade in `flow.rs` and checks in `config.rs`.
-- Dashboard lives in `snapshot.rs`, `topology.rs`, `stats.rs`, `webui.rs`, `ui/index.html`.
+- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`.
+- Order lives in kernel priority queues with mirrors in `src/rust/flow_edf.rs` and `src/rust/flow_slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood against the kernel logic, since no kernel test harness runs here.
+- Admission lives in `src/bpf/main/deadline.bpf.c` with share, row, drop parts plus a mirror in `src/rust/flow_edf.rs` for tests only. The mirror keeps the same share plus bound math with no effect on order.
+- Task burst and runtime bookkeeping lives in `src/rust/flow_runtime.rs` and `src/rust/flow_slice.rs` with checks in `src/rust/config.rs`.
+- Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
+- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses as source of truth.
 
 ## Limitations
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `72B` plus `8B` plus `8B` plus `120B`.
+- State is `88B`, `8B`, `8B`, `120B`.
 - Needs kernels, `7.2` series and up.
+- Priority and FIFO never mix on one queue, since the kernel keeps one order per queue and a mix fails closed with an error.
+- Mask wins on drain, since affinity gates every move and the kernel skips heads that cannot run on the dealing CPU.
+- Overflow stays FIFO with fail open drain, so stale deadlines never block live work and every pass still moves queued tasks in queue order up to `16` per pass.
+- Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline, so light work never takes a fast CPU that other work needs.
+- Flood past `128` queued caps ordered moves at `4` with queue order covering the rest to `16`, so a deep tail never burns extra scans in one pass.
+- Preempt sends at most one kick per park when the arrival leads by `500us` with `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.

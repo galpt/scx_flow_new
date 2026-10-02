@@ -4,10 +4,13 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! One local queue per CPU plus one shared queue per node plus one
-//! machine queue plus one overflow tail. Homeless tasks park in the
-//! overflow tail with all other parks, so no queue id names the kernel
-//! global queue. Dispatch moves one task per tier in local plus node
-//! plus machine plus overflow order with no scan on empty.
+//! machine queue plus one overflow tail. Local plus node plus machine
+//! use the kernel priority queue with deadline order and overflow stays
+//! FIFO, so no queue mixes FIFO plus priority tasks. Homeless tasks park
+//! in the overflow tail with all other parks, so no queue id names the
+//! kernel global queue. Dispatch drains local plus node plus machine in
+//! priority order plus overflow in queue order up to sixteen with flood
+//! cap past deep backlog.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -27,23 +30,32 @@ pub const SLOT_MAX_DSQS: u64 = 522;
 /// Max nodes bound shared with the BPF header.
 #[cfg(test)]
 pub const MAX_NODES: u64 = 8;
+/// Flood probes at 4. Caps ordered moves past deep backlog.
+#[cfg(test)]
+pub const FLOOD_PROBES: u64 = 4;
+/// Flood queued at 128. Past this depth ordered caps at four.
+#[cfg(test)]
+pub const FLOOD_QUEUED: u64 = 128;
+/// Dispatch batch at 16. Caps moves per pass.
+#[cfg(test)]
+pub const DISPATCH_BATCH: u64 = 16;
 
 /// Local queue id of one CPU from base plus id.
-/// One ordered queue per CPU keeps deadline order local.
+/// One priority queue per CPU keeps deadline order local.
 #[cfg(test)]
 pub fn local_dsq(cpu: u32) -> u64 {
     LOCAL_BASE + cpu as u64
 }
 
 /// Shared queue id of one node from base plus id.
-/// One ordered queue per node shares work inside the node.
+/// One priority queue per node shares work inside the node.
 #[cfg(test)]
 pub fn node_dsq(node: u32) -> u64 {
     NODE_BASE + node as u64
 }
 
 /// Id of the machine queue shared by every CPU.
-/// Work with no node home rests here with one move per pass.
+/// Work with no node home rests here priority ordered with mask wins.
 #[cfg(test)]
 pub fn machine_dsq() -> u64 {
     SLOT_MACHINE
@@ -51,7 +63,7 @@ pub fn machine_dsq() -> u64 {
 
 /// Id of the overflow tail shared by every CPU.
 /// Missed parks plus rejected parks plus pinned tasks plus homeless
-/// tasks rest here with one move per pass and one direct kick.
+/// tasks rest here FIFO with one idle kick and mask wins on drain.
 #[cfg(test)]
 pub fn slot_overflow_dsq() -> u64 {
     SLOT_OVERFLOW
@@ -107,5 +119,24 @@ mod tests {
         assert!(dsq_valid(slot_overflow_dsq()));
         assert!(!dsq_valid(0));
         assert!(!dsq_valid(0x6000));
+    }
+
+    #[test]
+    fn flood_and_batch_match_header() {
+        assert_eq!(FLOOD_PROBES, 4);
+        assert_eq!(FLOOD_QUEUED, 128);
+        assert_eq!(DISPATCH_BATCH, 16);
+        assert_eq!(
+            FLOOD_PROBES,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64
+        );
+        assert_eq!(
+            FLOOD_QUEUED,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64
+        );
+        assert_eq!(
+            DISPATCH_BATCH,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
+        );
     }
 }

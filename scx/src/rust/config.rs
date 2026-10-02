@@ -9,6 +9,8 @@ use crate::flow::ADMIT_PERMILLE;
 use crate::flow::CAP_BASE;
 use crate::flow::HINT_MAX;
 use crate::flow::PERIOD_NS;
+use crate::flow::PRED_MAX_NS;
+use crate::flow::PRED_MIN_NS;
 use crate::flow::QUANTUM_NS;
 use crate::flow::WEIGHT_BASE;
 use crate::flow::WEIGHT_MAX;
@@ -46,11 +48,12 @@ impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 2ms with base weight 128 in range
-    /// 1 to 16384. The period stays at 16ms. The batch stays fixed
-    /// at 16. Admission holds use under 950 per mille with base capacity
-    /// 1024. Queues hold 512 local plus 8 node plus machine plus
-    /// overflow with ids in the 0x5100 region. Hints hold 4096 flat
-    /// rows with no timer wait.
+    /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
+    /// The batch stays fixed at 16 with flood 4 past 128. Admission
+    /// holds use under 950 per mille with base capacity 1024. Queues
+    /// hold 512 local plus 8 node plus machine plus overflow with ids
+    /// in the 0x5100 region. Hints hold 4096 flat rows with no timer
+    /// wait. Preempt needs 500us margin plus 500us tail.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -63,6 +66,9 @@ impl Config {
         }
         if PERIOD_NS != 16_000_000 {
             bail!("period bounds bad");
+        }
+        if PRED_MIN_NS != 1 || PRED_MAX_NS != 1_000_000_000 {
+            bail!("predictor bounds bad");
         }
         if self.dispatch_batch != DEF_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
@@ -78,6 +84,18 @@ impl Config {
         }
         if HINT_MAX != 4096 {
             bail!("hint bound bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 500_000 {
+            bail!("margin bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 500_000 {
+            bail!("tail bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64 != 4 {
+            bail!("flood probes bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64 != 128 {
+            bail!("flood queued bad");
         }
         Ok(())
     }
@@ -187,6 +205,22 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
             crate::flow_cgrp::HINT_MAX
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS as u64,
+            PRED_MIN_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PRED_MAX_NS as u64,
+            PRED_MAX_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
+            500_000
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
+            500_000
         );
     }
 }

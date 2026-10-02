@@ -6,19 +6,22 @@
  * per node plus one shared queue per machine plus one overflow tail.
  * Homeless work parks in the overflow tail with all other parks.
  * Every task carries a release plus a period plus an absolute
- * deadline, and each queue orders by that deadline. Admission holds
- * total declared use under ninety five percent of the machine, so
- * admitted work can meet its deadlines. A miss counts when wall
- * completion passes release plus deadline, and a miss parks the task
- * in overflow with a direct kick and no wait. Placement takes the
- * slowest sufficient CPU among the allowed set that can meet the
- * deadline, so light work never takes a fast CPU that other work
- * needs. Hints from the flat view tune the period only, and no group
- * or pool shapes order. See select_cpu.bpf.c for placement and
- * enqueue.bpf.c for admission plus the deadline choice and
- * dispatch.bpf.c for the four single moves and lifecycle.bpf.c for
- * the miss count and timer.bpf.c for the leftover charge plus the
- * miss count.
+ * deadline, and each queue orders by that deadline through the kernel
+ * priority queue. Admission holds total declared use under ninety five
+ * percent of the machine, so admitted work can meet its deadlines.
+ * A miss counts when wall completion passes release plus deadline,
+ * and a miss parks the task in overflow with a direct kick and no
+ * wait. Placement takes the slowest sufficient CPU among the allowed
+ * set that can meet the deadline, so light work never takes a fast CPU
+ * that other work needs. Hints from the flat view tune the period
+ * only, and no group or pool shapes order. Each stop feeds the burst
+ * predictor average plus deviation with shift updates, so later
+ * deadlines track recent bursts with no table walk. The weight table
+ * maps nice to weight for scaled runtime with no trap on out of range.
+ * See select_cpu.bpf.c for placement and enqueue.bpf.c for admission
+ * plus the deadline choice and dispatch.bpf.c for the single scan and
+ * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
+ * charge plus the miss count.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -54,6 +57,10 @@ enum flow_consts {
 	/* so a fully used task still leaves room for one park plus */
 	/* one retry inside the period. */
 	FLOW_PERIOD_NS = 16000000ULL,
+	/* Predictor bounds with no knob. Holds 1ns to 1s, so a huge */
+	/* burst clamps instead of wrapping to a short deadline. */
+	FLOW_PRED_MIN_NS = 1ULL,
+	FLOW_PRED_MAX_NS = 1000000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
 	FLOW_WEIGHT_MAX = 16384ULL,
@@ -83,6 +90,12 @@ enum flow_consts {
 	/* moves one task per tier for four moves at most, so the ops */
 	/* table holds every pass with room and no shared math. */
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
+	/* Flood bound of 4 ordered moves past 128 queued with no knob. */
+	/* Past deep backlog ordered stops after four moves with queue */
+	/* order covering the remainder to sixteen, so a deep tail never */
+	/* burns sixteen double scans in one pass. */
+	FLOW_DISPATCH_FLOOD_PROBES = 4ULL,
+	FLOW_DISPATCH_FLOOD_QUEUED = 128ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Admission bound of 950 per mille with no knob. Holds use */
 	/* under ninety five percent, so admitted work keeps idle time */
@@ -96,9 +109,16 @@ enum flow_consts {
 	/* plus local plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
+	/* Preempt leads by a quarter base slice with no knob, so near */
+	/* ties never bounce while urgent gaps still preempt at once. */
+	FLOW_PREEMPT_MARGIN_NS = 500000ULL,
+	/* Preempt waits out a quarter base slice tail with no knob, so */
+	/* a nearly done owner finishes instead of taking a kick. */
+	FLOW_PREEMPT_TAIL_NS = 500000ULL,
 };
-/* Per task state at 72B with release plus period plus deadline plus */
-/* runtime plus stamps plus hint plus miss count plus admit share. */
+/* Per task state at 88B with release plus period plus deadline plus */
+/* runtime plus predictor plus stamps plus hint plus miss count plus */
+/* admit share. */
 /* Release holds the last release time for the miss check. A zero */
 /* release means no release yet, so the miss check skips with no count. */
 /* Period holds the relative period in nanos for the next deadline. */
@@ -109,6 +129,14 @@ enum flow_consts {
 /* Vruntime holds the scaled runtime served so far for order ties. */
 /* A zero runtime means no service yet, so fresh tasks order by */
 /* deadline alone. */
+/* Avg holds the burst average in nanos with zero for no history. */
+/* A zero average means no sample yet, so the deadline falls back to */
+/* the hint period with no predictor use. Values clamp to 1ns to 1s, */
+/* so a huge burst never wraps to a short deadline. */
+/* Dev holds the burst deviation in nanos with zero for no history. */
+/* A zero deviation means no sample yet, so the deadline uses the */
+/* average alone with no extra margin. Values clamp the same way with */
+/* shift updates, so a spike widens the deadline with no jump. */
 /* Wait holds the last enqueue time. A zero wait means the task */
 /* never queued. Every queue join stamps the task, so queued work */
 /* always carries a stamp. */
@@ -135,6 +163,8 @@ struct flow_task_ctx {
 	u64 period;
 	u64 deadline;
 	u64 vruntime;
+	u64 avg_ns;
+	u64 dev_ns;
 	u64 wait_at;
 	u64 run_at;
 	u32 hint_us;
@@ -198,9 +228,10 @@ struct flow_sched_stats {
 	u64 gate_rejects;
 };
 /* Task state holds release plus period plus deadline plus runtime */
-/* plus stamps plus hint plus misses plus admit share in 72 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 72,
-	"task state stays at 72B");
+/* plus predictor plus stamps plus hint plus misses plus admit share */
+/* in 88 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 88,
+	"task state stays at 88B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
@@ -240,6 +271,35 @@ static __always_inline u32 flow_weight_clamp(u32 w)
 	if (w > (u32)FLOW_WEIGHT_MAX)
 		return (u32)FLOW_WEIGHT_MAX;
 	return w;
+}
+/* Weight table for 40 nice levels from minus 20 to 19. */
+/* Index is nice plus 20 with center 1024 at nice 0. */
+/* Ends are 2048 at minus 20 and 256 at 19, */
+/* so total spread K is 8 with boost 2x and penalty 4x. */
+/* Made as 1024 times 2 to minus nice over 20 below 1, */
+/* else 1024 times 4 to minus nice over 19, rounded. */
+/* The maker is docs only, the table is rodata. */
+static const u16 flow_weight_table[40] = {
+	2048, 1978, 1911, 1846, 1783, 1722, 1663, 1607,
+	1552, 1499, 1448, 1399, 1351, 1305, 1261, 1218,
+	1176, 1136, 1097, 1060, 1024, 952, 885, 823,
+	765, 711, 661, 614, 571, 531, 494, 459,
+	427, 397, 369, 343, 319, 296, 275, 256,
+};
+/* Weight of one nice level from the table. */
+/* Out of range maps to 1024 with no trap. */
+/* Nice 0 skips the table with no load. */
+static __always_inline u32 flow_weight_of(s32 nice)
+{
+	s32 idx;
+	if (nice == 0)
+		return 1024;
+	if (nice < -20)
+		return 1024;
+	if (nice > 19)
+		return 1024;
+	idx = nice + 20;
+	return (u32)flow_weight_table[(u32)idx];
 }
 /* Advanced runtime after one execution segment. */
 /* Scales raw time by base over weight with a split divide, so heavy */
@@ -288,6 +348,103 @@ static __always_inline u64 flow_task_period(u32 hint_us)
 	if (hint > 18446744073709551ULL)
 		return (u64)~0ULL;
 	return hint * 1000ULL;
+}
+/* Clamped predictor value in 1ns to 1s with no wrap. */
+/* Values below the floor rise to 1ns and values past the top fall */
+/* to 1s, so a huge burst never wraps to a short deadline. */
+static __always_inline u64 flow_pred_clamp(u64 v)
+{
+	if (v < (u64)FLOW_PRED_MIN_NS)
+		return (u64)FLOW_PRED_MIN_NS;
+	if (v > (u64)FLOW_PRED_MAX_NS)
+		return (u64)FLOW_PRED_MAX_NS;
+	return v;
+}
+/* Updated burst average with shift 3 and saturation. */
+/* A zero average means no history, so the first sample sets the */
+/* average at once. Later samples move one eighth toward the new */
+/* delta with shifts only, so the verifier keeps no divide. The */
+/* result clamps to 1ns to 1s, so a spike never wraps. */
+static __always_inline u64 flow_pred_avg(u64 avg,
+	u64 delta)
+{
+	u64 d;
+	u64 diff;
+	d = flow_pred_clamp(delta ? delta :
+	    (u64)FLOW_PRED_MIN_NS);
+	if (avg == 0)
+		return d;
+	if (d > avg) {
+		diff = (d - avg) >> 3;
+		return flow_pred_clamp(flow_sat_add(avg,
+		    diff));
+	}
+	diff = (avg - d) >> 3;
+	if (diff > avg)
+		return (u64)FLOW_PRED_MIN_NS;
+	return flow_pred_clamp(avg - diff);
+}
+/* Updated burst deviation with shift 2 and saturation. */
+/* Tracks the absolute error between delta and average with one */
+/* quarter steps, so a stable burst keeps a small margin while a */
+/* ragged burst widens the deadline with no jump. A zero deviation */
+/* means no history, so the first error sets the value at once. The */
+/* result clamps the same way with no divide. */
+static __always_inline u64 flow_pred_dev(u64 dev,
+	u64 avg, u64 delta)
+{
+	u64 d;
+	u64 a;
+	u64 err;
+	u64 diff;
+	d = flow_pred_clamp(delta ? delta :
+	    (u64)FLOW_PRED_MIN_NS);
+	a = avg ? avg : d;
+	err = d > a ? d - a : a - d;
+	err = flow_pred_clamp(err ? err :
+	    (u64)FLOW_PRED_MIN_NS);
+	if (dev == 0)
+		return err;
+	if (err > dev) {
+		diff = (err - dev) >> 2;
+		return flow_pred_clamp(flow_sat_add(dev,
+		    diff));
+	}
+	diff = (dev - err) >> 2;
+	if (diff > dev)
+		return (u64)FLOW_PRED_MIN_NS;
+	return flow_pred_clamp(dev - diff);
+}
+/* Predicted period from average plus deviation with fallback. */
+/* A zero average means no history, so the default period applies. */
+/* Later periods add average plus deviation with saturation, so a */
+/* stable burst keeps a tight deadline while a ragged burst holds */
+/* margin with no wrap past 1s. */
+static __always_inline u64 flow_pred_period(u64 avg,
+	u64 dev)
+{
+	u64 sum;
+	if (avg == 0)
+		return (u64)FLOW_PERIOD_NS;
+	sum = flow_sat_add(avg, dev);
+	if (sum == (u64)~0ULL)
+		return (u64)FLOW_PRED_MAX_NS;
+	return flow_pred_clamp(sum);
+}
+/* Predicted deadline from release plus predictor else hint period. */
+/* A zero average means no history, so the hint period applies with */
+/* the default when the hint is zero. Later releases add the */
+/* predicted period with saturation, so a huge release clamps */
+/* instead of wrapping to the front. */
+static __always_inline u64 flow_pred_deadline(u64 release,
+	u64 avg, u64 dev, u32 hint_us)
+{
+	u64 period;
+	if (avg == 0)
+		period = flow_task_period(hint_us);
+	else
+		period = flow_pred_period(avg, dev);
+	return flow_deadline_at(release, period);
 }
 /* True when one task missed its deadline at the given time. */
 /* A zero deadline means no order yet, so the check skips. A zero */

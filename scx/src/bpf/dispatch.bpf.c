@@ -2,37 +2,51 @@
 /*
  * Dispatch op.
  *
- * Each pass moves one task per tier to local in fixed order across
- * local plus node plus machine plus overflow. One move per tier moves
- * four tasks at most with no shared math and no pre scan, and an
- * empty tier moves nothing with no scan. The overflow tail holds
- * homeless parks plus missed parks plus rejected parks plus pinned
- * tasks, and every park arrives with a direct kick and no wait, so no
- * timer wakes the pass. Per tier moves count once with no lock.
- * Level follows with the same CPU only. See intf.h for the batch and
- * enqueue.bpf.c for admission plus the deadline choice.
+ * Each pass drains local plus node plus machine with one pop each in
+ * priority order plus overflow with one single scan in queue order up
+ * to sixteen with no shared math. The kernel keeps each priority queue
+ * list in deadline order, so each pop takes the earliest deadline with
+ * mask wins on drain and no BPF sort. The overflow tail stays FIFO with
+ * one single scan and mask wins on drain, so stale work never stalls
+ * live work. Past deep backlog the single scan stops after four moves,
+ * so one pass never burns sixteen scans on a deep tail. The budget
+ * hoists the remaining dispatch slots once at entry, so every tier
+ * shares one exact bound with no overfill. Per tier moves count once
+ * with no lock through one exit, and the level follows after all moves
+ * with the same CPU only, so idle cannot be skipped. An empty queue
+ * leaves at once with no scan, so idle stays cheap. See intf.h for the
+ * batch plus flood and enqueue.bpf.c for admission plus the deadline
+ * choice.
  *
- * The pass splits the tier moves into dispatch/drain plus perf with
- * no lock here. Each move stays noinline with a scalar input, so
- * the verifier stays small. Level follows with no call on steady.
+ * The pass splits across dispatch/probes, drain, failopen, perf plus
+ * helpers/move plus helpers/finish with one RCU section in the single
+ * scan. The single scan stays noinline with scalar inputs and a bounded
+ * loop, so the verifier stays small with no unrolled caller tree, while
+ * the single task move plus the account stay inline so the deepest path
+ * keeps its call frames small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
+#include "dispatch/probes.bpf.c"
+#include "helpers/move.bpf.c"
 #include "dispatch/drain.bpf.c"
+#include "dispatch/failopen.bpf.c"
+#include "helpers/finish.bpf.c"
 #include "dispatch/perf.bpf.c"
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
-	/* One move per tier moves four tasks at most with no stall. */
-	/* Tiers take scalars only and verify once with no cross inline. */
+	u32 budget;
+	u32 left;
 	u32 local_moved = 0;
 	u32 node_moved = 0;
 	u32 machine_moved = 0;
 	u32 over_moved = 0;
 	u64 own_local;
 	u32 node;
-
+	u64 node_dsq;
+	u64 machine_dsq;
 	(void)prev;
 	/* A negative CPU is a core idle call with no queue work, so it */
 	/* returns with no gate count. A stale live CPU fails closed with */
@@ -43,6 +57,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		flow_gate_reject();
 		return;
 	}
+	/* Budget hoists the remaining dispatch slots once at entry, so */
+	/* every tier shares one exact bound with no overfill. */
+	budget = scx_bpf_dispatch_nr_slots();
+	if (budget == 0)
+		goto out;
+	if (budget > (u32)FLOW_DISPATCH_MAX_BATCH)
+		budget = (u32)FLOW_DISPATCH_MAX_BATCH;
+	/* Handles stay hoisted once at entry, so pops pay no extra lookup. */
 	own_local = flow_local_dsq((u32)cpu);
 	node = flow_cpu_node((u32)cpu);
 	/* Fold past the derived count to zero like enqueue, so the node */
@@ -50,28 +72,45 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	if (node >= (u32)FLOW_MAX_NODES ||
 	    (u64)node >= nr_node_ids)
 		node = 0;
-	/* Local tier first with one move and no scan on empty. */
-	local_moved = flow_move_one(own_local);
-	/* Node tier next with one move and no scan on empty. */
-	node_moved = flow_move_one(flow_node_dsq(node));
-	/* Machine tier next with one move and no scan on empty. */
-	machine_moved = flow_move_one(flow_machine_dsq());
-	/* Overflow tail last with one move and no scan on empty. */
-	/* Homeless parks move here with all other parks, so the kernel */
-	/* global queue stays out of the pass. */
-	over_moved = flow_move_one(flow_overflow_dsq());
-	/* Level follows with the same CPU only. */
+	node_dsq = flow_node_dsq(node);
+	machine_dsq = flow_machine_dsq();
+	left = budget;
+	/* Local tier first with one pop and no scan on empty. The kernel */
+	/* holds deadline order plus mask wins, so the head moves at once. */
+	if (left) {
+		local_moved = flow_move_one(own_local);
+		if (local_moved > left)
+			local_moved = left;
+		left -= local_moved;
+	}
+	/* Node tier next with one pop and no scan on empty. */
+	if (left) {
+		node_moved = flow_move_one(node_dsq);
+		if (node_moved > left)
+			node_moved = left;
+		left -= node_moved;
+	}
+	/* Machine tier next with one pop and no scan on empty. */
+	if (left) {
+		machine_moved = flow_move_one(machine_dsq);
+		if (machine_moved > left)
+			machine_moved = left;
+		left -= machine_moved;
+	}
+	/* Overflow tail last with one single scan and no scan on empty. */
+	/* Homeless parks move here with all other parks FIFO, so the */
+	/* kernel global queue stays out of the pass. Past deep backlog */
+	/* the scan stops after four with no extra pass, so a deep tail */
+	/* never burns sixteen scans at once. */
+	if (left)
+		over_moved = flow_priq_fill(cpu, left);
+	flow_account_local(local_moved);
+	flow_account_node(node_moved);
+	flow_account_machine(machine_moved);
+	flow_account_over(over_moved);
+out:
+	/* Level follows after all moves with the same CPU only through */
+	/* one exit, so idle cannot be skipped and a steady level makes */
+	/* no call. */
 	flow_perf_update(cpu);
-	if (local_moved != 0)
-		__sync_fetch_and_add(&flow_stats.local_moves,
-		    (u64)local_moved);
-	if (node_moved != 0)
-		__sync_fetch_and_add(&flow_stats.node_moves,
-		    (u64)node_moved);
-	if (machine_moved != 0)
-		__sync_fetch_and_add(&flow_stats.machine_moves,
-		    (u64)machine_moved);
-	if (over_moved != 0)
-		__sync_fetch_and_add(&flow_stats.over_moves,
-		    (u64)over_moved);
 }
