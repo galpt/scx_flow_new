@@ -301,9 +301,12 @@ impl Daemon {
     /// since the idle pick needs the live mask with no replay. The core
     /// takes idle first when the tail is empty and warmth first when
     /// the tail holds work, so this mirror matches the saturated branch
-    /// where warmth leads. The core revalidates mask plus live before
-    /// use, so a stale view never widens the target class here. Mirror
-    /// only with the core as authority.
+    /// where warmth leads. The threshold stays at zero depth with no
+    /// extra count, so any held work flips the branch in the core with
+    /// the idle scan kept solely on the held side there. The core
+    /// revalidates mask plus live before use, so a stale view never
+    /// widens the target class here. Mirror only with the core as
+    /// authority.
     #[cfg(test)]
     pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
         if allowed.is_empty() {
@@ -325,9 +328,48 @@ impl Daemon {
     /// True when the shared tail holds work for tests solely.
     /// Mirrors the core backlog check where an empty tail takes idle
     /// first and a held tail takes warmth first with no extra threshold.
+    /// The threshold stays at zero depth in both, so empty means idle
+    /// first and any held work means warmth first. Idle stays BPF only
+    /// since the live pick needs the live mask with no replay, while
+    /// this mirror covers the warmth order plus the threshold.
     #[cfg(test)]
     pub fn is_saturated(&self) -> bool {
-        self.order.len() != 0
+        !self.order.is_empty()
+    }
+
+    /// Candidate order for the saturated branch as test oracle.
+    /// Empty lists idle then hint then previous then first, while held
+    /// lists hint then previous then idle then first, matching the core
+    /// fallback with no extra threshold. Idle stays BPF only with no
+    /// mirror pick, so this names the order for branch coverage solely
+    /// with the core as authority.
+    #[cfg(test)]
+    pub fn branch_order(held: bool) -> [&'static str; 4] {
+        if held {
+            ["hint", "prev", "idle", "first"]
+        } else {
+            ["idle", "hint", "prev", "first"]
+        }
+    }
+
+    /// FIFO budget for the remainder gate as test oracle.
+    /// Zero moved drains the full batch as canary, while a partial
+    /// pass drains the rest solely when the tree reads empty after the
+    /// ordered moves. A partial pass with the tree still holding keys
+    /// suppresses FIFO with zero, so live work never slips to FIFO in
+    /// the same pass. The canary stays honest since tree plus state
+    /// land together, so solely empty plus corrupt plus stale reach
+    /// FIFO with the empty read taken after ordered moves in the same
+    /// pass. Mirror only with the core as authority.
+    #[cfg(test)]
+    pub fn remainder_budget(moved: usize, tree_empty: bool) -> usize {
+        if moved == 0 {
+            DISPATCH_BATCH
+        } else if moved < DISPATCH_BATCH && tree_empty {
+            DISPATCH_BATCH - moved
+        } else {
+            0
+        }
     }
 
     /// Admitted per mille sum for one CPU with zero past the bound.
@@ -534,15 +576,18 @@ impl Daemon {
     }
 
     /// Handle one complete notify as mirror oracle.
-    /// Drops the stored share exactly once in the mirror. Misses
-    /// count when monotonic time passes release plus deadline on a
-    /// blocking complete. A runnable end steps the repeat count toward
-    /// eight milliseconds capped there, while a blocking end clears it,
-    /// so steady work keeps the base slice with no extra threshold.
-    /// Runtime charge stays in the core total. Zero identifiers pass
-    /// through with no state change. Unknown identifiers pass through
-    /// after order cleanup, so a lost enqueue never leaks a share.
-    /// Mirror only.
+    /// Models the charged stopping path. Drops the stored share exactly
+    /// once in the mirror. Misses count when monotonic time passes
+    /// release plus deadline on a blocking complete. A runnable end
+    /// steps the repeat count toward eight milliseconds capped there,
+    /// while a blocking end clears it, so steady work keeps the base
+    /// slice with no extra threshold. The bump runs solely when the
+    /// task row was present, so zero plus unknown identifiers pass
+    /// through with no bump since run charge stays BPF only. Disable
+    /// plus exit skip the bump in the core and use the dedicated
+    /// handlers here. Runtime charge stays in the core total. Unknown
+    /// identifiers pass through after order cleanup, so a lost enqueue
+    /// never leaks a share. Mirror only.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         if pid == 0 {
             return;
@@ -570,6 +615,50 @@ impl Daemon {
             self.misses += 1;
             self.parks += 1;
         }
+    }
+
+    /// Handle one enable as mirror oracle.
+    /// Clears task plus order plus views plus repeat count with no
+    /// counters, so a reused pid restarts at the base slice like the
+    /// core enable path that drops the tree key plus the order row plus
+    /// the head slot. Zero passes with no change. Missing rows still
+    /// clear a lingering repeat count, so a prior runnable end never
+    /// leaks into the next life of the pid. Mirror only with the core
+    /// as authority.
+    #[cfg(test)]
+    pub fn handle_enable(&mut self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        self.remove_row(pid);
+        self.exhaust.remove(&pid);
+    }
+
+    /// Handle one disable as mirror oracle.
+    /// Drops the stored share plus order plus views with no repeat
+    /// bump and no miss, matching the core disable path that finishes
+    /// with runnable set but keeps exhaust for the next enable to
+    /// clear. Zero plus unknown pass through with no bump since the
+    /// drop stays idempotent. Mirror only with the core as authority.
+    #[cfg(test)]
+    pub fn handle_disable(&mut self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        self.remove_row(pid);
+    }
+
+    /// Handle one exit as mirror oracle.
+    /// Drops the stored share plus order plus views with no repeat
+    /// bump, matching the core exit path that shares the disable
+    /// finish without touching exhaust. Mirror only with the core as
+    /// authority.
+    #[cfg(test)]
+    pub fn handle_exit(&mut self, pid: u32) {
+        if pid == 0 {
+            return;
+        }
+        self.remove_row(pid);
     }
 
     /// Repeat count for one task with zero for fresh tasks.
@@ -1114,5 +1203,163 @@ mod tests {
         assert_eq!(d.place_for(3, 1, &[0, 1, 2]), 2);
         d.handle_complete(3, 2_000_000, true);
         assert!(!d.is_saturated());
+    }
+
+    #[test]
+    fn saturation_branches_split_idle_first_and_warmth_first() {
+        // Empty tail takes idle first while any held work takes warmth
+        // first, with the threshold at zero depth and the idle pick
+        // staying BPF only. The mirror covers the threshold plus the
+        // warmth order here.
+        assert_eq!(
+            Daemon::branch_order(false),
+            ["idle", "hint", "prev", "first"]
+        );
+        assert_eq!(
+            Daemon::branch_order(true),
+            ["hint", "prev", "idle", "first"]
+        );
+        let mut d = Daemon::new();
+        assert!(!d.is_saturated());
+        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "idle");
+        let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "hint");
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
+        assert_eq!(d.place_for(3, 1, &[0, 1, 2]), 2);
+        d.handle_complete(3, 2_000_000, true);
+        assert!(!d.is_saturated());
+        assert_eq!(Daemon::branch_order(d.is_saturated())[0], "idle");
+    }
+
+    #[test]
+    fn remainder_gate_suppresses_fifo_while_tree_holds_keys() {
+        // A partial ordered pass with the tree still holding keys keeps
+        // the rest for ordered with zero FIFO, so live work never slips
+        // to FIFO in the same pass.
+        assert_eq!(Daemon::remainder_budget(16, false), 0);
+        assert_eq!(Daemon::remainder_budget(10, false), 0);
+        assert_eq!(Daemon::remainder_budget(1, false), 0);
+        let mut d = Daemon::new();
+        for pid in 1..=20u32 {
+            let hint = if pid % 2 == 0 { 4000 } else { 32000 };
+            let _ = d.handle_enqueue(pid, hint, 0, 1_000_000, pid as u64 + 300);
+        }
+        assert_eq!(d.queue_len(), 20);
+        let moved = DISPATCH_BATCH.min(d.queue_len());
+        assert_eq!(moved, 16);
+        assert!(!d.ordered_entries().is_empty());
+        assert_eq!(Daemon::remainder_budget(moved, false), 0);
+    }
+
+    #[test]
+    fn remainder_gate_drains_canary_when_tree_empty() {
+        // Zero moved drains the full batch as canary, while a partial
+        // pass with the tree reading empty after ordered moves drains
+        // the rest. The empty read lands after ordered moves in the same
+        // pass, so solely empty plus corrupt plus stale reach FIFO since
+        // tree plus state land together.
+        assert_eq!(Daemon::remainder_budget(0, true), DISPATCH_BATCH);
+        assert_eq!(Daemon::remainder_budget(0, false), DISPATCH_BATCH);
+        assert_eq!(Daemon::remainder_budget(10, true), DISPATCH_BATCH - 10);
+        assert_eq!(Daemon::remainder_budget(15, true), 1);
+        assert_eq!(Daemon::remainder_budget(16, true), 0);
+        let d = Daemon::new();
+        assert_eq!(d.queue_len(), 0);
+        assert!(d.order.is_empty());
+        assert_eq!(Daemon::remainder_budget(0, d.order.is_empty()), 16);
+    }
+
+    #[test]
+    fn fused_single_section_keeps_head_and_scan_in_order() {
+        // Head hit plus full scan converge on the same least order, so
+        // one fused pick plus move per step drains in ordered view order
+        // with no reorder across sections.
+        let mut d = Daemon::new();
+        d.handle_enqueue(1, 32000, 0, 1_000_000, 401);
+        d.handle_enqueue(2, 4000, 0, 1_000_000, 402);
+        d.handle_enqueue(3, 16000, 0, 1_000_000, 403);
+        d.handle_enqueue(4, 4000, 1, 1_000_500, 404);
+        let view: Vec<u32> = d.ordered_entries().iter().map(|r| r.0).collect();
+        let least = d.peek_order().unwrap().pid;
+        assert_eq!(least, view[0]);
+        let key = super::super::veb::quantize(d.task(least).unwrap().deadline) as u32;
+        if let Some((pid, _, _)) = d.head_for(key) {
+            assert!(view.contains(&pid));
+        }
+        let mut seq = Vec::new();
+        while let Some(e) = d.order.pop_min() {
+            seq.push(e.pid);
+        }
+        assert_eq!(seq, view);
+        assert!(d.order.is_empty());
+    }
+
+    #[test]
+    fn disable_and_exit_skip_exhaust_bump() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 501);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert_eq!(d.exhaust_for(1), 0);
+        d.handle_disable(1);
+        assert_eq!(d.exhaust_for(1), 0);
+        assert_eq!(d.task_len(), 0);
+        assert_eq!(d.admitted(0), 0);
+        let got = d.handle_enqueue(2, 0, 0, 2_000_000, 502);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        d.handle_exit(2);
+        assert_eq!(d.exhaust_for(2), 0);
+        assert_eq!(d.task_len(), 0);
+        assert_eq!(d.admitted(0), 0);
+        d.handle_disable(0);
+        d.handle_exit(0);
+        assert_eq!(d.exhaust_for(0), 0);
+    }
+
+    #[test]
+    fn uncharged_complete_skips_bump() {
+        let mut d = Daemon::new();
+        d.handle_complete(99, 2_000_000, true);
+        assert_eq!(d.exhaust_for(99), 0);
+        assert_eq!(d.task_len(), 0);
+        d.handle_complete(99, 2_000_000, false);
+        assert_eq!(d.exhaust_for(99), 0);
+        assert_eq!(d.misses, 0);
+        d.handle_complete(0, 2_000_000, true);
+        assert_eq!(d.exhaust_for(0), 0);
+    }
+
+    #[test]
+    fn enable_clears_exhaust_for_pid_reuse() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 511);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 1);
+        d.handle_enable(1);
+        assert_eq!(d.exhaust_for(1), 0);
+        let got = d.handle_enqueue(1, 0, 0, 3_000_000, 512);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        d.handle_enable(0);
+        assert_eq!(d.exhaust_for(0), 0);
+    }
+
+    #[test]
+    fn drop_keeps_exhaust_until_enable() {
+        let mut d = Daemon::new();
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 521);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 1);
+        let got = d.handle_enqueue(1, 0, 0, 3_000_000, 522);
+        assert!(matches!(got, AdmitDecision::Admit { share: 250, .. }));
+        d.handle_disable(1);
+        assert_eq!(d.exhaust_for(1), 1);
+        assert_eq!(d.task_len(), 0);
+        d.handle_enable(1);
+        assert_eq!(d.exhaust_for(1), 0);
+        let got = d.handle_enqueue(1, 0, 0, 4_000_000, 523);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
     }
 }

@@ -93,21 +93,23 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Placement with idle, hint, selected, first in one place. */
 	/* Gives idle when the tail is empty and idle is allowed and */
 	/* live else the cached owner when still allowed and live else */
-	/* selected when allowed and live else idle when allowed and */
-	/* live else first when allowed and live else error with no */
-	/* drain check so spread stays cheap with warmth under load. */
-	/* Warmth leads when the tail holds work so a transient idle */
-	/* never pulls a repeat task off its cache. The hint stays */
-	/* revalidated inside the hint lookup with the move gate */
-	/* keeping safety, so no outer recheck is needed and a stale view */
-	/* never widens the target class. The chosen CPU holds the share */
-	/* with per CPU rows and rejects park with no run. */
+	/* selected when allowed and live else first when allowed and */
+	/* live else error with no drain check so spread stays cheap */
+	/* with warmth under load. Warmth leads when the tail holds */
+	/* work so a transient idle never pulls a repeat task off its */
+	/* cache, with the idle scan kept solely on that held branch so */
+	/* the empty branch pays one scan. The hint stays revalidated */
+	/* inside the hint lookup with the move gate keeping safety, so */
+	/* no outer recheck is needed and a stale view never widens the */
+	/* target class. The chosen CPU holds the share with per CPU */
+	/* rows and rejects park with no run. */
 	{
 		s32 idle;
 		s32 hint;
 		s32 first;
 		bool done = false;
-		if (!flow_saturated()) {
+		bool held = flow_saturated();
+		if (!held) {
 			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (flow_cpu_ok(p, idle)) {
 				cpu = idle;
@@ -122,7 +124,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			cpu = sel;
 			done = true;
 		}
-		if (!done) {
+		if (!done && held) {
 			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 			if (flow_cpu_ok(p, idle)) {
 				cpu = idle;

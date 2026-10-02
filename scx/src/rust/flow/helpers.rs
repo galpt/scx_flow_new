@@ -87,7 +87,10 @@ impl Daemon {
     /// Drops the stored share then clears the order row then clears the
     /// task row plus cached views. Complete plus stale collection use
     /// this so admitted sums never leak and stale order never runs.
-    /// Missing rows pass through with no state change.
+    /// Missing rows pass through with no state change. Repeat count
+    /// stays untouched here like the core drop, so only the blocking
+    /// complete plus the enable path clear it. Best effort with the
+    /// core as authority.
     pub(crate) fn remove_row(&mut self, pid: u32) {
         self.drop_stored(pid);
         self.order.remove(pid);

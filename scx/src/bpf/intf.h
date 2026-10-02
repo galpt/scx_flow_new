@@ -260,12 +260,6 @@ static __always_inline u64 flow_deadline_at(u64 now,
 {
 	return flow_sat_add(now, period);
 }
-static __always_inline u64 flow_share_permille(u64 period)
-{
-	if (period == 0)
-		return 0;
-	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
-}
 static __always_inline u64 flow_quantum_ns(u32 exhaust)
 {
 	if (exhaust == 0)

@@ -3,7 +3,8 @@
  * Park plus admission for the enqueue path.
  *
  * Parks at the overflow tail with the repeat aware slice and counts
- * one insert. Admission allocates one sequence then stores it plus
+ * one insert. Rejects keep the same repeat slice as admits, so a
+ * grown task parks grown with no separate slice path. Admission allocates one sequence then stores it plus
  * the deadline plus key from the same period helpers, then admits
  * under the bound with tree plus row or parks as reject at the top
  * key with the far deadline then parks at the tail then notifies for

@@ -65,4 +65,5 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
 - Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain ordered at the top key with higher latency.
 - Flood throughput stays bounded by the `2ms` base slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
+- Rejects park with the repeat slice, so a task that ran before keeps up to `8ms` even when parked with no run, keeping one slice rule for admits plus rejects.
 - Preempt sends at most one directed kick per park to the owner CPU solely when the wakeup holds a row and runs earlier than the owner task, with a running reject counting as longer, so urgent arrivals preempt longer runs with no storm and equal or earlier owners never bounce.
