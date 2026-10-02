@@ -22,7 +22,7 @@ Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint peri
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order up to `16`. Past `128` queued ordered caps at `4` with `32` visited entries at most. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order to `16`. Past `128` queued ordered caps at `4` with `32` visited entries at most. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -30,7 +30,7 @@ Each deadline orders as priority value with virtual runtime for ties. The predic
 
 ### Admission
 
-Tasks carry shares of one slice in the hint period always with the predictor for deadlines only and the core holds load under `950 per mille` per CPU. Shares add once and drop once through stored values. Rejects park in overflow with no run. Misses count past due on blocking ends. See `src/bpf/main/deadline.bpf.c` and `src/rust/flow_edf.rs`.
+Tasks carry one slice shares in hint period always with predictor for deadlines only and core holds load under `950 per mille` per CPU. Shares add and drop once through stored values. Rejects park in overflow with no run. Misses count past due on blocking ends. See `src/bpf/main/deadline.bpf.c` and `src/rust/flow_edf.rs`.
 
 ### Gates
 
