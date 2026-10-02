@@ -77,7 +77,7 @@ pub struct Metrics {
 
 /// One card of the per CPU grid.
 /// Identifier plus SMT stay fixed while pid plus slice refresh per poll.
-/// Pid holds zero when idle and slice holds the shared quantum.
+/// Pid holds zero when idle and slice holds the base quantum.
 /// SMT marks the second thread of one core for display solely and
 /// false on old payloads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub struct PerCpuMetrics {
     /// Pid now on the CPU with zero when idle.
     #[serde(default)]
     pub running_pid: u32,
-    /// Fixed slice in nanos with the shared quantum.
+    /// Base slice in nanos with the shared base quantum.
     #[serde(default)]
     pub slice_ns: u64,
 }

@@ -109,8 +109,8 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    /* Slice stays single line with ellipsis. The quantum */
-    /* is fixed so every card shows the same slice. */
+    /* Slice stays single line with ellipsis. The base */
+    /* stays fixed so every card shows the base slice. */
     .core-card .core-slice {
       font-size: 0.6rem;
       color: var(--text-secondary);
@@ -253,7 +253,7 @@
         </h1>
         <p style="font-size:0.8125rem;
           color:var(--text-secondary);margin-top:2px">
-          per-CPU deadline queues, fixed quantum and placement
+          per-CPU deadline queues, base quantum and placement
         </p>
         <p style="font-size:0.75rem;
           color:var(--text-muted);margin-top:2px;
@@ -425,7 +425,7 @@
       return Math.round(ns) + ' ns';
     }
 
-    /* Per CPU cards with fixed slice plus pid plus SMT. They show */
+    /* Per CPU cards with base slice plus pid plus SMT. They show */
     /* the pid plus the slice with no rate sampling plus the SMT mark */
     /* on the second thread. Slice stays single line with full text */
     /* in the title. */
@@ -620,7 +620,7 @@
       if (ver && topo) meta += ', ';
       if (topo) meta += topo;
       el('meta-line').textContent = meta ||
-        'per-CPU deadline queues, fixed quantum and placement';
+        'per-CPU deadline queues, base quantum and placement';
 
       el('on-cpu').textContent = fmt(shown);
       el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +

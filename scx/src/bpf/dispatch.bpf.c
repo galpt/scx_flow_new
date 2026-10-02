@@ -11,8 +11,10 @@
  * liveness gate every move through the same mask as the fallback path
  * with live proven once at entry, so the target class never widens.
  * Ordered checks run first so every parked task stays preferred, while
- * the fallback drain moves solely the remainder when the tree reads
- * empty plus corrupt plus persistent stale up to the batch bound. Deep
+ * the fallback drain moves solely when the tree reads empty plus a
+ * zero move plus persistent stale up to the batch bound. A partial
+ * ordered pass leaves the rest for ordered while the tree still holds
+ * keys, so live work never slips to FIFO in the same pass. Deep
  * backlog still drains sixteen ordered per pass with the earliest
  * moves kept in order. One head read plus task state picks the least
  * with fallback to the tail scan, so hits skip the walk while only the
@@ -26,7 +28,8 @@
  * since task state plus tree land synchronously and solely genuine
  * misses reach it. Over moves count progress with ordered moves
  * counting vEB hits plus fallback moves counting FIFO parks so every
- * dispatched task lands in one bucket. Level follows after ordered
+ * dispatched task lands in one bucket with the two arms split by the
+ * existing counters and no new wire. Level follows after ordered
  * moves plus fallback with the same CPU only and no call on steady
  * through one exit, so idle cannot be skipped.
  *
@@ -83,10 +86,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		    (u64)moved);
 		__sync_fetch_and_add(&flow_stats.veb_hits,
 		    (u64)moved);
-		/* The fallback itself no-ops on an empty queue, so no */
-		/* extra depth check lands here with the entry plus the */
-		/* ordered loop already gating empty. */
-		if (moved < (u32)FLOW_DISPATCH_MAX_BATCH) {
+		/* A partial ordered pass leaves the rest for ordered */
+		/* while the tree still holds keys, so live work never */
+		/* slips to FIFO here. The fallback below runs solely */
+		/* when the tree reads empty with corrupt plus stale */
+		/* remainder, keeping the canary honest with no new wire. */
+		if (moved < (u32)FLOW_DISPATCH_MAX_BATCH &&
+		    veb_min() == (u32)FLOW_VEB_EMPTY) {
 			u32 left = (u32)FLOW_DISPATCH_MAX_BATCH - moved;
 			extra = veb_fail_open_drain(cpu, left);
 			flow_fifo_account(extra);

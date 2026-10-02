@@ -2,11 +2,11 @@
 /*
  * Park plus admission for the enqueue path.
  *
- * Parks at the overflow tail with plain insert and counts one insert.
- * Admission allocates one sequence then stores it plus the deadline
- * plus key from the same period helpers, then admits under
- * the bound with tree plus row or parks as reject at the top key
- * with the far deadline then parks at the tail then notifies for
+ * Parks at the overflow tail with the repeat aware slice and counts
+ * one insert. Admission allocates one sequence then stores it plus
+ * the deadline plus key from the same period helpers, then admits
+ * under the bound with tree plus row or parks as reject at the top
+ * key with the far deadline then parks at the tail then notifies for
  * observability solely. Rejects stay ordered at the top key so
  * dispatch still picks them by key then deadline. Admitted parks
  * also store one head plus one placement view for later picks with
@@ -23,8 +23,11 @@
 static __always_inline void flow_park_plain(struct task_struct *p,
 	u64 enq_flags)
 {
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(),
-	    (u64)FLOW_QUANTUM_NS, enq_flags);
+	u64 slice = (u64)FLOW_QUANTUM_NS;
+	struct flow_task_ctx *park_ctx = flow_lookup((struct task_struct *)p);
+	if (park_ctx)
+		slice = flow_quantum_ns(READ_ONCE(park_ctx->exhaust));
+	scx_bpf_dsq_insert(p, flow_overflow_dsq(), slice, enq_flags);
 	__sync_fetch_and_add(&flow_stats.inserts, 1);
 }
 /* Park plus notify with BPF owned admission in one place. */
@@ -69,7 +72,8 @@ static __noinline void flow_enqueue_admit(struct task_struct *p,
 	u64 now = flow_now();
 	u64 period = flow_period_ns(weight);
 	u64 deadline = flow_deadline_at(now, period);
-	u64 share = flow_share_permille(period);
+	u32 exhaust = tctx ? READ_ONCE(tctx->exhaust) : 0;
+	u64 share = flow_slice_permille(period, exhaust);
 	u64 seq = __sync_fetch_and_add(&flow_seq, 1) + 1;
 	u32 pid = (u32)p->pid;
 	u32 key = veb_quant(deadline);

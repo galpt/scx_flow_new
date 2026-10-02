@@ -5,13 +5,17 @@
  * Running claims the segment start and tracks the CPU pid plus the on
  * CPU gauge. Stopping charges the segment to total runtime and counts
  * one requeue else one completion and emits one observability notify.
+ * A requeue steps the repeat count toward the larger slice capped at
+ * eight milliseconds, while a blocking end clears it, so steady work
+ * keeps the base slice and repeat exhaust grows it with no extra map.
  * Stopping drops the tree key plus the ledger share plus the order
  * row so dispatched keys never linger and use never leaks. Gate fail
  * stopping drops plus notifies when queued like disable so shares
  * return at once with no stale wait. Stopping skips the notify when
  * the task never queued. Enable clears the task state with share plus
- * CPU plus deadline plus key cleared and drops the tree key plus the
- * order row plus the head slot, so top key rejects never linger. Disable plus exit charge leftovers, drop the tree key
+ * CPU plus deadline plus key plus repeat cleared and drops the tree
+ * key plus the order row plus the head slot, so top key rejects never
+ * linger. Disable plus exit charge leftovers, drop the tree key
  * plus the ledger share plus the order row, emit one observability
  * notify so every admit pairs one drop. One finish helper pairs key,
  * charge, pid, gauge, ledger, notify through one exit so a missed
@@ -82,8 +86,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (!charged)
 		return;
 	if (runnable) {
+		struct flow_task_ctx *stctx = flow_lookup(p);
+		if (stctx) {
+			u32 cur = READ_ONCE(stctx->exhaust);
+			if (cur < (u32)FLOW_QUANTUM_MAX_STEP)
+				WRITE_ONCE(stctx->exhaust, cur + 1);
+		}
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
+	}
+	{
+		struct flow_task_ctx *ctctx = flow_lookup(p);
+		if (ctctx)
+			WRITE_ONCE(ctctx->exhaust, 0);
 	}
 	__sync_fetch_and_add(&flow_stats.completions, 1);
 }
@@ -108,6 +123,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	WRITE_ONCE(tctx->admit_cpu, 0);
 	WRITE_ONCE(tctx->deadline, 0);
 	WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
+	WRITE_ONCE(tctx->exhaust, 0);
 	/* Fresh tasks drop any prior top key plus row plus head, so a */
 	/* reused pid never leaves a stale ordered entry behind. */
 	veb_remove(pid);

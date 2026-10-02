@@ -7,7 +7,8 @@
 //! The core orders through the quantized tree in veb with admission
 //! plus order owned in the core. This file keeps the scalar math as
 //! oracle for tests plus header checks with identical share plus
-//! bound math.
+//! bound math. Shares scale with the repeat slice so admitted use
+//! stays honest.
 
 /// Default period in nanos at sixteen milliseconds. Holds eight slices.
 pub const PERIOD_NS: u64 = 16_000_000;
@@ -41,6 +42,20 @@ pub fn slice_permille(period: u64) -> u64 {
         return 0;
     }
     super::slice::QUANTUM_NS * 1000 / period
+}
+
+/// Per mille share of one repeat slice in one period.
+/// Empty periods yield zero share. Two milliseconds in sixteen take
+/// one hundred twenty five, four take two hundred fifty, eight take
+/// five hundred, matching the core repeat steps with no extra threshold.
+pub fn slice_permille_for(period: u64, exhaust: u32) -> u64 {
+    if exhaust == 0 {
+        return slice_permille(period);
+    }
+    if period == 0 {
+        return 0;
+    }
+    super::slice::quantum_for(exhaust) * 1000 / period
 }
 
 /// True when one CPU admits one more per mille share.
@@ -80,6 +95,10 @@ mod tests {
     fn admission_holds_bound() {
         assert_eq!(slice_permille(16_000_000), 125);
         assert_eq!(slice_permille(0), 0);
+        assert_eq!(slice_permille_for(16_000_000, 0), 125);
+        assert_eq!(slice_permille_for(16_000_000, 1), 250);
+        assert_eq!(slice_permille_for(16_000_000, 2), 500);
+        assert_eq!(slice_permille_for(0, 2), 0);
         assert!(admit_ok(825, 125));
         assert!(!admit_ok(826, 125));
         assert!(!admit_ok(u64::MAX, 125));

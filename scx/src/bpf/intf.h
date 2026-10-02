@@ -87,6 +87,9 @@ typedef int pid_t;
 #endif
 enum flow_consts {
 	FLOW_QUANTUM_NS = 2000000ULL,
+	FLOW_QUANTUM_MID_NS = 4000000ULL,
+	FLOW_QUANTUM_MAX_NS = 8000000ULL,
+	FLOW_QUANTUM_MAX_STEP = 2ULL,
 	FLOW_PERIOD_NS = 16000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
@@ -127,7 +130,7 @@ struct flow_task_ctx {
 	u32 admit_cpu;
 	u64 deadline;
 	u32 key;
-	u32 pad2;
+	u32 exhaust;
 };
 struct flow_cpu_state {
 	u32 running_pid;
@@ -262,6 +265,22 @@ static __always_inline u64 flow_share_permille(u64 period)
 	if (period == 0)
 		return 0;
 	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
+}
+static __always_inline u64 flow_quantum_ns(u32 exhaust)
+{
+	if (exhaust == 0)
+		return (u64)FLOW_QUANTUM_NS;
+	if (exhaust == 1)
+		return (u64)FLOW_QUANTUM_MID_NS;
+	return (u64)FLOW_QUANTUM_MAX_NS;
+}
+static __always_inline u64 flow_slice_permille(u64 period, u32 exhaust)
+{
+	u64 slice;
+	if (period == 0)
+		return 0;
+	slice = flow_quantum_ns(exhaust);
+	return slice * 1000ULL / period;
 }
 static __always_inline bool flow_admit_ok(u64 held,
 	u64 share)

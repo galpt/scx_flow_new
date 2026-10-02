@@ -19,7 +19,7 @@ use crate::flow::WEIGHT_MIN;
 use anyhow::Result;
 use anyhow::bail;
 
-/// Default fixed slice in nanos.
+/// Default base slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 /// Default dispatch batch for the ops table. Mirrors the header batch
 /// so the ops table holds every pass.
@@ -35,7 +35,7 @@ const DEF_FLOOD_QUEUED: u32 = 128;
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos. Always two milliseconds.
+    /// Base slice in nanos. Always two milliseconds.
     pub quantum_ns: u64,
     /// Dispatch batch for the ops table. Always sixteen.
     pub dispatch_batch: u32,
@@ -133,7 +133,7 @@ pub struct ConfigBuilder {
 
 #[cfg(test)]
 impl ConfigBuilder {
-    /// Set the fixed slice.
+    /// Set the base slice.
     pub fn quantum_ns(mut self, v: u64) -> Self {
         self.quantum_ns = Some(v);
         self
@@ -220,6 +220,21 @@ mod tests {
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
+        assert_eq!(
+            crate::flow::QUANTUM_MID_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MID_NS as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MID_NS, 4_000_000);
+        assert_eq!(
+            crate::flow::QUANTUM_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MAX_NS as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MAX_NS, 8_000_000);
+        assert_eq!(
+            crate::flow::QUANTUM_MAX_STEP as u64,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MAX_STEP as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MAX_STEP, 2);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 522);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64, 0x5A01);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);

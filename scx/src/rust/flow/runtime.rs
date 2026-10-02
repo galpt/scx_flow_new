@@ -200,6 +200,7 @@ pub struct Daemon {
     pub(crate) tasks: HashMap<u32, TaskState>,
     pub(crate) head_hint: HashMap<u32, (u32, u32, u64, u32)>,
     pub(crate) mask_hint: HashMap<u32, u32>,
+    exhaust: HashMap<u32, u32>,
     wire_last: u64,
     /// Tasks admitted under the use bound.
     pub admits: u64,
@@ -224,6 +225,7 @@ impl Daemon {
             tasks: HashMap::new(),
             head_hint: HashMap::new(),
             mask_hint: HashMap::new(),
+            exhaust: HashMap::new(),
             wire_last: 0,
             admits: 0,
             rejects: 0,
@@ -297,9 +299,11 @@ impl Daemon {
     /// the CPU bound, else the previous CPU wins when still allowed,
     /// else the first allowed wins. Idle stays BPF only with no mirror,
     /// since the idle pick needs the live mask with no replay. The core
-    /// revalidates mask plus live before use, so a stale view never
-    /// widens the target class here. Mirror only with the core as
-    /// authority.
+    /// takes idle first when the tail is empty and warmth first when
+    /// the tail holds work, so this mirror matches the saturated branch
+    /// where warmth leads. The core revalidates mask plus live before
+    /// use, so a stale view never widens the target class here. Mirror
+    /// only with the core as authority.
     #[cfg(test)]
     pub fn place_for(&self, pid: u32, prev: u32, allowed: &[u32]) -> u32 {
         if allowed.is_empty() {
@@ -316,6 +320,14 @@ impl Daemon {
             return prev;
         }
         allowed[0]
+    }
+
+    /// True when the shared tail holds work for tests solely.
+    /// Mirrors the core backlog check where an empty tail takes idle
+    /// first and a held tail takes warmth first with no extra threshold.
+    #[cfg(test)]
+    pub fn is_saturated(&self) -> bool {
+        self.order.len() != 0
     }
 
     /// Admitted per mille sum for one CPU with zero past the bound.
@@ -455,7 +467,8 @@ impl Daemon {
         };
         let period = super::edf::task_period(hint);
         let deadline = super::edf::deadline_at(now, period);
-        let share = super::edf::slice_permille(period);
+        let exhaust = self.exhaust.get(&pid).copied().unwrap_or(0);
+        let share = super::edf::slice_permille_for(period, exhaust);
         let held = self.admitted(cpu);
         if share != 0 && !super::edf::admit_ok(held, share) {
             return self.reject_park(pid, wire_seq, cpu, now);
@@ -523,10 +536,13 @@ impl Daemon {
     /// Handle one complete notify as mirror oracle.
     /// Drops the stored share exactly once in the mirror. Misses
     /// count when monotonic time passes release plus deadline on a
-    /// blocking complete. Runtime charge stays in the core total.
-    /// Zero identifiers pass through with no state change. Unknown
-    /// identifiers pass through after order cleanup, so a lost
-    /// enqueue never leaks a share. Mirror only.
+    /// blocking complete. A runnable end steps the repeat count toward
+    /// eight milliseconds capped there, while a blocking end clears it,
+    /// so steady work keeps the base slice with no extra threshold.
+    /// Runtime charge stays in the core total. Zero identifiers pass
+    /// through with no state change. Unknown identifiers pass through
+    /// after order cleanup, so a lost enqueue never leaks a share.
+    /// Mirror only.
     pub fn handle_complete(&mut self, pid: u32, now: u64, runnable: bool) {
         if pid == 0 {
             return;
@@ -540,10 +556,27 @@ impl Daemon {
         };
         let miss = !runnable && super::edf::missed(release, deadline, now);
         self.remove_row(pid);
+        if runnable {
+            let cur = self.exhaust.get(&pid).copied().unwrap_or(0);
+            if cur < super::slice::QUANTUM_MAX_STEP {
+                self.exhaust.insert(pid, cur + 1);
+            } else {
+                self.exhaust.insert(pid, super::slice::QUANTUM_MAX_STEP);
+            }
+        } else {
+            self.exhaust.remove(&pid);
+        }
         if miss {
             self.misses += 1;
             self.parks += 1;
         }
+    }
+
+    /// Repeat count for one task with zero for fresh tasks.
+    /// Mirror of the core exhaust view for tests solely.
+    #[cfg(test)]
+    pub fn exhaust_for(&self, pid: u32) -> u32 {
+        self.exhaust.get(&pid).copied().unwrap_or(0)
     }
 
     /// Collect stale rows past deadline plus grace as mirror only.
@@ -565,6 +598,7 @@ impl Daemon {
         }
         for pid in &stale {
             self.remove_row(*pid);
+            self.exhaust.remove(pid);
         }
         stale
     }
@@ -991,5 +1025,94 @@ mod tests {
         d.handle_complete(3, 2_000_000, true);
         assert_eq!(d.hint_for(3), None);
         assert_eq!(d.place_for(3, 1, &[0, 1]), 1);
+    }
+
+    #[test]
+    fn repeat_exhaust_steps_slice_to_eight_ms() {
+        let mut d = Daemon::new();
+        assert_eq!(d.exhaust_for(1), 0);
+        let got = d.handle_enqueue(1, 0, 0, 1_000_000, 71);
+        assert!(matches!(got, AdmitDecision::Admit { share: 125, .. }));
+        assert_eq!(d.task(1).unwrap().share, 125);
+        d.handle_complete(1, 2_000_000, true);
+        assert_eq!(d.exhaust_for(1), 1);
+        let got = d.handle_enqueue(1, 0, 0, 3_000_000, 72);
+        assert!(matches!(got, AdmitDecision::Admit { share: 250, .. }));
+        assert_eq!(d.task(1).unwrap().share, 250);
+        d.handle_complete(1, 4_000_000, true);
+        assert_eq!(d.exhaust_for(1), 2);
+        let got = d.handle_enqueue(1, 0, 0, 5_000_000, 73);
+        assert!(matches!(got, AdmitDecision::Admit { share: 500, .. }));
+        d.handle_complete(1, 6_000_000, true);
+        assert_eq!(d.exhaust_for(1), 2);
+        let got = d.handle_enqueue(1, 0, 0, 7_000_000, 74);
+        assert!(matches!(got, AdmitDecision::Admit { share: 500, .. }));
+        d.handle_complete(1, 8_000_000, false);
+        assert_eq!(d.exhaust_for(1), 0);
+    }
+
+    #[test]
+    fn remainder_stays_ordered_while_tree_holds_keys() {
+        let mut d = Daemon::new();
+        for pid in 1..=20u32 {
+            let hint = if pid % 2 == 0 { 4000 } else { 32000 };
+            let _ = d.handle_enqueue(pid, hint, 0, 1_000_000, pid as u64 + 200);
+        }
+        assert_eq!(d.queue_len(), 20);
+        let rows = d.ordered_entries();
+        assert_eq!(rows.len(), 20);
+        let mut last_key = 0u16;
+        let mut first_reject = rows.len();
+        for (idx, r) in rows.iter().enumerate() {
+            let key = super::super::veb::quantize(r.2);
+            if idx > 0 {
+                assert!(key >= last_key);
+            }
+            last_key = key;
+            if d.task(r.0).unwrap().share == 0 && first_reject == rows.len() {
+                first_reject = idx;
+            }
+        }
+        for r in &rows[..first_reject] {
+            assert_ne!(d.task(r.0).unwrap().share, 0);
+        }
+        let batch = rows.len().min(DISPATCH_BATCH);
+        assert_eq!(batch, 16);
+        let rest = &rows[batch..];
+        assert!(!rest.is_empty());
+        let mut rest_key = super::super::veb::quantize(rows[batch - 1].2);
+        for r in rest {
+            let key = super::super::veb::quantize(r.2);
+            assert!(key >= rest_key);
+            rest_key = key;
+        }
+    }
+
+    #[test]
+    fn fused_pick_move_matches_ordered_view() {
+        let mut d = Daemon::new();
+        d.handle_enqueue(1, 32000, 0, 1_000_000, 201);
+        d.handle_enqueue(2, 4000, 0, 1_000_000, 202);
+        d.handle_enqueue(3, 16000, 0, 1_000_000, 203);
+        let view: Vec<u32> = d.ordered_entries().iter().map(|r| r.0).collect();
+        assert_eq!(view, vec![2, 3, 1]);
+        let mut seq = Vec::new();
+        while let Some(e) = d.order.pop_min() {
+            seq.push(e.pid);
+        }
+        assert_eq!(seq, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn saturated_tail_keeps_warmth_first() {
+        let mut d = Daemon::new();
+        assert!(!d.is_saturated());
+        let got = d.handle_enqueue(3, 4000, 2, 1_000_000, 63);
+        assert!(matches!(got, AdmitDecision::Admit { .. }));
+        assert!(d.is_saturated());
+        assert_eq!(d.place_for(3, 0, &[0, 1, 2]), 2);
+        assert_eq!(d.place_for(3, 1, &[0, 1, 2]), 2);
+        d.handle_complete(3, 2_000_000, true);
+        assert!(!d.is_saturated());
     }
 }

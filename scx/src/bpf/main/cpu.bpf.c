@@ -118,3 +118,11 @@ static __always_inline void flow_gate_reject(void)
 		return;
 	__sync_fetch_and_add(&flow_stats.gate_rejects, 1);
 }
+/* Backlog check with the shared tail depth in one place. */
+/* Gives true when the tail holds work, so an idle pick would */
+/* be transient and warmth keeps cache. Empty keeps idle first */
+/* with no extra threshold, so light load still spreads. */
+static __always_inline bool flow_saturated(void)
+{
+	return scx_bpf_dsq_nr_queued(flow_overflow_dsq()) != 0;
+}

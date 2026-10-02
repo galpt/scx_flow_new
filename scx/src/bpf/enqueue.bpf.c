@@ -20,10 +20,10 @@
  * plus row plus task deadline plus key synchronously with the same sequence, deadline, CPU so
  * dispatch needs no roundtrip. Rejects park at the top key with
  * the far deadline plus no row plus no run. Placement picks with live checks alone and no
- * deadline quantize. An idle CPU wins first through the idle pick
- * when live plus allowed so load spreads with no scan. The cached
- * owner wins next when still live plus allowed so repeat tasks keep
- * warmth with no scan. The selected
+ * deadline quantize. An idle CPU wins first when the tail is empty
+ * so light load spreads with no scan. The cached owner wins first
+ * when the tail holds work so repeat tasks keep warmth with no
+ * scan. The selected
  * CPU wins next when live plus allowed with no drain check so warmth
  * stays cheap under load. The first allowed live CPU wins last. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
@@ -91,11 +91,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		return;
 	}
 	/* Placement with idle, hint, selected, first in one place. */
-	/* Gives idle when allowed and live else the cached owner when */
-	/* still allowed and live else selected when allowed and live */
-	/* else first when allowed and live else error with no drain */
-	/* check so spread stays cheap with warmth under load. The hint */
-	/* stays revalidated inside the hint lookup with the move gate */
+	/* Gives idle when the tail is empty and idle is allowed and */
+	/* live else the cached owner when still allowed and live else */
+	/* selected when allowed and live else idle when allowed and */
+	/* live else first when allowed and live else error with no */
+	/* drain check so spread stays cheap with warmth under load. */
+	/* Warmth leads when the tail holds work so a transient idle */
+	/* never pulls a repeat task off its cache. The hint stays */
+	/* revalidated inside the hint lookup with the move gate */
 	/* keeping safety, so no outer recheck is needed and a stale view */
 	/* never widens the target class. The chosen CPU holds the share */
 	/* with per CPU rows and rejects park with no run. */
@@ -103,33 +106,51 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		s32 idle;
 		s32 hint;
 		s32 first;
-		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (flow_cpu_ok(p, idle)) {
-			cpu = idle;
-		} else if ((hint = flow_place_hint((u32)p->pid, p)) >= 0) {
+		bool done = false;
+		if (!flow_saturated()) {
+			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			if (flow_cpu_ok(p, idle)) {
+				cpu = idle;
+				done = true;
+			}
+		}
+		if (!done && (hint = flow_place_hint((u32)p->pid, p)) >= 0) {
 			cpu = hint;
-		} else if (sel >= 0 && flow_cpu_ok(p, sel)) {
+			done = true;
+		}
+		if (!done && sel >= 0 && flow_cpu_ok(p, sel)) {
 			cpu = sel;
-		} else {
+			done = true;
+		}
+		if (!done) {
+			idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			if (flow_cpu_ok(p, idle)) {
+				cpu = idle;
+				done = true;
+			}
+		}
+		if (!done) {
 			first = (s32)bpf_cpumask_first(
 			    p->cpus_ptr);
 			if (flow_cpu_ok(p, first)) {
 				cpu = first;
-			} else {
-				flow_gate_reject();
-				seq_tmp = __sync_fetch_and_add(
-				    &flow_seq, 1) + 1;
-				WRITE_ONCE(tctx->seq, seq_tmp);
-				flow_reject_top((u32)p->pid, 0, tctx);
-				__sync_fetch_and_add(
-				    &flow_stats.rejects, 1);
-				__sync_fetch_and_add(
-				    &flow_stats.parks, 1);
-				flow_park_plain(p, enq_flags);
-				flow_notify_enqueue((u32)p->pid,
-				    0, weight, seq_tmp);
-				return;
+				done = true;
 			}
+		}
+		if (!done) {
+			flow_gate_reject();
+			seq_tmp = __sync_fetch_and_add(
+			    &flow_seq, 1) + 1;
+			WRITE_ONCE(tctx->seq, seq_tmp);
+			flow_reject_top((u32)p->pid, 0, tctx);
+			__sync_fetch_and_add(
+			    &flow_stats.rejects, 1);
+			__sync_fetch_and_add(
+			    &flow_stats.parks, 1);
+			flow_park_plain(p, enq_flags);
+			flow_notify_enqueue((u32)p->pid,
+			    0, weight, seq_tmp);
+			return;
 		}
 	}
 	if (!flow_cpu_ok(p, cpu)) {

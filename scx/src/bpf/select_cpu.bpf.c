@@ -5,10 +5,10 @@
  * Proposes one CPU with deadline driven placement. The op derives one
  * deadline from weight derived period plus now then quantizes to one
  * key with the same quantize as the tree so placement shares the order
- * source with dispatch. An idle CPU wins first through the idle pick
- * when live plus allowed so load spreads with no scan. The cached
- * owner wins next when still live plus allowed so repeat tasks keep
- * warmth with no scan. The previous
+ * source with dispatch. An idle CPU wins first when the shared tail
+ * is empty so light load spreads with no scan. The cached owner wins
+ * first when the tail holds work so repeat tasks keep warmth under
+ * load with no scan. The previous
  * CPU wins next when live plus allowed with no drain check so warmth
  * stays cheap under load. The first allowed live CPU wins last. Stale
  * masks fail closed with an error and one gate count so callers never
@@ -22,13 +22,16 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Fallback with idle, hint, previous, first, gate in one place. */
-/* Gives idle when allowed and live else the cached owner when still */
-/* allowed and live else previous when allowed and live else first */
-/* when allowed and live else error with one gate count. Callers reach */
-/* the gate solely here so every failure counts once with no missed */
-/* reject. Placement shares the deadline source with the tree through */
-/* the same quantize with no drain check so warmth stays cheap. Idle */
-/* first stays BPF only with no mirror, since the idle pick needs the */
+/* Gives idle when the tail is empty and idle is allowed and live */
+/* else the cached owner when still allowed and live else previous */
+/* when allowed and live else idle when allowed and live else first */
+/* when allowed and live else error with one gate count. Warmth */
+/* leads when the tail holds work so a transient idle never pulls */
+/* a repeat task off its cache. Callers reach the gate solely here */
+/* so every failure counts once with no missed reject. Placement */
+/* shares the deadline source with the tree through the same */
+/* quantize with no drain check so warmth stays cheap. Idle first */
+/* stays BPF only with no mirror, since the idle pick needs the */
 /* live mask with no replay. The hint stays revalidated inside the */
 /* hint lookup, so no outer recheck is needed and a stale view never */
 /* widens the target class. */
@@ -38,14 +41,25 @@ static __always_inline s32 flow_fallback_cpu(
 	s32 idle;
 	s32 hint;
 	s32 first;
-	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (flow_cpu_ok(p, idle))
-		return idle;
-	hint = flow_place_hint((u32)p->pid, p);
-	if (hint >= 0)
-		return hint;
-	if (flow_cpu_ok(p, prev_cpu))
-		return prev_cpu;
+	if (!flow_saturated()) {
+		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (flow_cpu_ok(p, idle))
+			return idle;
+		hint = flow_place_hint((u32)p->pid, p);
+		if (hint >= 0)
+			return hint;
+		if (flow_cpu_ok(p, prev_cpu))
+			return prev_cpu;
+	} else {
+		hint = flow_place_hint((u32)p->pid, p);
+		if (hint >= 0)
+			return hint;
+		if (flow_cpu_ok(p, prev_cpu))
+			return prev_cpu;
+		idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (flow_cpu_ok(p, idle))
+			return idle;
+	}
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;

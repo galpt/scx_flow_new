@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow is a CPU scheduler that runs the most urgent waiting task first. It keeps due time order in the kernel with a [Van Emde Boas tree](https://www.geeksforgeeks.org/dsa/van-emde-boas-tree-set-1-basics-and-construction/) from task weights. The core admits load under a bound and each run lasts `2ms`. See `src/bpf/veb/` and `src/bpf/intf.h`.
+scx_flow is a CPU scheduler that runs the most urgent waiting task first. It keeps due time order in the kernel with a [Van Emde Boas tree](https://www.geeksforgeeks.org/dsa/van-emde-boas-tree-set-1-basics-and-construction/) from task weights. The core admits load under a bound and each run lasts `2ms` fresh, up to `8ms` on repeat. See `src/bpf/veb/` and `src/bpf/intf.h`.
 
 ### Why?
 
@@ -15,7 +15,7 @@ Arrivals pass a gate. Tasks get due times from weight and the core admits under 
 ## Typical Use Cases
 
 - Latency sensitive apps. Tasks with the earliest deadline run first, so short arrivals never wait behind long work and stay responsive under load.
-- Desktop use. A fixed `2ms` slice keeps interaction smooth, so typing and motion stay fluid while background work continues.
+- Desktop use. A `2ms` base slice keeps interaction smooth, growing to `8ms` for repeat work, so typing stays fluid while background work continues.
 - Mixed batch work. Admission keeps overload feasible, so heavy jobs still finish while urgent tasks move ahead in deadline order.
 
 ## More details
@@ -61,8 +61,8 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Draining four fixed priority tiers in order stays out by design, since tier order beats due time order and extra moves cost time.
 - Priority tiers lose to due time order, since tier order needs extra scans and moves while due time order runs the most urgent task first.
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
-- Placement uses an idle CPU when live, else the last owner when live plus allowed, else the selected CPU when live, else the first live CPU, so load spreads with warmth and no extra scan.
+- Placement uses an idle CPU when live and empty, else the last owner when live plus allowed, else the selected CPU when live, else the first live CPU, so warmth wins under load with no extra scan.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
 - Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain ordered at the top key with higher latency.
-- Flood throughput stays bounded by the fixed `2ms` slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
+- Flood throughput stays bounded by the `2ms` base slice plus queue wait, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
 - Preempt sends at most one directed kick per park to the owner CPU solely when the wakeup holds a row and runs earlier than the owner task, with a running reject counting as longer, so urgent arrivals preempt longer runs with no storm and equal or earlier owners never bounce.
