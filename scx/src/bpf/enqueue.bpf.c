@@ -18,11 +18,12 @@
  * one drop through the stored value, so a hint change plus a move
  * never drifts the row. The exiting fast path plus one idle helper
  * plus one direct block form the three kick points, so every park
- * meets at most one kick with no storm. A direct preempt needs a margin lead with the owner slice
- * still long, so near ties plus nearly done owners never bounce.
- * Slice expiry paces the rest, so no slice write and no stamp run
- * here. See intf.h for the deadline helpers and dispatch.bpf.c for
- * the single scan.
+ * meets at most one kick with no storm. A direct preempt needs a
+ * 100us margin lead with more than 100us still left on the owner,
+ * so near ties plus nearly done owners never bounce while one kick
+ * per park stays. Slice expiry paces the rest, so no slice write and
+ * no stamp run here. See intf.h for the deadline helpers and
+ * dispatch.bpf.c for the single scan.
  *
  * The op splits across enqueue/target, insert, and kick files with
  * the enqueue body here. Each helper stays inline except the kick,
@@ -250,13 +251,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			bpf_rcu_read_unlock();
 			return;
 		}
-		/* An urgent arrival leads by a margin with the owner slice */
-		/* still long, so near ties plus nearly done owners never */
-		/* bounce. The margin adds a quarter base slice to the */
-		/* arrival with saturation, and the tail needs a quarter */
-		/* slice left on the owner, so only a truly earlier arrival */
-		/* with work left preempts at once. Equal or later arrivals */
-		/* pace at slice expiry with no count. */
+		/* An urgent arrival leads by 100us with more than 100us left */
+		/* on the owner, so near ties plus nearly done owners never */
+		/* bounce. The margin adds 100us to the arrival with */
+		/* saturation, and the tail needs more than 100us left on the */
+		/* owner, so only a truly earlier arrival with work left */
+		/* preempts at once with one kick per park. Equal or later */
+		/* arrivals pace at slice expiry with no count. */
 		if (!flow_time_before(deadline, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();

@@ -7,12 +7,15 @@
 //! kick at once with no rate window, and busy targets kick only for an
 //! urgent earlier deadline with margin plus tail.
 
-/// Preempt margin in nanos at 500us. Near ties never bounce.
+/// Preempt margin in nanos at 100us. Near ties never bounce.
 #[cfg(test)]
-pub const PREEMPT_MARGIN_NS: u64 = 500_000;
-/// Preempt tail in nanos at 500us. Nearly done owners finish first.
+pub const PREEMPT_MARGIN_NS: u64 = 100_000;
+/// Preempt tail in nanos at 100us. Nearly done owners finish first.
 #[cfg(test)]
-pub const PREEMPT_TAIL_NS: u64 = 500_000;
+pub const PREEMPT_TAIL_NS: u64 = 100_000;
+/// Preempt floor in nanos at 100us. Margin plus tail never drop below this.
+#[cfg(test)]
+pub const PREEMPT_FLOOR_NS: u64 = 100_000;
 
 /// True when the first time is before the second with wrap safety.
 /// Mirrors BPF flow_time_before with the signed diff, so order holds
@@ -103,6 +106,8 @@ mod tests {
     fn margin_blocks_near_ties() {
         assert!(!preempt_wants(19, 20, 2_000_000, 1));
         assert!(preempt_wants(10, 600_000, 2_000_000, 1));
+        assert!(!preempt_wants(10, 100_010, 2_000_000, 1));
+        assert!(preempt_wants(10, 100_011, 2_000_000, 1));
         assert!(!preempt_wants(10, 20, 100_000, 1));
         assert!(!preempt_wants(0, 20, 2_000_000, 1));
         assert!(!preempt_wants(10, 0, 0, 1));
@@ -112,9 +117,24 @@ mod tests {
 
     #[test]
     fn tail_waits_out_nearly_done() {
-        assert!(!preempt_wants(10, 1_000_000, 499_999, 1));
-        assert!(!preempt_wants(10, 1_000_000, 500_000, 1));
-        assert!(preempt_wants(10, 1_000_000, 500_001, 1));
+        assert!(!preempt_wants(10, 1_000_000, 99_999, 1));
+        assert!(!preempt_wants(10, 1_000_000, 100_000, 1));
+        assert!(preempt_wants(10, 1_000_000, 100_001, 1));
         assert!(!preempt_wants(10, 1_000_000, 0, 1));
+    }
+
+    #[test]
+    fn floor_stays_at_100us_with_single_kick() {
+        assert_eq!(PREEMPT_MARGIN_NS, PREEMPT_FLOOR_NS);
+        assert_eq!(PREEMPT_TAIL_NS, PREEMPT_FLOOR_NS);
+        assert_eq!(PREEMPT_FLOOR_NS, 100_000);
+        assert_eq!(
+            PREEMPT_MARGIN_NS,
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64
+        );
+        assert_eq!(
+            PREEMPT_TAIL_NS,
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64
+        );
     }
 }

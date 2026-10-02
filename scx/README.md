@@ -62,4 +62,4 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline, so light work never takes a fast CPU that other work needs.
 - Flood past `128` queued caps ordered moves at `8` with queue order covering the rest to `32` plus `32` visited entries at most, so a deep tail never burns extra scans in one pass.
 - Affinity stress with many foreign heads past four per tier stalls that tier for the pass while overflow still skips, so keep pinned work narrow and test with mixed masks before trusting tail latency.
-- Preempt sends at most one kick per park when the arrival leads by `500us` with more than `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.
+- Preempt sends at most one kick per park when the arrival leads by `100us` with more than `100us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.

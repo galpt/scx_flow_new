@@ -122,12 +122,14 @@ enum flow_consts {
 	/* plus local plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
-	/* Preempt leads by a quarter base slice with no knob, so near */
-	/* ties never bounce while urgent gaps still preempt at once. */
-	FLOW_PREEMPT_MARGIN_NS = 500000ULL,
-	/* Preempt waits out a quarter base slice tail with no knob, so */
-	/* a nearly done owner finishes instead of taking a kick. */
-	FLOW_PREEMPT_TAIL_NS = 500000ULL,
+	/* Preempt leads by 100us with no knob, so near ties never bounce */
+	/* while urgent gaps still preempt at once. The floor stays at */
+	/* 100us with one kick per park. */
+	FLOW_PREEMPT_MARGIN_NS = 100000ULL,
+	/* Preempt waits out a 100us tail with no knob, so a nearly done */
+	/* owner finishes instead of taking a kick. The floor stays at */
+	/* 100us with one kick per park. */
+	FLOW_PREEMPT_TAIL_NS = 100000ULL,
 };
 /* Per task state at 88B with release plus period plus deadline plus */
 /* runtime plus predictor plus stamps plus hint plus miss count plus */

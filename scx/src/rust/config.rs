@@ -54,7 +54,8 @@ impl Config {
     /// hint based always under 950 per mille with base capacity 1024.
     /// Queues hold 512 local plus 8 node plus machine plus overflow
     /// with ids in the 0x5100 region. Hints hold 4096 flat rows with
-    /// no timer wait. Preempt needs 500us margin plus 500us tail strictly.
+    /// no timer wait. Preempt needs 100us margin plus 100us tail strictly
+    /// with a floor at 100us and one kick per park.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -86,10 +87,10 @@ impl Config {
         if HINT_MAX != 4096 {
             bail!("hint bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 500_000 {
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 100_000 {
             bail!("margin bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 500_000 {
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 100_000 {
             bail!("tail bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64 != 8 {
@@ -223,11 +224,11 @@ mod tests {
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
-            500_000
+            100_000
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
-            500_000
+            100_000
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64,
