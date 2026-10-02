@@ -29,13 +29,13 @@ static __always_inline u32 veb_low(u32 k)
 {
 	return k & 255U;
 }
-static __noinline int veb_first_bit(u64 w)
+static __always_inline int veb_first_bit(u64 w)
 {
 	if (!w)
 		return 64;
 	return __builtin_ctzll(w);
 }
-static __noinline int veb_last_bit(u64 w)
+static __always_inline int veb_last_bit(u64 w)
 {
 	if (!w)
 		return -1;

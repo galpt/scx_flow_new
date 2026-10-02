@@ -28,8 +28,8 @@ static __noinline u32 veb_cluster_first(u32 h)
 		if (!p)
 			continue;
 		v = READ_ONCE(*p);
-		if (!v)
-			continue;
+		/* Zero folds into the first bit sentinel below with no */
+		/* extra branch, so empty words skip through one check. */
 		b = veb_first_bit(v);
 		if (b < 0 || b >= 64)
 			continue;
@@ -55,8 +55,8 @@ static __noinline u32 veb_cluster_last(u32 h)
 		if (!p)
 			continue;
 		v = READ_ONCE(*p);
-		if (!v)
-			continue;
+		/* Zero folds into the last bit sentinel below with no */
+		/* extra branch, so empty words skip through one check. */
 		b = veb_last_bit(v);
 		if (b < 0 || b >= 64)
 			continue;
@@ -83,8 +83,8 @@ static __noinline u32 veb_scan_min(void)
 		if (!p)
 			continue;
 		v = READ_ONCE(*p);
-		if (!v)
-			continue;
+		/* Zero folds into the first bit sentinel below with no */
+		/* extra branch, so empty words skip through one check. */
 		b = veb_first_bit(v);
 		if (b < 0 || b >= 64)
 			continue;
@@ -116,8 +116,8 @@ static __noinline u32 veb_scan_max(void)
 		if (!p)
 			continue;
 		v = READ_ONCE(*p);
-		if (!v)
-			continue;
+		/* Zero folds into the last bit sentinel below with no */
+		/* extra branch, so empty words skip through one check. */
 		b = veb_last_bit(v);
 		if (b < 0 || b >= 64)
 			continue;

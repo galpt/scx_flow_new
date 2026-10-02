@@ -5,12 +5,22 @@
  * Running claims the segment start and tracks the CPU pid plus the on
  * CPU gauge. Stopping charges the segment to total runtime and counts
  * one requeue else one completion and emits one observability notify.
+ * A requeue steps the repeat count toward the larger slice capped at
+ * eight milliseconds solely while the tail reads empty, while a held
+ * tail keeps the base so a long slice never delays waiting wakeups,
+ * and a blocking end clears it, so steady work keeps the base slice
+ * and repeat steps grow it with no extra map. Running warms the
+ * stay count toward hot on the same CPU and resets to cold on a
+ * move, while blocking plus enable clear it and requeues keep it,
+ * so steady work stays while migrants cool with no extra map.
  * Stopping drops the tree key plus the ledger share plus the order
  * row so dispatched keys never linger and use never leaks. Gate fail
  * stopping drops plus notifies when queued like disable so shares
  * return at once with no stale wait. Stopping skips the notify when
  * the task never queued. Enable clears the task state with share plus
- * CPU cleared. Disable plus exit charge leftovers, drop the tree key
+ * CPU plus deadline plus key plus repeat cleared and drops the tree
+ * key plus the order row plus the head slot, so top key rejects never
+ * linger. Disable plus exit charge leftovers, drop the tree key
  * plus the ledger share plus the order row, emit one observability
  * notify so every admit pairs one drop. One finish helper pairs key,
  * charge, pid, gauge, ledger, notify through one exit so a missed
@@ -37,10 +47,17 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	tctx = flow_lookup(p);
 	now = flow_now();
 	if (tctx) {
+		u32 old;
+		u32 next;
 		stamp = now ? now : 1;
 		prev = __sync_val_compare_and_swap(&tctx->run_at,
 		    0, stamp);
 		claimed = prev == 0;
+		/* Same CPU warms toward hot while a move resets to */
+		/* cold, so steady work stays while migrants cool. */
+		old = READ_ONCE(tctx->exhaust);
+		next = flow_warmth_bump_or_reset(old, cpu);
+		WRITE_ONCE(tctx->exhaust, next);
 	}
 	st = flow_cpu_state_for(cpu);
 	if (st)
@@ -81,8 +98,22 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (!charged)
 		return;
 	if (runnable) {
+		struct flow_task_ctx *stctx = flow_lookup(p);
+		if (stctx && !flow_saturated()) {
+			u32 cur = READ_ONCE(stctx->exhaust);
+			u32 step = flow_exhaust_step(cur);
+			if (step < (u32)FLOW_QUANTUM_MAX_STEP)
+				WRITE_ONCE(stctx->exhaust,
+				    (cur & ~(u32)FLOW_EXHAUST_STEP_MASK) |
+				    (step + 1U));
+		}
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
+	}
+	{
+		struct flow_task_ctx *ctctx = flow_lookup(p);
+		if (ctctx)
+			WRITE_ONCE(ctctx->exhaust, 0);
 	}
 	__sync_fetch_and_add(&flow_stats.completions, 1);
 }
@@ -90,6 +121,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
+	u32 pid;
+	u32 key;
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
 		return;
@@ -97,10 +130,20 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
+	pid = (u32)p->pid;
+	key = READ_ONCE(tctx->key);
 	WRITE_ONCE(tctx->run_at, 0);
 	WRITE_ONCE(tctx->seq, 0);
 	WRITE_ONCE(tctx->admit_share, 0);
 	WRITE_ONCE(tctx->admit_cpu, 0);
+	WRITE_ONCE(tctx->deadline, 0);
+	WRITE_ONCE(tctx->key, (u32)FLOW_VEB_EMPTY);
+	WRITE_ONCE(tctx->exhaust, 0);
+	/* Fresh tasks drop any prior top key plus row plus head, so a */
+	/* reused pid never leaves a stale ordered entry behind. */
+	veb_remove(pid);
+	flow_order_delete(pid);
+	flow_head_clear(pid, key);
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {

@@ -67,17 +67,17 @@ pub struct Metrics {
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
-    #[stat(desc = "Ordered vEB dispatches with admitted order match")]
+    #[stat(desc = "Ordered vEB dispatches in key plus deadline order")]
     #[serde(default)]
     pub veb_hits: u64,
-    #[stat(desc = "Fail open dispatches with no ordered dispatch")]
+    #[stat(desc = "Empty plus corrupt plus stale fallback as canary")]
     #[serde(default)]
     pub fifo_parks: u64,
 }
 
 /// One card of the per CPU grid.
 /// Identifier plus SMT stay fixed while pid plus slice refresh per poll.
-/// Pid holds zero when idle and slice holds the shared quantum.
+/// Pid holds zero when idle and slice holds the base quantum.
 /// SMT marks the second thread of one core for display solely and
 /// false on old payloads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -92,7 +92,7 @@ pub struct PerCpuMetrics {
     /// Pid now on the CPU with zero when idle.
     #[serde(default)]
     pub running_pid: u32,
-    /// Fixed slice in nanos with the shared quantum.
+    /// Base slice in nanos with the shared base quantum.
     #[serde(default)]
     pub slice_ns: u64,
 }

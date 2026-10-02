@@ -7,25 +7,41 @@
 
 use crate::flow::ADMIT_PERMILLE;
 use crate::flow::CAP_BASE;
+use crate::flow::DISPATCH_FLOOD_PROBES;
+use crate::flow::DISPATCH_FLOOD_QUEUED;
+use crate::flow::DISPATCH_PROBES;
+use crate::flow::EXHAUST_STEP_MASK;
 use crate::flow::HINT_MAX;
+use crate::flow::HOT;
 use crate::flow::PERIOD_NS;
 use crate::flow::QUANTUM_NS;
+use crate::flow::WARM;
+use crate::flow::WARM_CPU_MASK;
+use crate::flow::WARM_CPU_SHIFT;
+use crate::flow::WARMTH_MAX;
+use crate::flow::WARMTH_SHIFT;
 use crate::flow::WEIGHT_BASE;
 use crate::flow::WEIGHT_MAX;
 use crate::flow::WEIGHT_MIN;
 use anyhow::Result;
 use anyhow::bail;
 
-/// Default fixed slice in nanos.
+/// Default base slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 /// Default dispatch batch for the ops table. Mirrors the header batch
 /// so the ops table holds every pass.
 const DEF_BATCH: u32 = 16;
+/// Default flood stall budget. Mirrors the header flood probes so deep
+/// backlog never burns full scans with queue order covering the rest.
+const DEF_FLOOD_PROBES: u32 = 4;
+/// Default flood queue bound. Mirrors the header queued bound so the
+/// stall budget gates solely past deep backlog.
+const DEF_FLOOD_QUEUED: u32 = 128;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos. Always two milliseconds.
+    /// Base slice in nanos. Always two milliseconds.
     pub quantum_ns: u64,
     /// Dispatch batch for the ops table. Always sixteen.
     pub dispatch_batch: u32,
@@ -46,7 +62,10 @@ impl Config {
     /// Faulty values mark a programming fault.
     /// The slice stays at two milliseconds with base weight one hundred
     /// twenty eight in range one to sixteen thousand. The period stays
-    /// at sixteen milliseconds. The batch stays at sixteen. Admission
+    /// at sixteen milliseconds. The batch stays at sixteen with ordered
+    /// filling the batch and queue order covering the remainder. Flood
+    /// bound stays at four plus one hundred twenty eight as deep backlog
+    /// shape with a twenty probe cap kept as ABI. Admission
     /// holds use under nine hundred fifty per mille with base capacity
     /// one thousand twenty four. Queues hold five hundred twelve local,
     /// eight node, machine, overflow. Hints hold four
@@ -79,6 +98,42 @@ impl Config {
         if HINT_MAX != 4096 {
             bail!("hint bound bad");
         }
+        if DISPATCH_FLOOD_PROBES != 4 {
+            bail!("flood probes bad");
+        }
+        if DEF_FLOOD_PROBES != 4 {
+            bail!("flood probes bad");
+        }
+        if DISPATCH_FLOOD_QUEUED != 128 {
+            bail!("flood queued bad");
+        }
+        if DEF_FLOOD_QUEUED != 128 {
+            bail!("flood queued bad");
+        }
+        if DISPATCH_PROBES != 20 {
+            bail!("probe bound bad");
+        }
+        if WARM_CPU_SHIFT != 2 {
+            bail!("warm cpu shift bad");
+        }
+        if WARM_CPU_MASK != 511 {
+            bail!("warm cpu mask bad");
+        }
+        if EXHAUST_STEP_MASK != 3 {
+            bail!("exhaust step mask bad");
+        }
+        if WARMTH_SHIFT != 11 {
+            bail!("warmth shift bad");
+        }
+        if WARMTH_MAX != 255 {
+            bail!("warmth max bad");
+        }
+        if WARM != 1 {
+            bail!("warm bad");
+        }
+        if HOT != 3 {
+            bail!("hot bad");
+        }
         Ok(())
     }
 
@@ -104,7 +159,7 @@ pub struct ConfigBuilder {
 
 #[cfg(test)]
 impl ConfigBuilder {
-    /// Set the fixed slice.
+    /// Set the base slice.
     pub fn quantum_ns(mut self, v: u64) -> Self {
         self.quantum_ns = Some(v);
         self
@@ -174,9 +229,38 @@ mod tests {
         );
         assert_eq!(DEF_BATCH, 16);
         assert_eq!(
+            DEF_FLOOD_PROBES,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES
+        );
+        assert_eq!(DEF_FLOOD_PROBES, 4);
+        assert_eq!(
+            DEF_FLOOD_QUEUED,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED
+        );
+        assert_eq!(DEF_FLOOD_QUEUED, 128);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_PROBES as usize,
+            crate::flow::DISPATCH_PROBES
+        );
+        assert_eq!(
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
+        assert_eq!(
+            crate::flow::QUANTUM_MID_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MID_NS as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MID_NS, 4_000_000);
+        assert_eq!(
+            crate::flow::QUANTUM_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MAX_NS as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MAX_NS, 8_000_000);
+        assert_eq!(
+            crate::flow::QUANTUM_MAX_STEP as u64,
+            crate::bpf_intf::flow_consts_FLOW_QUANTUM_MAX_STEP as u64
+        );
+        assert_eq!(crate::flow::QUANTUM_MAX_STEP, 2);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 522);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64, 0x5A01);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);
@@ -186,5 +270,51 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
             crate::flow::cgrp::HINT_MAX
         );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARM_CPU_SHIFT,
+            crate::flow::WARM_CPU_SHIFT
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARM_CPU_MASK,
+            crate::flow::WARM_CPU_MASK
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_EXHAUST_STEP_MASK,
+            crate::flow::EXHAUST_STEP_MASK
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARMTH_SHIFT,
+            crate::flow::WARMTH_SHIFT
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WARMTH_MAX,
+            crate::flow::WARMTH_MAX
+        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_WARM, crate::flow::WARM);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_HOT, crate::flow::HOT);
+        assert_eq!(crate::flow::WARM_CPU_SHIFT, 2);
+        assert_eq!(crate::flow::WARM_CPU_MASK, 511);
+        assert_eq!(crate::flow::EXHAUST_STEP_MASK, 3);
+        assert_eq!(crate::flow::WARMTH_SHIFT, 11);
+        assert_eq!(crate::flow::WARMTH_MAX, 255);
+        assert_eq!(crate::flow::WARM, 1);
+        assert_eq!(crate::flow::HOT, 3);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn flood_and_drain_bounds_hold() {
+        assert_eq!(DISPATCH_FLOOD_PROBES, 4);
+        assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
+        assert_eq!(DISPATCH_PROBES, 20);
+        assert_eq!(DEF_BATCH, 16);
+        assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
+        assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
+        // Ordered fills the batch with queue order covering the remainder,
+        // so deep backlog still drains sixteen per pass as four ordered
+        // plus twelve in queue order.
+        let slack = DEF_BATCH - DEF_FLOOD_PROBES;
+        assert_eq!(slack, 12);
+        assert_eq!(DEF_FLOOD_PROBES + (DEF_BATCH >> 2), 8);
     }
 }

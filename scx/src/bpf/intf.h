@@ -9,27 +9,54 @@
  * so queue identifiers stay stable across releases. Enqueue admits
  * synchronously with share math plus bound check then inserts
  * one key derived from the deadline plus one order row with sequence,
- * deadline, CPU and parks with plain insert. Rejects park with no
- * key plus no row plus no run. Dispatch moves admitted tasks in tree
- * order up to sixteen per pass with sequence, liveness, affinity
- * checks. Stale entries park and the core drops shares through
- * stopping plus disable plus exit plus gate fail paths exactly once.
- * Empty queue leaves at once with no scan. Empty tree or stall moves
- * one affinity gated head task with liveness plus affinity checks
- * plus keyed drop and no order gate so runnable tasks never stall
- * on live work. Ordered moves count one vEB hit plus fail open
- * moves count one FIFO park so every dispatched task lands in one
- * bucket with completions counted apart. Fail open stays rare since
- * order rows land synchronously and solely genuine affinity misses
- * reach it. A single tail avoids cross tier moves that would bounce
+ * deadline, CPU and parks with plain insert. Task state also keeps
+ * the deadline plus key from the same period plus deadline plus
+ * quantize helpers with zero roundtrip, so dispatch compares without
+ * touching order rows. Rejects park at the top key with the far
+ * deadline plus no row plus no run, so every parked task stays
+ * ordered with rejects last. One kick follows each park to the
+ * chosen CPU when idle else one idle peer else one directed preempt
+ * to the owner solely when the wakeup leads the owner deadline by
+ * the margin with the owner slice still long, so urgent arrivals
+ * preempt longer runs with at most one kick per park and no storm
+ * while near ties plus nearly done owners never bounce. Placement
+ * keeps hot stays first with headroom else idle else warm stays with
+ * headroom else the least loaded allowed CPU from a bounded scan, so
+ * steady work stays while wakeups still spread without stacking.
+ * Dispatch moves every parked task in global
+ * deadline order up to sixteen per pass with no sequence gate and
+ * no CPU gate. Each pass picks the least key then deadline then owned
+ * then pid among entries the dispatch CPU may run, so any CPU takes
+ * the earliest work it may run. The head keeps smallest pid best
+ * effort while the full scan orders owned then pid.
+ * Affinity plus liveness still gate every move through the same
+ * entry check as the fallback path, so the target class never widens.
+ * Ordered checks run first
+ * so every parked task stays preferred, while the fallback drain moves
+ * the remainder in queue order up to the batch bound. Past deep
+ * backlog ordered stops after four moves with queue order covering the
+ * remainder to sixteen, so a deep tail never burns sixteen double
+ * scans in one pass. A recheck miss skips stale and keeps walking
+ * within the batch with the queue order drain left for the remainder.
+ * Stale
+ * entries park and the core drops shares through stopping plus
+ * disable plus exit plus gate fail paths exactly once. Empty queue
+ * leaves at once with no scan. Stall drains up to sixteen in queue
+ * order with liveness plus affinity checks and no order gate so
+ * runnable tasks never stall on live work.
+ * Ordered moves count one vEB hit plus fallback moves count one
+ * FIFO park so every dispatched task lands in one bucket with
+ * completions counted apart. Fallback stays rare since task state plus
+ * tree land synchronously with deep backlog draining through the same
+ * queue order. Flood backlog still drains sixteen per pass with
+ * ordered first plus queue order remainder and rejects ordered at the
+ * top key. A single tail avoids cross tier moves that would bounce
  * cache and NUMA locality. Undrained queues hold zero tasks and cost
  * solely at init. Counters use atomic adds from every CPU and stay
  * best effort for observability. Concurrent skips may count twice
  * with parks staying noisy but fail closed. Admits, rejects, misses
  * count in the core as source of truth and merge into the snapshot.
- * Ordered moves count vEB hits plus fail open moves count FIFO parks
- * so every dispatched task lands in one bucket with completions
- * counted apart. The wire stays at 112B. Reads poll at dashboard
+ * The wire stays at 112B. Reads poll at dashboard
  * cadence so line bouncing stays bounded by event rate. Shared
  * fields pair reads with writes through atomics plus volatile
  * access. The watchdog stays at twenty seconds. Admission plus order
@@ -67,6 +94,9 @@ typedef int pid_t;
 #endif
 enum flow_consts {
 	FLOW_QUANTUM_NS = 2000000ULL,
+	FLOW_QUANTUM_MID_NS = 4000000ULL,
+	FLOW_QUANTUM_MAX_NS = 8000000ULL,
+	FLOW_QUANTUM_MAX_STEP = 2ULL,
 	FLOW_PERIOD_NS = 16000000ULL,
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
@@ -81,6 +111,8 @@ enum flow_consts {
 	FLOW_MAX_DSQS = 522ULL,
 	FLOW_DISPATCH_MAX_BATCH = 16ULL,
 	FLOW_DISPATCH_MAX_PROBES = 20ULL,
+	FLOW_DISPATCH_FLOOD_PROBES = 4ULL,
+	FLOW_DISPATCH_FLOOD_QUEUED = 128ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_PROTO_ENQUEUE = 1ULL,
 	FLOW_PROTO_ORDER = 2ULL,
@@ -93,16 +125,38 @@ enum flow_consts {
 	FLOW_QUANT_SHIFT = 10ULL,
 	FLOW_VEB_EMPTY = 0xFFFFFFFFULL,
 	FLOW_ADMIT_PERMILLE = 950ULL,
-	/* CPU performance levels at half plus max with no knob. Any own */
-	/* plus local plus running picks max else half with no shared use. */
+	/* Preempt leads by a quarter base slice with no knob, so near */
+	/* ties never bounce while urgent gaps still preempt at once. */
+	FLOW_PREEMPT_MARGIN_NS = 500000ULL,
+	/* Preempt waits out a quarter base slice tail with no knob, so */
+	/* a nearly done owner finishes instead of taking a kick. */
+	FLOW_PREEMPT_TAIL_NS = 500000ULL,
+	/* CPU performance levels at half plus max with no knob. Any local */
+	/* plus running picks max else half with no shared use. */
 	FLOW_CPU_PERF_HALF = 512ULL,
 	FLOW_CPU_PERF_MAX = 1024ULL,
+	/* Repeat step keeps two bits with three levels and no knob. */
+	FLOW_EXHAUST_STEP_MASK = 3ULL,
+	/* Last CPU plus one keeps nine bits with zero for unknown. */
+	FLOW_WARM_CPU_SHIFT = 2ULL,
+	FLOW_WARM_CPU_MASK = 511ULL,
+	/* Warmth score keeps eight bits saturating at the top. */
+	FLOW_WARMTH_SHIFT = 11ULL,
+	FLOW_WARMTH_MAX = 255ULL,
+	/* Warm needs one stay after placement with two runnings total */
+	/* while hot needs three stays after placement with four runnings */
+	/* total. Cold stays at zero with no stick. */
+	FLOW_WARM = 1ULL,
+	FLOW_HOT = 3ULL,
 };
 struct flow_task_ctx {
 	u64 run_at;
 	u64 seq;
 	u32 admit_share;
 	u32 admit_cpu;
+	u64 deadline;
+	u32 key;
+	u32 exhaust;
 };
 struct flow_cpu_state {
 	u32 running_pid;
@@ -143,8 +197,8 @@ struct flow_order_entry {
 	u32 cpu;
 	u32 pad;
 };
-_Static_assert(sizeof(struct flow_task_ctx) == 24,
-	"task state stays at 24B");
+_Static_assert(sizeof(struct flow_task_ctx) == 40,
+	"task state stays at 40B");
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
 _Static_assert(sizeof(struct flow_topo) == 8,
@@ -232,11 +286,65 @@ static __always_inline u64 flow_deadline_at(u64 now,
 {
 	return flow_sat_add(now, period);
 }
-static __always_inline u64 flow_share_permille(u64 period)
+static __always_inline u32 flow_exhaust_step(u32 exhaust)
 {
+	return exhaust & (u32)FLOW_EXHAUST_STEP_MASK;
+}
+static __always_inline u32 flow_warmth_get(u32 exhaust)
+{
+	return (exhaust >> (u32)FLOW_WARMTH_SHIFT) &
+	    (u32)FLOW_WARMTH_MAX;
+}
+static __always_inline s32 flow_warm_cpu_get(u32 exhaust)
+{
+	u32 raw = (exhaust >> (u32)FLOW_WARM_CPU_SHIFT) &
+	    (u32)FLOW_WARM_CPU_MASK;
+	if (!raw)
+		return -1;
+	return (s32)(raw - 1U);
+}
+/* Bump warmth on same CPU else reset to cold with the step kept. */
+/* Same CPU grows toward hot saturating at the top, while a move */
+/* clears to cold so the next stay must warm again. The top CPU */
+/* wraps to unknown and stays cold, which is rare and fail closed. */
+static __always_inline u32 flow_warmth_bump_or_reset(u32 old,
+	s32 cpu)
+{
+	u32 step = old & (u32)FLOW_EXHAUST_STEP_MASK;
+	u32 warm = (old >> (u32)FLOW_WARMTH_SHIFT) &
+	    (u32)FLOW_WARMTH_MAX;
+	u32 raw = (old >> (u32)FLOW_WARM_CPU_SHIFT) &
+	    (u32)FLOW_WARM_CPU_MASK;
+	s32 prev = raw ? (s32)(raw - 1U) : -1;
+	u32 nwarm;
+	u32 nraw;
+	if (cpu < 0 || (u64)cpu >= (u64)FLOW_MAX_CPUS)
+		return old;
+	if (prev == cpu)
+		nwarm = warm >= (u32)FLOW_WARMTH_MAX ?
+		    (u32)FLOW_WARMTH_MAX : warm + 1U;
+	else
+		nwarm = 0;
+	nraw = ((u32)cpu + 1U) & (u32)FLOW_WARM_CPU_MASK;
+	return step | (nraw << (u32)FLOW_WARM_CPU_SHIFT) |
+	    (nwarm << (u32)FLOW_WARMTH_SHIFT);
+}
+static __always_inline u64 flow_quantum_ns(u32 exhaust)
+{
+	u32 step = flow_exhaust_step(exhaust);
+	if (step == 0)
+		return (u64)FLOW_QUANTUM_NS;
+	if (step == 1)
+		return (u64)FLOW_QUANTUM_MID_NS;
+	return (u64)FLOW_QUANTUM_MAX_NS;
+}
+static __always_inline u64 flow_slice_permille(u64 period, u32 exhaust)
+{
+	u64 slice;
 	if (period == 0)
 		return 0;
-	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
+	slice = flow_quantum_ns(exhaust);
+	return slice * 1000ULL / period;
 }
 static __always_inline bool flow_admit_ok(u64 held,
 	u64 share)
