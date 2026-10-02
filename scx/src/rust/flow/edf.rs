@@ -88,18 +88,18 @@ pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
 }
 
 /// True when one arrival preempts one occupant under margin plus tail.
-/// Empty arrivals never preempt. A far arrival never preempts a
-/// rowless occupant, so two rowless tasks never churn. A rowless
-/// occupant counts as longer, so an admitted arrival still preempts
-/// a reject run. A nearly done occupant finishes instead, and the
-/// arrival must lead by the margin, so near ties never bounce.
+/// Empty or far arrivals never preempt, so a far reject never churns
+/// any run. A rowless occupant counts as longer, so an admitted
+/// arrival still preempts a reject run. A nearly done occupant
+/// finishes instead, and the arrival must lead by the margin, so near
+/// ties never bounce.
 /// Mirrors the core paired check with the core as authority.
 #[cfg(test)]
 pub fn preempt_want(arrival: u64, occupant: u64, remain: u64, margin: u64) -> bool {
     if arrival == 0 {
         return false;
     }
-    if arrival == u64::MAX && occupant == 0 {
+    if arrival == u64::MAX {
         return false;
     }
     if occupant == 0 {
@@ -184,9 +184,21 @@ mod tests {
             PREEMPT_TAIL_NS,
             PREEMPT_MARGIN_NS
         ));
-        // Rowless pairs keep the old guards.
+        // Rowless pairs keep the old guards with far never preempting.
         assert!(!preempt_want(0, 10_000_000, u64::MAX, PREEMPT_MARGIN_NS));
         assert!(!preempt_want(u64::MAX, 0, u64::MAX, PREEMPT_MARGIN_NS));
+        assert!(!preempt_want(
+            u64::MAX,
+            10_000_000,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
+        assert!(!preempt_want(
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            PREEMPT_MARGIN_NS
+        ));
         assert!(preempt_want(1_000_000, 0, u64::MAX, PREEMPT_MARGIN_NS));
         assert_eq!(PREEMPT_MARGIN_NS, 500_000);
         assert_eq!(PREEMPT_TAIL_NS, 500_000);

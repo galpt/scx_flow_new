@@ -14,7 +14,7 @@
  * dispatch order with a lead margin, so near ties never bounce. A
  * running task with no row counts as longer, so an admitted wakeup
  * still preempts a reject run, while a far reject wakeup never
- * preempts a reject run with neither holding a row. A nearly done
+ * preempts any run. A nearly done
  * owner finishes instead of taking a kick through its remaining
  * slice. At most one kick lands per park with no call when
  * the wakeup holds no row or the owner already runs the earlier
@@ -36,17 +36,16 @@
 /* by the margin with the occupant slice still long, so urgent gaps */
 /* preempt at once while near ties plus nearly done owners never */
 /* bounce. A missing occupant row counts as longer so an admitted */
-/* arrival still preempts a reject run. A missing arrival row never */
-/* preempts, so equal or earlier owners never bounce. Two rowless */
-/* tasks never preempt, so a far reject arrival never churns a reject */
-/* run with no order on either side. Callers pass the occupant */
+/* arrival still preempts a reject run. A missing or far arrival */
+/* never preempts, so equal or earlier owners never bounce and far */
+/* rejects never churn any run. Callers pass the occupant */
 /* remaining slice plus the margin, both in nanos. */
 static __always_inline bool flow_preempt_want(u64 arrival, u64 occupant,
 	u64 remain, u64 margin)
 {
 	if (arrival == 0)
 		return false;
-	if (arrival == (u64)~0ULL && occupant == 0)
+	if (arrival == (u64)~0ULL)
 		return false;
 	if (occupant == 0)
 		return true;

@@ -22,7 +22,7 @@ Arrivals pass a gate. Tasks get due times from weight and the core admits under 
 
 ### Queues
 
-One queue holds tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. Fallback runs solely on empty plus corrupt plus stale. Low byte head skips tail walks. Fresh tasks take idle first even when held while repeats reuse owner when allowed. Backlog drains 16 ordered per pass. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One queue holds tasks. Each pass moves up to 16 in least key then deadline then owned then pid order. Fallback runs solely on empty plus corrupt plus stale. Low byte head skips tail walks. Fresh tasks take idle first even when held while repeats reuse owner with headroom when allowed. Backlog drains 16 ordered per pass. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -61,7 +61,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Draining four fixed priority tiers in order stays out by design, since tier order beats due time order and extra moves cost time.
 - Priority tiers lose to due time order, since tier order needs extra scans and moves while due time order runs the most urgent task first.
 - Node and machine queues stay reserved with no tasks, so queue numbers stay stable across releases.
-- Placement uses an idle CPU when live for fresh tasks even when held and when empty for repeats, else the last owner for repeats when held plus allowed plus idle, else the least loaded of sixteen allowed with idle exit, else the first live CPU, so fresh wakeups spread while repeats keep warmth without stacking.
+- Placement uses an idle CPU when live for fresh tasks even when held and when empty for repeats, else the last owner for repeats when held plus allowed plus idle, else the least loaded among the first sixteen CPU ids with idle exit, else the first live CPU, so fresh wakeups spread while repeats keep warmth without stacking.
 - One shared waiting line stays in use with no change, since a single line keeps cache use simple and every CPU takes from it in due time order.
 - Oversubscription past about seven admitted tasks per CPU at default weight parks the rest as rejects, so a 496 thread flood on 16 CPUs runs admitted in order while rejects drain ordered at the top key with higher latency.
 - Flood throughput stays bounded by the `2ms` base slice plus queue wait under backlog with grown slices kept for empty tails only, so a deep flood still shows higher wakeup delay than light load even with ordered plus preempt work.
