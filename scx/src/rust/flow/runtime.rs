@@ -52,12 +52,13 @@ pub const DISPATCH_BATCH: usize = 16;
 /// Twenty stays as ABI while ordered fills sixteen per pass so full
 /// batches never starve.
 pub const DISPATCH_PROBES: usize = 20;
-/// Deep backlog shape. Mirrors the BPF header as ABI. Backlog still
-/// drains sixteen ordered per pass with the fallback solely on empty
-/// plus corrupt plus stale.
+/// Deep backlog shape. Mirrors the BPF header as ABI. Past deep
+/// backlog ordered caps at four with queue order draining the
+/// remainder whenever queued.
 pub const DISPATCH_FLOOD_PROBES: usize = 4;
 /// Queue depth marking deep backlog. Mirrors the header as ABI.
-/// Ordered still drains sixteen per pass past this depth.
+/// Past this depth ordered caps at four with queue order draining
+/// the remainder whenever queued to sixteen.
 pub const DISPATCH_FLOOD_QUEUED: usize = 128;
 /// Bound for the userspace event queue at twice order depth.
 /// Holds enqueue plus complete pairs per burst. Full queues drop with
@@ -406,7 +407,10 @@ impl Daemon {
     /// Ordered budget past deep backlog as test oracle.
     /// Past one hundred twenty eight queued ordered caps at four with
     /// queue order covering the remainder, else ordered fills sixteen.
-    /// Mirror only with the core as authority.
+    /// Entry depth stands in for live depth, so the mirror maps past
+    /// one hundred twenty eight to four while the core needs entry past
+    /// one hundred thirty two to hold the cap live. Mirror only with
+    /// the core as authority.
     #[cfg(test)]
     pub fn ordered_budget(queued: usize) -> usize {
         if queued > DISPATCH_FLOOD_QUEUED {
@@ -914,7 +918,8 @@ mod tests {
         assert_eq!(DISPATCH_FLOOD_PROBES, 4);
         assert_eq!(DISPATCH_FLOOD_QUEUED, 128);
         // Ordered fills sixteen with queue order covering the remainder,
-        // so deep backlog still drains sixteen per pass in order.
+        // so deep backlog still drains sixteen per pass as four ordered
+        // plus twelve in queue order.
         let slack = DISPATCH_BATCH - DISPATCH_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DISPATCH_FLOOD_PROBES + (DISPATCH_BATCH >> 2), 8);

@@ -254,7 +254,8 @@ mod tests {
         assert!(DISPATCH_FLOOD_PROBES < DISPATCH_PROBES);
         assert!(DEF_BATCH as usize <= DISPATCH_PROBES);
         // Ordered fills the batch with queue order covering the remainder,
-        // so deep backlog still drains sixteen per pass in order.
+        // so deep backlog still drains sixteen per pass as four ordered
+        // plus twelve in queue order.
         let slack = DEF_BATCH - DEF_FLOOD_PROBES;
         assert_eq!(slack, 12);
         assert_eq!(DEF_FLOOD_PROBES + (DEF_BATCH >> 2), 8);

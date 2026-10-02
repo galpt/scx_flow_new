@@ -30,9 +30,10 @@
  * stays cheap without stacking under load. The first allowed live CPU wins last. The
  * chosen CPU holds the admitted share with per CPU rows and rejects
  * park ordered at the top with no run. Dispatch order stays least key
- * then deadline then owned then pid with the head best effort. Fallback
- * stays as the empty plus corrupt plus stale canary since task state
- * plus tree land synchronously.
+ * then deadline then owned then pid with the head best effort. Queue
+ * order covers the deep backlog remainder with fallback staying the
+ * empty plus corrupt plus stale canary since task state plus tree
+ * land synchronously.
  *
  * The op splits across enqueue/notify, park, kick files. Notify plus
  * park plus admission stay noinline with scalar inputs and the kick

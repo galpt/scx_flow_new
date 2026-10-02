@@ -11,7 +11,9 @@
  * stays hoisted once at entry, so the loop pays no dsq lookup per
  * step beyond the depth call. Past deep backlog ordered stops after
  * four moves with queue order covering the remainder to sixteen, so
- * a deep tail never burns sixteen double scans in one pass. A recheck
+ * a deep tail never burns sixteen double scans in one pass. Depth
+ * reads live each step, so entry past one hundred thirty two holds
+ * the four cap while shorter tails still fill sixteen ordered. A recheck
  * miss skips the stale pick and keeps walking within the batch, so one
  * stale entry never ends ordered early while persistent misses still
  * fall to the queue order drain below. Drops run at teardown, so the

@@ -14,9 +14,9 @@
 //! core order with rejects at the top key last and over moves count
 //! progress with ordered moves counting vEB hits plus fallback moves
 //! counting FIFO parks so every dispatched task lands in one bucket.
-//! Ordered share stays near total since every parked task carries a
-//! key plus deadline with solely the empty plus corrupt plus stale
-//! fallback reaching fail open.
+//! Ordered stays first since every parked task carries a key plus
+//! deadline with the deep backlog remainder draining in queue order
+//! alongside the empty plus corrupt plus stale stall reaching fail open.
 //! Dashboard timestamps use wall time for logs plus file names while
 //! deadlines plus runtime use monotonic time, so the two domains stay
 //! separate by intent.
