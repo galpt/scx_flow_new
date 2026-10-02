@@ -403,8 +403,9 @@ static __always_inline u64 flow_pred_avg(u64 avg,
 /* Tracks the absolute error between delta and average with one */
 /* quarter steps, so a stable burst keeps a small margin while a */
 /* ragged burst widens the deadline with no jump. A zero deviation */
-/* means no history, so the first error sets the value at once. The */
-/* result clamps the same way with no divide. */
+/* means no history, so the first value takes the max of error and */
+/* average quarter as the floor. The result clamps the same way with */
+/* no divide and shifts stay at 2. */
 static __always_inline u64 flow_pred_dev(u64 dev,
 	u64 avg, u64 delta)
 {
@@ -412,14 +413,19 @@ static __always_inline u64 flow_pred_dev(u64 dev,
 	u64 a;
 	u64 err;
 	u64 diff;
+	u64 floor;
 	d = flow_pred_clamp(delta ? delta :
 	    (u64)FLOW_PRED_MIN_NS);
 	a = avg ? avg : d;
 	err = d > a ? d - a : a - d;
 	err = flow_pred_clamp(err ? err :
 	    (u64)FLOW_PRED_MIN_NS);
-	if (dev == 0)
+	if (dev == 0) {
+		floor = avg >> 2;
+		if (floor > err)
+			return flow_pred_clamp(floor);
 		return err;
+	}
 	if (err > dev) {
 		diff = (err - dev) >> 2;
 		return flow_pred_clamp(flow_sat_add(dev,

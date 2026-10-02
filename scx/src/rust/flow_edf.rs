@@ -122,7 +122,9 @@ pub fn pred_avg(avg: u64, delta: u64) -> u64 {
 
 /// Updated burst deviation with shift 2 and saturation.
 /// Tracks the absolute error with one quarter steps, so stable bursts
-/// keep a small margin while ragged bursts widen with no jump.
+/// keep a small margin while ragged bursts widen with no jump. A zero
+/// deviation takes the max of error and average quarter as the floor
+/// with shifts plus clamp kept.
 #[cfg(test)]
 pub fn pred_dev(dev: u64, avg: u64, delta: u64) -> u64 {
     let d = pred_clamp(if delta == 0 { PRED_MIN_NS } else { delta });
@@ -130,6 +132,10 @@ pub fn pred_dev(dev: u64, avg: u64, delta: u64) -> u64 {
     let err_raw = d.abs_diff(a);
     let err = pred_clamp(if err_raw == 0 { PRED_MIN_NS } else { err_raw });
     if dev == 0 {
+        let floor = avg >> 2;
+        if floor > err {
+            return pred_clamp(floor);
+        }
         return err;
     }
     if err > dev {
@@ -230,7 +236,9 @@ mod tests {
     #[test]
     fn pred_dev_tracks_error() {
         assert_eq!(pred_dev(0, 0, 2_000_000), 1);
-        assert_eq!(pred_dev(0, 2_000_000, 2_000_000), 1);
+        assert_eq!(pred_dev(0, 2_000_000, 2_000_000), 500_000);
+        assert_eq!(pred_dev(0, 4_000_000, 4_000_000), 1_000_000);
+        assert_eq!(pred_dev(0, 1_000_000, 2_000_000), 1_000_000);
         let wide = pred_dev(1, 2_000_000, 4_000_000);
         assert!(wide > 1);
         assert_eq!(pred_dev(100, 1_000, 1_000), 76);

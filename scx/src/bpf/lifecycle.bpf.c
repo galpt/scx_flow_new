@@ -120,9 +120,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* the clamp keeps the advance in 1 to 16384 with no divide by */
 	/* zero. Two divides per stop stay cheap beside one slice. The */
 	/* predictor average plus deviation update from the same delta */
-	/* with shifts only, so later deadlines track recent bursts with */
-	/* no extra walk. A zero delta keeps the predictor with no train, */
-	/* so a backward clock never pulls the average to 1ns. */
+	/* with shifts only plus a first deviation floor at average */
+	/* quarter, so later deadlines track recent bursts with no extra */
+	/* walk. A zero delta keeps the predictor with no train, so a */
+	/* backward clock never pulls the average to 1ns. */
 	{
 		u32 w = flow_weight_clamp(flow_weight_of(
 		    flow_nice_of(p)));

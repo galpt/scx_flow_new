@@ -20,9 +20,9 @@
 /* still pairs. A backward clock charges zero time but still pairs */
 /* the gauge. Runtime advances by scaled time with the task weight */
 /* from the nice table beside the raw charge, and the predictor */
-/* average plus deviation update from the same delta with shifts, so */
-/* a leftover segment still trains later deadlines. Outlined to keep */
-/* disable and exit small. */
+/* average plus deviation update from the same delta with shifts plus */
+/* a first deviation floor at average quarter, so a leftover segment */
+/* still trains later deadlines. Outlined to keep disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
 	struct flow_task_ctx *tctx)
 {

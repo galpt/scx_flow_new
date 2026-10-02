@@ -26,7 +26,7 @@ One local queue per CPU plus one per node plus machine plus overflow hold tasks.
 
 ### Keys
 
-Each deadline orders as priority value with virtual runtime for ties. The predictor average plus deviation shapes later deadlines with shift updates. The weight table maps nice to weight for scaled runtime. See `src/bpf/intf.h` and `src/rust/flow_edf.rs`.
+Each deadline orders as priority value with virtual runtime for ties. The predictor average plus deviation shapes later deadlines with shift updates plus a first deviation floor at average quarter. The weight table maps nice to weight for scaled runtime. See `src/bpf/intf.h` and `src/rust/flow_edf.rs`.
 
 ### Admission
 
