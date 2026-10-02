@@ -23,14 +23,14 @@ const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 /// Default dispatch batch for the ops table with no knob. Mirrors
 /// FLOW_DISPATCH_MAX_BATCH in intf.h, so the ops table holds every
 /// pass with room and no shared math.
-const DEF_BATCH: u32 = 16;
+const DEF_BATCH: u32 = 32;
 
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Fixed slice in nanos. Always 2ms with no knob.
     pub quantum_ns: u64,
-    /// Dispatch batch for the ops table. Always 16 with no knob.
+    /// Dispatch batch for the ops table. Always 32 with no knob.
     pub dispatch_batch: u32,
 }
 
@@ -49,7 +49,7 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 2ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
-    /// The batch stays fixed at 16 with flood 4 past 128 plus a step
+    /// The batch stays fixed at 32 with flood 8 past 128 plus a step
     /// cap of 32 visited entries. Admission stays hint based always
     /// under 950 per mille with base capacity 1024. Queues
     /// hold 512 local plus 8 node plus machine plus overflow with ids
@@ -74,7 +74,7 @@ impl Config {
         if self.dispatch_batch != DEF_BATCH {
             bail!("batch bad {}", self.dispatch_batch);
         }
-        if self.dispatch_batch != 16 {
+        if self.dispatch_batch != 32 {
             bail!("batch bad {}", self.dispatch_batch);
         }
         if ADMIT_PERMILLE != 950 {
@@ -92,7 +92,7 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 500_000 {
             bail!("tail bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64 != 4 {
+        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64 != 8 {
             bail!("flood probes bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64 != 128 {
@@ -131,7 +131,7 @@ impl ConfigBuilder {
         self.quantum_ns = Some(v);
         self
     }
-    /// Set the fixed dispatch batch. Only 16 passes.
+    /// Set the fixed dispatch batch. Only 32 passes.
     pub fn dispatch_batch(mut self, v: u32) -> Self {
         self.dispatch_batch = Some(v);
         self
@@ -173,11 +173,11 @@ mod tests {
 
     #[test]
     fn rejects_non_fixed_batch() {
-        for bad in [0, 1, 8, 15, 17, 32] {
+        for bad in [0, 1, 8, 15, 16, 17, 31, 33] {
             let got = ConfigBuilder::default().dispatch_batch(bad).build();
             assert!(got.is_err(), "batch {bad} must fail");
         }
-        let ok = ConfigBuilder::default().dispatch_batch(16).build();
+        let ok = ConfigBuilder::default().dispatch_batch(32).build();
         assert!(ok.is_ok());
     }
 
@@ -186,7 +186,7 @@ mod tests {
     fn describe_is_stable() {
         let s = Config::default().describe();
         assert!(s.contains("quantum=2000us"));
-        assert!(s.contains("batch=16"));
+        assert!(s.contains("batch=32"));
     }
 
     #[test]
@@ -196,7 +196,7 @@ mod tests {
             DEF_BATCH,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
         );
-        assert_eq!(DEF_BATCH, 16);
+        assert_eq!(DEF_BATCH, 32);
         assert_eq!(
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
@@ -228,7 +228,7 @@ mod tests {
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64,
-            4
+            8
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64,

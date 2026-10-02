@@ -348,7 +348,7 @@ mod tests {
             crate::config::Config::default().dispatch_batch,
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
         );
-        assert_eq!(crate::config::Config::default().dispatch_batch, 16);
+        assert_eq!(crate::config::Config::default().dispatch_batch, 32);
     }
 
     #[test]

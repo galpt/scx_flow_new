@@ -3,12 +3,12 @@
  * Overflow fill for the dispatch pass.
  *
  * Moves up to budget tasks from the overflow tail in queue order in one
- * scan, so a deep tail pays one scan for sixteen moves with no rescan
+ * scan, so a deep tail pays one scan for thirty two moves with no rescan
  * per move. The overflow tail stays FIFO with plain inserts, so this
  * queue order step moves the remainder with best effort order there.
- * Past deep backlog the fill stops after four moves, and every pass
+ * Past deep backlog the fill stops after eight moves, and every pass
  * stops after thirty two visited entries regardless of moves, so one
- * pass never burns sixteen scans on a deep tail and never walks the
+ * pass never burns thirty two scans on a deep tail and never walks the
  * whole queue on mask misses while still draining with fail open
  * progress. The queue handle plus the flood bound stay hoisted once
  * at entry, so the scan pays no DSQ lookup and no per step depth test
@@ -18,17 +18,19 @@
  * kernel error while mask still wins on drain. Unlike
  * the priority tiers that block on an unmatching head, this scan
  * skips unmatching entries, so one foreign task never stalls live
- * work. Runs noinline with scalar CPU plus budget and a bounded scan,
+ * work. The move bound stays at remaining budget else eight past deep
+ * backlog with the step cap at thirty two, so the fill never overfills.
+ * Runs noinline with scalar CPU plus budget and a bounded scan,
  * so the verifier stays small with no unrolled caller tree and no
  * rescan per move.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Overflow fill with flood cap plus step cap plus move in one place. */
-/* Gives the moved count up to budget with four past deep backlog and */
-/* thirty two visited entries at most, so a deep tail never burns */
-/* sixteen scans in one pass and a miss heavy tail never walks the */
-/* whole queue under RCU. Noinline with scalar inputs so the single */
+/* Gives the moved count up to remaining budget with eight past deep */
+/* backlog and thirty two visited entries at most, so a deep tail never */
+/* burns thirty two scans in one pass and a miss heavy tail never walks */
+/* the whole queue under RCU. Noinline with scalar inputs so the single */
 /* scan verifies once apart from the dispatch entry. */
 static __noinline u32 flow_overflow_fill(s32 cpu, u32 budget)
 {
@@ -51,13 +53,15 @@ static __noinline u32 flow_overflow_fill(s32 cpu, u32 budget)
 		return 0;
 	/* Flood bound hoists out of the scan, so the loop holds two */
 	/* breaks only with no per step queue depth test. Past deep */
-	/* backlog the move bound drops to four, else it stays at budget. */
+	/* backlog the move bound drops to eight, else it stays at */
+	/* remaining budget. */
 	limit = budget;
 	if (qlen > (u64)FLOW_DISPATCH_FLOOD_QUEUED &&
 	    limit > (u32)FLOW_DISPATCH_FLOOD_PROBES)
 		limit = (u32)FLOW_DISPATCH_FLOOD_PROBES;
-	/* Single scan moves up to budget in queue order with no rescan */
-	/* per move, so a deep tail pays one scan for sixteen moves. */
+	/* Single scan moves up to remaining budget in queue order with */
+	/* no rescan per move, so a deep tail pays one scan for thirty */
+	/* two moves. */
 	/* The move adds with no success branch and the BPF mask test */
 	/* gates affinity, so mask misses skip with no kernel error. */
 	bpf_rcu_read_lock();

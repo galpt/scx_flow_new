@@ -22,7 +22,7 @@ Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint peri
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order to `16`. Past `128` queued ordered caps at `4` with `32` visited entries at most. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks. Each pass drains local plus node plus machine in deadline order plus overflow in queue order to `32`. Past `128` queued ordered caps at `8` with `32` visited entries at most. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -58,8 +58,8 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 - Needs kernels, `7.2` series and up.
 - Priority and FIFO never mix on one queue, since the kernel keeps one order per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority pops blocking on an unmatching head while the overflow scan skips to the next match.
-- Overflow stays FIFO with fail open drain, so stale deadlines never block live work and every pass still moves queued tasks in queue order up to `16` per pass.
+- Overflow stays FIFO with fail open drain, so stale deadlines never block live work and every pass still moves queued tasks in queue order up to `32` per pass.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline, so light work never takes a fast CPU that other work needs.
-- Flood past `128` queued caps ordered moves at `4` with queue order covering the rest to `16` plus `32` visited entries at most, so a deep tail never burns extra scans in one pass.
+- Flood past `128` queued caps ordered moves at `8` with queue order covering the rest to `32` plus `32` visited entries at most, so a deep tail never burns extra scans in one pass.
 - Affinity stress with many foreign heads stalls priority tiers for that pass while overflow still skips, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Preempt sends at most one kick per park when the arrival leads by `500us` with more than `500us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.
