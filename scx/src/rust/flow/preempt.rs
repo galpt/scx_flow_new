@@ -57,8 +57,9 @@ pub fn eligible(vruntime: u64, min_vruntime: u64, vlag: i32) -> bool {
 /// taking a kick. A zero occupant deadline or a zero owner start means
 /// no order yet, so no kick. A max arrival or a saturated margin fails
 /// closed. Remain holds the owner end minus now saturating, so remain
-/// must exceed the tail strictly. Order uses wrap safe time before
-/// throughout.
+/// must exceed the tail strictly with wrap safe order. Order uses wrap
+/// safe time before throughout, including the tail, so the check holds
+/// across the u64 wrap with no branch.
 #[cfg(test)]
 pub fn preempt_wants(
     arrival: u64,
@@ -91,14 +92,19 @@ pub fn preempt_wants(
     if occ_start == 0 {
         return false;
     }
-    if remain <= PREEMPT_TAIL_NS {
+    // Wrap safe tail: remain must sit strictly past the tail with the
+    // signed diff, so the check holds across the u64 wrap. A saturated
+    // remain at max still fails closed through the same order.
+    if !time_before(PREEMPT_TAIL_NS, remain) {
         return false;
     }
     true
 }
 
 /// True when one idle kick fires for an eligible arrival.
-/// Ineligible hogs pace through tiers with no idle jump.
+/// Ineligible hogs pace through tiers with no idle jump. The gate
+/// stays with one minimum read per wait, and the ineligible corner
+/// meets its tier on the next dispatch pass with no storm.
 #[cfg(test)]
 pub fn idle_kick_wants(vruntime: u64, min_vruntime: u64, vlag: i32) -> bool {
     eligible(vruntime, min_vruntime, vlag)

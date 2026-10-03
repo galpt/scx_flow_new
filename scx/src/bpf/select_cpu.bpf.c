@@ -102,11 +102,13 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* among the peers that drain before the deadline, so light work */
 	/* never takes a fast CPU that other work needs. Peers within 64 */
 	/* units of the best count as near minimum, and the smallest */
-	/* minimum vruntime wins those ties, so lagging CPUs take work */
-	/* first with no hotspot. Capacities stay symmetric on test hosts, */
-	/* so the first sufficient id usually wins with no extra pass. The */
-	/* cursor spreads passes with no hotspot, and it races best effort */
-	/* with no atomic order. */
+	/* minimum vruntime wins those ties with wrap safe order, so */
+	/* lagging CPUs take work first with no hotspot. Capacities stay */
+	/* symmetric on test hosts, so the first sufficient id usually */
+	/* wins with no extra pass. The cursor spreads passes with no */
+	/* hotspot, and it races best effort with no atomic order. At most */
+	/* eight peers run with at most one drain poll plus two map reads */
+	/* each, so the pass stays bounded with no extra walk. */
 	{
 		u64 nr = nr_cpu_ids;
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);

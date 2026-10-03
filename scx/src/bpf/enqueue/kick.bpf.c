@@ -17,6 +17,8 @@
 /* Kick one idle allowed CPU for tier waits with one kick at most, */
 /* so the cost stays bounded by waits with no storm. Eligibility gates */
 /* every kick, so a vruntime past minimum plus lag paces with no wake. */
+/* The gate stays with one minimum read per wait, and the ineligible */
+/* corner paces in tiers with mask wins on drain and no delay. */
 /* Tries the selected CPU first, then the kernel idle pick, then */
 /* the first allowed live CPU. Kicks only when the target runs */
 /* nothing, with the idle flag cleared first so the kick sticks. */

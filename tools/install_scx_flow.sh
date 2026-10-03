@@ -29,11 +29,34 @@ need rsync
 need git
 
 # Always start from a fresh workspace so no run reuses
-# an existing tree. Guard the remove against empty or root.
-if [ -z "${WS}" ] || [ "${WS}" = "/" ]; then
+# an existing tree. Guard the remove against empty or root plus
+# whitespace plus glob plus relative paths, so only an absolute
+# workspace path without spaces is cleaned.
+if [ -z "${WS}" ] || [ "${WS}" = "/" ] || [ "${WS}" = "//" ]; then
     echo "refusing to clean an empty or root path" >&2
     exit 1
 fi
+case "${WS}" in
+    /*) ;;
+    *)
+        echo "refusing a non absolute workspace path" >&2
+        exit 1
+        ;;
+esac
+case "${WS}" in
+    *' '* | *'*'* | *'?'* | *'['*)
+        echo "refusing a workspace path with whitespace or glob" >&2
+        exit 1
+        ;;
+esac
+TAB="$(printf '\t')"
+NL="$(printf '\n')"
+case "${WS}" in
+    *"${TAB}"* | *"${NL}"*)
+        echo "refusing a workspace path with whitespace" >&2
+        exit 1
+        ;;
+esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
 rm -rf "${WS}"
 mkdir -p "${WS}"

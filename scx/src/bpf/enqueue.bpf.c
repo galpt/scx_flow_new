@@ -156,9 +156,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (is_reenq) {
 			ph = READ_ONCE(tctx->hint_us);
 		} else {
-			u32 pwgt;
-			ph = flow_task_hint(p);
-			pwgt = flow_task_weight(p);
+			u32 pwgt = (u32)FLOW_WEIGHT_BASE;
+			/* One cache plus one row read for both values, so */
+			/* the fresh pinned path pays no double lookup. */
+			flow_task_hint_weight(p, &ph, &pwgt);
 			__sync_lock_test_and_set(&tctx->weight,
 			    flow_weight_clamp(pwgt));
 		}
@@ -224,9 +225,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (is_reenq) {
 		hint = READ_ONCE(tctx->hint_us);
 	} else {
-		u32 wgt;
-		hint = flow_task_hint(p);
-		wgt = flow_task_weight(p);
+		u32 wgt = (u32)FLOW_WEIGHT_BASE;
+		/* One cache plus one row read for both values, so the fresh */
+		/* path pays no double lookup with no behavior change. */
+		flow_task_hint_weight(p, &hint, &wgt);
 		__sync_lock_test_and_set(&tctx->weight, flow_weight_clamp(wgt));
 	}
 	avg = (u64)READ_ONCE(tctx->avg_ns);
@@ -381,7 +383,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		/* Idle kicks gate on eligibility as well, so hogs pace */
 		/* through tiers with no idle jump while lagging tasks still */
-		/* wake at once. */
+		/* wake at once. The gate stays with one minimum read per */
+		/* wait, and the ineligible corner paces in tiers with no */
+		/* kick and no storm. */
 		avr = READ_ONCE(tctx->vruntime);
 		avlag = READ_ONCE(tctx->vlag);
 		cmin = flow_cpu_min((u32)cpu);
@@ -436,10 +440,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* on the owner, so near ties plus nearly done owners never */
 		/* bounce. The margin adds 100us to the arrival with */
 		/* saturation, and the tail needs more than 100us left on the */
-		/* owner, so only a truly earlier arrival with work left */
-		/* preempts at once with one kick per wait. Equal or later */
-		/* arrivals pace at slice expiry with no count. The fair time */
-		/* leads here, so fairness plus urgency gate the kick. */
+		/* owner with wrap safe order, so only a truly earlier arrival */
+		/* with work left preempts at once with one kick per wait. */
+		/* Equal or later arrivals pace at slice expiry with no count. */
+		/* The fair time leads here, so fairness plus urgency gate */
+		/* the kick. */
 		if (!flow_time_before(vtime, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();

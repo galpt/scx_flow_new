@@ -7,9 +7,9 @@
  * stays proven once at entry, so the per element cost stays one mask
  * test with no live branch. The uniform tier skip gates affinity
  * through this one BPF test, so a miss skips with no kernel error
- * while mask still wins on drain. Moves carry deadline order for
- * tiers through the same move, so one foreign task never stalls live
- * work. Visits cap at sixty four per pass with resume next pass, so
+ * while mask still wins on drain. Moves carry fair order for
+ * tiers through the same move with the fair time as the queue key,
+ * so one foreign task never stalls live work. Visits cap at sixty four per pass with resume next pass, so
  * a miss heavy queue never holds RCU across the whole queue while
  * moved progress stays work conserving across passes. Runs inline for
  * the probe plus move, so the verifier stays small with no unrolled

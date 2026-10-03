@@ -5,11 +5,12 @@
 
 //! One local queue per CPU plus one shared queue per node plus one
 //! machine queue with no overflow tail. Every queue uses the kernel
-//! priority queue with deadline order, so no queue mixes orders.
+//! priority queue in fair order, so no queue mixes orders.
 //! Homeless tasks wait in the machine queue with all other shared
 //! work, so no queue id names the kernel global queue. Dispatch
-//! drains local plus node plus machine in priority order with moves
-//! uncapped to remaining slots and visits capped at 64 per pass.
+//! drains local plus node plus machine in fair order with at most
+//! one move per tier bounded by remaining slots and visits capped
+//! at 64 per pass.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -28,7 +29,7 @@ pub const SLOT_MAX_DSQS: u64 = 521;
 pub const MAX_NODES: u64 = 8;
 
 /// Local queue id of one CPU from base plus id.
-/// One priority queue per CPU keeps deadline order local.
+/// One priority queue per CPU keeps fair order local.
 #[cfg(test)]
 pub fn local_dsq(cpu: u32) -> u64 {
     LOCAL_BASE + cpu as u64

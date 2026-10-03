@@ -5,16 +5,16 @@
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine with no overflow tail.
  * Homeless work waits in the machine queue with all other shared work.
- * Every task carries a release plus a period plus an absolute
- * deadline, and each queue orders by that deadline through the kernel
- * priority queue. Every task joins a queue with no admission bound,
- * so the earliest deadline always runs next. A miss counts when wall
- * time passes the deadline, and the miss rejoins a tier queue with
- * a fresh deadline plus a direct kick and no wait. Placement takes
- * the slowest sufficient CPU among the allowed set that can meet
- * the deadline, so light work never takes a fast CPU that other work
- * needs. Hints from the flat view tune the period only, and no group
- * or pool shapes order. Each stop feeds the burst predictor average
+ * Every task earns an absolute deadline from now plus a period, and
+ * each queue orders by the fair time through the kernel priority
+ * queue. The fair time holds the earlier of deadline plus virtual
+ * deadline with a 2ms lag bound, so the earliest fair time always
+ * runs next. A miss counts when wall time passes the deadline, and
+ * the miss rejoins a tier queue with a fresh deadline plus a direct
+ * kick and no wait. Placement takes the slowest sufficient CPU among
+ * the allowed set that can meet the deadline, so light work never
+ * takes a fast CPU that other work needs. Hints from the flat view
+ * tune the period plus the weight, and no group or pool shapes order. Each stop feeds the burst predictor average
  * plus deviation with shift updates, so later deadlines track recent
  * bursts with no table walk. See select_cpu.bpf.c for placement and
  * enqueue.bpf.c for the deadline choice plus dispatch.bpf.c for the
@@ -84,9 +84,10 @@ enum flow_consts {
 	FLOW_MAX_DSQS = 521ULL,
 	/* Dispatch visit cap of 64 entries per pass with no knob. Caps */
 	/* visited entries per pass regardless of moves, so one pass never */
-	/* holds RCU across the whole queue on mask misses. Moves stay */
-	/* uncapped to remaining dispatch slots, and leftover work resumes */
-	/* next pass, so the pass stays work conserving across passes. */
+	/* holds RCU across the whole queue on mask misses. Moves take at */
+	/* most one per tier per pass bounded by remaining dispatch slots, */
+	/* and leftover work resumes next pass, so the pass stays work */
+	/* conserving across passes. */
 	FLOW_DISPATCH_MAX_VISIT = 64ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
@@ -111,7 +112,7 @@ enum flow_consts {
 	FLOW_VLAG_MAX_NS = 2000000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
-/* machine drain in deadline order through the kernel priority queue */
+/* machine drain in fair order through the kernel priority queue */
 /* with no overflow tail. Every pass follows this order with no load */
 /* based swap, so the verifier sees one fixed path. Dead enum with no */
 /* code use, kept doc only since dispatch calls the tier moves */
@@ -376,13 +377,13 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
 		return vd;
 	return deadline;
 }
-/* Absolute deadline from release plus relative period. */
-/* The add saturates, so a huge release clamps instead of wrapping */
+/* Absolute deadline from now plus relative period. */
+/* The add saturates, so a huge now clamps instead of wrapping */
 /* to the front. */
-static __always_inline u64 flow_deadline_at(u64 release,
+static __always_inline u64 flow_deadline_at(u64 now,
 	u64 period)
 {
-	return flow_sat_add(release, period);
+	return flow_sat_add(now, period);
 }
 /* Period for one task from hint else default. */
 /* A zero hint means no hint, so the default period applies. The hint */
@@ -486,14 +487,14 @@ static __always_inline u64 flow_pred_period(u64 avg,
 		return (u64)FLOW_PRED_MAX_NS;
 	return flow_pred_clamp(sum);
 }
-/* Predicted deadline from release plus predictor else hint period. */
+/* Predicted deadline from now plus predictor else hint period. */
 /* A zero average means no history, so the hint period applies with */
-/* the default when the hint is zero. Later releases add the */
-/* predicted period with saturation, so a huge release clamps */
+/* the default when the hint is zero. Later wakeups add the */
+/* predicted period with saturation, so a huge now clamps */
 /* instead of wrapping to the front. Fair order via kernel priority */
 /* queue: the vtime key holds the earlier of this deadline plus the */
 /* virtual deadline, so the earliest fair time wins with lag bounds. */
-static __always_inline u64 flow_pred_deadline(u64 release,
+static __always_inline u64 flow_pred_deadline(u64 now,
 	u64 avg, u64 dev, u32 hint_us)
 {
 	u64 period;
@@ -501,7 +502,7 @@ static __always_inline u64 flow_pred_deadline(u64 release,
 		period = flow_task_period(hint_us);
 	else
 		period = flow_pred_period(avg, dev);
-	return flow_deadline_at(release, period);
+	return flow_deadline_at(now, period);
 }
 /* Fallback deadline from now plus the hint period with saturation. */
 /* Tasks with no state or no history join a tier queue at once with */
@@ -527,7 +528,7 @@ static __always_inline bool flow_missed(u64 deadline,
 	return true;
 }
 /* Local queue id of one CPU from base plus id. */
-/* One ordered queue per CPU keeps deadline order local. */
+/* One ordered queue per CPU keeps fair order local. */
 static __always_inline u64 flow_local_dsq(u32 cpu)
 {
 	return (u64)FLOW_LOCAL_BASE + (u64)cpu;

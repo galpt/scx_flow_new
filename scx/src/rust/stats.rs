@@ -43,7 +43,7 @@ pub struct Metrics {
     #[stat(desc = "Runnable slice ends with requeue")]
     #[serde(default)]
     pub requeues: u64,
-    #[stat(desc = "Blocks and exits with release")]
+    #[stat(desc = "Blocks and exits")]
     #[serde(default)]
     pub completions: u64,
     #[stat(desc = "Moves from the local tier")]
@@ -66,7 +66,7 @@ pub struct Metrics {
     )]
     #[serde(default)]
     pub rejects: u64,
-    #[stat(desc = "Wall completions past release plus deadline")]
+    #[stat(desc = "Wall completions past deadline")]
     #[serde(default)]
     pub misses: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]

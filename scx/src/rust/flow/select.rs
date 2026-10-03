@@ -52,11 +52,13 @@ pub fn cpu_meets_fair(depth: u64, vtime: u64, now: u64) -> bool {
 /// tiebreak on the smallest minimum vruntime. Peers within 64 capacity
 /// units of the best count as tied, so lagging CPUs take work first.
 /// Test-only mirror with no map use where the BPF pass scans at most
-/// eight peers from a cursor, while this mirror walks the passed live
-/// slice in order. Callers pass host-sized slices within the 512 CPU
-/// bound, so the walk stays short with no extra cap here. Units plus
-/// minimums run parallel to live with base plus zero on short slices.
-/// Returns minus one when no allowed CPU is live.
+/// eight peers from the cursor and skips the busy waker, and this
+/// mirror walks the same bounded window from the passed cursor with
+/// the same skip. Minimum order uses the wrap safe signed diff like
+/// BPF, so the tiebreak holds across the u64 wrap. Callers pass
+/// host-sized slices within the 512 CPU bound with units plus
+/// minimums parallel to live. Returns minus one when no allowed CPU
+/// is live. Perf stays bounded at eight peers with no extra walk.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -69,6 +71,8 @@ pub fn place(
     mins: &[u64],
     deadline: u64,
     now: u64,
+    this_cpu: i32,
+    cursor: u32,
 ) -> i32 {
     for cpu in idle {
         if allowed.contains(cpu) && live.contains(cpu) {
@@ -88,49 +92,59 @@ pub fn place(
     let mut best: i32 = -1;
     let mut best_units: u32 = u32::MAX;
     let mut best_min: u64 = u64::MAX;
-    for cpu in live {
-        if *cpu == prev {
-            continue;
-        }
-        if !allowed.contains(cpu) {
-            continue;
-        }
-        if idle.contains(cpu) {
-            continue;
-        }
-        let idx = live.iter().position(|c| *c == *cpu).unwrap_or(usize::MAX);
-        let depth = depths.get(idx).copied().unwrap_or(0);
-        if !cpu_meets(depth, deadline, now) {
-            continue;
-        }
-        let unit = units.get(idx).copied().unwrap_or(1024);
-        let min = mins.get(idx).copied().unwrap_or(0);
-        if best == -1 {
-            best = *cpu;
-            best_units = unit;
+    let n = live.len();
+    if n > 1 && n <= 512 {
+        let start = ((cursor.wrapping_add(1)) % n as u32) as usize;
+        for off in 0..SHARED_SCAN_BOUND as usize {
+            if off >= n {
+                break;
+            }
+            let idx = (start + off) % n;
+            let cpu = live[idx];
+            // The busy waker stays out like BPF, since an idle waker
+            // already returned above and a busy waker would only stack.
+            if cpu == this_cpu {
+                continue;
+            }
+            if !allowed.contains(&cpu) {
+                continue;
+            }
+            if idle.contains(&cpu) {
+                continue;
+            }
+            let depth = depths.get(idx).copied().unwrap_or(0);
+            if !cpu_meets(depth, deadline, now) {
+                continue;
+            }
+            let unit = units.get(idx).copied().unwrap_or(1024);
+            let min = mins.get(idx).copied().unwrap_or(0);
+            if best == -1 {
+                best = cpu;
+                best_units = unit;
+                best_min = min;
+                continue;
+            }
+            if unit.saturating_add(NEAR_MIN_WINDOW) < best_units {
+                best = cpu;
+                best_units = unit;
+                best_min = min;
+                continue;
+            }
+            if unit > best_units.saturating_add(NEAR_MIN_WINDOW) {
+                continue;
+            }
+            if min != best_min && !crate::flow::edf::time_before(min, best_min) {
+                continue;
+            }
+            if min == best_min && cpu >= best {
+                continue;
+            }
+            if unit < best_units {
+                best_units = unit;
+            }
             best_min = min;
-            continue;
+            best = cpu;
         }
-        if unit.saturating_add(NEAR_MIN_WINDOW) < best_units {
-            best = *cpu;
-            best_units = unit;
-            best_min = min;
-            continue;
-        }
-        if unit > best_units.saturating_add(NEAR_MIN_WINDOW) {
-            continue;
-        }
-        if min > best_min {
-            continue;
-        }
-        if min == best_min && *cpu >= best {
-            continue;
-        }
-        if unit < best_units {
-            best_units = unit;
-        }
-        best_min = min;
-        best = *cpu;
     }
     if best != -1 {
         return best;
@@ -165,6 +179,8 @@ mod tests {
                 &units(2),
                 &mins(2),
                 100,
+                0,
+                0,
                 0
             ),
             1
@@ -183,6 +199,8 @@ mod tests {
                 &units(2),
                 &mins(2),
                 100,
+                0,
+                99,
                 0
             ),
             0
@@ -191,7 +209,19 @@ mod tests {
 
     #[test]
     fn shared_takes_missed_prev() {
-        let got = place(&[], 0, &[0, 1], &[0, 1], &[9, 0], &units(2), &mins(2), 5, 0);
+        let got = place(
+            &[],
+            0,
+            &[0, 1],
+            &[0, 1],
+            &[9, 0],
+            &units(2),
+            &mins(2),
+            5,
+            0,
+            0,
+            1,
+        );
         assert_eq!(got, 1);
     }
 
@@ -207,6 +237,8 @@ mod tests {
             &mins(3),
             100,
             0,
+            99,
+            2,
         );
         assert_eq!(got, 1);
     }
@@ -223,6 +255,8 @@ mod tests {
             &[300, 100, 200],
             100,
             0,
+            99,
+            2,
         );
         assert_eq!(got, 2);
     }
@@ -239,6 +273,8 @@ mod tests {
             &[900, 100],
             100,
             0,
+            99,
+            1,
         );
         assert_eq!(got, 1);
     }
@@ -246,7 +282,19 @@ mod tests {
     #[test]
     fn empty_mask_fails_closed() {
         assert_eq!(
-            place(&[], 0, &[], &[0, 1], &[0, 0], &units(2), &mins(2), 100, 0),
+            place(
+                &[],
+                0,
+                &[],
+                &[0, 1],
+                &[0, 0],
+                &units(2),
+                &mins(2),
+                100,
+                0,
+                99,
+                0
+            ),
             -1
         );
     }
@@ -255,6 +303,41 @@ mod tests {
     fn shared_scan_stays_bounded() {
         assert_eq!(SHARED_SCAN_BOUND, 8);
         assert_eq!(NEAR_MIN_WINDOW, 64);
+        // Wrap safe minimum order holds across the u64 wrap.
+        assert!(crate::flow::edf::time_before(u64::MAX, 10));
+        assert!(!crate::flow::edf::time_before(10, u64::MAX - 10));
+        // Busy waker stays out while the cursor window still finds
+        // the lagging peer within eight.
+        let got = place(
+            &[],
+            9,
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[0, 0, 0],
+            &[1024, 1024, 1024],
+            &[300, 100, 200],
+            100,
+            0,
+            1,
+            2,
+        );
+        assert_eq!(got, 2);
+        // Cursor rotation still visits all peers when the host holds
+        // fewer than eight CPUs.
+        let again = place(
+            &[],
+            9,
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[0, 0, 0],
+            &units(3),
+            &mins(3),
+            100,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(again, 1);
     }
 
     #[test]

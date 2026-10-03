@@ -5,8 +5,8 @@
  * Moves one queued task to local with a uniform skip plus a BPF
  * mask gate. Each priority tier calls once in fixed order, and an
  * empty queue moves nothing with no scan. The kernel keeps each
- * priority queue list in deadline order, so the earliest matching
- * deadline moves with mask wins on drain and no BPF sort. A head that
+ * priority queue list in fair order, so the earliest matching fair
+ * time moves with mask wins on drain and no BPF sort. A head that
  * cannot run on the dealing CPU skips to the next entry through the
  * shared move, so one foreign task never stalls its tier for that pass.
  * Visits share the per pass cap at sixty four with leftover work

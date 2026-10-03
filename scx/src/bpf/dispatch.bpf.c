@@ -2,13 +2,14 @@
 /*
  * Dispatch op.
  *
- * Each pass drains local plus node plus machine in priority order
- * with moves uncapped to remaining dispatch slots and visits capped
- * at sixty four per pass. The kernel keeps each priority queue list
- * in deadline order, so each tier takes the earliest matching
- * deadline with mask wins on drain and no BPF sort. EDF order via
- * kernel priority queue: the vtime key holds the fair time,
- * so the earliest deadline wins with no lag compensation. Each tier
+ * Each pass drains local plus node plus machine in fair order
+ * with at most one move per tier bounded by remaining dispatch
+ * slots and visits capped at sixty four per pass. The kernel keeps
+ * each priority queue list in fair order, so each tier takes the
+ * earliest matching fair time with mask wins on drain and no BPF
+ * sort. Fair order via kernel priority queue: the vtime key holds
+ * the earlier of deadline plus virtual deadline, so the earliest
+ * fair time wins with the 2ms lag bound. Each tier
  * skips unmatching heads uniformly through the shared move, so one
  * foreign task never stalls its tier for that pass. Visits cap at
  * sixty four per pass regardless of moves with leftover work resuming
@@ -84,9 +85,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	machine_dsq = flow_machine_dsq();
 	left = budget;
 	/* Local tier first with no scan on empty. The kernel holds */
-	/* deadline order plus mask wins, so the earliest matching */
-	/* deadline moves at once within the per pass visit cap. The likely */
-	/* busy tiers run first in static order with no reorder. */
+	/* fair order plus mask wins, so the earliest matching fair time */
+	/* moves at once within the per pass visit cap with at most one */
+	/* move for this tier. The likely busy tiers run first in static */
+	/* order with no reorder. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		local_moved = flow_move_one(own_local, cpu, &visits);
 		if (local_moved > left)

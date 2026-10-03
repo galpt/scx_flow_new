@@ -61,6 +61,16 @@ fn full_version() -> String {
     build_id::full_version(env!("CARGO_PKG_VERSION"))
 }
 
+/// Validated poll interval from float seconds.
+/// Rejects NaN plus infinite plus non-positive plus over one hour, so
+/// a bad flag fails closed before any timer starts with no panic.
+fn poll_interval_secs(v: f64) -> Result<Duration> {
+    if !v.is_finite() || v <= 0.0 || v > 3600.0 {
+        anyhow::bail!("interval bad {v}");
+    }
+    Ok(Duration::from_secs_f64(v))
+}
+
 #[derive(Debug, Parser)]
 #[command(name = SCHEDULER_NAME, version, disable_version_flag = true)]
 struct Opts {
@@ -288,9 +298,10 @@ fn main() -> Result<()> {
         sd.store(true, Ordering::Relaxed);
     })?;
     if let Some(intv) = opts.monitor.or(opts.stats) {
+        let dur = poll_interval_secs(intv)?;
         let sd = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            if let Err(e) = stats::monitor(Duration::from_secs_f64(intv), sd) {
+            if let Err(e) = stats::monitor(dur, sd) {
                 log::warn!("monitor failed: {e}");
             }
         });
@@ -313,6 +324,12 @@ mod tests {
     #[test]
     fn scheduler_name_is_flow() {
         assert_eq!(SCHEDULER_NAME, "scx_flow");
+        assert!(poll_interval_secs(1.0).is_ok());
+        assert!(poll_interval_secs(0.0).is_err());
+        assert!(poll_interval_secs(-1.0).is_err());
+        assert!(poll_interval_secs(f64::NAN).is_err());
+        assert!(poll_interval_secs(f64::INFINITY).is_err());
+        assert!(poll_interval_secs(3601.0).is_err());
     }
 
     #[test]

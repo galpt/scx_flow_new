@@ -106,3 +106,62 @@ static __always_inline u32 flow_task_weight(
 		return flow_hint_weight(id);
 	}
 }
+/* Hint plus weight of one task with one cache plus one row read. */
+/* Single fast path for fresh enqueues that need both values, so the */
+/* hot path pays one cache lookup plus one hint row read instead of */
+/* two of each with no behavior change. A null hierarchy means the */
+/* root, so the default period plus neutral share apply. Requeues */
+/* reuse the stored weight with no acquire elsewhere, so slice */
+/* rotation pays no hierarchy cost. */
+static __always_inline void flow_task_hint_weight(
+	struct task_struct *p, u32 *hint_us, u32 *weight)
+{
+	u32 pid = (u32)p->pid;
+	u64 *cached;
+	u64 id;
+	struct flow_hint *h;
+	if (hint_us)
+		*hint_us = 0;
+	if (weight)
+		*weight = (u32)FLOW_WEIGHT_BASE;
+	if (!p)
+		return;
+	if (pid) {
+		cached = bpf_map_lookup_elem(&cgrp_cache_stor,
+		    &pid);
+		if (cached && *cached) {
+			id = *cached;
+			h = bpf_map_lookup_elem(&hint_stor, &id);
+			if (!h)
+				return;
+			if (hint_us)
+				*hint_us = READ_ONCE(h->period_us);
+			if (weight) {
+				u32 w = READ_ONCE(h->weight);
+				*weight = w ? flow_weight_clamp(w) :
+				    (u32)FLOW_WEIGHT_BASE;
+			}
+			return;
+		}
+	}
+	{
+		struct cgroup *cgrp = flow_task_cgrp(p);
+		if (!cgrp)
+			return;
+		id = flow_cgrp_id(cgrp);
+		flow_cgrp_put(cgrp);
+		if (pid)
+			bpf_map_update_elem(&cgrp_cache_stor,
+			    &pid, &id, BPF_ANY);
+		h = bpf_map_lookup_elem(&hint_stor, &id);
+		if (!h)
+			return;
+		if (hint_us)
+			*hint_us = READ_ONCE(h->period_us);
+		if (weight) {
+			u32 w = READ_ONCE(h->weight);
+			*weight = w ? flow_weight_clamp(w) :
+			    (u32)FLOW_WEIGHT_BASE;
+		}
+	}
+}

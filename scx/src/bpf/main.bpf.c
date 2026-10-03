@@ -2,8 +2,8 @@
 /*
  * Flow scheduler BPF core.
  *
- * Maps hold task releases, CPU pid plus cursor rows, the topology
- * view, the capacity view, and the flat hint rows. Init creates one
+ * Maps hold task state, CPU pid plus cursor plus minimum rows, the
+ * topology view, the capacity view, and the flat hint rows. Init creates one
  * local queue per CPU plus one shared queue per node plus one machine
  * queue with no overflow tail, and it fails loudly when an id reaches the local range. Ops split across
  * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
@@ -20,7 +20,7 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/* Per task release for the life of the task. */
+/* Per task state for the life of the task. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);

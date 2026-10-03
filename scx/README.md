@@ -22,7 +22,7 @@ Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor e
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine hold tasks across 521 queues. Each pass drains local plus node plus machine in fair order with moves uncapped to remaining slots and visits capped at 64 with resume. No queue waits with no scan. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine hold tasks across 521 queues. Each pass drains local plus node plus machine in fair order with at most one move per tier bounded by remaining slots and visits capped at 64 with resume. No queue waits with no scan. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 

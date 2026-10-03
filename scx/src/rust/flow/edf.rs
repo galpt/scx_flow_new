@@ -36,12 +36,12 @@ pub fn task_period(hint_us: u32) -> u64 {
     (hint_us as u64).saturating_mul(1000)
 }
 
-/// Absolute deadline from release plus relative period.
-/// The add saturates, so a huge release clamps instead of wrapping
+/// Absolute deadline from now plus relative period.
+/// The add saturates, so a huge now clamps instead of wrapping
 /// to the front.
 #[cfg(test)]
-pub fn deadline_at(release: u64, period: u64) -> u64 {
-    release.saturating_add(period)
+pub fn deadline_at(now: u64, period: u64) -> u64 {
+    now.saturating_add(period)
 }
 
 /// Fallback deadline from now plus the hint period with saturation.
@@ -136,17 +136,17 @@ pub fn pred_period(avg: u64, dev: u64) -> u64 {
     pred_clamp(avg.saturating_add(dev))
 }
 
-/// Predicted deadline from release plus predictor else hint period.
+/// Predicted deadline from now plus predictor else hint period.
 /// A zero average means no history, so the hint period applies with
 /// the default when the hint is zero.
 #[cfg(test)]
-pub fn pred_deadline(release: u64, avg: u64, dev: u64, hint_us: u32) -> u64 {
+pub fn pred_deadline(now: u64, avg: u64, dev: u64, hint_us: u32) -> u64 {
     let period = if avg == 0 {
         task_period(hint_us)
     } else {
         pred_period(avg, dev)
     };
-    release.saturating_add(period)
+    now.saturating_add(period)
 }
 
 /// Clamp one weight into the scheduler range.
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn miss_checks_without_release() {
+    fn miss_checks_without_stored_release() {
         assert!(!missed(0, 200));
         assert!(!missed(100, 100));
         assert!(missed(100, 101));
