@@ -50,12 +50,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
 	/* the occupant preempt lookup, so slice rotation stays cheap. The */
 	/* cached hint in the task state carries the period, and the owner */
-	/* paces at slice expiry with no extra kick. */
-	if (enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST))
+	/* paces at slice expiry with no extra kick. The requeue case is */
+	/* rare beside fresh wakeups, so it stays unlikely. */
+	if (unlikely(enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST)))
 		is_reenq = true;
 	/* Exiting tasks run at once on the task CPU with no queue wait. */
-	/* The gate never runs here, so exiting work stays exempt. */
-	if (p->flags & PF_EXITING) {
+	/* The gate never runs here, so exiting work stays exempt. Exiting */
+	/* is rare, so it stays unlikely. */
+	if (unlikely(p->flags & PF_EXITING)) {
 		s32 tgt = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, tgt)) {
 			struct flow_cpu_state *tst;
@@ -79,9 +81,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	now = flow_now();
 	/* The gate runs first with no state create, so stale CPUs plus */
 	/* moved tasks fail closed with no alloc cost. The lookup stays */
-	/* read only here, and the create follows only on pass. */
-	if (!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
-	    scx_bpf_task_cpu(p), p, 0)) {
+	/* read only here, and the create follows only on pass. Rejects are */
+	/* rare, so they stay unlikely. */
+	if (unlikely(!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
+	    scx_bpf_task_cpu(p), p, 0))) {
 		struct flow_task_ctx *lctx = flow_lookup(p);
 		flow_gate_reject();
 		if (lctx)
@@ -95,14 +98,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The kick targets one idle allowed CPU with no preempt, so a */
 	/* parked task wakes without a storm. The gate already passed, */
 	/* so this path keeps its reject count with no double gate. */
-	if (!tctx) {
+	/* Missing state is rare, so it stays unlikely. */
+	if (unlikely(!tctx)) {
 		flow_gate_reject();
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	/* Pinned tasks rest in overflow with wait set and one idle kick. */
-	if (pinned) {
+	/* Pinning is rare, so it stays unlikely. */
+	if (unlikely(pinned)) {
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);

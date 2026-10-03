@@ -25,8 +25,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	struct flow_task_ctx *tctx;
 	(void)wake_flags;
 	this_cpu = (s32)bpf_get_smp_processor_id();
-	/* Pinned tasks stay where the mask allows with no scan. */
-	if (is_migration_disabled(p)) {
+	/* Pinned tasks stay where the mask allows with no scan. Pinning */
+	/* is rare, so it stays unlikely. */
+	if (unlikely(is_migration_disabled(p))) {
 		s32 here = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, here))
 			return here;
@@ -39,7 +40,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		return prev_cpu;
 	}
 	/* Single mask tasks keep the same pinned path with no scan. */
-	if (p->nr_cpus_allowed == 1) {
+	/* A single mask is rare, so it stays unlikely. */
+	if (unlikely(p->nr_cpus_allowed == 1)) {
 		s32 here = scx_bpf_task_cpu(p);
 		s32 allow;
 		if (flow_cpu_ok(p, here))
@@ -59,8 +61,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* The waker CPU is free when it runs nothing and the mask allows. */
 	/* An idle core cannot stack, so the slowest sufficient scan ends */
 	/* here with no cost. The pid read uses a relaxed load to match */
-	/* the running stores. */
-	if (flow_cpu_ok(p, this_cpu)) {
+	/* the running stores. The waker idle hit is rare since the waker */
+	/* runs this op, so the miss path stays likely. */
+	if (likely(flow_cpu_ok(p, this_cpu))) {
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
 		if (wst && READ_ONCE(wst->running_pid) == 0)
 			return this_cpu;
@@ -79,9 +82,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* state cost. A zero deadline meets everywhere with no drain poll, */
 	/* so the previous CPU wins at once with no 8 peer scan. */
 	tctx = flow_lookup(p);
-	if (tctx)
+	if (likely(tctx))
 		deadline = READ_ONCE(tctx->deadline);
-	if (deadline == 0 && flow_cpu_ok(p, prev_cpu))
+	if (unlikely(deadline == 0) && likely(flow_cpu_ok(p, prev_cpu)))
 		return prev_cpu;
 	/* The previous CPU wins when it can drain before the deadline. */
 	/* Warmth stays free, and a miss falls to the shared home. The 8 */

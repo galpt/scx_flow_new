@@ -16,9 +16,9 @@
 /* Hotplug needs a restart with fail closed to overflow. */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
-	if ((u64)cpu >= nr_cpu_ids)
+	if (unlikely((u64)cpu >= nr_cpu_ids))
 		return false;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+	if (unlikely((u64)cpu >= (u64)FLOW_MAX_CPUS))
 		return false;
 	return true;
 }
@@ -27,11 +27,11 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 static __always_inline bool flow_cpu_ok(
 	const struct task_struct *p, s32 cpu)
 {
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return false;
-	if ((u64)cpu >= nr_cpu_ids)
+	if (unlikely((u64)cpu >= nr_cpu_ids))
 		return false;
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+	if (unlikely((u64)cpu >= (u64)FLOW_MAX_CPUS))
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
@@ -88,14 +88,14 @@ static __always_inline void flow_clear_running_if_owner(
 static __always_inline bool flow_entry_ok(s32 cpu,
 	const struct task_struct *p, u64 dsq)
 {
-	if (!p)
+	if (unlikely(!p))
 		return false;
-	if (cpu >= 0 && !flow_cpu_live((u32)cpu))
+	if (unlikely(cpu >= 0 && !flow_cpu_live((u32)cpu)))
 		return false;
-	if (cpu >= 0 && !bpf_cpumask_test_cpu((u32)cpu,
-	    p->cpus_ptr))
+	if (unlikely(cpu >= 0 && !bpf_cpumask_test_cpu((u32)cpu,
+	    p->cpus_ptr)))
 		return false;
-	if (dsq && !flow_dsq_valid(dsq))
+	if (unlikely(dsq && !flow_dsq_valid(dsq)))
 		return false;
 	return true;
 }

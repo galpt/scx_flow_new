@@ -25,9 +25,9 @@
 static __always_inline bool flow_mask_ok(s32 cpu,
 	const struct task_struct *p)
 {
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return false;
-	if (!p)
+	if (unlikely(!p))
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
 }
@@ -42,11 +42,11 @@ static __always_inline bool flow_mask_ok(s32 cpu,
 static __always_inline u32 flow_move_candidate(
 	struct bpf_iter_scx_dsq *it, s32 cpu, struct task_struct *p)
 {
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return 0;
-	if (!p)
+	if (unlikely(!p))
 		return 0;
-	if (!flow_mask_ok(cpu, p))
+	if (unlikely(!flow_mask_ok(cpu, p)))
 		return 0;
 	return (u32)scx_bpf_dsq_move(it, p,
 	    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu, 0);
@@ -63,22 +63,22 @@ static __noinline u32 flow_overflow_fill(s32 cpu, u32 budget, u32 *visits)
 	u64 ov;
 	u64 qlen;
 	struct task_struct *p;
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return 0;
-	if (budget == 0)
+	if (unlikely(budget == 0))
 		return 0;
-	if (!visits)
+	if (unlikely(!visits))
 		return 0;
-	if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+	if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 		return 0;
-	if (!flow_cpu_live((u32)cpu))
+	if (unlikely(!flow_cpu_live((u32)cpu)))
 		return 0;
 	/* Queue handle stays hoisted, so the scan pays no DSQ lookup. */
 	ov = flow_overflow_dsq();
 	/* Length is an opportunistic early out only with no correctness */
 	/* use, so a join racing the read still meets the next pass. */
 	qlen = (u64)scx_bpf_dsq_nr_queued(ov);
-	if (qlen == 0)
+	if (likely(qlen == 0))
 		return 0;
 	/* Single scan moves up to remaining slots in queue order with */
 	/* no rescan per move, so a deep tail pays one scan. Visits cap */
@@ -88,9 +88,9 @@ static __noinline u32 flow_overflow_fill(s32 cpu, u32 budget, u32 *visits)
 	/* gates affinity, so mask misses skip with no kernel error. */
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, ov, 0) {
-		if (moved >= budget)
+		if (unlikely(moved >= budget))
 			break;
-		if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 			break;
 		(*visits)++;
 		moved += flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p);

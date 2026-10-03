@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.7.3
+
+- Gate first with queue depth early out in dispatch plus select plus enqueue. Tiers leave at once on empty with no RCU hold, idle hits pay no state cost, and rejects pay no alloc. Static tier order stays local plus node plus machine plus overflow with the probe plus move held in failopen through one shared gate.
+- Idle direct bypass takes idle targets straight to local with one kick, so wakeups skip the tier plus dispatch hop. Requeues plus last expiry reuse the cached hint with no cgroup acquire and pace with no occupant lookup, and a zero deadline keeps the previous CPU with no 8 peer scan.
+- Hierarchy id cache with 1024 entries pays one hash lookup on hit with no acquire, and clears on migrate plus enable plus task exit with weight reads staying fresh. Frequency keeps transition only sets through one cached compare with live plus bound before the cap.
+- Snapshot counts live pids for the on CPU gauge with no BPF counter, so hot paths pay no atomic. Branches carry likely plus unlikely with the expected path first and no fair.c helper.
+- Fixed slice at `1ms` with sixteen slices per `16ms` period. Task state at `64B` with no virtual runtime and no nice table.
+- Dispatch moves uncapped to remaining dispatch slots with no batch plus no flood plus no step cap plus no tier probes. Tiers plus overflow skip uniformly through the shared move with mask wins on drain. Visits cap at `64` per pass regardless of moves with resume next pass, so one pass never holds RCU across the whole queue while staying work conserving across passes. No consumable slots leaves at once with no scan.
+- Joins carry no admission bound and no stored share. Every join counts one admit with rejects staying zero for wire compat while the deadline predictor stays. Past saturation at `100%` utilization the core still drains best effort in deadline order with miss cascade expected.
+- EDF order via kernel priority queue with the deadline as vtime and no lag compensation.
+- Docs plus validation track the new shape. No `fair.c` helper is used and the queue order stays in kernel priority queues.
+
 ## 4.7.2
 
 - Fixed slice at `1ms` with sixteen slices per `16ms` period. Task state at `64B` with no virtual runtime and no nice table.

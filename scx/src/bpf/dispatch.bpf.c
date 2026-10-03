@@ -61,12 +61,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u64 node_dsq;
 	u64 machine_dsq;
 	(void)prev;
-	/* A negative CPU is a core idle call with no queue work, so it */
-	/* returns with no gate count. A stale live CPU fails closed with */
-	/* one count below, so only real rejects count. */
-	if (cpu < 0)
+	/* The gate runs first with no queue cost, so a stale CPU fails */
+	/* closed at once. A negative CPU is an idle call with no work, so */
+	/* it leaves with no count while only live rejects count. */
+	if (unlikely(cpu < 0))
 		return;
-	if (!flow_cpu_live((u32)cpu)) {
+	if (unlikely(!flow_cpu_live((u32)cpu))) {
 		flow_gate_reject();
 		return;
 	}
@@ -75,7 +75,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* overfill. No consumable slots leaves at once with no scan, so */
 	/* idle stays cheap. */
 	budget = scx_bpf_dispatch_nr_slots();
-	if (budget == 0)
+	if (unlikely(budget == 0))
 		goto out;
 	/* Handles stay hoisted once at entry, so pops pay no extra lookup. */
 	own_local = flow_local_dsq((u32)cpu);
@@ -90,22 +90,23 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	left = budget;
 	/* Local tier first with no scan on empty. The kernel holds */
 	/* deadline order plus mask wins, so the earliest matching */
-	/* deadline moves at once within the per pass visit cap. */
-	if (left && visits < (u32)FLOW_DISPATCH_MAX_VISIT) {
+	/* deadline moves at once within the per pass visit cap. The likely */
+	/* busy tiers run first in static order with no reorder. */
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		local_moved = flow_move_one(own_local, cpu, &visits);
 		if (local_moved > left)
 			local_moved = left;
 		left -= local_moved;
 	}
 	/* Node tier next with no scan on empty. */
-	if (left && visits < (u32)FLOW_DISPATCH_MAX_VISIT) {
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		node_moved = flow_move_one(node_dsq, cpu, &visits);
 		if (node_moved > left)
 			node_moved = left;
 		left -= node_moved;
 	}
 	/* Machine tier next with no scan on empty. */
-	if (left && visits < (u32)FLOW_DISPATCH_MAX_VISIT) {
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		machine_moved = flow_move_one(machine_dsq, cpu, &visits);
 		if (machine_moved > left)
 			machine_moved = left;
@@ -118,7 +119,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* never holds RCU across the whole queue while leftover work */
 	/* resumes next pass. Tiers plus overflow share the mask gate */
 	/* through the shared move. */
-	if (left && visits < (u32)FLOW_DISPATCH_MAX_VISIT)
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT))
 		over_moved = flow_overflow_fill(cpu, left, &visits);
 	flow_account_local(local_moved);
 	flow_account_node(node_moved);

@@ -27,33 +27,31 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	s32 cpu;
 	u64 now;
 	u64 stamp;
-	u64 prev;
-	(void)prev;
 	cpu = scx_bpf_task_cpu(p);
 	/* The gate runs first with fail closed and no count on pass. */
 	/* Exiting tasks never reach here through the running path. */
-	if (!flow_entry_ok(cpu, p, 0)) {
+	if (unlikely(!flow_entry_ok(cpu, p, 0))) {
 		flow_gate_reject();
 		return;
 	}
 	tctx = flow_lookup(p);
 	now = flow_now();
-	if (tctx) {
+	if (likely(tctx)) {
 		/* Zero never marks a run, so a zero clock folds to one. */
 		/* The claim swaps from zero only, so a second running */
 		/* without a stop keeps the first start with no second use. */
 		/* The on CPU gauge lives in the snapshot with no BPF count, */
 		/* so this path holds no gauge add. */
 		stamp = now ? now : 1;
-		prev = __sync_val_compare_and_swap(&tctx->run_at,
+		__sync_val_compare_and_swap(&tctx->run_at,
 		    0, stamp);
 	}
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return;
-	if (!flow_cpu_live((u32)cpu))
+	if (unlikely(!flow_cpu_live((u32)cpu)))
 		return;
 	st = flow_cpu((u32)cpu);
-	if (st)
+	if (likely(st))
 		__sync_lock_test_and_set(&st->running_pid,
 		    (u32)p->pid);
 }

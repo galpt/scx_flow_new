@@ -36,21 +36,21 @@ static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 {
 	struct task_struct *p;
 	u32 moved = 0;
-	if (cpu < 0)
+	if (unlikely(cpu < 0))
 		return 0;
-	if (!visits)
+	if (unlikely(!visits))
 		return 0;
-	if (!flow_cpu_live((u32)cpu))
+	if (unlikely(!flow_cpu_live((u32)cpu)))
 		return 0;
-	if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+	if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 		return 0;
-	if (scx_bpf_dsq_nr_queued(dsq) <= 0)
+	if (likely(scx_bpf_dsq_nr_queued(dsq) <= 0))
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {
-		if (moved)
+		if (unlikely(moved))
 			break;
-		if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 			break;
 		(*visits)++;
 		moved += flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p);
