@@ -34,7 +34,7 @@ Tasks carry no share and every join counts one admit with no reject. The hint pe
 
 ### Gates
 
-A gate runs first at each step so stale tasks and CPUs wait safely. Exiting work runs at once. Fails drop the ledger with no leak. The drain stays affinity gated with mask wins. One counter tracks held work. See `src/bpf/main/cpu.bpf.c` and `src/rust/flow/runtime.rs`.
+A gate runs first at each step so stale tasks and CPUs wait safely. Exiting work runs at once. Fails drop the ledger with no leak. The drain stays affinity gated with mask wins. One counter tracks held work. See `src/bpf/main/cpu.bpf.c`.
 
 ### Reporting
 
@@ -43,11 +43,11 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Changes live in `CHANGELOG.md` with the `4.7.1` bounds.
-- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`.
-- Order lives in kernel priority queues with mirrors in `src/rust/flow/edf.rs` and `src/rust/flow/slot.rs` for tests only. The mirrors check deadline order plus saturation plus flood plus tier probes plus step cap against the kernel logic, since no kernel test harness runs here.
+- Changes live in `CHANGELOG.md` with the `4.7.2` bounds.
+- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`. No `fair.c` helper is used and the queue order stays in kernel priority queues.
+- Order lives in kernel priority queues with mirrors in `src/rust/flow/edf.rs` and `src/rust/flow/slot.rs` for tests only. The mirrors check deadline order plus saturation against the kernel logic, since no kernel test harness runs here.
 - Deadline checks live in `src/bpf/main/deadline.bpf.c` with a mirror in `src/rust/flow/edf.rs` for tests only. The mirror keeps the same hint plus predictor math with no effect on order.
-- Task burst and runtime bookkeeping lives in `src/rust/flow/runtime.rs` and `src/rust/flow/slice.rs` with checks in `src/rust/config.rs`.
+- Task burst bookkeeping lives in `src/rust/flow/edf.rs` with the slice in `src/rust/flow/slice.rs` plus checks in `src/rust/config.rs`.
 - Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
 - Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses as source of truth.
 
