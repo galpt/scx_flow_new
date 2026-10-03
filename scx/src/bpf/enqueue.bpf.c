@@ -15,8 +15,8 @@
  * with shift updates from stopping, so short bursts earn tight
  * deadlines with no table walk. Every enqueue counts one admit with
  * no reject, so the counters track joins with no bound. The exiting
- * plus one direct block form the three kick points, so every park
- * meets at most one kick with no storm. A direct preempt needs a
+ * plus idle direct plus helper plus direct block form the four kick
+ * points, so every park meets at most one kick with no storm. A direct preempt needs a
  * 100us margin lead with more than 100us still left on the owner,
  * so near ties plus nearly done owners never bounce while one kick
  * per park stays. Slice expiry paces the rest, so no slice write and
@@ -197,11 +197,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* Idle targets kick at once with no rate window. */
 	/* The idle flag clears first so the kick sticks. The pid read */
-	/* uses a relaxed load to match the running stores. The single */
-	/* direct block holds both the idle plus the preempt kick, so no */
-	/* fourth point beyond the three can storm. Requeues skip the */
-	/* occupant lookup with no task_from_pid cost, so slice rotation */
-	/* paces at expiry with no extra kick. */
+	/* uses a relaxed load to match the running stores. The direct */
+	/* block holds both the idle plus the preempt kick with the idle */
+	/* direct bypass as its mate, so all four points keep one kick per */
+	/* park with no storm. Requeues skip the occupant lookup with no */
+	/* task_from_pid cost, so slice rotation paces at expiry with no */
+	/* extra kick. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
