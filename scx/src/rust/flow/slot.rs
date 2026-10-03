@@ -9,7 +9,8 @@
 //! FIFO, so no queue mixes FIFO plus priority tasks. Homeless tasks park
 //! in the overflow tail with all other parks, so no queue id names the
 //! kernel global queue. Dispatch drains local plus node plus machine in
-//! priority order plus overflow in queue order with no move bound.
+//! priority order plus overflow in queue order with moves uncapped to
+//! remaining slots and visits capped at 64 per pass.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -52,7 +53,7 @@ pub fn machine_dsq() -> u64 {
 }
 
 /// Id of the overflow tail shared by every CPU.
-/// Missed parks plus rejected parks plus pinned tasks plus homeless
+/// Missed parks plus gate parks plus pinned tasks plus homeless
 /// tasks rest here FIFO with one idle kick and mask wins on drain.
 #[cfg(test)]
 pub fn slot_overflow_dsq() -> u64 {

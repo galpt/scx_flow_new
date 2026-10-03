@@ -4,7 +4,7 @@
  *
  * Every release earns one absolute deadline from the burst predictor
  * else the hint period, and every task joins a queue with no admission
- * bound. Admitted tasks join direct when the target can drain before
+ * bound. Tasks join direct when the target can drain before
  * the shared home, so no task waits for a busy CPU while shared room
  * stays open. Missed tasks park in overflow with a miss count and one
  * idle kick and no wait. Pinned tasks rest in overflow with wait set
@@ -21,7 +21,7 @@
  * so near ties plus nearly done owners never bounce while one kick
  * per park stays. Slice expiry paces the rest, so no slice write and
  * no stamp run here. See intf.h for the deadline helpers and
- * dispatch.bpf.c for the single scan.
+ * dispatch.bpf.c for the tier plus overflow scans.
  *
  * The op splits across enqueue/target, insert, and kick files with
  * the enqueue body here. Each helper stays inline except the kick,

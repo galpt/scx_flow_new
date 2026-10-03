@@ -64,13 +64,13 @@ pub struct Metrics {
     #[stat(desc = "Tasks admitted with no bound")]
     #[serde(default)]
     pub admits: u64,
-    #[stat(desc = "Rejects with no bound, always zero")]
+    #[stat(desc = "Rejects with no bound, always zero for wire compat")]
     #[serde(default)]
     pub rejects: u64,
     #[stat(desc = "Wall completions past release plus deadline")]
     #[serde(default)]
     pub misses: u64,
-    #[stat(desc = "Overflow parks from misses plus rejects")]
+    #[stat(desc = "Overflow parks from misses")]
     #[serde(default)]
     pub parks: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]

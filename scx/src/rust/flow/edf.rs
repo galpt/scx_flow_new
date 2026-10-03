@@ -8,8 +8,8 @@
 //! deadline lives in intf.h with the drain checks in
 //! main/deadline.bpf.c, and this file mirrors the math with no map use.
 //! Every task joins a queue with no admission bound, so the predictor
-//! shapes only the deadline. Fact (EEVDF): the queue key is the virtual
-//! deadline vd equal to the absolute deadline, so the earliest vd wins
+//! shapes only the deadline. EDF order via kernel priority queue: the
+//! vtime key holds the absolute deadline, so the earliest deadline wins
 //! with no lag compensation.
 
 /// Default period in nanos at 16ms. Holds sixteen slices.

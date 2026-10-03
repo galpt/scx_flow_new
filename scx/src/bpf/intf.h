@@ -16,8 +16,8 @@
  * only, and no group or pool shapes order. Each stop feeds the burst
  * predictor average plus deviation with shift updates, so later
  * deadlines track recent bursts with no table walk. See select_cpu.bpf.c
- * for placement and enqueue.bpf.c for admission
- * plus the deadline choice and dispatch.bpf.c for the single scan and
+ * for placement and enqueue.bpf.c for the deadline choice
+ * plus dispatch.bpf.c for the tier plus overflow scans and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
  * charge plus the miss count.
  *
@@ -84,6 +84,12 @@ enum flow_consts {
 	/* Queue count of 522. Holds 512 local plus 8 node plus one */
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
+	/* Dispatch visit cap of 64 entries per pass with no knob. Caps */
+	/* visited entries per pass regardless of moves, so one pass never */
+	/* holds RCU across the whole queue on mask misses. Moves stay */
+	/* uncapped to remaining dispatch slots, and leftover work resumes */
+	/* next pass, so the pass stays work conserving across passes. */
+	FLOW_DISPATCH_MAX_VISIT = 64ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
@@ -352,9 +358,9 @@ static __always_inline u64 flow_pred_period(u64 avg,
 /* A zero average means no history, so the hint period applies with */
 /* the default when the hint is zero. Later releases add the */
 /* predicted period with saturation, so a huge release clamps */
-/* instead of wrapping to the front. Fact (EEVDF): the queue vtime */
-/* key is the virtual deadline vd set equal to this absolute deadline, */
-/* so the earliest vd wins with no lag compensation. */
+/* instead of wrapping to the front. EDF order via kernel priority */
+/* queue: the vtime key holds this absolute deadline, so the */
+/* earliest deadline wins with no lag compensation. */
 static __always_inline u64 flow_pred_deadline(u64 release,
 	u64 avg, u64 dev, u32 hint_us)
 {

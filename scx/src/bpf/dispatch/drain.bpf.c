@@ -10,33 +10,43 @@
  * cannot run on the dealing CPU skips to the next entry through the
  * shared move, so one foreign task never stalls its tier for that pass.
  * The overflow scan skips the same way through the shared move, so
- * live work still moves there. Homeless parks
- * rest in overflow with all other parks FIFO, so no trip touches the
- * kernel global queue. Fresh parks join the same order at once with
- * no hold. Runs under the caller with no lock.
+ * live work still moves there. Visits share the per pass cap at sixty
+ * four with leftover work resuming next pass, so one pass never holds
+ * RCU across the whole queue while staying work conserving across
+ * passes. Homeless parks rest in overflow with all other parks FIFO,
+ * so no trip touches the kernel global queue. Fresh parks join the
+ * same order at once with no hold. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Move one queued task to local with a uniform skip plus a BPF mask gate. */
-/* Takes a queue id plus a CPU scalar with no struct pass, so every */
-/* tier verifies through this one call. The live check in the caller */
-/* covers the CPU, and the shared move gates affinity with no kernel */
-/* error, so an empty queue returns zero with no scan and no miss */
-/* count. An unmatching head skips to the next entry through the same */
-/* shared gate the overflow scan uses, so one foreign task never stalls */
-/* its tier for that pass. */
-static __noinline u32 flow_move_one(u64 dsq, s32 cpu)
+/* Takes a queue id plus a CPU scalar plus the per pass visit count with */
+/* no struct pass, so every tier verifies through this one call. The live */
+/* check in the caller covers the CPU, and the shared move gates affinity */
+/* with no kernel error, so an empty queue returns zero with no scan and */
+/* no miss count. An unmatching head skips to the next entry through the */
+/* same shared gate the overflow scan uses, so one foreign task never */
+/* stalls its tier for that pass. Visits cap per pass with resume next */
+/* pass, so the loop never holds RCU across the whole queue. */
+static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 {
 	struct task_struct *p;
 	u32 moved = 0;
 	if (cpu < 0)
 		return 0;
+	if (!visits)
+		return 0;
 	if (!flow_cpu_live((u32)cpu))
+		return 0;
+	if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {
 		if (moved)
 			break;
+		if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+			break;
+		(*visits)++;
 		moved += flow_move_candidate(BPF_FOR_EACH_ITER, cpu, p);
 	}
 	bpf_rcu_read_unlock();

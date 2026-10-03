@@ -5,7 +5,7 @@
  * Holds the single affinity check for shared tier plus overflow
  * checks. Live stays proven once at entry, so the per element cost
  * stays one mask test with no live branch. The overflow scan plus
- * the tier bounded skip gate affinity through this BPF test, so a
+ * the uniform skip gate affinity through this BPF test, so a
  * BPF miss skips with no kernel error while mask still wins on
  * drain. Runs inline so the iterator stays in the caller with no
  * extra call cost.

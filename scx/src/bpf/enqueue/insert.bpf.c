@@ -16,8 +16,9 @@
  */
 /* Insert one task into its local queue with its deadline. */
 /* Uses the priority queue with the deadline as vtime, so the head */
-/* holds the earliest deadline with mask wins on drain. Fact (EEVDF): */
-/* the vtime key is the virtual deadline vd, so the earliest vd wins. */
+/* holds the earliest deadline with mask wins on drain. EDF order via */
+/* kernel priority queue: the vtime key holds the absolute deadline, */
+/* so the earliest deadline wins with no lag compensation. */
 static __always_inline void flow_local_insert(
 	struct task_struct *p, s32 cpu, u64 deadline)
 {
@@ -41,7 +42,7 @@ static __always_inline void flow_machine_insert(
 	    (u64)FLOW_QUANTUM_NS, deadline, 0);
 }
 /* Insert one task into the shared overflow tail. */
-/* Pinned tasks plus missed parks plus rejected parks plus homeless */
+/* Pinned tasks plus missed parks plus gate parks plus homeless */
 /* tasks rest here FIFO with one idle kick on insert, so every park */
 /* meets a dispatch pass with no wait and no priority mix. */
 static __always_inline void flow_over_insert(

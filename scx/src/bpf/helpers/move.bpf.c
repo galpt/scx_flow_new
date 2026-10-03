@@ -3,7 +3,7 @@
  * Move candidate for the dispatch pass.
  *
  * Holds one task move with no reference and no release. Callers pass
- * the iterator plus task from the scan, so the tier bounded skip plus
+ * the iterator plus task from the scan, so the uniform skip plus
  * the overflow single scan share one move with no rescan per move.
  * The shared mask probe gates affinity with liveness proven by the caller,
  * so a mismatched entry skips with no kernel error while mask still
