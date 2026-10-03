@@ -2,15 +2,15 @@
 
 ### What is it?
 
-scx_flow runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every task with no bound and a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice for steady pacing under load today. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
-The goal is to test fair order with prediction in the kernel and see if short bursts reach a CPU sooner. Finding the earliest fair time without a full scan matters when order decides who runs next. Direct queue order keeps the test fair. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
+The goal is to test fair order with prediction in the kernel and see if short bursts reach a CPU sooner. Finding the earliest fair time without a full scan matters when order decides who runs next. Direct queue order keeps the test fair and repeatable. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
 
 ### How it works?
 
-Arrivals pass a gate. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus slice over weight. Each CPU takes the earliest fair time it may run. Teardown charges plus advances vruntime with predictor update. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/edf.rs`.
+Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus slice over weight. Each CPU takes the earliest fair time it may run. Teardown charges plus advances vruntime with predictor update always. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/edf.rs`.
 
 ## Typical Use Cases
 

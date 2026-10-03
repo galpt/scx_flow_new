@@ -58,6 +58,7 @@ pub fn cpu_meets_fair(depth: u64, vtime: u64, now: u64) -> bool {
 /// minimums run parallel to live with base plus zero on short slices.
 /// Returns minus one when no allowed CPU is live.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub fn place(
     idle: &[i32],
     prev: i32,

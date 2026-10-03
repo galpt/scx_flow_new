@@ -7,7 +7,7 @@
  * at sixty four per pass. The kernel keeps each priority queue list
  * in deadline order, so each tier takes the earliest matching
  * deadline with mask wins on drain and no BPF sort. EDF order via
- * kernel priority queue: the vtime key holds the absolute deadline,
+ * kernel priority queue: the vtime key holds the fair time,
  * so the earliest deadline wins with no lag compensation. Each tier
  * skips unmatching heads uniformly through the shared move, so one
  * foreign task never stalls its tier for that pass. Visits cap at
