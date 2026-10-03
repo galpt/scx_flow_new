@@ -108,6 +108,16 @@ enum flow_consts {
 	/* 100us with one kick per park. */
 	FLOW_PREEMPT_TAIL_NS = 100000ULL,
 };
+/* Static dispatch tier order with no reorder. Local plus node plus */
+/* machine drain in deadline order through the kernel priority queue, */
+/* then overflow drains in queue order. Every pass follows this order */
+/* with no load based swap, so the verifier sees one fixed path. */
+enum flow_tier {
+	FLOW_TIER_LOCAL = 0,
+	FLOW_TIER_NODE = 1,
+	FLOW_TIER_MACHINE = 2,
+	FLOW_TIER_OVERFLOW = 3,
+};
 /* Per task state at 64B with release plus period plus deadline plus */
 /* predictor plus stamps plus hint plus miss count. */
 /* Release holds the last release time for the miss check. A zero */

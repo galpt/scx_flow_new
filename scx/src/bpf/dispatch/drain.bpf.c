@@ -21,13 +21,17 @@
  */
 /* Move one queued task to local with a uniform skip plus a BPF mask gate. */
 /* Takes a queue id plus a CPU scalar plus the per pass visit count with */
-/* no struct pass, so every tier verifies through this one call. The live */
-/* check in the caller covers the CPU, and the shared move gates affinity */
-/* with no kernel error, so an empty queue returns zero with no scan and */
-/* no miss count. An unmatching head skips to the next entry through the */
-/* same shared gate the overflow scan uses, so one foreign task never */
-/* stalls its tier for that pass. Visits cap per pass with resume next */
-/* pass, so the loop never holds RCU across the whole queue. */
+/* no struct pass, so every tier verifies through this one call. The gate */
+/* runs first for the CPU, then the queue depth leaves at once with no RCU */
+/* hold, so idle tiers stay cheap. The length is an opportunistic early */
+/* out only with no correctness use, so a join racing the read still meets */
+/* the next pass with no loss. The shared move gates affinity with no */
+/* kernel error, so an empty queue returns zero with no scan and no miss */
+/* count. An unmatching head skips to the next entry through the same */
+/* shared gate the overflow scan uses, so one foreign task never stalls */
+/* its tier for that pass. Visits cap per pass with resume next pass, so */
+/* the loop never holds RCU across the whole queue. Static tier order is */
+/* local plus node plus machine plus overflow with no reorder. */
 static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 {
 	struct task_struct *p;
@@ -39,6 +43,8 @@ static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 	if (!flow_cpu_live((u32)cpu))
 		return 0;
 	if (*visits >= (u32)FLOW_DISPATCH_MAX_VISIT)
+		return 0;
+	if (scx_bpf_dsq_nr_queued(dsq) <= 0)
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq, 0) {

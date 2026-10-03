@@ -67,26 +67,30 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		}
 	}
-	tctx = flow_get(p);
+	tctx = NULL;
 	sel = p->scx.selected_cpu;
 	pinned = flow_task_pinned(p);
 	now = flow_now();
-	/* Tasks without state park in overflow with an idle kick. */
-	/* The kick targets one idle allowed CPU with no preempt, so a */
-	/* parked task wakes without a storm. */
-	if (!tctx) {
+	/* The gate runs first with no state create, so stale CPUs plus */
+	/* moved tasks fail closed with no alloc cost. The lookup stays */
+	/* read only here, and the create follows only on pass. */
+	if (!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
+	    scx_bpf_task_cpu(p), p, 0)) {
+		struct flow_task_ctx *lctx = flow_lookup(p);
 		flow_gate_reject();
+		if (lctx)
+			lctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
-	/* The gate runs before any queue join with fail closed. */
-	/* A stale CPU plus a moved task counts one reject and parks in */
-	/* overflow with one direct kick. */
-	if (!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
-	    scx_bpf_task_cpu(p), p, 0)) {
+	tctx = flow_get(p);
+	/* Tasks without state park in overflow with an idle kick. */
+	/* The kick targets one idle allowed CPU with no preempt, so a */
+	/* parked task wakes without a storm. The gate already passed, */
+	/* so this path keeps its reject count with no double gate. */
+	if (!tctx) {
 		flow_gate_reject();
-		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;

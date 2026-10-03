@@ -52,11 +52,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		flow_gate_reject();
 		return prev_cpu;
 	}
-	/* The deadline shapes the sufficient check below. */
-	/* A missing state means no order yet, so every live CPU meets. */
-	tctx = flow_lookup(p);
-	if (tctx)
-		deadline = READ_ONCE(tctx->deadline);
+	/* The gate runs first with the pinned paths, then the idle fast */
+	/* paths leave at once with no state read, so idle stays cheap. */
+	/* The deadline shapes the sufficient check below only, so the */
+	/* lookup waits until the idle paths miss with no cost on hit. */
 	/* The waker CPU is free when it runs nothing and the mask allows. */
 	/* An idle core cannot stack, so the slowest sufficient scan ends */
 	/* here with no cost. The pid read uses a relaxed load to match */
@@ -74,6 +73,13 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		if (picked >= 0 && flow_cpu_ok(p, picked))
 			return picked;
 	}
+	/* The deadline shapes the sufficient check below. */
+	/* A missing state means no order yet, so every live CPU meets. */
+	/* The read waits until the idle paths miss, so idle hits pay no */
+	/* state cost. */
+	tctx = flow_lookup(p);
+	if (tctx)
+		deadline = READ_ONCE(tctx->deadline);
 	/* The previous CPU wins when it can drain before the deadline. */
 	/* Warmth stays free, and a miss falls to the shared home. */
 	if (flow_cpu_ok(p, prev_cpu)) {

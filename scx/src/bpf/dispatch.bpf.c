@@ -17,8 +17,12 @@
  * cap at sixty four per pass regardless of moves with leftover work
  * resuming next pass, so one pass never holds RCU across the whole
  * queue on mask misses while staying work conserving across passes.
- * Moves cap at remaining dispatch slots with no clamp, so every tier
- * shares one exact move bound with no overfill. Per tier moves count
+ * The gate runs first for the CPU, then the remaining dispatch slots
+ * bound the moves with no clamp, so every tier shares one exact move
+ * bound with no overfill. The queue depth leaves at once per tier with
+ * no RCU hold through the shared move, so idle tiers stay cheap. Static
+ * tier order is local plus node plus machine plus overflow with no
+ * reorder, so the pass follows one fixed path. Per tier moves count
  * once with no lock through one exit, and the level follows after all
  * moves with the same CPU only, so idle cannot be skipped. No
  * consumable slots leaves at once with no scan, so idle stays cheap.
