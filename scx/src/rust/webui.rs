@@ -306,7 +306,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the fifteen live counters plus uptime. */
+    /* Dashboard shows the thirteen live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -319,12 +319,10 @@ mod tests {
         assert!(html.contains("id=\"local-moves\""));
         assert!(html.contains("id=\"node-moves\""));
         assert!(html.contains("id=\"machine-moves\""));
-        assert!(html.contains("id=\"over-moves\""));
         assert!(html.contains("id=\"kicks\""));
         assert!(html.contains("id=\"admits\""));
         assert!(html.contains("id=\"rejects\""));
         assert!(html.contains("id=\"misses\""));
-        assert!(html.contains("id=\"parks\""));
         assert!(html.contains("id=\"gate-rejects\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
@@ -332,8 +330,11 @@ mod tests {
         assert!(html.contains("local_moves"));
         assert!(html.contains("node_moves"));
         assert!(html.contains("machine_moves"));
-        assert!(html.contains("over_moves"));
         assert!(html.contains("gate_rejects"));
+        assert!(!html.contains("over_moves"));
+        assert!(!html.contains("over-moves"));
+        assert!(!html.contains("\"parks\""));
+        assert!(!html.contains("id=\"parks\""));
         assert!(!html.contains("global_moves"));
         assert!(!html.contains("global-moves"));
     }
@@ -348,6 +349,10 @@ mod tests {
         assert!(!html.contains("nr_throttled"));
         assert!(!html.contains("bw_moves"));
         assert!(!html.contains("park_moves"));
+        assert!(!html.contains("over_moves"));
+        assert!(!html.contains("over-moves"));
+        assert!(!html.contains("\"parks\""));
+        assert!(!html.contains("id=\"parks\""));
         assert!(!html.contains("enq_no_tctx"));
         assert!(!html.contains("preempt_kicks"));
         assert!(!html.contains("preempt_skipped"));

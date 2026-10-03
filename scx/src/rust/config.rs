@@ -45,9 +45,11 @@ impl Config {
     /// 64 per pass plus no batch plus no flood plus no step plus no
     /// tier probes, and joins carry no admission bound with base
     /// capacity 1024. Queues hold 512 local plus 8 node plus machine
-    /// plus overflow with ids in the 0x5100 region. Hints hold 4096
-    /// flat rows with no timer wait. Preempt needs 100us margin plus
-    /// 100us tail strictly with a floor at 100us and one kick per park.
+    /// with ids in the 0x5100 region and no overflow. Hints hold 4096
+    /// flat rows with period plus weight and no timer wait. Preempt
+    /// needs 100us margin plus 100us tail strictly with a floor at 100us
+    /// and one kick per wait gated on eligibility. Fairness bounds lag
+    /// at 2ms with vruntime plus virtual deadline pacing queue order.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -72,6 +74,12 @@ impl Config {
         }
         if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 100_000 {
             bail!("tail bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64 != 2_000_000 {
+            bail!("lag bound bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64 != 521 {
+            bail!("dsq count bad");
         }
         Ok(())
     }
@@ -148,6 +156,10 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 521);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64,
+            2_000_000
+        );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_LOCAL_BASE as u64, 0x5100);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);

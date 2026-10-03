@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.7.4
+
+- Drop the overflow tail for 521 queues with local plus node plus machine only. Every wait rejoins a tier queue in deadline order with a fallback deadline plus a tier insert, dispatch drops the overflow scan plus its account, and stats fall from `120B` to `104B` with 13 counters and no parks.
+- Add vruntime fairness at `64B` task plus `16B` CPU with release evicted and 32 bit predictor fields. Weight scales with banded shifts and no divide, vruntime advances by scaled service, lag clamps at `2ms`, eligibility gates kicks, virtual deadline adds eligible plus request over weight, and fair vtime takes min deadline plus virtual deadline. Lifecycle stopping plus disable plus exit charge plus advance plus fold the minimum, and the timer leftover matches.
+- Share bands map light shares to long periods plus small weights while heavy shares map to short periods plus large weights on powers of two. Enqueue copies the clamped weight uniformly for cgroup plus root tasks with neutral on miss. Placement keeps the slowest sufficient CPU with near minimum tiebreak on minima within `64` units, and deadline helpers add a CPU minimum read plus a fair drain check with the bypass on fair time.
+- Docs plus mirrors plus UI track the new shape with 50 word subsections, 521 queue checks, fair tests, and thirteen counters with no overflow cards. No `fair.c` helper text is copied and the queue order stays in kernel priority queues.
+
 ## 4.7.3
 
 - Gate first with queue depth early out in dispatch plus select plus enqueue. Tiers leave at once on empty with no RCU hold, idle hits pay no state cost, and rejects pay no alloc. Static tier order stays local plus node plus machine plus overflow with the probe plus move held in failopen through one shared gate.

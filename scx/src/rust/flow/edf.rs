@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Deadline helpers for the flow scheduler.
+//! Deadline plus fairness helpers for the flow scheduler.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the release plus period plus deadline plus miss plus
-//! predictor models shared by BPF and userspace tests. The BPF
-//! deadline lives in intf.h with the drain checks in
-//! main/deadline.bpf.c, and this file mirrors the math with no map use.
-//! Every task joins a queue with no admission bound, so the predictor
-//! shapes only the deadline. EDF order via kernel priority queue: the
-//! vtime key holds the absolute deadline, so the earliest deadline wins
-//! with no lag compensation.
+//! Holds the period plus deadline plus miss plus predictor plus vruntime
+//! models shared by BPF and userspace tests. The BPF deadline plus
+//! fairness live in intf.h with the drain checks in main/deadline.bpf.c,
+//! and this file mirrors the math with no map use. Every task joins a
+//! tier queue with no admission bound, so the predictor shapes the EDF
+//! deadline while vruntime shapes the fair time. Fair order via kernel
+//! priority queue: the vtime key holds the earlier of deadline plus
+//! virtual deadline, so urgent tasks still win with lag bounds.
 
 /// Default period in nanos at 16ms. Holds sixteen slices.
 pub const PERIOD_NS: u64 = 16_000_000;
@@ -20,6 +20,9 @@ pub const CAP_BASE: u32 = 1024;
 pub const PRED_MIN_NS: u64 = 1;
 /// Largest predictor value in nanos at 1s. Clamps long bursts with no wrap.
 pub const PRED_MAX_NS: u64 = 1_000_000_000;
+/// Allowed lag bound in nanos at 2ms. Bounds sleeper boost with no storm.
+#[cfg(test)]
+pub const VLAG_MAX_NS: i32 = 2_000_000;
 
 /// Period for one task from hint micros else default.
 /// A zero hint means no hint, so the default period applies. The hint
@@ -41,17 +44,20 @@ pub fn deadline_at(release: u64, period: u64) -> u64 {
     release.saturating_add(period)
 }
 
+/// Fallback deadline from now plus the hint period with saturation.
+/// Tasks with no state join a tier queue at once with this deadline.
+#[cfg(test)]
+pub fn fallback_deadline(now: u64, hint_us: u32) -> u64 {
+    deadline_at(now, task_period(hint_us))
+}
+
 /// True when one task missed its deadline at the given time.
-/// A zero deadline means no order yet, so the check skips. A zero
-/// release means no release yet, so the check skips too. A time equal
+/// A zero deadline means no order yet, so the check skips. A time equal
 /// to the deadline passes, so only a strictly later time counts. Order
 /// uses the wrap safe signed diff like BPF flow_missed, so the check
 /// holds across the u64 wrap with no branch.
 #[cfg(test)]
-pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
-    if release == 0 {
-        return false;
-    }
+pub fn missed(deadline: u64, now: u64) -> bool {
     if deadline == 0 {
         return false;
     }
@@ -143,6 +149,126 @@ pub fn pred_deadline(release: u64, avg: u64, dev: u64, hint_us: u32) -> u64 {
     release.saturating_add(period)
 }
 
+/// Clamp one weight into the scheduler range.
+/// Zero or oversize weights fail closed to the nearer bound.
+#[cfg(test)]
+pub fn weight_clamp(w: u32) -> u32 {
+    w.clamp(
+        crate::flow::slice::WEIGHT_MIN,
+        crate::flow::slice::WEIGHT_MAX,
+    )
+}
+
+/// Scaled service for one delta at one weight with no divide.
+/// The neutral weight of 128 keeps the delta unchanged, lighter tasks
+/// shift left while heavier tasks shift right with saturation.
+#[cfg(test)]
+pub fn scaled_delta(delta: u64, weight: u32) -> u64 {
+    let w = weight_clamp(weight);
+    if w < 16 {
+        if delta > (u64::MAX >> 4) {
+            return u64::MAX;
+        }
+        return delta << 4;
+    }
+    if w < 32 {
+        if delta > (u64::MAX >> 3) {
+            return u64::MAX;
+        }
+        return delta << 3;
+    }
+    if w < 64 {
+        if delta > (u64::MAX >> 2) {
+            return u64::MAX;
+        }
+        return delta << 2;
+    }
+    if w < 96 {
+        if delta > (u64::MAX >> 1) {
+            return u64::MAX;
+        }
+        return delta << 1;
+    }
+    if w < 192 {
+        return delta;
+    }
+    if w < 384 {
+        return delta >> 1;
+    }
+    if w < 768 {
+        return delta >> 2;
+    }
+    if w < 1536 {
+        return delta >> 3;
+    }
+    if w < 3072 {
+        return delta >> 4;
+    }
+    if w < 6144 {
+        return delta >> 5;
+    }
+    let out = delta >> 6;
+    if out == 0 && delta != 0 {
+        return 1;
+    }
+    out
+}
+
+/// Advanced vruntime after one delta at one weight with saturation.
+#[cfg(test)]
+pub fn vruntime_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
+    vruntime.saturating_add(scaled_delta(delta, weight))
+}
+
+/// True when the first time is before the second with wrap safety.
+#[cfg(test)]
+pub fn time_before(a: u64, b: u64) -> bool {
+    (a.wrapping_sub(b) as i64) < 0
+}
+
+/// Clamped lag within plus or minus 2ms.
+#[cfg(test)]
+pub fn lag_clamp(lag: i32) -> i32 {
+    lag.clamp(-VLAG_MAX_NS, VLAG_MAX_NS)
+}
+
+/// True when one vruntime is eligible against the CPU minimum.
+/// Eligible means the vruntime falls no more than the allowed lag past
+/// the minimum, so lagging tasks wait while leading tasks pace.
+#[cfg(test)]
+pub fn eligible(vruntime: u64, min_vruntime: u64, vlag: i32) -> bool {
+    let lag = lag_clamp(vlag).max(0) as u64;
+    let limit = min_vruntime.saturating_add(lag);
+    if limit == u64::MAX {
+        return true;
+    }
+    if vruntime == limit {
+        return true;
+    }
+    time_before(vruntime, limit)
+}
+
+/// Virtual deadline from eligible plus request over weight.
+#[cfg(test)]
+pub fn virt_deadline(ve: u64, request: u64, weight: u32) -> u64 {
+    ve.saturating_add(scaled_delta(request, weight))
+}
+
+/// Fair queue key as the earlier of deadline plus virtual deadline.
+#[cfg(test)]
+pub fn fair_vtime(deadline: u64, vd: u64) -> u64 {
+    if deadline == 0 {
+        return vd;
+    }
+    if vd == 0 {
+        return deadline;
+    }
+    if time_before(vd, deadline) {
+        return vd;
+    }
+    deadline
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,16 +279,17 @@ mod tests {
         assert_eq!(task_period(8000), 8_000_000);
         assert_eq!(deadline_at(1_000, 16_000_000), 16_001_000);
         assert_eq!(deadline_at(u64::MAX, 16_000_000), u64::MAX);
+        assert_eq!(fallback_deadline(1_000, 0), 16_001_000);
+        assert_eq!(fallback_deadline(1_000, 8000), 8_001_000);
     }
 
     #[test]
-    fn miss_checks() {
-        assert!(!missed(0, 100, 200));
-        assert!(!missed(10, 0, 200));
-        assert!(!missed(10, 100, 100));
-        assert!(missed(10, 100, 101));
-        assert!(missed(1, u64::MAX - 1, 5));
-        assert!(!missed(1, u64::MAX - 1, u64::MAX - 2));
+    fn miss_checks_without_release() {
+        assert!(!missed(0, 200));
+        assert!(!missed(100, 100));
+        assert!(missed(100, 101));
+        assert!(missed(u64::MAX - 1, 5));
+        assert!(!missed(u64::MAX - 1, u64::MAX - 2));
     }
 
     #[test]
@@ -208,5 +335,37 @@ mod tests {
         assert_eq!(pred_deadline(1_000, 0, 0, 8000), 8_001_000);
         assert_eq!(pred_deadline(1_000, 2_000_000, 500_000, 0), 2_501_000);
         assert_eq!(pred_deadline(u64::MAX, 2_000_000, 0, 0), u64::MAX);
+    }
+
+    #[test]
+    fn scaler_keeps_neutral_shifts_bands() {
+        assert_eq!(scaled_delta(1_000_000, 128), 1_000_000);
+        assert_eq!(scaled_delta(1_000_000, 16), 8_000_000);
+        assert_eq!(scaled_delta(1_000_000, 32), 4_000_000);
+        assert_eq!(scaled_delta(1_000_000, 64), 2_000_000);
+        assert_eq!(scaled_delta(1_000_000, 256), 500_000);
+        assert_eq!(scaled_delta(1_000_000, 1024), 125_000);
+        assert_eq!(scaled_delta(u64::MAX, 1), u64::MAX);
+        assert_eq!(vruntime_advance(1_000, 1_000_000, 128), 1_001_000);
+    }
+
+    #[test]
+    fn lag_clamps_and_gates_eligibility() {
+        assert_eq!(lag_clamp(5_000_000), 2_000_000);
+        assert_eq!(lag_clamp(-5_000_000), -2_000_000);
+        assert!(eligible(1_000, 1_000, 0));
+        assert!(eligible(500, 1_000, 0));
+        assert!(!eligible(1_001, 1_000, 0));
+        assert!(eligible(3_000_000, 1_000_000, 2_000_000));
+        assert!(!eligible(3_000_001, 1_000_000, 2_000_000));
+    }
+
+    #[test]
+    fn virtual_deadline_paces_fair_time() {
+        let vd = virt_deadline(1_000_000, 1_000_000, 128);
+        assert_eq!(vd, 2_000_000);
+        assert_eq!(fair_vtime(10_000_000, vd), vd);
+        assert_eq!(fair_vtime(1_000_000, vd), 1_000_000);
+        assert_eq!(fair_vtime(0, vd), vd);
     }
 }
