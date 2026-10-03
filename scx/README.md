@@ -26,7 +26,7 @@ One local queue per CPU plus one per node plus machine plus overflow hold tasks.
 
 ### Keys
 
-Each deadline orders as priority value with virtual runtime for ties. The predictor average plus deviation shapes later deadlines with shift updates plus a first deviation floor at average quarter. The weight table maps nice to weight for scaled runtime. See `src/bpf/intf.h` and `src/rust/flow/edf.rs`.
+Each deadline orders as priority value with no runtime tiebreak. The predictor average plus deviation shapes later deadlines with shift updates plus a first deviation floor at average quarter. See `src/bpf/intf.h` and `src/rust/flow/edf.rs`.
 
 ### Admission
 
@@ -55,7 +55,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show live counters as text or on a
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `88B`, `8B`, `8B`, `120B`.
+- State is `80B`, `8B`, `8B`, `120B`.
 - Needs kernels, `7.2` series and up.
 - Priority and FIFO never mix on one queue, since the kernel keeps one order per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match within four probes while the overflow scan skips to the next match.

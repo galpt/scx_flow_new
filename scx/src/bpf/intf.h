@@ -16,9 +16,8 @@
  * that other work needs. Hints from the flat view tune the period
  * only, and no group or pool shapes order. Each stop feeds the burst
  * predictor average plus deviation with shift updates, so later
- * deadlines track recent bursts with no table walk. The weight table
- * maps nice to weight for scaled runtime with no trap on out of range.
- * See select_cpu.bpf.c for placement and enqueue.bpf.c for admission
+ * deadlines track recent bursts with no table walk. See select_cpu.bpf.c
+ * for placement and enqueue.bpf.c for admission
  * plus the deadline choice and dispatch.bpf.c for the single scan and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
  * charge plus the miss count.
@@ -132,9 +131,8 @@ enum flow_consts {
 	/* 100us with one kick per park. */
 	FLOW_PREEMPT_TAIL_NS = 100000ULL,
 };
-/* Per task state at 88B with release plus period plus deadline plus */
-/* runtime plus predictor plus stamps plus hint plus miss count plus */
-/* admit share. */
+/* Per task state at 80B with release plus period plus deadline plus */
+/* predictor plus stamps plus hint plus miss count plus admit share. */
 /* Release holds the last release time for the miss check. A zero */
 /* release means no release yet, so the miss check skips with no count. */
 /* Period holds the relative period in nanos for the next deadline. */
@@ -142,9 +140,6 @@ enum flow_consts {
 /* Deadline holds the absolute deadline for queue order and the miss */
 /* check. A zero deadline means no order yet, so preempt compares skip */
 /* with no kick and the miss check skips with no count. */
-/* Vruntime holds the scaled runtime served so far for order ties. */
-/* A zero runtime means no service yet, so fresh tasks order by */
-/* deadline alone. */
 /* Avg holds the burst average in nanos with zero for no history. */
 /* A zero average means no sample yet, so the deadline falls back to */
 /* the hint period with no predictor use. Values clamp to 1ns to 1s, */
@@ -178,7 +173,6 @@ struct flow_task_ctx {
 	u64 release;
 	u64 period;
 	u64 deadline;
-	u64 vruntime;
 	u64 avg_ns;
 	u64 dev_ns;
 	u64 wait_at;
@@ -243,11 +237,10 @@ struct flow_sched_stats {
 	u64 parks;
 	u64 gate_rejects;
 };
-/* Task state holds release plus period plus deadline plus runtime */
-/* plus predictor plus stamps plus hint plus misses plus admit share */
-/* in 88 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 88,
-	"task state stays at 88B");
+/* Task state holds release plus period plus deadline plus predictor */
+/* plus stamps plus hint plus misses plus admit share in 80 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 80,
+	"task state stays at 80B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
@@ -278,7 +271,7 @@ static __always_inline u64 flow_sat_add(u64 a,
 		return (u64)~0ULL;
 	return out;
 }
-/* Clamped weight in 1 to 16384 with base 128. */
+/* Weight of one hint level clamped into range. */
 /* Zero or oversize weights fail closed to the nearer bound. */
 static __always_inline u32 flow_weight_clamp(u32 w)
 {
@@ -287,61 +280,6 @@ static __always_inline u32 flow_weight_clamp(u32 w)
 	if (w > (u32)FLOW_WEIGHT_MAX)
 		return (u32)FLOW_WEIGHT_MAX;
 	return w;
-}
-/* Weight table for 40 nice levels from minus 20 to 19. */
-/* Index is nice plus 20 with center 1024 at nice 0. */
-/* Ends are 2048 at minus 20 and 256 at 19, */
-/* so total spread K is 8 with boost 2x and penalty 4x. */
-/* Made as 1024 times 2 to minus nice over 20 below 1, */
-/* else 1024 times 4 to minus nice over 19, rounded. */
-/* The maker is docs only, the table is rodata. */
-static const u16 flow_weight_table[40] = {
-	2048, 1978, 1911, 1846, 1783, 1722, 1663, 1607,
-	1552, 1499, 1448, 1399, 1351, 1305, 1261, 1218,
-	1176, 1136, 1097, 1060, 1024, 952, 885, 823,
-	765, 711, 661, 614, 571, 531, 494, 459,
-	427, 397, 369, 343, 319, 296, 275, 256,
-};
-/* Weight of one nice level from the table. */
-/* Out of range maps to 1024 with no trap. */
-/* Nice 0 skips the table with no load. */
-static __always_inline u32 flow_weight_of(s32 nice)
-{
-	s32 idx;
-	if (nice == 0)
-		return 1024;
-	if (nice < -20)
-		return 1024;
-	if (nice > 19)
-		return 1024;
-	idx = nice + 20;
-	return (u32)flow_weight_table[(u32)idx];
-}
-/* Advanced runtime after one execution segment. */
-/* Scales raw time by base over weight with a split divide, so heavy */
-/* weights advance slowly and light weights advance fast. The split */
-/* keeps every intermediate small for real segments, a segment past */
-/* the scale bound saturates at once, and both adds saturate too, so */
-/* huge inputs clamp instead of wrapping. One stop per slice keeps */
-/* the two divides cheap beside the slice. */
-static __always_inline u64 flow_vruntime_advance(u64 vruntime,
-	u64 delta, u32 weight)
-{
-	u64 w = (u64)flow_weight_clamp(weight);
-	u64 q = delta / w;
-	u64 head;
-	u64 tail;
-	u64 adv;
-	u64 out;
-	if (q > (u64)~0ULL / (u64)FLOW_WEIGHT_BASE)
-		return (u64)~0ULL;
-	head = q * (u64)FLOW_WEIGHT_BASE;
-	tail = delta % w * (u64)FLOW_WEIGHT_BASE / w;
-	adv = flow_sat_add(head, tail);
-	if (adv == (u64)~0ULL)
-		return (u64)~0ULL;
-	out = flow_sat_add(vruntime, adv);
-	return out;
 }
 /* Absolute deadline from release plus relative period. */
 /* The add saturates, so a huge release clamps instead of wrapping */

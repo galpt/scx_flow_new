@@ -374,8 +374,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_88() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 88);
+    fn task_size_is_80() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 80);
     }
 
     #[test]
@@ -400,11 +400,6 @@ mod tests {
     fn kick_rule_matches_header() {
         assert!(crate::flow::arrival_kicks(10, 20));
         assert!(!crate::flow::arrival_kicks(20, 20));
-    }
-
-    #[test]
-    fn runtime_advance_matches_base() {
-        assert_eq!(crate::flow::runtime_advance(0, 2_000_000, 128), 2_000_000);
     }
 
     #[test]

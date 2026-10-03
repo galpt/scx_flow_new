@@ -4,14 +4,13 @@
  *
  * Running claims the segment start from zero and counts the on CPU
  * gauge once per claim. Stopping claims the start once and charges
- * the raw segment to total runtime, then advances virtual runtime by
- * scaled time with the nice table weight, then feeds the burst
+ * the raw segment to total runtime, then feeds the burst
  * predictor average plus deviation from the same delta with shifts,
  * then drops the stored admitted share, then counts one requeue per
  * runnable stop else one completion. A wall completion past release
  * plus deadline counts one miss with one park and no kick, since the
  * task already left the CPU. Enable clears the release plus the period
- * plus the deadline plus the runtime plus the predictor plus the hint
+ * plus the deadline plus the predictor plus the hint
  * plus the miss count plus the stored share, and disable plus exit
  * charge a leftover segment at most once when stopping never ran plus
  * drop a stored share with no leak. A closed gate in stopping plus
@@ -113,30 +112,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	else
 		delta = now - start;
 	/* Every segment counts raw time with no weight scaling. */
-	/* Order already carries weight through scaled runtime. */
-	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
-	/* Runtime advances by scaled time with the nice table weight. */
-	/* The table maps nice to weight with 1024 on out of range, and */
-	/* the clamp keeps the advance in 1 to 16384 with no divide by */
-	/* zero. Two divides per stop stay cheap beside one slice. The */
-	/* predictor average plus deviation update from the same delta */
-	/* with shifts only plus a first deviation floor at average */
+	/* The predictor average plus deviation update from the same */
+	/* delta with shifts only plus a first deviation floor at average */
 	/* quarter, so later deadlines track recent bursts with no extra */
 	/* walk. A zero delta keeps the predictor with no train, so a */
 	/* backward clock never pulls the average to 1ns. */
-	{
-		u32 w = flow_weight_clamp(flow_weight_of(
-		    flow_nice_of(p)));
-		tctx->vruntime = flow_vruntime_advance(tctx->vruntime,
-		    delta, w);
-		if (delta) {
-			u64 avg = READ_ONCE(tctx->avg_ns);
-			u64 dev = READ_ONCE(tctx->dev_ns);
-			u64 n_avg = flow_pred_avg(avg, delta);
-			u64 n_dev = flow_pred_dev(dev, avg, delta);
-			__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
-			__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
-		}
+	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	if (delta) {
+		u64 avg = READ_ONCE(tctx->avg_ns);
+		u64 dev = READ_ONCE(tctx->dev_ns);
+		u64 n_avg = flow_pred_avg(avg, delta);
+		u64 n_dev = flow_pred_dev(dev, avg, delta);
+		__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
+		__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
 	}
 	/* The admitted share drops once per stop with floor at zero. */
 	/* The stored value drops, so a hint change between enqueue and */
@@ -169,13 +157,12 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	if (!tctx)
 		return;
 	/* Fresh tasks hold no release, no period, no deadline, no */
-	/* runtime, no predictor, no stamps, no hint, no misses, and no */
+	/* predictor, no stamps, no hint, no misses, and no */
 	/* admit share. The first enqueue anchors at now with one */
 	/* deadline from the hint period with no predictor use. */
 	tctx->release = 0;
 	tctx->period = 0;
 	tctx->deadline = 0;
-	tctx->vruntime = 0;
 	tctx->avg_ns = 0;
 	tctx->dev_ns = 0;
 	tctx->wait_at = 0;
