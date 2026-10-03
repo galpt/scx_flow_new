@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Reexports the slice, deadline, and preempt helpers.
+//! Facade over the cgrp, edf, preempt, select, slice, and slot helpers.
 //! Tests reach the mirrors through this facade, so every reexport is used.
 
 pub mod cgrp;

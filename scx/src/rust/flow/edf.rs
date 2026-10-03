@@ -43,7 +43,10 @@ pub fn deadline_at(release: u64, period: u64) -> u64 {
 
 /// True when one task missed its deadline at the given time.
 /// A zero deadline means no order yet, so the check skips. A zero
-/// release means no release yet, so the check skips too.
+/// release means no release yet, so the check skips too. A time equal
+/// to the deadline passes, so only a strictly later time counts. Order
+/// uses the wrap safe signed diff like BPF flow_missed, so the check
+/// holds across the u64 wrap with no branch.
 #[cfg(test)]
 pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
     if release == 0 {
@@ -52,10 +55,10 @@ pub fn missed(release: u64, deadline: u64, now: u64) -> bool {
     if deadline == 0 {
         return false;
     }
-    if now <= deadline {
+    if now == deadline {
         return false;
     }
-    true
+    (now.wrapping_sub(deadline) as i64) > 0
 }
 
 /// Clamped predictor value in 1ns to 1s with no wrap.
@@ -158,6 +161,8 @@ mod tests {
         assert!(!missed(10, 0, 200));
         assert!(!missed(10, 100, 100));
         assert!(missed(10, 100, 101));
+        assert!(missed(1, u64::MAX - 1, 5));
+        assert!(!missed(1, u64::MAX - 1, u64::MAX - 2));
     }
 
     #[test]

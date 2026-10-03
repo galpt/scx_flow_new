@@ -182,7 +182,8 @@ struct flow_hint {
 	u64 period_us;
 };
 /* Scheduler counters with 15 fields. Homeless parks count in the */
-/* overflow moves, so every tier move has a live counter. */
+/* overflow moves, so every tier move has a live counter. Rejects */
+/* stay zero for wire compat with real rejects in gate_rejects. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;

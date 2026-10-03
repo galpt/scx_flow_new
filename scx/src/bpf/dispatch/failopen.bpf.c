@@ -44,6 +44,8 @@ static __noinline u32 flow_overflow_fill(s32 cpu, u32 budget, u32 *visits)
 		return 0;
 	/* Queue handle stays hoisted, so the scan pays no DSQ lookup. */
 	ov = flow_overflow_dsq();
+	/* Length is an opportunistic early out only with no correctness */
+	/* use, so a join racing the read still meets the scan below. */
 	qlen = (u64)scx_bpf_dsq_nr_queued(ov);
 	if (qlen == 0)
 		return 0;
