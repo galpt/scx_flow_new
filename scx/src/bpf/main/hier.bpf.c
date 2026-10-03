@@ -3,12 +3,12 @@
  * Flat hint helpers for the core.
  *
  * Holds the id plus level plus ancestor helpers for the flat hint
- * view. The flat view tunes the period only, and no group or pool
- * shapes order. The pid cache stays ABA safe via clear on migrate
- * plus enable plus exit, so a reused pid never reads a stale id. The
- * cache caps at 1024 entries with fail to the acquire path and no
- * eviction. Runs inline with no walk past one ancestor step, so
- * the verifier stays small.
+ * view. The flat view tunes the period plus the weight only, and no
+ * group or pool shapes order. The pid cache stays ABA safe via clear
+ * on migrate plus enable plus exit, so a reused pid never reads a
+ * stale id. The cache caps at 1024 entries with fail to the acquire
+ * path and no eviction. Runs inline with no walk past one ancestor
+ * step, so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -74,5 +74,35 @@ static __always_inline u32 flow_task_hint(
 			    &pid, &id, BPF_ANY);
 		hint = flow_hint_us(id);
 		return hint;
+	}
+}
+/* Weight of one task from its hierarchy with paired release. */
+/* Follows the same cached id path as the hint with uniform handling */
+/* for cgroup plus root tasks, so every task earns a clamped share with */
+/* no special case. A null hierarchy means the root, so the neutral */
+/* share applies with no hint use. Requeues reuse the stored weight */
+/* with no acquire, so slice rotation pays no hierarchy cost. */
+static __always_inline u32 flow_task_weight(
+	struct task_struct *p)
+{
+	u32 pid = (u32)p->pid;
+	u64 *cached;
+	u64 id;
+	if (pid) {
+		cached = bpf_map_lookup_elem(&cgrp_cache_stor,
+		    &pid);
+		if (cached && *cached)
+			return flow_hint_weight(*cached);
+	}
+	{
+		struct cgroup *cgrp = flow_task_cgrp(p);
+		if (!cgrp)
+			return (u32)FLOW_WEIGHT_BASE;
+		id = flow_cgrp_id(cgrp);
+		flow_cgrp_put(cgrp);
+		if (pid)
+			bpf_map_update_elem(&cgrp_cache_stor,
+			    &pid, &id, BPF_ANY);
+		return flow_hint_weight(id);
 	}
 }

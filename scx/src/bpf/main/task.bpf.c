@@ -8,7 +8,7 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Monotonic clock in nanos for releases and deadlines. */
+/* Monotonic clock in nanos for deadlines plus fair times. */
 static __always_inline u64 flow_now(void)
 {
 	return bpf_ktime_get_ns();
@@ -77,6 +77,24 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 	if (!h)
 		return 0;
 	return READ_ONCE(h->period_us);
+}
+/* Flat weight hint for one id with base on miss. */
+/* A missing row means no hint, so the neutral share applies with no */
+/* cgroup use. Values already clamp at write, so reads need no clamp. */
+static __always_inline u32 flow_hint_weight(u64 cgid)
+{
+	struct flow_hint *h;
+	if (!cgid)
+		return (u32)FLOW_WEIGHT_BASE;
+	h = bpf_map_lookup_elem(&hint_stor, &cgid);
+	if (!h)
+		return (u32)FLOW_WEIGHT_BASE;
+	{
+		u32 w = READ_ONCE(h->weight);
+		if (w == 0)
+			return (u32)FLOW_WEIGHT_BASE;
+		return flow_weight_clamp(w);
+	}
 }
 /* Acquired hierarchy of one task with paired release. */
 /* Uses the scheduler view with a reference, so the caller releases */

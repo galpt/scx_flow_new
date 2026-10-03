@@ -143,6 +143,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
 	/* Queue order uses the fair time of deadline plus virtual deadline. */
+	/* Weight copies uniformly with no cgroup special case. */
 	if (unlikely(pinned)) {
 		s32 pc = flow_pick_target(p, sel);
 		u32 ph;
@@ -152,10 +153,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u32 ps;
 		u64 pvd;
 		u64 pvt;
-		if (is_reenq)
+		if (is_reenq) {
 			ph = READ_ONCE(tctx->hint_us);
-		else
+		} else {
+			u32 pwgt;
 			ph = flow_task_hint(p);
+			pwgt = flow_task_weight(p);
+			__sync_lock_test_and_set(&tctx->weight,
+			    flow_weight_clamp(pwgt));
+		}
 		tctx->hint_us = ph;
 		pdl = flow_fallback_deadline(now, ph);
 		tctx->wait_at = now;
@@ -201,21 +207,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A zero average means no history, so the fresh hint period */
 	/* applies with the default when the hint is zero. Later wakeups */
 	/* add average plus deviation with saturation, so short bursts earn */
-	/* tight deadlines with no table walk. The hint stores with no lag, */
-	/* while the predictor shapes only the deadline once history */
-	/* exists. A miss on the last deadline counts before the new */
-	/* deadline, so the miss count tracks wall completion past deadline. */
-	/* Requeues reuse the cached hint with no cgroup acquire, so slice */
-	/* rotation pays no hierarchy cost. The reuse may stay stale across */
-	/* one slice when the weight changed, so the new hint shows on the */
-	/* next fresh wakeup with no order break. The cache clears on */
-	/* migrate plus exit elsewhere, so reuse stays correct. Vruntime */
-	/* clamps within the lag bound of the target minimum with a compare */
-	/* and swap, so sleepers gain no more than one boost with no storm. */
-	if (is_reenq)
+	/* tight deadlines with no table walk. The hint plus the weight */
+	/* store with no lag, while the predictor shapes only the deadline */
+	/* once history exists. A miss on the last deadline counts before */
+	/* the new deadline, so the miss count tracks wall completion past */
+	/* deadline. Requeues reuse the cached hint plus weight with no */
+	/* cgroup acquire, so slice rotation pays no hierarchy cost. The */
+	/* reuse may stay stale across one slice when the share changed, so */
+	/* the new values show on the next fresh wakeup with no order break. */
+	/* The cache clears on migrate plus exit elsewhere, so reuse stays */
+	/* correct. Vruntime clamps within the lag bound of the target */
+	/* minimum with a compare and swap, so sleepers gain no more than */
+	/* one boost with no storm. Weight copies uniformly for cgroup plus */
+	/* root tasks with neutral on miss, so every task earns a clamped */
+	/* share with no special case. */
+	if (is_reenq) {
 		hint = READ_ONCE(tctx->hint_us);
-	else
+	} else {
+		u32 wgt;
 		hint = flow_task_hint(p);
+		wgt = flow_task_weight(p);
+		__sync_lock_test_and_set(&tctx->weight, flow_weight_clamp(wgt));
+	}
 	avg = (u64)READ_ONCE(tctx->avg_ns);
 	dev = (u64)READ_ONCE(tctx->dev_ns);
 	if (avg == 0)
@@ -230,18 +243,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* compare and swap, so a concurrent charge win keeps the winner */
 	/* with no regression. */
 	{
-		struct flow_cpu_state *mst = flow_cpu((u32)cpu);
-		if (mst) {
-			u64 min = READ_ONCE(mst->min_vruntime);
-			u64 cur = READ_ONCE(tctx->vruntime);
-			u64 bound = (u64)FLOW_VLAG_MAX_NS;
-			u64 floor = 0;
-			if (min > bound)
-				floor = min - bound;
-			if (min > bound && cur < floor)
-				__sync_val_compare_and_swap(&tctx->vruntime,
-				    cur, floor);
-		}
+		u64 min = flow_cpu_min((u32)cpu);
+		u64 cur = READ_ONCE(tctx->vruntime);
+		u64 bound = (u64)FLOW_VLAG_MAX_NS;
+		u64 floor = 0;
+		if (min > bound)
+			floor = min - bound;
+		if (min > bound && cur < floor)
+			__sync_val_compare_and_swap(&tctx->vruntime,
+			    cur, floor);
 	}
 	if (READ_ONCE(tctx->deadline) &&
 	    flow_missed(READ_ONCE(tctx->deadline), now)) {
@@ -296,12 +306,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* target takes the task straight to its local queue with one idle */
 	/* kick, so wakeups skip the tier plus dispatch hop. The bypass runs */
 	/* only when the local plus node plus machine tiers hold no queued */
-	/* work or the target still drains before the deadline, so an earlier */
-	/* deadline never waits behind this arrival in a tier queue. The */
-	/* deadline plus admit already hold, so order plus counters stay */
-	/* correct with no extra wait. The bypass inserts straight to local */
-	/* with no tier move count, so admits vs moves drift by the bypass */
-	/* count with no loss while dispatch moves still count each tier. */
+	/* work or the target still drains before the fair time, so an */
+	/* earlier fair time never waits behind this arrival in a tier */
+	/* queue. The deadline plus admit already hold, so order plus */
+	/* counters stay correct with no extra wait. The bypass inserts */
+	/* straight to local with no tier move count, so admits vs moves */
+	/* drift by the bypass count with no loss while dispatch moves still */
+	/* count each tier. Eligible arrivals only bypass, so hogs pace */
+	/* through tiers with no direct jump. */
 	{
 		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
 		if (dst && READ_ONCE(dst->running_pid) == 0) {
@@ -310,6 +322,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			bool node_valid = false;
 			u64 node_dsq = 0;
 			bool tiers_empty = false;
+			u64 bmin;
 			if (node < (u32)FLOW_MAX_NODES &&
 			    (u64)node < nr_node_ids) {
 				node_dsq = flow_node_dsq(node);
@@ -321,8 +334,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (!node_valid ||
 			     scx_bpf_dsq_nr_queued(node_dsq) <= 0))
 				tiers_empty = true;
-			if (tiers_empty ||
-			    flow_cpu_meets((u32)cpu, deadline, now)) {
+			bmin = READ_ONCE(dst->min_vruntime);
+			if ((tiers_empty ||
+			    flow_cpu_meets_fair((u32)cpu, vtime, now)) &&
+			    flow_eligible(READ_ONCE(tctx->vruntime), bmin,
+			        READ_ONCE(tctx->vlag))) {
 				scx_bpf_dsq_insert(p,
 				    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
 				    (u64)FLOW_QUANTUM_NS, enq_flags);
@@ -363,6 +379,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 cmin;
 		if (!st)
 			return;
+		/* Idle kicks gate on eligibility as well, so hogs pace */
+		/* through tiers with no idle jump while lagging tasks still */
+		/* wake at once. */
+		avr = READ_ONCE(tctx->vruntime);
+		avlag = READ_ONCE(tctx->vlag);
+		cmin = flow_cpu_min((u32)cpu);
+		if (!flow_eligible(avr, cmin, avlag))
+			return;
 		if (READ_ONCE(st->running_pid) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -373,14 +397,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* so the task_from_pid plus cgroup plus 8 peer cost stays */
 		/* out of the hot rotation path. */
 		if (is_reenq)
-			return;
-		/* Only eligible arrivals preempt the occupant, so hogs pace */
-		/* at slice expiry while lagging tasks still kick at once. */
-		/* A vruntime past minimum plus lag fails closed with no kick. */
-		avr = READ_ONCE(tctx->vruntime);
-		avlag = READ_ONCE(tctx->vlag);
-		cmin = READ_ONCE(st->min_vruntime);
-		if (!flow_eligible(avr, cmin, avlag))
 			return;
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */

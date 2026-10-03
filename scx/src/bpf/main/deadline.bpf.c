@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Deadline helpers for the core.
+ * Deadline plus fair helpers for the core.
  *
- * Holds the release plus period plus deadline plus drain readiness
- * checks with saturating math. Every task joins a queue with no
- * bound. Runs under the caller with no lock.
+ * Holds the deadline plus fair time plus drain readiness checks with
+ * saturating math. Every task joins a tier queue with no bound, and
+ * queue order uses the fair time while placement tests the deadline.
+ * The CPU minimum read stays best effort with zero on miss. Runs under
+ * the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -21,6 +23,15 @@ static __always_inline bool flow_deadline_ok(u64 deadline,
 	if (now == deadline)
 		return true;
 	return false;
+}
+/* Minimum vruntime of one CPU with zero on miss. */
+/* A missing row means no history, so zero keeps new tasks eligible. */
+static __always_inline u64 flow_cpu_min(u32 cpu)
+{
+	struct flow_cpu_state *st = flow_cpu(cpu);
+	if (!st)
+		return 0;
+	return READ_ONCE(st->min_vruntime);
 }
 /* Drain depth of one CPU as queued slices times the quantum. */
 /* Saturates on wrap, so a huge depth clamps instead of wrapping to */
@@ -53,6 +64,27 @@ static __always_inline bool flow_cpu_meets(u32 cpu,
 	if (flow_time_before(ready, deadline))
 		return true;
 	if (ready == deadline)
+		return true;
+	return false;
+}
+/* True when one CPU can finish its local drain before a fair time. */
+/* Mirrors the deadline check for the fair key, so the bypass tests */
+/* fair order while tier placement tests the deadline. A zero fair time */
+/* means no fair order yet, so the check passes with no gate. */
+static __always_inline bool flow_cpu_meets_fair(u32 cpu,
+	u64 vtime, u64 now)
+{
+	u64 drain;
+	u64 ready;
+	if (vtime == 0)
+		return true;
+	drain = flow_drain_ns(flow_local_dsq(cpu));
+	ready = flow_sat_add(now, drain);
+	if (ready == (u64)~0ULL)
+		return false;
+	if (flow_time_before(ready, vtime))
+		return true;
+	if (ready == vtime)
 		return true;
 	return false;
 }

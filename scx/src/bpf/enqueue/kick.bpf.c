@@ -4,16 +4,19 @@
  *
  * Holds the idle allowed kick for tier waits with no preempt. Each
  * wait sends one idle kick at most with no storm, so the cost stays
- * bounded by waits and only an idle CPU wakes. Outlined to keep
- * enqueue small with no duplicate walk. The exiting fast path plus
- * the idle direct bypass plus this helper plus the direct join block
- * form the four kick points with no extra sender, so every wait meets
- * at most one kick. Runs under the caller with no lock.
+ * bounded by waits and only an idle CPU wakes. Eligible arrivals only
+ * kick, so hogs pace through tiers with no idle jump while lagging
+ * tasks still wake at once. Outlined to keep enqueue small with no
+ * duplicate walk. The exiting fast path plus the idle direct bypass
+ * plus this helper plus the direct join block form the four kick
+ * points with no extra sender, so every wait meets at most one kick.
+ * Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Kick one idle allowed CPU for tier waits with one kick at most, */
-/* so the cost stays bounded by waits with no storm. */
+/* so the cost stays bounded by waits with no storm. Eligibility gates */
+/* every kick, so a vruntime past minimum plus lag paces with no wake. */
 /* Tries the selected CPU first, then the kernel idle pick, then */
 /* the first allowed live CPU. Kicks only when the target runs */
 /* nothing, with the idle flag cleared first so the kick sticks. */
@@ -26,10 +29,24 @@ static __noinline void flow_kick_idle_allowed(
 	s32 idle;
 	s32 first;
 	struct flow_cpu_state *st;
+	struct flow_task_ctx *tctx;
+	u64 vr = 0;
+	s32 lag = 0;
+	bool has_ctx = false;
+	tctx = flow_lookup((struct task_struct *)p);
+	if (tctx) {
+		vr = READ_ONCE(tctx->vruntime);
+		lag = READ_ONCE(tctx->vlag);
+		has_ctx = true;
+	}
 	if (flow_cpu_ok(p, sel)) {
 		st = flow_cpu((u32)sel);
 		if (st &&
 		    READ_ONCE(st->running_pid) == 0) {
+			if (has_ctx &&
+			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
+			        lag))
+				return;
 			scx_bpf_test_and_clear_cpu_idle(sel);
 			scx_bpf_kick_cpu(sel, SCX_KICK_IDLE);
 			__sync_fetch_and_add(
@@ -42,6 +59,10 @@ static __noinline void flow_kick_idle_allowed(
 		st = flow_cpu((u32)idle);
 		if (st &&
 		    READ_ONCE(st->running_pid) == 0) {
+			if (has_ctx &&
+			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
+			        lag))
+				return;
 			scx_bpf_test_and_clear_cpu_idle(
 			    (s32)idle);
 			scx_bpf_kick_cpu((s32)idle,
@@ -56,6 +77,10 @@ static __noinline void flow_kick_idle_allowed(
 		st = flow_cpu((u32)first);
 		if (st &&
 		    READ_ONCE(st->running_pid) == 0) {
+			if (has_ctx &&
+			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
+			        lag))
+				return;
 			scx_bpf_test_and_clear_cpu_idle(first);
 			scx_bpf_kick_cpu(first, SCX_KICK_IDLE);
 			__sync_fetch_and_add(

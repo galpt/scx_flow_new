@@ -2,19 +2,19 @@
 /*
  * Flat hierarchy ops.
  *
- * The flat view holds one period hint per id only, and no group or
- * pool shapes order. The table holds 4096 rows with no eviction, so
- * a full table misses to the default period with no stall. Init runs
- * sleepable with map create, the rest run without sleep with lookup
- * only. Moves carry the release plus the period plus the deadline
- * with no hint carry, so the next enqueue reads the
- * new hint. Weight sets the hint from a fixed table with no share
- * use. See intf.h for the hint helpers and enqueue.bpf.c for the
- * hint use.
+ * The flat view holds one period plus weight hint per id, and no group
+ * or pool shapes order. The table holds 4096 rows with no eviction, so
+ * a full table misses to the default period plus neutral weight with
+ * no stall. Init runs sleepable with map create, the rest run without
+ * sleep with lookup only. Moves carry vruntime plus deadline with no
+ * hint carry, so the next enqueue reads the new hint plus weight.
+ * Weight sets the hint from fixed share bands with no divide. See
+ * intf.h for the hint helpers and enqueue.bpf.c for the hint plus
+ * weight use.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Init one flat hint row with zero period and no hint. */
+/* Init one flat hint row with zero period plus neutral weight. */
 /* Sleepable only, so map create runs here. A full table keeps the */
 /* miss to the default period with no fail, so the update stays */
 /* unchecked and init returns zero on purpose with no eviction. */
@@ -29,11 +29,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	id = flow_cgrp_id(cgrp);
 	if (!id)
 		return -EINVAL;
+	h.weight = (u32)FLOW_WEIGHT_BASE;
 	bpf_map_update_elem(&hint_stor, &id, &h, BPF_ANY);
 	return 0;
 }
 /* Exit one flat hint row. */
-/* Deletes the row, so later lookups miss to the default period. */
+/* Deletes the row, so later lookups miss to defaults. */
 void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
 {
 	u64 id;
@@ -54,11 +55,11 @@ s32 BPF_STRUCT_OPS(flow_cgroup_prep_move, struct task_struct *p,
 	(void)to;
 	return 0;
 }
-/* Commit one flat move with release plus deadline carry. */
-/* The release plus the period plus the deadline stay, so order */
-/* survives the move. The hint stays per id with no carry, so the */
-/* next enqueue reads the new hint. The cached id clears here, so the */
-/* next hint read takes the new hierarchy with no stale use. */
+/* Commit one flat move with vruntime plus deadline carry. */
+/* The vruntime plus the deadline stay, so order survives the move. */
+/* The hint plus the weight stay per id with no carry, so the next */
+/* enqueue reads the new values. The cached id clears here, so the */
+/* next read takes the new hierarchy with no stale use. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	struct cgroup *from, struct cgroup *to)
 {
@@ -78,11 +79,13 @@ void BPF_STRUCT_OPS(flow_cgroup_cancel_move, struct task_struct *p,
 	(void)from;
 	(void)to;
 }
-/* Update one flat hint from the share with a fixed table. */
-/* Light shares map to long periods and heavy shares map to short */
-/* periods, so the hint tunes the deadline period with no share use. Creates */
-/* the row on miss, so later reads see the new hint at once. A full */
-/* table keeps the miss to the default period with no eviction. */
+/* Update one flat hint from the share with fixed bands. */
+/* Light shares map to long periods plus small weights and heavy shares */
+/* map to short periods plus large weights, so the hint tunes the */
+/* deadline period while the weight tunes vruntime speed with no divide. */
+/* Bands sit on powers of two, so the scaler shifts exactly with no */
+/* table walk. Creates the row on miss, so later reads see the new hint */
+/* at once. A full table keeps the miss to defaults with no eviction. */
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	u32 weight)
 {
@@ -95,14 +98,19 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	if (!id)
 		return;
 	w = flow_weight_clamp(weight);
-	if (w < 64)
+	if (w < 64) {
 		h.period_us = 32000;
-	else if (w < 128)
+		h.weight = 32;
+	} else if (w < 128) {
 		h.period_us = 16000;
-	else if (w < 512)
+		h.weight = 64;
+	} else if (w < 512) {
 		h.period_us = 8000;
-	else
+		h.weight = 256;
+	} else {
 		h.period_us = 4000;
+		h.weight = 1024;
+	}
 	if (bpf_map_update_elem(&hint_stor, &id, &h, BPF_ANY) < 0)
 		return;
 }

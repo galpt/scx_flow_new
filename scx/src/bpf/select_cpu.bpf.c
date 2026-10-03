@@ -4,15 +4,17 @@
  *
  * Placement takes idle first, then the previous CPU, then the shared
  * home, and it keeps the slowest sufficient CPU among the allowed
- * set that can meet the deadline. An idle CPU takes the task at once
- * with no scan. The previous CPU wins next when it can drain before
- * the deadline, so warmth stays free with no cost. The shared home
- * takes the rest, so no task waits for a busy CPU while shared room
- * stays open. Capacities stay symmetric on test hosts, so the lowest
- * sufficient id is the slowest sufficient pick. Pinned tasks stay
- * where the mask allows with no scan, and the task mask always wins.
- * An empty mask falls through to the machine tier at enqueue. See
- * enqueue.bpf.c for the deadline choice after select.
+ * set that can meet the deadline with a near minimum tiebreak on the
+ * CPU minimum. An idle CPU takes the task at once with no scan. The
+ * previous CPU wins next when it can drain before the deadline, so
+ * warmth stays free with no cost. The shared home takes the rest, so
+ * no task waits for a busy CPU while shared room stays open.
+ * Capacities stay symmetric on test hosts, so the lowest sufficient
+ * id is the slowest sufficient pick with the smallest minimum winning
+ * near ties. Pinned tasks stay where the mask allows with no scan,
+ * and the task mask always wins. An empty mask falls through to the
+ * machine tier at enqueue. See enqueue.bpf.c for the fair time choice
+ * after select.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -95,13 +97,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		if (flow_cpu_meets((u32)prev_cpu, deadline, now))
 			return prev_cpu;
 	}
-	/* The shared home takes the rest in id order. */
+	/* The shared home takes the rest in id order with fair tiebreak. */
 	/* The slowest sufficient allowed CPU wins with the lowest units */
 	/* among the peers that drain before the deadline, so light work */
-	/* never takes a fast CPU that other work needs. Capacities stay */
-	/* symmetric on test hosts, so the first sufficient id usually */
-	/* wins with no extra pass. The cursor spreads passes with no */
-	/* hotspot, and it races best effort with no atomic order. */
+	/* never takes a fast CPU that other work needs. Peers within 64 */
+	/* units of the best count as near minimum, and the smallest */
+	/* minimum vruntime wins those ties, so lagging CPUs take work */
+	/* first with no hotspot. Capacities stay symmetric on test hosts, */
+	/* so the first sufficient id usually wins with no extra pass. The */
+	/* cursor spreads passes with no hotspot, and it races best effort */
+	/* with no atomic order. */
 	{
 		u64 nr = nr_cpu_ids;
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
@@ -110,12 +115,14 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		u64 now = flow_now();
 		u32 best = 0xffffffffU;
 		u32 best_units = 0xffffffffU;
+		u64 best_min = (u64)~0ULL;
 		if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
 			u32 n = (u32)nr;
 			u32 start = (cursor + 1U) % n;
 			bpf_for(off, 0, 8) {
 				u32 peer;
 				u32 units;
+				u64 pmin;
 				if ((u64)off >= (u64)n)
 					break;
 				peer = (start + off) % n;
@@ -132,9 +139,34 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				    now))
 					continue;
 				units = flow_cpu_units(peer);
-				if (units >= best_units)
+				pmin = flow_cpu_min(peer);
+				/* A clearly slower CPU always wins. */
+				/* A near minimum within 64 units defers */
+				/* to the smallest minimum, so lagging */
+				/* CPUs take work first. */
+				if (best != 0xffffffffU) {
+					if (units + 64U < best_units) {
+						best_units = units;
+						best_min = pmin;
+						best = peer;
+						continue;
+					}
+					if (units > best_units + 64U)
+						continue;
+					if (!flow_time_before(pmin, best_min) &&
+					    pmin != best_min)
+						continue;
+					if (pmin == best_min &&
+					    peer >= best)
+						continue;
+					best_units = units < best_units ?
+					    units : best_units;
+					best_min = pmin;
+					best = peer;
 					continue;
+				}
 				best_units = units;
+				best_min = pmin;
 				best = peer;
 			}
 			if (wst && best != 0xffffffffU)

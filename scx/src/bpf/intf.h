@@ -192,11 +192,13 @@ struct flow_topo {
 struct flow_cpu_cap {
 	u32 units;
 };
-/* Flat period hint at 8B with one micros row per id. */
-/* Hint holds the period in micros with zero for no hint. The flat */
-/* view tunes the period only, and no group or pool shapes order. */
+/* Flat period plus weight hint at 8B with one row per id. */
+/* Period holds the period in micros with zero for no hint, and weight */
+/* holds the scheduling share with 128 for neutral. The flat view tunes */
+/* the period plus the weight only, and no group or pool shapes order. */
 struct flow_hint {
-	u64 period_us;
+	u32 period_us;
+	u32 weight;
 };
 /* Scheduler counters with 13 fields. Homeless work counts in the */
 /* machine moves, so every tier move has a live counter. Rejects stay */
