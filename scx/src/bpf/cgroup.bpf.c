@@ -57,14 +57,17 @@ s32 BPF_STRUCT_OPS(flow_cgroup_prep_move, struct task_struct *p,
 /* Commit one flat move with release plus deadline carry. */
 /* The release plus the period plus the deadline stay, so order */
 /* survives the move. The hint stays per id with no carry, so the */
-/* next enqueue reads the new hint with no id read here. */
+/* next enqueue reads the new hint. The cached id clears here, so the */
+/* next hint read takes the new hierarchy with no stale use. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	struct cgroup *from, struct cgroup *to)
 {
 	(void)from;
-	(void)p;
+	if (!p)
+		return;
 	if (!to)
 		return;
+	flow_cgrp_cache_invalidate((u32)p->pid);
 }
 /* Cancel one flat move with no state change. */
 /* Preparation holds no state, so cancel stays empty. */

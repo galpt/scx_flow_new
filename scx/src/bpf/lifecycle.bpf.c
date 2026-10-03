@@ -147,7 +147,9 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	/* Fresh tasks hold no release, no period, no deadline, no */
 	/* predictor, no stamps, no hint, and no misses. The first */
 	/* enqueue anchors at now with one deadline from the hint period */
-	/* with no predictor use. */
+	/* with no predictor use. The cached hierarchy id clears too, so */
+	/* a reused pid never reads a stale hierarchy. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx->release = 0;
 	tctx->period = 0;
 	tctx->deadline = 0;
@@ -178,7 +180,10 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 	(void)args;
-	/* Exiting tasks stay exempt from the gate with no count. */
+	/* Exiting tasks stay exempt from the gate with no count. The */
+	/* cached hierarchy id clears too, so a later pid reuse never */
+	/* reads a stale hierarchy. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */

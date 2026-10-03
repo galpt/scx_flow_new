@@ -28,20 +28,45 @@ static __always_inline u64 flow_cgrp_id(
 		return 1;
 	return id;
 }
+/* Clear one cached hierarchy id for a pid with no fail. */
+/* Runs on migrate plus enable plus task exit, so a reused pid never */
+/* reads a stale id. A zero pid never caches, so it needs no clear. */
+static __always_inline void flow_cgrp_cache_invalidate(u32 pid)
+{
+	if (!pid)
+		return;
+	bpf_map_delete_elem(&cgrp_cache_stor, &pid);
+}
 /* Hint of one task from its hierarchy with paired release. */
-/* Reads the flat row for the task id only with no ancestor walk, so */
-/* the hot path pays one lookup. A null hierarchy means the root, so */
-/* the default period applies with no hint use. */
+/* Reads the cached id first with one hash lookup and no acquire, so */
+/* the hot path pays no hierarchy cost on hit. A miss takes the */
+/* acquire path once and fills the cache best effort, so later joins */
+/* hit with no walk. The flat row still reads fresh each time, so a */
+/* weight change shows at once with no cache clear. A null hierarchy */
+/* means the root, so the default period applies with no hint use. */
 static __always_inline u32 flow_task_hint(
 	struct task_struct *p)
 {
-	struct cgroup *cgrp = flow_task_cgrp(p);
+	u32 pid = (u32)p->pid;
+	u64 *cached;
 	u64 id;
 	u32 hint;
-	if (!cgrp)
-		return 0;
-	id = flow_cgrp_id(cgrp);
-	flow_cgrp_put(cgrp);
-	hint = flow_hint_us(id);
-	return hint;
+	if (pid) {
+		cached = bpf_map_lookup_elem(&cgrp_cache_stor,
+		    &pid);
+		if (cached && *cached)
+			return flow_hint_us(*cached);
+	}
+	{
+		struct cgroup *cgrp = flow_task_cgrp(p);
+		if (!cgrp)
+			return 0;
+		id = flow_cgrp_id(cgrp);
+		flow_cgrp_put(cgrp);
+		if (pid)
+			bpf_map_update_elem(&cgrp_cache_stor,
+			    &pid, &id, BPF_ANY);
+		hint = flow_hint_us(id);
+		return hint;
+	}
 }

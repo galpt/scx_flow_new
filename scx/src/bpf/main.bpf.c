@@ -57,6 +57,17 @@ struct {
 	__type(key, u64);
 	__type(value, struct flow_hint);
 } hint_stor SEC(".maps");
+/* Task to hierarchy cache with pid key plus id value. Holds the last */
+/* seen hierarchy id per task with a bound at 1024, so the hot enqueue */
+/* pays one hash lookup with no acquire on hit. Full tables fail closed */
+/* to the acquire path with no eviction. Entries clear on migrate plus */
+/* enable plus task exit, so a reused pid never reads a stale id. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, u32);
+	__type(value, u64);
+} cgrp_cache_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
