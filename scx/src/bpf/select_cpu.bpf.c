@@ -76,12 +76,17 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* The deadline shapes the sufficient check below. */
 	/* A missing state means no order yet, so every live CPU meets. */
 	/* The read waits until the idle paths miss, so idle hits pay no */
-	/* state cost. */
+	/* state cost. A zero deadline meets everywhere with no drain poll, */
+	/* so the previous CPU wins at once with no 8 peer scan. */
 	tctx = flow_lookup(p);
 	if (tctx)
 		deadline = READ_ONCE(tctx->deadline);
+	if (deadline == 0 && flow_cpu_ok(p, prev_cpu))
+		return prev_cpu;
 	/* The previous CPU wins when it can drain before the deadline. */
-	/* Warmth stays free, and a miss falls to the shared home. */
+	/* Warmth stays free, and a miss falls to the shared home. The 8 */
+	/* peer scan stays out when the previous CPU already meets, so */
+	/* requeues keep warmth with no extra walk. */
 	if (flow_cpu_ok(p, prev_cpu)) {
 		u64 now = flow_now();
 		if (flow_cpu_meets((u32)prev_cpu, deadline, now))

@@ -46,7 +46,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u32 hint;
 	u64 avg = 0;
 	u64 dev = 0;
-	(void)enq_flags;
+	bool is_reenq = false;
+	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
+	/* the occupant preempt lookup, so slice rotation stays cheap. The */
+	/* cached hint in the task state carries the period, and the owner */
+	/* paces at slice expiry with no extra kick. */
+	if (enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST))
+		is_reenq = true;
 	/* Exiting tasks run at once on the task CPU with no queue wait. */
 	/* The gate never runs here, so exiting work stays exempt. */
 	if (p->flags & PF_EXITING) {
@@ -121,8 +127,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* while the predictor shapes only the deadline once history */
 	/* exists. A miss on the last release counts before the new */
 	/* release, so the miss count tracks wall completion past release */
-	/* plus deadline. */
-	hint = flow_task_hint(p);
+	/* plus deadline. Requeues reuse the cached hint with no cgroup */
+	/* acquire, so slice rotation pays no hierarchy cost. The cache */
+	/* clears on migrate plus exit elsewhere, so reuse stays correct. */
+	if (is_reenq)
+		hint = tctx->hint_us;
+	else
+		hint = flow_task_hint(p);
 	avg = READ_ONCE(tctx->avg_ns);
 	dev = READ_ONCE(tctx->dev_ns);
 	if (avg == 0)
@@ -150,6 +161,22 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while overflow still parks misses plus pins. */
 	__sync_fetch_and_add(&flow_stats.admits, 1);
+	/* Idle direct bypass with no tier queue. An idle target takes the */
+	/* task straight to its local queue with one idle kick, so wakeups */
+	/* skip the tier plus dispatch hop. The deadline plus admit already */
+	/* hold, so order plus counters stay correct with no extra wait. */
+	{
+		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
+		if (dst && READ_ONCE(dst->running_pid) == 0) {
+			scx_bpf_dsq_insert(p,
+			    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
+			    (u64)FLOW_QUANTUM_NS, enq_flags);
+			scx_bpf_test_and_clear_cpu_idle(cpu);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			return;
+		}
+	}
 	/* Direct join when the target drains before the deadline. */
 	/* Else the shared home takes the task, node first then machine, */
 	/* so no task waits for a busy CPU while shared room stays open. */
@@ -167,7 +194,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The idle flag clears first so the kick sticks. The pid read */
 	/* uses a relaxed load to match the running stores. The single */
 	/* direct block holds both the idle plus the preempt kick, so no */
-	/* fourth point beyond the three can storm. */
+	/* fourth point beyond the three can storm. Requeues skip the */
+	/* occupant lookup with no task_from_pid cost, so slice rotation */
+	/* paces at expiry with no extra kick. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
@@ -186,6 +215,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_fetch_and_add(&flow_stats.kicks, 1);
 			return;
 		}
+		/* Requeues pace at slice expiry with no occupant preempt, */
+		/* so the task_from_pid plus cgroup plus 8 peer cost stays */
+		/* out of the hot rotation path. */
+		if (is_reenq)
+			return;
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */
 		/* missing occupant fails closed with no kick and no count. */
