@@ -28,7 +28,7 @@ const DEF_BATCH: u32 = 32;
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos. Always 2ms with no knob.
+    /// Fixed slice in nanos. Always 1ms with no knob.
     pub quantum_ns: u64,
     /// Dispatch batch for the ops table. Always 32 with no knob.
     pub dispatch_batch: u32,
@@ -47,7 +47,7 @@ impl Default for Config {
 impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
-    /// The slice stays fixed at 2ms with base weight 128 in range
+    /// The slice stays fixed at 1ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
     /// The batch stays fixed at 32 with flood 8 past 128 plus tier
     /// probes 4 plus a step cap of 32 visited entries. Admission stays
@@ -165,7 +165,7 @@ mod tests {
     fn rejects_bad_quantum() {
         let a = ConfigBuilder::default().quantum_ns(1).build();
         assert!(a.is_err());
-        let b = ConfigBuilder::default().quantum_ns(1_000_000).build();
+        let b = ConfigBuilder::default().quantum_ns(2_000_000).build();
         assert!(b.is_err());
     }
 
@@ -183,7 +183,7 @@ mod tests {
     /// Summary holds the fixed slice with no knob.
     fn describe_is_stable() {
         let s = Config::default().describe();
-        assert!(s.contains("quantum=2000us"));
+        assert!(s.contains("quantum=1000us"));
         assert!(s.contains("batch=32"));
     }
 
@@ -245,8 +245,8 @@ mod tests {
     #[test]
     /// Admission stays hint based with the predictor for deadlines only.
     fn admission_is_hint_based() {
-        assert_eq!(crate::flow::admit_share(0), 125);
-        assert_eq!(crate::flow::admit_share(8000), 250);
-        assert_eq!(crate::flow::slice_permillle(2_500_000), 800);
+        assert_eq!(crate::flow::admit_share(0), 62);
+        assert_eq!(crate::flow::admit_share(8000), 125);
+        assert_eq!(crate::flow::slice_permillle(2_500_000), 400);
     }
 }

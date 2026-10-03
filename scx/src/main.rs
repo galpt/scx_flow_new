@@ -340,7 +340,7 @@ mod tests {
             crate::flow::slice::QUANTUM_NS,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(crate::flow::slice::QUANTUM_NS, 2_000_000);
+        assert_eq!(crate::flow::slice::QUANTUM_NS, 1_000_000);
         assert_eq!(crate::flow::slice::WEIGHT_BASE, 128);
         assert_eq!(crate::flow::slice::WEIGHT_MIN, 1);
         assert_eq!(crate::flow::slice::WEIGHT_MAX, 16_384);

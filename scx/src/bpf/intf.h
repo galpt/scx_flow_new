@@ -48,12 +48,12 @@ typedef int pid_t;
 #ifndef READ_ONCE
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
 #endif
-/* Fixed slice of 2ms with no knob. Every insert uses this slice. */
-/* Two ms covers two 1ms wakeups, so one slice always spans the */
-/* cheapest wakeup granularity with margin for one late wakeup. */
+/* Fixed slice of 1ms with no knob. Every insert uses this slice. */
+/* One ms matches the cheapest wakeup granularity, so one slice */
+/* always spans one wakeup with no extra hold. */
 enum flow_consts {
-	FLOW_QUANTUM_NS = 2000000ULL,
-	/* Default period of 16ms with no knob. Holds eight slices, */
+	FLOW_QUANTUM_NS = 1000000ULL,
+	/* Default period of 16ms with no knob. Holds sixteen slices, */
 	/* so a fully used task still leaves room for one park plus */
 	/* one retry inside the period. */
 	FLOW_PERIOD_NS = 16000000ULL,
@@ -529,8 +529,8 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 }
 /* Per mille share of one slice in one period with saturation. */
 /* A zero period means no bound, so the share stays zero. The math */
-/* scales slice times 1000 over period, so a 2ms slice in a 16ms */
-/* period takes 125 per mille. */
+/* scales slice times 1000 over period, so a 1ms slice in a 16ms */
+/* period takes 62 per mille. */
 static __always_inline u64 flow_slice_permillle(u64 period)
 {
 	if (!period)

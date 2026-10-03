@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow runs the earliest deadline task first. It keeps deadline order in kernel priority queues with a burst predictor from recent runs. The core admits load under a bound with a fixed `2ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow runs the earliest deadline task first. It keeps deadline order in kernel priority queues with a burst predictor from recent runs. The core admits load under a bound with a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
@@ -15,7 +15,7 @@ Arrivals pass a gate. Tasks earn deadlines from the predictor else the hint peri
 ## Typical Use Cases
 
 - Latency sensitive apps. Tasks with the earliest deadline run first, so short arrivals never wait behind long work and stay responsive under load.
-- Desktop use. A `2ms` slice keeps interaction smooth while background work continues, so typing stays fluid with no extra tuning.
+- Desktop use. A `1ms` slice keeps interaction smooth while background work continues, so typing stays fluid with no extra tuning.
 - Mixed batch work. Admission keeps overload feasible, so heavy jobs still finish while urgent tasks move ahead in deadline order.
 
 ## More details

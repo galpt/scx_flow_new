@@ -10,7 +10,7 @@
 //! Admission stays hint based always while the predictor shapes only
 //! the deadline, so steady work keeps a small share.
 
-/// Default period in nanos at 16ms. Holds eight slices.
+/// Default period in nanos at 16ms. Holds sixteen slices.
 pub const PERIOD_NS: u64 = 16_000_000;
 /// Admission bound in per mille at 950. Holds use under ninety five percent.
 pub const ADMIT_PERMILLE: u64 = 950;
@@ -42,8 +42,8 @@ pub fn deadline_at(release: u64, period: u64) -> u64 {
 }
 
 /// Per mille share of one slice in one period with saturation.
-/// A zero period means no bound, so the share stays zero. A 2ms slice
-/// in a 16ms period takes 125 per mille.
+/// A zero period means no bound, so the share stays zero. A 1ms slice
+/// in a 16ms period takes 62 per mille.
 #[cfg(test)]
 pub fn slice_permillle(period: u64) -> u64 {
     if period == 0 {
@@ -186,24 +186,24 @@ mod tests {
 
     #[test]
     fn admission_holds_bound() {
-        assert_eq!(slice_permillle(16_000_000), 125);
+        assert_eq!(slice_permillle(16_000_000), 62);
         assert_eq!(slice_permillle(0), 0);
-        assert!(admit_ok(825, 125));
-        assert!(!admit_ok(826, 125));
-        assert!(!admit_ok(u64::MAX, 125));
+        assert!(admit_ok(888, 62));
+        assert!(!admit_ok(889, 62));
+        assert!(!admit_ok(u64::MAX, 62));
         assert!(!admit_ok(u64::MAX - 10, 20));
     }
 
     #[test]
     fn admission_stays_hint_based() {
-        assert_eq!(admit_share(0), 125);
-        assert_eq!(admit_share(8000), 250);
-        assert_eq!(admit_share(4000), 500);
+        assert_eq!(admit_share(0), 62);
+        assert_eq!(admit_share(8000), 125);
+        assert_eq!(admit_share(4000), 250);
         // A short predictor period must not inflate the share: a 2.5ms
-        // predicted window would take 800 per mille, while the hint
+        // predicted window would take 400 per mille, while the hint
         // share stays small for the same task.
-        assert_eq!(slice_permillle(2_500_000), 800);
-        assert_eq!(admit_share(0), 125);
+        assert_eq!(slice_permillle(2_500_000), 400);
+        assert_eq!(admit_share(0), 62);
     }
 
     #[test]

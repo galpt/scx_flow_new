@@ -220,13 +220,13 @@ mod tests {
                     id: 0,
                     smt: false,
                     running_pid: 7,
-                    slice_ns: 2_000_000,
+                    slice_ns: 1_000_000,
                 },
                 crate::stats::PerCpuMetrics {
                     id: 1,
                     smt: true,
                     running_pid: 0,
-                    slice_ns: 2_000_000,
+                    slice_ns: 1_000_000,
                 },
             ],
             version: "4.7.0".to_string(),
@@ -278,7 +278,7 @@ mod tests {
         assert!(!back.per_cpu[0].smt);
         assert!(back.per_cpu[1].smt);
         assert_eq!(back.per_cpu[0].running_pid, 7);
-        assert_eq!(back.per_cpu[0].slice_ns, 2_000_000);
+        assert_eq!(back.per_cpu[0].slice_ns, 1_000_000);
         assert_eq!(back.per_cpu[1].id, 1);
         assert_eq!(back.version, "4.7.0");
         assert_eq!(back.topology, "cpus=4 seeded");
