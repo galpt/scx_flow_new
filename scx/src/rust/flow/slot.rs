@@ -4,13 +4,12 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! One local queue per CPU plus one shared queue per node plus one
-//! machine queue plus one overflow tail. Local plus node plus machine
-//! use the kernel priority queue with deadline order and overflow stays
-//! FIFO, so no queue mixes FIFO plus priority tasks. Homeless tasks park
-//! in the overflow tail with all other parks, so no queue id names the
-//! kernel global queue. Dispatch drains local plus node plus machine in
-//! priority order plus overflow in queue order with moves uncapped to
-//! remaining slots and visits capped at 64 per pass.
+//! machine queue with no overflow tail. Every queue uses the kernel
+//! priority queue with deadline order, so no queue mixes orders.
+//! Homeless tasks wait in the machine queue with all other shared
+//! work, so no queue id names the kernel global queue. Dispatch
+//! drains local plus node plus machine in priority order with moves
+//! uncapped to remaining slots and visits capped at 64 per pass.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -21,12 +20,9 @@ pub const NODE_BASE: u64 = 0x5900;
 /// Id of the machine queue shared by every CPU.
 #[cfg(test)]
 pub const SLOT_MACHINE: u64 = 0x5A00;
-/// Id of the overflow tail shared by every CPU.
+/// Max DSQs at 512 CPUs. Holds 512 local plus 8 node plus machine.
 #[cfg(test)]
-pub const SLOT_OVERFLOW: u64 = 0x5A01;
-/// Max DSQs at 512 CPUs. Holds 512 local plus 8 node plus machine plus overflow.
-#[cfg(test)]
-pub const SLOT_MAX_DSQS: u64 = 522;
+pub const SLOT_MAX_DSQS: u64 = 521;
 /// Max nodes bound shared with the BPF header.
 #[cfg(test)]
 pub const MAX_NODES: u64 = 8;
@@ -52,18 +48,10 @@ pub fn machine_dsq() -> u64 {
     SLOT_MACHINE
 }
 
-/// Id of the overflow tail shared by every CPU.
-/// Missed parks plus gate parks plus pinned tasks plus homeless
-/// tasks rest here FIFO with one idle kick and mask wins on drain.
-#[cfg(test)]
-pub fn slot_overflow_dsq() -> u64 {
-    SLOT_OVERFLOW
-}
-
 /// True when one id names a live scheduler queue.
-/// Local plus node plus machine plus overflow pass, and all other
-/// ids fail, so a stale id never moves work. The kernel global queue
-/// stays out on purpose with homeless parks in overflow.
+/// Local plus node plus machine pass, and all other ids fail, so a
+/// stale id never moves work. The kernel global queue stays out on
+/// purpose with homeless work in the machine queue.
 #[cfg(test)]
 pub fn dsq_valid(dsq: u64) -> bool {
     if (LOCAL_BASE..LOCAL_BASE + 512).contains(&dsq) {
@@ -75,14 +63,11 @@ pub fn dsq_valid(dsq: u64) -> bool {
     if dsq == SLOT_MACHINE {
         return true;
     }
-    if dsq == SLOT_OVERFLOW {
-        return true;
-    }
     false
 }
 
-/// Count of DSQs for one host with local plus node plus two.
-/// Holds 512 plus 8 plus 2 on a full host.
+/// Count of DSQs for one host with local plus node plus one.
+/// Holds 512 plus 8 plus 1 on a full host.
 #[cfg(test)]
 pub fn slot_nr_dsqs() -> u64 {
     SLOT_MAX_DSQS
@@ -97,8 +82,7 @@ mod tests {
         assert_eq!(LOCAL_BASE, 0x5100);
         assert_eq!(NODE_BASE, 0x5900);
         assert_eq!(SLOT_MACHINE, 0x5A00);
-        assert_eq!(SLOT_OVERFLOW, 0x5A01);
-        assert_eq!(SLOT_MAX_DSQS, 522);
+        assert_eq!(SLOT_MAX_DSQS, 521);
         assert_eq!(slot_nr_dsqs(), SLOT_MAX_DSQS);
         assert!(dsq_valid(local_dsq(0)));
         assert!(dsq_valid(local_dsq(511)));
@@ -107,8 +91,8 @@ mod tests {
         assert!(dsq_valid(node_dsq(7)));
         assert!(!dsq_valid(node_dsq(8)));
         assert!(dsq_valid(machine_dsq()));
-        assert!(dsq_valid(slot_overflow_dsq()));
         assert!(!dsq_valid(0));
+        assert!(!dsq_valid(0x5A01));
         assert!(!dsq_valid(0x6000));
     }
 }

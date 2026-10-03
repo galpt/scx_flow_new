@@ -10,7 +10,7 @@
  */
 /* True when one task still meets its deadline from the given time. */
 /* A zero deadline means no order yet, so the check passes with no */
-/* miss. A time past the deadline fails, so the caller parks. */
+/* miss. A time past the deadline fails, so the caller rejoins a tier. */
 static __always_inline bool flow_deadline_ok(u64 deadline,
 	u64 now)
 {

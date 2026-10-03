@@ -47,12 +47,10 @@ impl<'a> Scheduler<'a> {
             local_moves: s.local_moves,
             node_moves: s.node_moves,
             machine_moves: s.machine_moves,
-            over_moves: s.over_moves,
             kicks: s.kicks,
             admits: s.admits,
             rejects: s.rejects,
             misses: s.misses,
-            parks: s.parks,
             gate_rejects: s.gate_rejects,
         }
     }

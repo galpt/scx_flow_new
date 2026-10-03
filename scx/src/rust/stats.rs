@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 15 counters, Rust adds display-only uptime for 16.
+/// BPF holds 13 counters, Rust adds display-only uptime for 14.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -55,9 +55,6 @@ pub struct Metrics {
     #[stat(desc = "Moves from the machine tier")]
     #[serde(default)]
     pub machine_moves: u64,
-    #[stat(desc = "Moves from the overflow tail")]
-    #[serde(default)]
-    pub over_moves: u64,
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
@@ -72,9 +69,6 @@ pub struct Metrics {
     #[stat(desc = "Wall completions past release plus deadline")]
     #[serde(default)]
     pub misses: u64,
-    #[stat(desc = "Overflow parks from misses")]
-    #[serde(default)]
-    pub parks: u64,
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
@@ -160,8 +154,8 @@ impl Metrics {
         writeln!(
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
-             local={} node={} machine={} over={} kick={} adm={} rej={} \
-             miss={} park={} gate={}",
+             local={} node={} machine={} kick={} adm={} rej={} \
+             miss={} gate={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -172,12 +166,10 @@ impl Metrics {
             self.local_moves,
             self.node_moves,
             self.machine_moves,
-            self.over_moves,
             self.kicks,
             self.admits,
             self.rejects,
             self.misses,
-            self.parks,
             self.gate_rejects,
         )?;
         Ok(())
@@ -196,12 +188,10 @@ impl Metrics {
             local_moves: self.local_moves.wrapping_sub(rhs.local_moves),
             node_moves: self.node_moves.wrapping_sub(rhs.node_moves),
             machine_moves: self.machine_moves.wrapping_sub(rhs.machine_moves),
-            over_moves: self.over_moves.wrapping_sub(rhs.over_moves),
             kicks: self.kicks.wrapping_sub(rhs.kicks),
             admits: self.admits.wrapping_sub(rhs.admits),
             rejects: self.rejects.wrapping_sub(rhs.rejects),
             misses: self.misses.wrapping_sub(rhs.misses),
-            parks: self.parks.wrapping_sub(rhs.parks),
             gate_rejects: self.gate_rejects.wrapping_sub(rhs.gate_rejects),
         }
     }

@@ -3,23 +3,23 @@
  * Shared constants and helpers for the flow scheduler.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
- * per node plus one shared queue per machine plus one overflow tail.
- * Homeless work parks in the overflow tail with all other parks.
+ * per node plus one shared queue per machine with no overflow tail.
+ * Homeless work waits in the machine queue with all other shared work.
  * Every task carries a release plus a period plus an absolute
  * deadline, and each queue orders by that deadline through the kernel
  * priority queue. Every task joins a queue with no admission bound,
  * so the earliest deadline always runs next. A miss counts when wall
- * and a miss parks the task in overflow with a direct kick and no
- * wait. Placement takes the slowest sufficient CPU among the allowed
- * set that can meet the deadline, so light work never takes a fast CPU
- * that other work needs. Hints from the flat view tune the period
- * only, and no group or pool shapes order. Each stop feeds the burst
- * predictor average plus deviation with shift updates, so later
- * deadlines track recent bursts with no table walk. See select_cpu.bpf.c
- * for placement and enqueue.bpf.c for the deadline choice
- * plus dispatch.bpf.c for the tier plus overflow scans and
- * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
- * charge plus the miss count.
+ * time passes the deadline, and the miss rejoins a tier queue with
+ * a fresh deadline plus a direct kick and no wait. Placement takes
+ * the slowest sufficient CPU among the allowed set that can meet
+ * the deadline, so light work never takes a fast CPU that other work
+ * needs. Hints from the flat view tune the period only, and no group
+ * or pool shapes order. Each stop feeds the burst predictor average
+ * plus deviation with shift updates, so later deadlines track recent
+ * bursts with no table walk. See select_cpu.bpf.c for placement and
+ * enqueue.bpf.c for the deadline choice plus dispatch.bpf.c for the
+ * tier scans and lifecycle.bpf.c for the miss count and timer.bpf.c
+ * for the leftover charge plus the miss count.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -52,7 +52,7 @@ typedef int pid_t;
 enum flow_consts {
 	FLOW_QUANTUM_NS = 1000000ULL,
 	/* Default period of 16ms with no knob. Holds sixteen slices, */
-	/* so a fully used task still leaves room for one park plus */
+	/* so a fully used task still leaves room for one wait plus */
 	/* one retry inside the period. */
 	FLOW_PERIOD_NS = 16000000ULL,
 	/* Predictor bounds with no knob. Holds 1ns to 1s, so a huge */
@@ -79,11 +79,9 @@ enum flow_consts {
 	FLOW_NODE_BASE = 0x5900ULL,
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
-	/* Overflow tail id shared by every CPU. */
-	FLOW_OVERFLOW = 0x5A01ULL,
-	/* Queue count of 522. Holds 512 local plus 8 node plus one */
-	/* machine plus one overflow. */
-	FLOW_MAX_DSQS = 522ULL,
+	/* Queue count of 521. Holds 512 local plus 8 node plus one */
+	/* machine with no overflow. */
+	FLOW_MAX_DSQS = 521ULL,
 	/* Dispatch visit cap of 64 entries per pass with no knob. Caps */
 	/* visited entries per pass regardless of moves, so one pass never */
 	/* holds RCU across the whole queue on mask misses. Moves stay */
@@ -101,24 +99,23 @@ enum flow_consts {
 	FLOW_CPU_PERF_MAX = 1024ULL,
 	/* Preempt leads by 100us with no knob, so near ties never bounce */
 	/* while urgent gaps still preempt at once. The floor stays at */
-	/* 100us with one kick per park. */
+	/* 100us with one kick per wait. */
 	FLOW_PREEMPT_MARGIN_NS = 100000ULL,
 	/* Preempt waits out a 100us tail with no knob, so a nearly done */
 	/* owner finishes instead of taking a kick. The floor stays at */
-	/* 100us with one kick per park. */
+	/* 100us with one kick per wait. */
 	FLOW_PREEMPT_TAIL_NS = 100000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
-/* machine drain in deadline order through the kernel priority queue, */
-/* then overflow drains in queue order. Every pass follows this order */
-/* with no load based swap, so the verifier sees one fixed path. Dead */
-/* enum with no code use, kept doc only since dispatch calls the tier */
-/* moves directly with no index switch. */
+/* machine drain in deadline order through the kernel priority queue */
+/* with no overflow tail. Every pass follows this order with no load */
+/* based swap, so the verifier sees one fixed path. Dead enum with no */
+/* code use, kept doc only since dispatch calls the tier moves */
+/* directly with no index switch. */
 enum flow_tier {
 	FLOW_TIER_LOCAL = 0,
 	FLOW_TIER_NODE = 1,
 	FLOW_TIER_MACHINE = 2,
-	FLOW_TIER_OVERFLOW = 3,
 };
 /* Per task state at 64B with release plus period plus deadline plus */
 /* predictor plus stamps plus hint plus miss count. */
@@ -194,8 +191,8 @@ struct flow_cpu_cap {
 struct flow_hint {
 	u64 period_us;
 };
-/* Scheduler counters with 15 fields. Homeless parks count in the */
-/* overflow moves, so every tier move has a live counter. Rejects stay */
+/* Scheduler counters with 13 fields. Homeless work counts in the */
+/* machine moves, so every tier move has a live counter. Rejects stay */
 /* dead at zero for wire compat only with no writer, while real rejects */
 /* count in gate_rejects. Readers must use gate_rejects for drops. */
 struct flow_sched_stats {
@@ -207,12 +204,10 @@ struct flow_sched_stats {
 	u64 local_moves;
 	u64 node_moves;
 	u64 machine_moves;
-	u64 over_moves;
 	u64 kicks;
 	u64 admits;
 	u64 rejects;
 	u64 misses;
-	u64 parks;
 	u64 gate_rejects;
 };
 /* Task state holds release plus period plus deadline plus predictor */
@@ -225,13 +220,13 @@ _Static_assert(sizeof(struct flow_cpu_state) == 8,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 15 counters in 120 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 120,
-	"stats stay at 120B");
-/* Queue count holds local plus node plus machine plus overflow. */
+/* Stats hold 13 counters in 104 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 104,
+	"stats stay at 104B");
+/* Queue count holds local plus node plus machine with no overflow. */
 _Static_assert(FLOW_MAX_DSQS ==
-	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
-	"dsq count stays local plus node plus two");
+	FLOW_MAX_CPUS + FLOW_MAX_NODES + 1,
+	"dsq count stays local plus node plus one");
 /* True when the first time is before the second with wrap safety. */
 /* The signed diff keeps order across the u64 wrap with no branch. */
 static __always_inline bool flow_time_before(u64 a,
@@ -386,6 +381,14 @@ static __always_inline u64 flow_pred_deadline(u64 release,
 		period = flow_pred_period(avg, dev);
 	return flow_deadline_at(release, period);
 }
+/* Fallback deadline from now plus the hint period with saturation. */
+/* Tasks with no state or no history join a tier queue at once with */
+/* this deadline, so no path needs a tail queue with no wait. */
+static __always_inline u64 flow_fallback_deadline(u64 now,
+	u32 hint_us)
+{
+	return flow_deadline_at(now, flow_task_period(hint_us));
+}
 /* True when one task missed its deadline at the given time. */
 /* A zero deadline means no order yet, so the check skips. A zero */
 /* release means no release yet, so the check skips too. A time that */
@@ -422,15 +425,9 @@ static __always_inline u64 flow_machine_dsq(void)
 {
 	return (u64)FLOW_MACHINE;
 }
-/* Id of the overflow tail shared by every CPU. */
-/* Missed parks plus pinned tasks rest here with mask wins on drain. */
-static __always_inline u64 flow_overflow_dsq(void)
-{
-	return (u64)FLOW_OVERFLOW;
-}
 /* True when one id names a live scheduler queue. */
-/* Local plus node plus machine plus overflow pass, and all other */
-/* ids fail, so a stale id never moves work. */
+/* Local plus node plus machine pass, and all other ids fail, so a */
+/* stale id never moves work. */
 static __always_inline bool flow_dsq_valid(u64 dsq)
 {
 	if (dsq >= (u64)FLOW_LOCAL_BASE &&
@@ -440,8 +437,6 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 	    dsq < (u64)FLOW_NODE_BASE + (u64)FLOW_MAX_NODES)
 		return true;
 	if (dsq == (u64)FLOW_MACHINE)
-		return true;
-	if (dsq == (u64)FLOW_OVERFLOW)
 		return true;
 	return false;
 }

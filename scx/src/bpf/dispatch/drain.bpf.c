@@ -9,13 +9,12 @@
  * deadline moves with mask wins on drain and no BPF sort. A head that
  * cannot run on the dealing CPU skips to the next entry through the
  * shared move, so one foreign task never stalls its tier for that pass.
- * The overflow scan skips the same way through the shared move, so
- * live work still moves there. Visits share the per pass cap at sixty
- * four with leftover work resuming next pass, so one pass never holds
- * RCU across the whole queue while staying work conserving across
- * passes. Homeless parks rest in overflow with all other parks FIFO,
- * so no trip touches the kernel global queue. Fresh parks join the
- * same order at once with no hold. Runs under the caller with no lock.
+ * Visits share the per pass cap at sixty four with leftover work
+ * resuming next pass, so one pass never holds RCU across the whole
+ * queue while staying work conserving across passes. Homeless work
+ * waits in the machine queue with all other shared work, so no trip
+ * touches the kernel global queue. Fresh joins enter tier order at
+ * once with no hold. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -27,11 +26,11 @@
 /* out only with no correctness use, so a join racing the read still meets */
 /* the next pass with no loss. The shared move gates affinity with no */
 /* kernel error, so an empty queue returns zero with no scan and no miss */
-/* count. An unmatching head skips to the next entry through the same */
-/* shared gate the overflow scan uses, so one foreign task never stalls */
-/* its tier for that pass. Visits cap per pass with resume next pass, so */
-/* the loop never holds RCU across the whole queue. Static tier order is */
-/* local plus node plus machine plus overflow with no reorder. */
+/* count. An unmatching head skips to the next entry through the */
+/* shared gate, so one foreign task never stalls its tier for that */
+/* pass. Visits cap per pass with resume next pass, so the loop never */
+/* holds RCU across the whole queue. Static tier order is local plus */
+/* node plus machine with no reorder. */
 static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 {
 	struct task_struct *p;

@@ -2,8 +2,8 @@
 /*
  * Charge and miss helpers for the core.
  *
- * Holds the leftover charge plus the miss count. Parks wake by direct
- * kick on insert with no timer wait, so no timer lives here. Each
+ * Holds the leftover charge plus the miss count. Tier waits wake by
+ * direct kick on insert with no timer wait, so no timer lives here. Each
  * helper stays noinline with scalar inputs, so the verifier stays
  * small.
  *
@@ -52,9 +52,9 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
 	}
 }
-/* Count one deadline miss with saturation plus one park. */
-/* Misses clamp, so a huge miss count never wraps to zero. Parks */
-/* count the same hits, so the wire shows misses plus parks together. */
+/* Count one deadline miss with saturation and no park. */
+/* Misses clamp, so a huge miss count never wraps to zero. Tier */
+/* rejoins carry the fresh deadline with no extra counter. */
 static __noinline void flow_count_miss(
 	struct flow_task_ctx *tctx)
 {
@@ -65,5 +65,4 @@ static __noinline void flow_count_miss(
 	if (m != 0xffffffffU)
 		__sync_fetch_and_add(&tctx->misses, 1);
 	__sync_fetch_and_add(&flow_stats.misses, 1);
-	__sync_fetch_and_add(&flow_stats.parks, 1);
 }

@@ -207,12 +207,10 @@ mod tests {
                 local_moves: 10,
                 node_moves: 4,
                 machine_moves: 2,
-                over_moves: 1,
                 kicks: 5,
                 admits: 3,
                 rejects: 1,
                 misses: 2,
-                parks: 2,
                 gate_rejects: 0,
             },
             per_cpu: vec![
@@ -237,11 +235,11 @@ mod tests {
         assert!(txt.contains("local_moves"));
         assert!(txt.contains("node_moves"));
         assert!(txt.contains("machine_moves"));
-        assert!(txt.contains("over_moves"));
+        assert!(!txt.contains("over_moves"));
         assert!(txt.contains("admits"));
         assert!(txt.contains("rejects"));
         assert!(txt.contains("misses"));
-        assert!(txt.contains("parks"));
+        assert!(!txt.contains("\"parks\""));
         assert!(txt.contains("gate_rejects"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
@@ -268,11 +266,9 @@ mod tests {
         assert_eq!(back.stats.local_moves, 10);
         assert_eq!(back.stats.node_moves, 4);
         assert_eq!(back.stats.machine_moves, 2);
-        assert_eq!(back.stats.over_moves, 1);
         assert_eq!(back.stats.admits, 3);
         assert_eq!(back.stats.rejects, 1);
         assert_eq!(back.stats.misses, 2);
-        assert_eq!(back.stats.parks, 2);
         assert_eq!(back.stats.gate_rejects, 0);
         assert_eq!(back.per_cpu.len(), 2);
         assert!(!back.per_cpu[0].smt);

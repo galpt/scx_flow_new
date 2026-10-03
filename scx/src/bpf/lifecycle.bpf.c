@@ -7,7 +7,7 @@
  * the raw segment to total runtime, then feeds the burst
  * predictor average plus deviation from the same delta with shifts,
  * then counts one requeue per runnable stop else one completion. A wall
- * completion past release plus deadline counts one miss with one park
+ * completion past release plus deadline counts one miss with no wait
  * and no kick, since the task already left the CPU. Enable clears the
  * release plus the period plus the deadline plus the predictor plus
  * the hint plus the miss count, and disable plus exit charge a
@@ -114,8 +114,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
-	/* A wall completion past the deadline counts one miss with one */
-	/* park and no kick, since the task already left the CPU. */
+	/* A wall completion past the deadline counts one miss with no */
+	/* wait and no kick, since the task already left the CPU. */
 	if (!runnable && tctx->release &&
 	    !flow_deadline_ok(tctx->deadline, now)) {
 		flow_count_miss(tctx);

@@ -230,19 +230,17 @@ impl<'a> Scheduler<'a> {
         }
         let m = self.get_metrics();
         info!(
-            "exit ins={} req={} done={} local={} node={} machine={} over={} kick={} adm={} rej={} miss={} park={} gate={} runtime={} oncpu={}",
+            "exit ins={} req={} done={} local={} node={} machine={} kick={} adm={} rej={} miss={} gate={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
             m.local_moves,
             m.node_moves,
             m.machine_moves,
-            m.over_moves,
             m.kicks,
             m.admits,
             m.rejects,
             m.misses,
-            m.parks,
             m.gate_rejects,
             m.total_runtime,
             m.on_cpu,
@@ -340,11 +338,6 @@ mod tests {
     #[test]
     fn slot_matches_header() {
         assert_eq!(
-            crate::flow::slot::SLOT_OVERFLOW,
-            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
-        );
-        assert_eq!(crate::flow::slot::SLOT_OVERFLOW, 0x5A01);
-        assert_eq!(
             crate::flow::slot::SLOT_MACHINE,
             crate::bpf_intf::flow_consts_FLOW_MACHINE as u64
         );
@@ -352,7 +345,7 @@ mod tests {
             crate::flow::slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 522);
+        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 521);
     }
 
     #[test]
@@ -380,10 +373,10 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_120() {
+    fn sched_stats_size_is_104() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            120
+            104
         );
     }
 

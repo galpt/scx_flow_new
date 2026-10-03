@@ -3,9 +3,9 @@
  * Flow scheduler BPF core.
  *
  * Maps hold task releases, CPU pid plus cursor rows, the topology
- * view, the capacity view, and the flat hint rows. Init creates one local queue per CPU plus one shared queue
- * per node plus one machine queue plus one overflow tail, and it
- * fails loudly when an id reaches the local range. Ops split across
+ * view, the capacity view, and the flat hint rows. Init creates one
+ * local queue per CPU plus one shared queue per node plus one machine
+ * queue with no overflow tail, and it fails loudly when an id reaches the local range. Ops split across
  * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
  * lifecycle, and flat hierarchy files. Shared helpers split across
  * main/task, deadline, hier, cpu, and timer files with maps plus
@@ -156,7 +156,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			cp->units = (u32)FLOW_CAP_BASE;
 	}
 	/* One local queue per CPU plus one shared queue per node plus */
-	/* one machine queue plus one overflow tail. Local ids cover */
+	/* one machine queue with no overflow tail. Local ids cover */
 	/* 0x5100 plus id and node ids cover 0x5900 plus id. The node */
 	/* loop covers the derived count with a cap at eight. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
@@ -204,15 +204,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -EINVAL;
 	}
 	ret = scx_bpf_create_dsq(flow_machine_dsq(), -1);
-	if (ret < 0 && ret != -EEXIST) {
-		scx_bpf_error("dsq create failed");
-		return ret;
-	}
-	if (!flow_dsq_valid(flow_overflow_dsq())) {
-		scx_bpf_error("dsq id over bound");
-		return -EINVAL;
-	}
-	ret = scx_bpf_create_dsq(flow_overflow_dsq(), -1);
 	if (ret < 0 && ret != -EEXIST) {
 		scx_bpf_error("dsq create failed");
 		return ret;
