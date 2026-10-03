@@ -3,9 +3,8 @@
  * Enqueue op.
  *
  * Every release earns one absolute deadline from the burst predictor
- * else the hint period, and admission holds declared use under ninety
- * five percent before the task joins a queue. Admitted tasks join
- * direct when the target can drain before the deadline, else they join
+ * else the hint period, and every task joins a queue with no admission
+ * bound. Admitted tasks join direct when the target can drain before
  * the shared home, so no task waits for a busy CPU while shared room
  * stays open. Missed tasks park in overflow with a miss count and one
  * idle kick and no wait. Pinned tasks rest in overflow with wait set
@@ -14,9 +13,8 @@
  * arrivals, so a stale CPU plus a moved task fails closed with one
  * counter. The predictor average plus deviation shape later deadlines
  * with shift updates from stopping, so short bursts earn tight
- * deadlines with no table walk. The admitted share pairs one add with
- * one drop through the stored value, so a hint change plus a move
- * never drifts the row. The exiting fast path plus one idle helper
+ * deadlines with no table walk. Every enqueue counts one admit with
+ * no reject, so the counters track joins with no bound. The exiting
  * plus one direct block form the three kick points, so every park
  * meets at most one kick with no storm. A direct preempt needs a
  * 100us margin lead with more than 100us still left on the owner,
@@ -45,7 +43,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 now;
 	u64 period;
 	u64 deadline;
-	u64 share;
 	u32 hint;
 	u64 avg = 0;
 	u64 dev = 0;
@@ -85,22 +82,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* The gate runs before any queue join with fail closed. */
 	/* A stale CPU plus a moved task counts one reject and parks in */
-	/* overflow with one direct kick. A stale stored share drops */
-	/* here too, so a double enqueue never holds two shares. */
+	/* overflow with one direct kick. */
 	if (!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
 	    scx_bpf_task_cpu(p), p, 0)) {
 		flow_gate_reject();
-		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	/* Pinned tasks rest in overflow with wait set and one idle kick. */
-	/* The share walk never runs here, so pinned parks stay cheap. */
-	/* A stale stored share drops here too with no new share. */
 	if (pinned) {
-		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -108,10 +100,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	cpu = flow_pick_target(p, sel);
 	/* No live CPU parks homeless work in overflow with an idle kick. */
-	/* A stale stored share drops here too with no new share. */
 	if (!flow_cpu_ok(p, cpu)) {
 		flow_gate_reject();
-		flow_admit_drop_stored(tctx);
 		tctx->wait_at = now;
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
@@ -123,11 +113,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A zero average means no history, so the hint period applies */
 	/* with the default when the hint is zero. Later releases add */
 	/* average plus deviation with saturation, so short bursts earn */
-	/* tight deadlines with no table walk. The hint stores for the */
-	/* admission share with no lag, while the predictor shapes only */
-	/* the deadline once history exists. A miss on the last release */
-	/* counts before the new release, so the miss count tracks wall */
-	/* completion past release plus deadline. */
+	/* tight deadlines with no table walk. The hint stores with no lag, */
+	/* while the predictor shapes only the deadline once history */
+	/* exists. A miss on the last release counts before the new */
+	/* release, so the miss count tracks wall completion past release */
+	/* plus deadline. */
 	hint = flow_task_hint(p);
 	avg = READ_ONCE(tctx->avg_ns);
 	dev = READ_ONCE(tctx->dev_ns);
@@ -137,10 +127,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	else
 		period = flow_pred_period(avg, dev);
 	tctx->hint_us = hint;
-	/* A stale stored share drops before the miss check, so a double */
-	/* enqueue without a stop never holds two shares. The normal pass */
-	/* sees zero here with no extra debit. */
-	flow_admit_drop_stored(tctx);
 	if (tctx->release && tctx->deadline &&
 	    flow_missed(tctx->release, tctx->deadline, now)) {
 		flow_count_miss(tctx);
@@ -157,29 +143,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	tctx->deadline = deadline;
 	tctx->wait_at = now;
-	/* Admission holds declared use under the bound per CPU. */
-	/* The share is one slice in the hint period always, so steady */
-	/* work keeps a small share while the predictor shapes only the */
-	/* deadline. A reject parks in overflow with one idle kick and no */
-	/* wait. The added share stores on the task, so the stop drops the */
-	/* stored value with no drift on hint change and no wrong CPU */
-	/* debit on move. The stored share drops before the miss check */
-	/* above, so a double enqueue without a stop never holds two */
-	/* shares. */
-	share = flow_admit_share(hint);
-	if (share && !flow_admit_ok(flow_cpu_admitted((u32)cpu),
-	    share)) {
-		__sync_fetch_and_add(&flow_stats.rejects, 1);
-		flow_over_insert(p);
-		flow_kick_idle_allowed(p, sel);
-		return;
-	}
-	if (share) {
-		flow_admit_add((u32)cpu, share);
-		__sync_lock_test_and_set(&tctx->admit_share, share);
-		__sync_lock_test_and_set(&tctx->admit_cpu,
-		    (u32)cpu);
-	}
+	/* Every join counts one admit with no bound and no reject, so the */
+	/* counters track joins while overflow still parks misses plus pins. */
 	__sync_fetch_and_add(&flow_stats.admits, 1);
 	/* Direct join when the target drains before the deadline. */
 	/* Else the shared home takes the task, node first then machine, */

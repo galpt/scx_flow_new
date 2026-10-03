@@ -9,8 +9,7 @@
 //! FIFO, so no queue mixes FIFO plus priority tasks. Homeless tasks park
 //! in the overflow tail with all other parks, so no queue id names the
 //! kernel global queue. Dispatch drains local plus node plus machine in
-//! priority order plus overflow in queue order up to thirty two with flood
-//! cap past deep backlog plus a step cap on visited entries.
+//! priority order plus overflow in queue order with no move bound.
 
 /// Base id of the per CPU local queues.
 #[cfg(test)]
@@ -30,21 +29,6 @@ pub const SLOT_MAX_DSQS: u64 = 522;
 /// Max nodes bound shared with the BPF header.
 #[cfg(test)]
 pub const MAX_NODES: u64 = 8;
-/// Flood probes at 8. Caps ordered moves past deep backlog.
-#[cfg(test)]
-pub const FLOOD_PROBES: u64 = 8;
-/// Tier probes at 4. Caps visited heads per priority tier with skips.
-#[cfg(test)]
-pub const TIER_PROBES: u64 = 4;
-/// Flood queued at 128. Past this depth ordered caps at eight.
-#[cfg(test)]
-pub const FLOOD_QUEUED: u64 = 128;
-/// Scan steps at 32. Caps visited entries per pass regardless of moves.
-#[cfg(test)]
-pub const SCAN_STEPS: u64 = 32;
-/// Dispatch batch at 32. Caps moves per pass.
-#[cfg(test)]
-pub const DISPATCH_BATCH: u64 = 32;
 
 /// Local queue id of one CPU from base plus id.
 /// One priority queue per CPU keeps deadline order local.
@@ -125,34 +109,5 @@ mod tests {
         assert!(dsq_valid(slot_overflow_dsq()));
         assert!(!dsq_valid(0));
         assert!(!dsq_valid(0x6000));
-    }
-
-    #[test]
-    fn flood_and_batch_match_header() {
-        assert_eq!(FLOOD_PROBES, 8);
-        assert_eq!(TIER_PROBES, 4);
-        assert_eq!(FLOOD_QUEUED, 128);
-        assert_eq!(SCAN_STEPS, 32);
-        assert_eq!(DISPATCH_BATCH, 32);
-        assert_eq!(
-            FLOOD_PROBES,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_PROBES as u64
-        );
-        assert_eq!(
-            TIER_PROBES,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_TIER_PROBES as u64
-        );
-        assert_eq!(
-            FLOOD_QUEUED,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_FLOOD_QUEUED as u64
-        );
-        assert_eq!(
-            SCAN_STEPS,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_SCAN_STEPS as u64
-        );
-        assert_eq!(
-            DISPATCH_BATCH,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH as u64
-        );
     }
 }

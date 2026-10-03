@@ -3,17 +3,15 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the release plus period plus deadline plus admission plus miss
-//! plus predictor models shared by BPF and userspace tests. The BPF
-//! deadline lives in intf.h with the admission rows in
+//! Holds the release plus period plus deadline plus miss plus
+//! predictor models shared by BPF and userspace tests. The BPF
+//! deadline lives in intf.h with the drain checks in
 //! main/deadline.bpf.c, and this file mirrors the math with no map use.
-//! Admission stays hint based always while the predictor shapes only
-//! the deadline, so steady work keeps a small share.
+//! Every task joins a queue with no admission bound, so the predictor
+//! shapes only the deadline.
 
 /// Default period in nanos at 16ms. Holds sixteen slices.
 pub const PERIOD_NS: u64 = 16_000_000;
-/// Admission bound in per mille at 950. Holds use under ninety five percent.
-pub const ADMIT_PERMILLE: u64 = 950;
 /// Base capacity in units at 1024. Every symmetric CPU offers the same units.
 pub const CAP_BASE: u32 = 1024;
 /// Least predictor value in nanos at 1. Clamps short bursts with no wrap.
@@ -39,38 +37,6 @@ pub fn task_period(hint_us: u32) -> u64 {
 #[cfg(test)]
 pub fn deadline_at(release: u64, period: u64) -> u64 {
     release.saturating_add(period)
-}
-
-/// Per mille share of one slice in one period with saturation.
-/// A zero period means no bound, so the share stays zero. A 1ms slice
-/// in a 16ms period takes 62 per mille.
-#[cfg(test)]
-pub fn slice_permillle(period: u64) -> u64 {
-    if period == 0 {
-        return 0;
-    }
-    crate::flow::slice::QUANTUM_NS * 1000 / period
-}
-
-/// Admission share of one task from the hint period always.
-/// A zero hint means no hint, so the default period applies. The
-/// predictor never shapes this share, so steady work keeps a small
-/// share while short bursts earn only tight deadlines.
-#[cfg(test)]
-pub fn admit_share(hint_us: u32) -> u64 {
-    slice_permillle(task_period(hint_us))
-}
-
-/// True when one CPU can admit one more per mille share.
-/// The admitted sum plus the new share must stay under the bound, so
-/// admitted work keeps idle time for late wakeups. A wrapped sum fails
-/// closed, so an overflow never admits.
-#[cfg(test)]
-pub fn admit_ok(admitted: u64, share: u64) -> bool {
-    match admitted.checked_add(share) {
-        None => false,
-        Some(sum) => sum <= ADMIT_PERMILLE,
-    }
 }
 
 /// True when one task missed its deadline at the given time.
@@ -182,28 +148,6 @@ mod tests {
         assert_eq!(task_period(8000), 8_000_000);
         assert_eq!(deadline_at(1_000, 16_000_000), 16_001_000);
         assert_eq!(deadline_at(u64::MAX, 16_000_000), u64::MAX);
-    }
-
-    #[test]
-    fn admission_holds_bound() {
-        assert_eq!(slice_permillle(16_000_000), 62);
-        assert_eq!(slice_permillle(0), 0);
-        assert!(admit_ok(888, 62));
-        assert!(!admit_ok(889, 62));
-        assert!(!admit_ok(u64::MAX, 62));
-        assert!(!admit_ok(u64::MAX - 10, 20));
-    }
-
-    #[test]
-    fn admission_stays_hint_based() {
-        assert_eq!(admit_share(0), 62);
-        assert_eq!(admit_share(8000), 125);
-        assert_eq!(admit_share(4000), 250);
-        // A short predictor period must not inflate the share: a 2.5ms
-        // predicted window would take 400 per mille, while the hint
-        // share stays small for the same task.
-        assert_eq!(slice_permillle(2_500_000), 400);
-        assert_eq!(admit_share(0), 62);
     }
 
     #[test]

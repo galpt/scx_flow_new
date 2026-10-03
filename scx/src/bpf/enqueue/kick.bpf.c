@@ -6,7 +6,7 @@
  * preempt. Each park sends one idle kick at most with no storm, so the
  * cost stays bounded by parks and only an idle CPU wakes. Outlined to
  * keep enqueue small with no duplicate walk. The exiting fast path plus
- * this helper plus the direct admitted block form the three kick points
+ * this helper plus the direct join block form the three kick points
  * with no extra sender, so every park meets at most one kick. Runs
  * under the caller with no lock.
  *

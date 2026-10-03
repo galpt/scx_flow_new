@@ -6,20 +6,17 @@
  * gauge once per claim. Stopping claims the start once and charges
  * the raw segment to total runtime, then feeds the burst
  * predictor average plus deviation from the same delta with shifts,
- * then drops the stored admitted share, then counts one requeue per
- * runnable stop else one completion. A wall completion past release
- * plus deadline counts one miss with one park and no kick, since the
- * task already left the CPU. Enable clears the release plus the period
- * plus the deadline plus the predictor plus the hint
- * plus the miss count plus the stored share, and disable plus exit
- * charge a leftover segment at most once when stopping never ran plus
- * drop a stored share with no leak. A closed gate in stopping plus
- * disable still drops a stored share, so a stale CPU never leaks its
- * debit and enable meets zero by design. Release clears a stale
+ * then counts one requeue per runnable stop else one completion. A wall
+ * completion past release plus deadline counts one miss with one park
+ * and no kick, since the task already left the CPU. Enable clears the
+ * release plus the period plus the deadline plus the predictor plus
+ * the hint plus the miss count, and disable plus exit charge a
+ * leftover segment at most once when stopping never ran. A closed gate
+ * still counts one reject with no charge. Release clears a stale
  * running view with no charge. The gate runs first in every op except
  * the exiting paths, so a stale CPU fails closed with one counter. See
- * intf.h for the shared helpers and enqueue.bpf.c for admission plus
- * the deadline choice.
+ * intf.h for the shared helpers and enqueue.bpf.c for the deadline
+ * choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -81,9 +78,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 start;
 	cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
-		/* A closed gate still drops a stored share, so a stale CPU */
-		/* never leaks its debit. */
-		flow_admit_drop_stored(flow_lookup(p));
 		flow_gate_reject();
 		return;
 	}
@@ -101,9 +95,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* every counted start meets exactly one gauge drop. */
 	start = __sync_lock_test_and_set(&tctx->run_at, 0);
 	if (start == 0) {
-		/* No claimed start still drops a stored share, so a queued */
-		/* task that never ran never leaks its debit. */
-		flow_admit_drop_stored(tctx);
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		return;
 	}
@@ -126,11 +117,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
 		__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
 	}
-	/* The admitted share drops once per stop with floor at zero. */
-	/* The stored value drops, so a hint change between enqueue and */
-	/* stop never drifts the row and a move never debits the wrong */
-	/* CPU. A double drop stays empty with no second debit. */
-	flow_admit_drop_stored(tctx);
+	/* The pid view clears when owned and the gauge drops once per */
+	/* claimed start. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	flow_on_cpu_dec();
 	/* A wall completion past the deadline counts one miss with one */
@@ -157,9 +145,9 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	if (!tctx)
 		return;
 	/* Fresh tasks hold no release, no period, no deadline, no */
-	/* predictor, no stamps, no hint, no misses, and no */
-	/* admit share. The first enqueue anchors at now with one */
-	/* deadline from the hint period with no predictor use. */
+	/* predictor, no stamps, no hint, and no misses. The first */
+	/* enqueue anchors at now with one deadline from the hint period */
+	/* with no predictor use. */
 	tctx->release = 0;
 	tctx->period = 0;
 	tctx->deadline = 0;
@@ -169,27 +157,19 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->run_at = 0;
 	tctx->hint_us = 0;
 	tctx->misses = 0;
-	tctx->admit_share = 0;
-	tctx->admit_cpu = 0;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
 	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
-		/* A closed gate still drops a stored share, so a stale CPU */
-		/* never leaks its debit. */
-		flow_admit_drop_stored(flow_lookup(p));
 		flow_gate_reject();
 		return;
 	}
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */
-	/* A stored share drops here too, so a task that leaves without */
-	/* a stop never leaks its debit. */
 	flow_charge_leftover(p, tctx);
-	flow_admit_drop_stored(tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
@@ -202,9 +182,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The gauge drop follows the claim with no owner gate. */
-	/* A stored share drops here too with no leak on exit. */
 	flow_charge_leftover(p, tctx);
-	flow_admit_drop_stored(tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,

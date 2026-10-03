@@ -7,7 +7,7 @@
  * a full table misses to the default period with no stall. Init runs
  * sleepable with map create, the rest run without sleep with lookup
  * only. Moves carry the release plus the period plus the deadline
- * plus the runtime with no hint carry, so the next enqueue reads the
+ * with no hint carry, so the next enqueue reads the
  * new hint. Weight sets the hint from a fixed table with no share
  * use. See intf.h for the hint helpers and enqueue.bpf.c for the
  * hint use.
@@ -54,10 +54,10 @@ s32 BPF_STRUCT_OPS(flow_cgroup_prep_move, struct task_struct *p,
 	(void)to;
 	return 0;
 }
-/* Commit one flat move with release plus deadline plus runtime carry. */
-/* The release plus the period plus the deadline plus the runtime */
-/* stay, so order survives the move. The hint stays per id with no */
-/* carry, so the next enqueue reads the new hint with no id read here. */
+/* Commit one flat move with release plus deadline carry. */
+/* The release plus the period plus the deadline stay, so order */
+/* survives the move. The hint stays per id with no carry, so the */
+/* next enqueue reads the new hint with no id read here. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	struct cgroup *from, struct cgroup *to)
 {
@@ -77,7 +77,7 @@ void BPF_STRUCT_OPS(flow_cgroup_cancel_move, struct task_struct *p,
 }
 /* Update one flat hint from the share with a fixed table. */
 /* Light shares map to long periods and heavy shares map to short */
-/* periods, so the hint tunes admission with no share use. Creates */
+/* periods, so the hint tunes the deadline period with no share use. Creates */
 /* the row on miss, so later reads see the new hint at once. A full */
 /* table keeps the miss to the default period with no eviction. */
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,

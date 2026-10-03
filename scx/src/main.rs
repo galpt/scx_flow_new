@@ -326,15 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn batch_matches_header() {
-        assert_eq!(
-            crate::config::Config::default().dispatch_batch,
-            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_BATCH
-        );
-        assert_eq!(crate::config::Config::default().dispatch_batch, 32);
-    }
-
-    #[test]
     fn quantum_matches_header() {
         assert_eq!(
             crate::flow::slice::QUANTUM_NS,
@@ -374,8 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn task_size_is_80() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 80);
+    fn task_size_is_64() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 64);
     }
 
     #[test]

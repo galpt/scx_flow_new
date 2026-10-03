@@ -7,9 +7,8 @@
  * Homeless work parks in the overflow tail with all other parks.
  * Every task carries a release plus a period plus an absolute
  * deadline, and each queue orders by that deadline through the kernel
- * priority queue. Admission holds total declared use under ninety five
- * percent of the machine, so admitted work can meet its deadlines.
- * A miss counts when wall completion passes release plus deadline,
+ * priority queue. Every task joins a queue with no admission bound,
+ * so the earliest deadline always runs next. A miss counts when wall
  * and a miss parks the task in overflow with a direct kick and no
  * wait. Placement takes the slowest sufficient CPU among the allowed
  * set that can meet the deadline, so light work never takes a fast CPU
@@ -85,35 +84,7 @@ enum flow_consts {
 	/* Queue count of 522. Holds 512 local plus 8 node plus one */
 	/* machine plus one overflow. */
 	FLOW_MAX_DSQS = 522ULL,
-	/* Dispatch batch of 32 moves per pass with no knob. One pass */
-	/* moves up to thirty two across tiers with one move per priority */
-	/* tier within four probes plus the overflow fill to remaining */
-	/* budget, so the ops table holds every pass with room and no */
-	/* shared math. The pass clamps remaining slots to this bound */
-	/* with no overfill. */
-	FLOW_DISPATCH_MAX_BATCH = 32ULL,
-	/* Tier probe bound of 4 entries per tier with no knob. Each */
-	/* priority tier visits at most four heads with skips, so one */
-	/* foreign head never stalls the tier while the scan stays small. */
-	/* Shares the step style with the overflow scan cap below. */
-	FLOW_DISPATCH_TIER_PROBES = 4ULL,
-	/* Flood bound of 8 ordered moves past 128 queued with no knob. */
-	/* Past deep backlog ordered stops after eight moves with queue */
-	/* order covering the remainder to thirty two, so a deep tail */
-	/* never burns thirty two double scans in one pass. A step cap */
-	/* of 32 entries bounds the single scan regardless of moves, so */
-	/* a mask miss walk never holds RCU across the whole queue. */
-	FLOW_DISPATCH_FLOOD_PROBES = 8ULL,
-	FLOW_DISPATCH_FLOOD_QUEUED = 128ULL,
-	/* Scan step bound of 32 entries with no knob. Caps visited */
-	/* entries per pass regardless of moved, so fail open progress */
-	/* stays while a miss heavy tail cannot walk the whole queue. */
-	FLOW_DISPATCH_SCAN_STEPS = 32ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
-	/* Admission bound of 950 per mille with no knob. Holds use */
-	/* under ninety five percent, so admitted work keeps idle time */
-	/* for late wakeups. */
-	FLOW_ADMIT_PERMILLE = 950ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
 	/* sufficient pick falls to the lowest sufficient id. */
@@ -131,8 +102,8 @@ enum flow_consts {
 	/* 100us with one kick per park. */
 	FLOW_PREEMPT_TAIL_NS = 100000ULL,
 };
-/* Per task state at 80B with release plus period plus deadline plus */
-/* predictor plus stamps plus hint plus miss count plus admit share. */
+/* Per task state at 64B with release plus period plus deadline plus */
+/* predictor plus stamps plus hint plus miss count. */
 /* Release holds the last release time for the miss check. A zero */
 /* release means no release yet, so the miss check skips with no count. */
 /* Period holds the relative period in nanos for the next deadline. */
@@ -157,15 +128,10 @@ enum flow_consts {
 /* without a stop keeps the first start with no second count. */
 /* Stopping versus disable or exit claims once with atomics, so each */
 /* counted start meets exactly one gauge drop with no owner gate. */
-/* Hint holds the flat period hint in micros for admission. A zero */
+/* Hint holds the flat period hint in micros for the deadline. A zero */
 /* hint means no hint, so the default period applies. Misses holds */
 /* the count of deadline misses for the life of the task with */
 /* saturating adds, so a huge miss count clamps instead of wrapping. */
-/* Admit share holds the added per mille share with zero for none, */
-/* so the stop drops the stored value with no drift on hint change. */
-/* Admit CPU holds the CPU where the share was added, so a moved task */
-/* still debits the right row with no wrong CPU drop. Only admitted */
-/* inserts touch the admitted rows, parks and homeless work never do. */
 /* Stamps stay per task owned with no atomics except the run claim, */
 /* only counters use atomics. Cursor and miss scans stay best effort */
 /* with no atomic order. */
@@ -179,9 +145,6 @@ struct flow_task_ctx {
 	u64 run_at;
 	u32 hint_us;
 	u32 misses;
-	u64 admit_share;
-	u32 admit_cpu;
-	u32 __pad;
 };
 /* Per CPU state at 8B with running pid plus placement cursor. */
 /* Pid holds the task now on the CPU else zero. Owner clears use a */
@@ -205,12 +168,6 @@ struct flow_topo {
 /* pick. A zero row means unknown, so the base applies. */
 struct flow_cpu_cap {
 	u32 units;
-};
-/* Per CPU admitted use at 8B with one per mille row. */
-/* Admitted holds the sum of admitted per mille shares on the CPU */
-/* with saturating math, so a huge hint clamps instead of wrapping. */
-struct flow_cpu_admit {
-	u64 permille;
 };
 /* Flat period hint at 8B with one micros row per id. */
 /* Hint holds the period in micros with zero for no hint. The flat */
@@ -238,9 +195,9 @@ struct flow_sched_stats {
 	u64 gate_rejects;
 };
 /* Task state holds release plus period plus deadline plus predictor */
-/* plus stamps plus hint plus misses plus admit share in 80 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 80,
-	"task state stays at 80B");
+/* plus stamps plus hint plus misses in 64 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 64,
+	"task state stays at 64B");
 /* CPU state holds pid plus cursor in 8 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 8,
 	"cpu state stays at 8B");
@@ -464,27 +421,5 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 	if (dsq == (u64)FLOW_OVERFLOW)
 		return true;
 	return false;
-}
-/* Per mille share of one slice in one period with saturation. */
-/* A zero period means no bound, so the share stays zero. The math */
-/* scales slice times 1000 over period, so a 1ms slice in a 16ms */
-/* period takes 62 per mille. */
-static __always_inline u64 flow_slice_permillle(u64 period)
-{
-	if (!period)
-		return 0;
-	return (u64)FLOW_QUANTUM_NS * 1000ULL / period;
-}
-/* True when one CPU can admit one more per mille share. */
-/* The admitted sum plus the new share must stay under the bound, so */
-/* admitted work keeps idle time for late wakeups. Saturated sums */
-/* fail closed, so a wrapped sum never admits. */
-static __always_inline bool flow_admit_ok(u64 admitted,
-	u64 share)
-{
-	u64 sum = admitted + share;
-	if (sum < admitted)
-		return false;
-	return sum <= (u64)FLOW_ADMIT_PERMILLE;
 }
 #endif

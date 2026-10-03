@@ -3,8 +3,7 @@
  * Flow scheduler BPF core.
  *
  * Maps hold task releases, CPU pid plus cursor rows, the topology
- * view, the capacity view, the admitted use rows, and the flat hint
- * rows. Init creates one local queue per CPU plus one shared queue
+ * view, the capacity view, and the flat hint rows. Init creates one local queue per CPU plus one shared queue
  * per node plus one machine queue plus one overflow tail, and it
  * fails loudly when an id reaches the local range. Ops split across
  * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
@@ -49,13 +48,6 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_cpu_cap);
 } cap_stor SEC(".maps");
-/* Per CPU admitted use with one per mille row. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_MAX_CPUS);
-	__type(key, u32);
-	__type(value, struct flow_cpu_admit);
-} admit_stor SEC(".maps");
 /* Flat period hint by id with miss default. Keys are hierarchy ids */
 /* with a bound at 4096, so large hosts hold churn with no stall. */
 /* Full tables fail closed to the default period with no eviction. */
@@ -242,6 +234,5 @@ SCX_OPS_DEFINE(flow_ops,
 					  SCX_OPS_ENQ_EXITING |
 					  SCX_OPS_ENQ_MIGRATION_DISABLED |
 					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
-	       .dispatch_max_batch	= FLOW_DISPATCH_MAX_BATCH,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");

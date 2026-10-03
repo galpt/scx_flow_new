@@ -2,7 +2,7 @@
 /*
  * Task and map helpers for the core.
  *
- * Holds the clock plus task, CPU, topology, capacity, admission, and
+ * Holds the clock plus task, CPU, topology, capacity, and
  * hint loads shared by every op. Runs inline with no walk, so the
  * verifier stays small.
  *
@@ -55,18 +55,6 @@ static __always_inline u32 flow_cpu_units(u32 cpu)
 	v = bpf_map_lookup_elem(&cap_stor, &key);
 	if (!v || *v == 0)
 		return (u32)FLOW_CAP_BASE;
-	return READ_ONCE(*v);
-}
-/* Admitted per mille of one CPU with zero on miss. */
-static __always_inline u64 flow_cpu_admitted(u32 cpu)
-{
-	u32 key = cpu;
-	u64 *v;
-	if (cpu >= (u32)FLOW_MAX_CPUS)
-		return 0;
-	v = bpf_map_lookup_elem(&admit_stor, &key);
-	if (!v)
-		return 0;
 	return READ_ONCE(*v);
 }
 /* Node of one CPU with zero on miss. */

@@ -61,10 +61,10 @@ pub struct Metrics {
     #[stat(desc = "Idle wakeup kicks sent after insert")]
     #[serde(default)]
     pub kicks: u64,
-    #[stat(desc = "Tasks admitted under the use bound")]
+    #[stat(desc = "Tasks admitted with no bound")]
     #[serde(default)]
     pub admits: u64,
-    #[stat(desc = "Tasks parked on admission reject")]
+    #[stat(desc = "Rejects with no bound, always zero")]
     #[serde(default)]
     pub rejects: u64,
     #[stat(desc = "Wall completions past release plus deadline")]
