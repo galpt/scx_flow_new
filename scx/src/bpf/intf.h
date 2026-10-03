@@ -105,6 +105,10 @@ enum flow_consts {
 	/* owner finishes instead of taking a kick. The floor stays at */
 	/* 100us with one kick per wait. */
 	FLOW_PREEMPT_TAIL_NS = 100000ULL,
+	/* Allowed lag bound of 2ms with no knob. Newly woken tasks clamp */
+	/* within this distance of the CPU minimum, so sleepers gain no */
+	/* more than one extra slice of boost with no storm. */
+	FLOW_VLAG_MAX_NS = 2000000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine drain in deadline order through the kernel priority queue */
@@ -117,60 +121,63 @@ enum flow_tier {
 	FLOW_TIER_NODE = 1,
 	FLOW_TIER_MACHINE = 2,
 };
-/* Per task state at 64B with release plus period plus deadline plus */
-/* predictor plus stamps plus hint plus miss count. */
-/* Release holds the last release time for the miss check. A zero */
-/* release means no release yet, so the miss check skips with no count. */
-/* Period holds the relative period in nanos for the next deadline. */
-/* A zero period means no hint yet, so the default period applies. */
-/* Deadline holds the absolute deadline for queue order and the miss */
-/* check. A zero deadline means no order yet, so preempt compares skip */
-/* with no kick and the miss check skips with no count. */
-/* Avg holds the burst average in nanos with zero for no history. */
-/* A zero average means no sample yet, so the deadline falls back to */
-/* the hint period with no predictor use. Values clamp to 1ns to 1s, */
-/* so a huge burst never wraps to a short deadline. */
-/* Dev holds the burst deviation in nanos with zero for no history. */
-/* A zero deviation means no sample yet, so the deadline uses the */
-/* average alone with no extra margin. Values clamp the same way with */
-/* shift updates, so a spike widens the deadline with no jump. */
-/* Wait holds the last enqueue time. A zero wait means the task */
-/* never queued. Every queue join stamps the task, so queued work */
-/* always carries a stamp. */
-/* Run holds the segment start while on CPU else zero, so a claimed */
-/* start pairs the stopping charge with no BPF gauge. The on CPU */
-/* gauge lives in the snapshot with no BPF count. Running */
-/* claims from zero only with a compare and swap, so a second running */
-/* without a stop keeps the first start with no second use. */
-/* Stopping versus disable or exit claims once with atomics, so each */
-/* claimed start meets exactly one charge with no owner gate. */
-/* Hint holds the flat period hint in micros for the deadline. A zero */
-/* hint means no hint, so the default period applies. Misses holds */
-/* the count of deadline misses for the life of the task with */
-/* saturating adds, so a huge miss count clamps instead of wrapping. */
-/* Stamps stay per task owned with no atomics except the run claim, */
-/* only counters use atomics. Cursor and miss scans stay best effort */
-/* with no atomic order. */
+/* Per task state at 64B with vruntime plus deadline plus stamps plus */
+/* predictor plus lag plus weight plus slice plus hint plus misses. */
+/* Vruntime holds the scaled service in nanos with zero for no history. */
+/* A zero vruntime means no service yet, so the first virtual deadline */
+/* falls near now with no boost past the lag bound. Deadline holds the */
+/* absolute EDF deadline for queue order and the miss check. A zero */
+/* deadline means no order yet, so preempt compares skip with no kick */
+/* and the miss check skips with no count. Wait holds the last enqueue */
+/* time. A zero wait means the task never queued. Every queue join */
+/* stamps the task, so queued work always carries a stamp. Run holds */
+/* the segment start while on CPU else zero, so a claimed start pairs */
+/* the stopping charge with no BPF gauge. The on CPU gauge lives in */
+/* the snapshot with no BPF count. Running claims from zero only with */
+/* a compare and swap, so a second running without a stop keeps the */
+/* first start with no second use. Stopping versus disable or exit */
+/* claims once with atomics, so each claimed start meets exactly one */
+/* charge with no owner gate. Period holds the relative period in nanos */
+/* for the next deadline in 32 bits with zero for no hint. Avg holds */
+/* the burst average in nanos in 32 bits with zero for no history. Dev */
+/* holds the burst deviation in nanos in 32 bits with zero for no */
+/* history. Values clamp to 1ns to 1s, so a huge burst never wraps. */
+/* Vlag holds the allowed lag in nanos as a signed bound with zero for */
+/* no slack. Weight holds the scheduling share clamped to range with */
+/* 128 for neutral. Slice holds the per task slice in nanos with the */
+/* quantum as the default. Hint holds the flat period hint in micros */
+/* for the deadline. A zero hint means no hint, so the default period */
+/* applies. Misses holds the count of deadline misses for the life of */
+/* the task with saturating adds, so a huge miss count clamps instead */
+/* of wrapping. Stamps stay per task owned with no atomics except the */
+/* run claim, only counters use atomics. Cursor and miss scans stay */
+/* best effort with no atomic order. */
 struct flow_task_ctx {
-	u64 release;
-	u64 period;
+	u64 vruntime;
 	u64 deadline;
-	u64 avg_ns;
-	u64 dev_ns;
 	u64 wait_at;
 	u64 run_at;
+	u32 period;
+	u32 avg_ns;
+	u32 dev_ns;
+	s32 vlag;
+	u32 weight;
+	u32 slice_ns;
 	u32 hint_us;
 	u32 misses;
 };
-/* Per CPU state at 8B with running pid plus placement cursor. */
-/* Pid holds the task now on the CPU else zero. Owner clears use a */
-/* compare and swap, so a stale exit never clears a new owner. */
-/* Cursor spreads the placement scans with no hotspot. The cursor races */
-/* best effort with no atomic order. Dispatch uses a fixed tier order */
-/* with no cursor use. */
+/* Per CPU state at 16B with running pid plus placement cursor plus */
+/* minimum vruntime. Pid holds the task now on the CPU else zero. */
+/* Owner clears use a compare and swap, so a stale exit never clears a */
+/* new owner. Cursor spreads the placement scans with no hotspot. The */
+/* cursor races best effort with no atomic order. Min vruntime tracks */
+/* the smallest served vruntime on the CPU with zero for no history, */
+/* so newly woken tasks clamp without gaining past the lag bound. */
+/* Dispatch uses a fixed tier order with no cursor use. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;
+	u64 min_vruntime;
 };
 /* Per CPU topology view at 8B with sibling plus node. */
 /* Smt sib holds the thread sibling or all ones when unknown. */
@@ -210,13 +217,13 @@ struct flow_sched_stats {
 	u64 misses;
 	u64 gate_rejects;
 };
-/* Task state holds release plus period plus deadline plus predictor */
-/* plus stamps plus hint plus misses in 64 bytes. */
+/* Task state holds vruntime plus deadline plus stamps plus predictor */
+/* plus lag plus weight plus slice plus hint plus misses in 64 bytes. */
 _Static_assert(sizeof(struct flow_task_ctx) == 64,
 	"task state stays at 64B");
-/* CPU state holds pid plus cursor in 8 bytes. */
-_Static_assert(sizeof(struct flow_cpu_state) == 8,
-	"cpu state stays at 8B");
+/* CPU state holds pid plus cursor plus minimum vruntime in 16 bytes. */
+_Static_assert(sizeof(struct flow_cpu_state) == 16,
+	"cpu state stays at 16B");
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
@@ -253,6 +260,119 @@ static __always_inline u32 flow_weight_clamp(u32 w)
 	if (w > (u32)FLOW_WEIGHT_MAX)
 		return (u32)FLOW_WEIGHT_MAX;
 	return w;
+}
+/* Scaled service for one delta at one weight with no divide. */
+/* The neutral weight of 128 keeps the delta unchanged, lighter tasks */
+/* shift left for more charge while heavier tasks shift right for less */
+/* charge. Bands follow powers of two with saturation on shift, so the */
+/* verifier sees no divide and a huge shift clamps instead of wrapping. */
+static __always_inline u64 flow_scaled_delta(u64 delta,
+	u32 weight)
+{
+	u32 w = flow_weight_clamp(weight);
+	u64 out;
+	if (w < 16U) {
+		if (delta > ((u64)~0ULL >> 4))
+			return (u64)~0ULL;
+		return delta << 4;
+	}
+	if (w < 32U) {
+		if (delta > ((u64)~0ULL >> 3))
+			return (u64)~0ULL;
+		return delta << 3;
+	}
+	if (w < 64U) {
+		if (delta > ((u64)~0ULL >> 2))
+			return (u64)~0ULL;
+		return delta << 2;
+	}
+	if (w < 96U) {
+		if (delta > ((u64)~0ULL >> 1))
+			return (u64)~0ULL;
+		return delta << 1;
+	}
+	if (w < 192U)
+		return delta;
+	if (w < 384U)
+		return delta >> 1;
+	if (w < 768U)
+		return delta >> 2;
+	if (w < 1536U)
+		return delta >> 3;
+	if (w < 3072U)
+		return delta >> 4;
+	if (w < 6144U)
+		return delta >> 5;
+	out = delta >> 6;
+	if (out == 0 && delta != 0)
+		return 1;
+	return out;
+}
+/* Advanced vruntime after one delta at one weight with saturation. */
+/* Adds the scaled service to the base, so heavy tasks advance slowly */
+/* while light tasks advance quickly with no divide. A wrap clamps to */
+/* max, so a huge vruntime never falls to the front. */
+static __always_inline u64 flow_vruntime_advance(u64 vruntime,
+	u64 delta, u32 weight)
+{
+	return flow_sat_add(vruntime, flow_scaled_delta(delta, weight));
+}
+/* Clamped lag in nanos within the allowed bound. */
+/* Values past plus or minus 2ms fold to the nearer bound, so a stale */
+/* lag never grants a huge boost with no storm. */
+static __always_inline s32 flow_lag_clamp(s32 lag)
+{
+	s32 bound = (s32)FLOW_VLAG_MAX_NS;
+	if (lag > bound)
+		return bound;
+	if (lag < -bound)
+		return -bound;
+	return lag;
+}
+/* True when one vruntime is eligible against the CPU minimum. */
+/* Eligible means the vruntime falls no more than the allowed lag past */
+/* the minimum, so lagging tasks wait while leading tasks pace. The */
+/* signed diff keeps order across the u64 wrap with no branch, and a */
+/* saturated minimum plus lag never wraps to the front. */
+static __always_inline bool flow_eligible(u64 vruntime,
+	u64 min_vruntime, s32 vlag)
+{
+	s32 lag = flow_lag_clamp(vlag);
+	u64 limit;
+	if (lag < 0)
+		lag = 0;
+	limit = flow_sat_add(min_vruntime, (u64)lag);
+	if (limit == (u64)~0ULL)
+		return true;
+	if (vruntime == limit)
+		return true;
+	return flow_time_before(vruntime, limit);
+}
+/* Virtual deadline from eligible plus request over weight. */
+/* Adds the scaled request to the eligible base with saturation, so a */
+/* heavy task earns a near deadline while a light task earns a far one */
+/* with no divide. A wrap clamps to max, so a huge sum never jumps to */
+/* the front. */
+static __always_inline u64 flow_virt_deadline(u64 ve,
+	u64 request, u32 weight)
+{
+	return flow_sat_add(ve, flow_scaled_delta(request, weight));
+}
+/* Fair queue key as the earlier of deadline plus virtual deadline. */
+/* The EDF deadline caps latency while the virtual deadline paces */
+/* fairness, so urgent tasks still win while hogs fall behind. A zero */
+/* deadline means no EDF order yet, so the virtual deadline rules. The */
+/* signed diff picks the earlier time with wrap safety. */
+static __always_inline u64 flow_fair_vtime(u64 deadline,
+	u64 vd)
+{
+	if (deadline == 0)
+		return vd;
+	if (vd == 0)
+		return deadline;
+	if (flow_time_before(vd, deadline))
+		return vd;
+	return deadline;
 }
 /* Absolute deadline from release plus relative period. */
 /* The add saturates, so a huge release clamps instead of wrapping */
@@ -368,9 +488,9 @@ static __always_inline u64 flow_pred_period(u64 avg,
 /* A zero average means no history, so the hint period applies with */
 /* the default when the hint is zero. Later releases add the */
 /* predicted period with saturation, so a huge release clamps */
-/* instead of wrapping to the front. EDF order via kernel priority */
-/* queue: the vtime key holds this absolute deadline, so the */
-/* earliest deadline wins with no lag compensation. */
+/* instead of wrapping to the front. Fair order via kernel priority */
+/* queue: the vtime key holds the earlier of this deadline plus the */
+/* virtual deadline, so the earliest fair time wins with lag bounds. */
 static __always_inline u64 flow_pred_deadline(u64 release,
 	u64 avg, u64 dev, u32 hint_us)
 {
@@ -390,15 +510,12 @@ static __always_inline u64 flow_fallback_deadline(u64 now,
 	return flow_deadline_at(now, flow_task_period(hint_us));
 }
 /* True when one task missed its deadline at the given time. */
-/* A zero deadline means no order yet, so the check skips. A zero */
-/* release means no release yet, so the check skips too. A time that */
-/* falls before the deadline passes, so only a time past the deadline */
-/* counts a miss. */
-static __always_inline bool flow_missed(u64 release,
-	u64 deadline, u64 now)
+/* A zero deadline means no order yet, so the check skips. A time that */
+/* falls before or on the deadline passes, so only a strictly later */
+/* time counts a miss with wrap safety. */
+static __always_inline bool flow_missed(u64 deadline,
+	u64 now)
 {
-	if (release == 0)
-		return false;
 	if (deadline == 0)
 		return false;
 	if (flow_time_before(now, deadline))

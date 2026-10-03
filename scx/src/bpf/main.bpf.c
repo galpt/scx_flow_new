@@ -150,6 +150,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (st) {
 			st->running_pid = 0;
 			st->cursor = (u32)cpu;
+			st->min_vruntime = 0;
 		}
 		cp = bpf_map_lookup_elem(&cap_stor, &key);
 		if (cp)

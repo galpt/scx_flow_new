@@ -363,8 +363,8 @@ mod tests {
     }
 
     #[test]
-    fn cpu_size_is_8() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 8);
+    fn cpu_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_state>(), 16);
     }
 
     #[test]

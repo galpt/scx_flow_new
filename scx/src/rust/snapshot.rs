@@ -61,6 +61,7 @@ impl<'a> Scheduler<'a> {
         let idle = crate::bpf_intf::flow_cpu_state {
             running_pid: 0,
             cursor: 0,
+            min_vruntime: 0,
         };
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             return idle;

@@ -3,20 +3,21 @@
  * Task lifecycle ops.
  *
  * Running claims the segment start from zero with no BPF gauge.
- * The snapshot counts live pids for the on CPU gauge. Stopping claims the start once and charges
- * the raw segment to total runtime, then feeds the burst
- * predictor average plus deviation from the same delta with shifts,
- * then counts one requeue per runnable stop else one completion. A wall
- * completion past release plus deadline counts one miss with no wait
- * and no kick, since the task already left the CPU. Enable clears the
- * release plus the period plus the deadline plus the predictor plus
- * the hint plus the miss count, and disable plus exit charge a
- * leftover segment at most once when stopping never ran. A closed gate
- * still counts one reject with no charge. Release clears a stale
- * running view with no charge. The gate runs first in every op except
- * the exiting paths, so a stale CPU fails closed with one counter. See
- * intf.h for the shared helpers and enqueue.bpf.c for the deadline
- * choice.
+ * The snapshot counts live pids for the on CPU gauge. Stopping claims
+ * the start once, charges the raw segment to total runtime, advances
+ * vruntime by the scaled delta, folds the CPU minimum forward, then
+ * feeds the burst predictor average plus deviation from the same delta
+ * with shifts, then counts one requeue per runnable stop else one
+ * completion. A wall completion past the deadline counts one miss with
+ * no wait and no kick, since the task already left the CPU. Enable
+ * clears vruntime plus deadline plus stamps plus predictor plus lag
+ * plus weight plus slice plus hint plus misses, and disable plus exit
+ * charge a leftover segment at most once when stopping never ran with
+ * the same advance plus minimum fold. A closed gate still counts one
+ * reject with no charge. Release clears a stale running view with no
+ * charge. The gate runs first in every op except the exiting paths, so
+ * a stale CPU fails closed with one counter. See intf.h for the shared
+ * helpers and enqueue.bpf.c for the fair time choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -96,30 +97,39 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		delta = 0;
 	else
 		delta = now - start;
-	/* Every segment counts raw time with no weight scaling. */
+	/* Every segment counts raw time while vruntime counts scaled time. */
 	/* The predictor average plus deviation update from the same */
 	/* delta with shifts only plus a first deviation floor at average */
 	/* quarter, so later deadlines track recent bursts with no extra */
 	/* walk. A zero delta keeps the predictor with no train, so a */
-	/* backward clock never pulls the average to 1ns. */
+	/* backward clock never pulls the average to 1ns. The vruntime */
+	/* advance uses the task weight with no divide, so heavy tasks move */
+	/* slowly while light tasks move quickly. The CPU minimum folds */
+	/* forward best effort with no regression past a concurrent win. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	if (delta) {
-		u64 avg = READ_ONCE(tctx->avg_ns);
-		u64 dev = READ_ONCE(tctx->dev_ns);
+		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
+		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
+		u32 weight = READ_ONCE(tctx->weight);
 		u64 n_avg = flow_pred_avg(avg, delta);
 		u64 n_dev = flow_pred_dev(dev, avg, delta);
-		__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
-		__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
+		u64 vrun = READ_ONCE(tctx->vruntime);
+		u64 n_vrun;
+		if (weight == 0)
+			weight = (u32)FLOW_WEIGHT_BASE;
+		n_vrun = flow_vruntime_advance(vrun, delta, weight);
+		__sync_lock_test_and_set(&tctx->avg_ns, (u32)n_avg);
+		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
+		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);
+		flow_min_advance(cpu, n_vrun);
 	}
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	/* A wall completion past the deadline counts one miss with no */
 	/* wait and no kick, since the task already left the CPU. */
-	if (!runnable && tctx->release &&
-	    !flow_deadline_ok(tctx->deadline, now)) {
+	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
-	}
 	if (runnable) {
 		__sync_fetch_and_add(&flow_stats.requeues, 1);
 		return;
@@ -137,19 +147,24 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx = flow_get(p);
 	if (!tctx)
 		return;
-	/* Fresh tasks hold no release, no period, no deadline, no */
-	/* predictor, no stamps, no hint, and no misses. The first */
-	/* enqueue anchors at now with one deadline from the hint period */
-	/* with no predictor use. The cached hierarchy id clears too, so */
-	/* a reused pid never reads a stale hierarchy. */
+	/* Fresh tasks hold no vruntime, no deadline, no stamps, no */
+	/* predictor, no lag, neutral weight, fixed slice, no hint, and no */
+	/* misses. The first enqueue clamps vruntime to the CPU minimum */
+	/* minus the lag bound with a fallback deadline plus a virtual */
+	/* deadline, so sleepers gain no more than one boost. The cached */
+	/* hierarchy id clears too, so a reused pid never reads a stale */
+	/* hierarchy. */
 	flow_cgrp_cache_invalidate((u32)p->pid);
-	tctx->release = 0;
-	tctx->period = 0;
+	tctx->vruntime = 0;
 	tctx->deadline = 0;
-	tctx->avg_ns = 0;
-	tctx->dev_ns = 0;
 	tctx->wait_at = 0;
 	tctx->run_at = 0;
+	tctx->period = 0;
+	tctx->avg_ns = 0;
+	tctx->dev_ns = 0;
+	tctx->vlag = 0;
+	tctx->weight = (u32)FLOW_WEIGHT_BASE;
+	tctx->slice_ns = (u32)FLOW_QUANTUM_NS;
 	tctx->hint_us = 0;
 	tctx->misses = 0;
 }
@@ -163,7 +178,9 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	}
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	/* The pid clear stays in the caller with no gauge use. */
+	/* The advance plus the minimum fold match stopping, so a leftover */
+	/* still paces fairness with no double charge. The pid clear stays */
+	/* in the caller with no gauge use. */
 	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
@@ -179,7 +196,9 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	/* The pid clear stays in the caller with no gauge use. */
+	/* The advance plus the minimum fold match stopping, so a leftover */
+	/* still paces fairness with no double charge. The pid clear stays */
+	/* in the caller with no gauge use. */
 	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
