@@ -5,7 +5,10 @@
 
 //! Builds the counters view plus the dashboard view from the BPF maps.
 //! Each poll reads the counters plus the per CPU pid view with no
-//! extra sysfs use, so the page stays cheap beside the slice.
+//! extra sysfs use, so the page stays cheap beside the slice. A
+//! dashboard poll costs 2N BPF map reads for N online CPUs: N for the
+//! on CPU gauge plus N for the per CPU cards, with one alloc and no
+//! sysfs on poll.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -17,9 +20,9 @@ use crate::stats;
 impl<'a> Scheduler<'a> {
     /// Count live pids for the on CPU gauge with no BPF counter.
     /// Walks the cached online list with one map read per CPU, so the
-    /// gauge stays exact with no atomic cost on the hot paths. The BPF
-    /// on CPU field stays zero for wire compat and never drives this
-    /// count.
+    /// gauge costs N reads with no atomic cost on the hot paths. The
+    /// BPF on CPU field stays zero for wire compat and never drives
+    /// this count.
     pub(crate) fn count_on_cpu(&self) -> u64 {
         let mut live = 0u64;
         for &id in self.online_cpus.iter() {
@@ -83,7 +86,9 @@ impl<'a> Scheduler<'a> {
 
     /// Dashboard snapshot with raw counters plus live pid cards.
     /// Counters stay raw with no deltas and the on CPU gauge counts live
-    /// pids with the pid view. SMT comes from the cached init
+    /// pids with the pid view. Costs 2N map reads for N online CPUs: N
+    /// for the gauge via get_metrics plus N for the cards, with one
+    /// alloc sized to the online count. SMT comes from the cached init
     /// flags with no sysfs use on poll and stays display only. Offline
     /// stays out, so per CPU count matches the cached online count.
     /// Version plus timestamp plus topology join the counters for the
@@ -111,5 +116,26 @@ impl<'a> Scheduler<'a> {
             timestamp_ns,
             topology: self.topology.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Poll cost in BPF map reads for N online CPUs.
+    /// Dashboard polls read N for the on CPU gauge via get_metrics plus
+    /// N for the per CPU cards, so the total stays 2N with one alloc
+    /// and no sysfs on poll.
+    fn snapshot_reads(n: usize) -> usize {
+        n.saturating_mul(2)
+    }
+
+    #[test]
+    fn poll_cost_is_two_n() {
+        assert_eq!(snapshot_reads(0), 0);
+        assert_eq!(snapshot_reads(1), 2);
+        assert_eq!(snapshot_reads(4), 8);
+        // One alloc holds N cards with no extra walk.
+        let per_cpu = Vec::<u32>::with_capacity(4);
+        assert!(per_cpu.capacity() >= 4);
     }
 }

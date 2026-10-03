@@ -96,11 +96,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx = flow_get(p);
 	/* Tasks without state park in overflow with an idle kick. */
 	/* The kick targets one idle allowed CPU with no preempt, so a */
-	/* parked task wakes without a storm. The gate already passed, */
-	/* so this path keeps its reject count with no double gate. */
+	/* parked task wakes without a storm. The gate already passed, so */
+	/* this path holds no gate count with no double count. */
 	/* Missing state is rare, so it stays unlikely. */
 	if (unlikely(!tctx)) {
-		flow_gate_reject();
 		flow_over_insert(p);
 		flow_kick_idle_allowed(p, sel);
 		return;
@@ -125,16 +124,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	if (tctx->deadline == 0 && tctx->wait_at == 0)
 		__sync_fetch_and_add(&flow_stats.inserts, 1);
 	/* One release plus one predictor period plus one deadline. */
-	/* A zero average means no history, so the hint period applies */
-	/* with the default when the hint is zero. Later releases add */
-	/* average plus deviation with saturation, so short bursts earn */
+	/* A zero average means no history, so the fresh hint period */
+	/* applies with the default when the hint is zero. Later releases */
+	/* add average plus deviation with saturation, so short bursts earn */
 	/* tight deadlines with no table walk. The hint stores with no lag, */
 	/* while the predictor shapes only the deadline once history */
 	/* exists. A miss on the last release counts before the new */
 	/* release, so the miss count tracks wall completion past release */
 	/* plus deadline. Requeues reuse the cached hint with no cgroup */
-	/* acquire, so slice rotation pays no hierarchy cost. The cache */
-	/* clears on migrate plus exit elsewhere, so reuse stays correct. */
+	/* acquire, so slice rotation pays no hierarchy cost. The reuse may */
+	/* stay stale across one slice when the weight changed, so the new */
+	/* hint shows on the next fresh wakeup with no order break. The */
+	/* cache clears on migrate plus exit elsewhere, so reuse stays */
+	/* correct. */
 	if (is_reenq)
 		hint = tctx->hint_us;
 	else
@@ -142,8 +144,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	avg = READ_ONCE(tctx->avg_ns);
 	dev = READ_ONCE(tctx->dev_ns);
 	if (avg == 0)
-		period = flow_task_period(tctx->hint_us ?
-		    tctx->hint_us : hint);
+		period = flow_task_period(hint);
 	else
 		period = flow_pred_period(avg, dev);
 	tctx->hint_us = hint;
@@ -166,20 +167,45 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while overflow still parks misses plus pins. */
 	__sync_fetch_and_add(&flow_stats.admits, 1);
-	/* Idle direct bypass with no tier queue. An idle target takes the */
-	/* task straight to its local queue with one idle kick, so wakeups */
-	/* skip the tier plus dispatch hop. The deadline plus admit already */
-	/* hold, so order plus counters stay correct with no extra wait. */
+	/* Idle direct bypass only when tiers hold no earlier work. An idle */
+	/* target takes the task straight to its local queue with one idle */
+	/* kick, so wakeups skip the tier plus dispatch hop. The bypass runs */
+	/* only when the local plus node plus machine tiers hold no queued */
+	/* work or the target still drains before the deadline, so an earlier */
+	/* deadline never waits behind this arrival in a tier queue. The */
+	/* deadline plus admit already hold, so order plus counters stay */
+	/* correct with no extra wait. The bypass inserts straight to local */
+	/* with no tier move count, so admits vs moves drift by the bypass */
+	/* count with no loss while dispatch moves still count each tier. */
 	{
 		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
 		if (dst && READ_ONCE(dst->running_pid) == 0) {
-			scx_bpf_dsq_insert(p,
-			    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
-			    (u64)FLOW_QUANTUM_NS, enq_flags);
-			scx_bpf_test_and_clear_cpu_idle(cpu);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
-			return;
+			u64 own = flow_local_dsq((u32)cpu);
+			u32 node = flow_cpu_node((u32)cpu);
+			bool node_valid = false;
+			u64 node_dsq = 0;
+			bool tiers_empty = false;
+			if (node < (u32)FLOW_MAX_NODES &&
+			    (u64)node < nr_node_ids) {
+				node_dsq = flow_node_dsq(node);
+				node_valid = true;
+			}
+			if (scx_bpf_dsq_nr_queued(own) <= 0 &&
+			    scx_bpf_dsq_nr_queued(
+			        flow_machine_dsq()) <= 0 &&
+			    (!node_valid ||
+			     scx_bpf_dsq_nr_queued(node_dsq) <= 0))
+				tiers_empty = true;
+			if (tiers_empty ||
+			    flow_cpu_meets((u32)cpu, deadline, now)) {
+				scx_bpf_dsq_insert(p,
+				    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
+				    (u64)FLOW_QUANTUM_NS, enq_flags);
+				scx_bpf_test_and_clear_cpu_idle(cpu);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+				__sync_fetch_and_add(&flow_stats.kicks, 1);
+				return;
+			}
 		}
 	}
 	/* Direct join when the target drains before the deadline. */

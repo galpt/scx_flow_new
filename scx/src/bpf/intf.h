@@ -111,7 +111,9 @@ enum flow_consts {
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine drain in deadline order through the kernel priority queue, */
 /* then overflow drains in queue order. Every pass follows this order */
-/* with no load based swap, so the verifier sees one fixed path. */
+/* with no load based swap, so the verifier sees one fixed path. Dead */
+/* enum with no code use, kept doc only since dispatch calls the tier */
+/* moves directly with no index switch. */
 enum flow_tier {
 	FLOW_TIER_LOCAL = 0,
 	FLOW_TIER_NODE = 1,
@@ -193,8 +195,9 @@ struct flow_hint {
 	u64 period_us;
 };
 /* Scheduler counters with 15 fields. Homeless parks count in the */
-/* overflow moves, so every tier move has a live counter. Rejects */
-/* stay zero for wire compat with real rejects in gate_rejects. */
+/* overflow moves, so every tier move has a live counter. Rejects stay */
+/* dead at zero for wire compat only with no writer, while real rejects */
+/* count in gate_rejects. Readers must use gate_rejects for drops. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;

@@ -85,7 +85,8 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return;
 	/* The allowlist guards the pre cap choice with half plus max. */
-	/* Dead by build here with no other level, kept fail closed. */
+	/* Dead enum by build here with no other level passed, kept fail */
+	/* closed so a future caller still traps with no silent level. */
 	if (want != (u32)FLOW_CPU_PERF_HALF &&
 	    want != (u32)FLOW_CPU_PERF_MAX)
 		return;

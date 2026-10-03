@@ -4,7 +4,10 @@
  *
  * Holds the id plus level plus ancestor helpers for the flat hint
  * view. The flat view tunes the period only, and no group or pool
- * shapes order. Runs inline with no walk past one ancestor step, so
+ * shapes order. The pid cache stays ABA safe via clear on migrate
+ * plus enable plus exit, so a reused pid never reads a stale id. The
+ * cache caps at 1024 entries with fail to the acquire path and no
+ * eviction. Runs inline with no walk past one ancestor step, so
  * the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -29,8 +32,9 @@ static __always_inline u64 flow_cgrp_id(
 	return id;
 }
 /* Clear one cached hierarchy id for a pid with no fail. */
-/* Runs on migrate plus enable plus task exit, so a reused pid never */
-/* reads a stale id. A zero pid never caches, so it needs no clear. */
+/* Runs on migrate plus enable plus task exit for ABA safety, so a */
+/* reused pid never reads a stale id. A zero pid never caches, so it */
+/* needs no clear. */
 static __always_inline void flow_cgrp_cache_invalidate(u32 pid)
 {
 	if (!pid)
@@ -39,7 +43,9 @@ static __always_inline void flow_cgrp_cache_invalidate(u32 pid)
 }
 /* Hint of one task from its hierarchy with paired release. */
 /* Reads the cached id first with one hash lookup and no acquire, so */
-/* the hot path pays no hierarchy cost on hit. A miss takes the */
+/* the hot path pays no hierarchy cost on hit. The pid cache caps at */
+/* 1024 entries with fail to the acquire path and no eviction, so a */
+/* full table still reads fresh with no stall. A miss takes the */
 /* acquire path once and fills the cache best effort, so later joins */
 /* hit with no walk. The flat row still reads fresh each time, so a */
 /* weight change shows at once with no cache clear. A null hierarchy */
