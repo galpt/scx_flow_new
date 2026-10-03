@@ -28,7 +28,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	u64 now;
 	u64 stamp;
 	u64 prev;
-	bool claimed = false;
+	(void)prev;
 	cpu = scx_bpf_task_cpu(p);
 	/* The gate runs first with fail closed and no count on pass. */
 	/* Exiting tasks never reach here through the running path. */
@@ -41,26 +41,21 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	if (tctx) {
 		/* Zero never marks a run, so a zero clock folds to one. */
 		/* The claim swaps from zero only, so a second running */
-		/* without a stop keeps the first start with no second */
-		/* gauge count. */
+		/* without a stop keeps the first start with no second use. */
+		/* The on CPU gauge lives in the snapshot with no BPF count, */
+		/* so this path holds no gauge add. */
 		stamp = now ? now : 1;
 		prev = __sync_val_compare_and_swap(&tctx->run_at,
 		    0, stamp);
-		claimed = prev == 0;
 	}
 	if (cpu < 0)
-		goto inc;
+		return;
 	if (!flow_cpu_live((u32)cpu))
-		goto inc;
+		return;
 	st = flow_cpu((u32)cpu);
 	if (st)
 		__sync_lock_test_and_set(&st->running_pid,
 		    (u32)p->pid);
-inc:
-	/* Count the on CPU gauge once per claimed start. */
-	/* Tasks without state hold no claim, so they hold no count. */
-	if (claimed)
-		__sync_fetch_and_add(&flow_stats.on_cpu, 1);
 }
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	u64 deq_flags)
@@ -91,8 +86,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	}
 	/* The start claims with an exchange, so stopping versus disable */
 	/* or exit charges once. A zero claim means no counted start, */
-	/* so this pass drops with no charge and no gauge move, and */
-	/* every counted start meets exactly one gauge drop. */
+	/* so this pass drops with no charge. The on CPU gauge lives in */
+	/* the snapshot with no BPF drop, so every pass ends here with no */
+	/* gauge use. */
 	start = __sync_lock_test_and_set(&tctx->run_at, 0);
 	if (start == 0) {
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
@@ -117,10 +113,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->avg_ns, n_avg);
 		__sync_lock_test_and_set(&tctx->dev_ns, n_dev);
 	}
-	/* The pid view clears when owned and the gauge drops once per */
-	/* claimed start. */
+	/* The pid view clears when owned with no gauge use. */
+	/* The snapshot counts live pids for the on CPU gauge. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
-	flow_on_cpu_dec();
 	/* A wall completion past the deadline counts one miss with one */
 	/* park and no kick, since the task already left the CPU. */
 	if (!runnable && tctx->release &&

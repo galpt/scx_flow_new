@@ -15,11 +15,27 @@ use crate::Scheduler;
 use crate::stats;
 
 impl<'a> Scheduler<'a> {
+    /// Count live pids for the on CPU gauge with no BPF counter.
+    /// Walks the cached online list with one map read per CPU, so the
+    /// gauge stays exact with no atomic cost on the hot paths. The BPF
+    /// on CPU field stays zero for wire compat and never drives this
+    /// count.
+    pub(crate) fn count_on_cpu(&self) -> u64 {
+        let mut live = 0u64;
+        for &id in self.online_cpus.iter() {
+            let st = self.read_cpu(id as usize);
+            if st.running_pid != 0 {
+                live = live.saturating_add(1);
+            }
+        }
+        live
+    }
+
     pub(crate) fn get_metrics(&self) -> stats::Metrics {
         let bss = self.skel.maps.bss_data.as_ref().expect("bss missing");
         let s = &bss.flow_stats;
         stats::Metrics {
-            on_cpu: s.on_cpu,
+            on_cpu: self.count_on_cpu(),
             total_runtime: s.total_runtime,
             uptime_ns: self.started_at.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             inserts: s.inserts,
@@ -66,8 +82,8 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Dashboard snapshot with raw counters plus live pid cards.
-    /// Counters stay raw with no deltas and the on CPU gauge passes
-    /// through with the live pid view. SMT comes from the cached init
+    /// Counters stay raw with no deltas and the on CPU gauge counts live
+    /// pids with the pid view. SMT comes from the cached init
     /// flags with no sysfs use on poll and stays display only. Offline
     /// stays out, so per CPU count matches the cached online count.
     /// Version plus timestamp plus topology join the counters for the

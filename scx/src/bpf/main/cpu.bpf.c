@@ -2,11 +2,12 @@
 /*
  * CPU view plus entry gate helpers for the core.
  *
- * Holds the live plus mask checks plus the running pid and gauge
- * helpers plus the universal entry gate with no charge. The gate
- * runs first in every op, so bad CPUs plus bad queues plus bad tasks
- * fail closed with one counter. Runs inline with no walk, so the
- * verifier stays small.
+ * Holds the live plus mask checks plus the running pid helpers plus
+ * the universal entry gate with no charge. The on CPU gauge lives in
+ * the snapshot with no BPF counter, so the hot start plus stop paths
+ * pay no atomic. The gate runs first in every op, so bad CPUs plus
+ * bad queues plus bad tasks fail closed with one counter. Runs inline
+ * with no walk, so the verifier stays small. No fair.c helper is used.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -33,29 +34,6 @@ static __always_inline bool flow_cpu_ok(
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return false;
 	return bpf_cpumask_test_cpu((u32)cpu, p->cpus_ptr);
-}
-/* Drop the on CPU gauge by one with no wrap and no clear. */
-/* The gauge is display only with no scheduling use, so a lost race */
-/* stays best effort with no correctness need. Retries the compare */
-/* and swap to pair every counted start, and a lost race retries with */
-/* no silent drop. The bound stays at 16 for the verifier, and the */
-/* window is one swap, so 16 covers the worst burst with no growing */
-/* leak past it. */
-static __always_inline void flow_on_cpu_dec(void)
-{
-	s32 i;
-	bpf_for(i, 0, 16) {
-		u64 cur = flow_stats.on_cpu;
-		u64 nxt;
-		u64 old;
-		if (cur == 0)
-			break;
-		nxt = cur - 1;
-		old = __sync_val_compare_and_swap(
-		    &flow_stats.on_cpu, cur, nxt);
-		if (old == cur)
-			break;
-	}
 }
 /* Clear the running pid with a compare and swap loop. */
 /* Retries the swap so a concurrent run pairs, and a lost race keeps */

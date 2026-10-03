@@ -127,6 +127,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 out:
 	/* Level follows after all moves with the same CPU only through */
 	/* one exit, so idle cannot be skipped and a steady level makes */
-	/* no call. */
+	/* no call through the cached compare. */
 	flow_perf_update(cpu);
 }

@@ -61,11 +61,12 @@ static __noinline bool flow_perf_busy(s32 cpu)
 /* Holds the ksym plus live plus bound plus allowlist plus cap plus */
 /* transition checks in one place, so callers cannot split them. The */
 /* kfunc check runs first, so old kernels skip with no set. The live */
-/* check runs next, so unknown CPUs skip with no set. The allowlist */
-/* guards the pre cap choice only, the cap may step outside it within */
-/* range, so no trap fires. The last level check holds, so a steady */
-/* level makes no set. Runs after priority moves plus fail open with */
-/* the dispatch CPU only and no remote use. */
+/* plus bound checks run next with no cap cost, so unknown CPUs skip */
+/* with no kfunc poll. The allowlist guards the pre cap choice only, */
+/* the cap may step outside it within range, so no trap fires. The */
+/* cached last level check holds after the cap, so a steady level makes */
+/* no set with one cached compare. Runs after priority moves plus fail */
+/* open with the dispatch CPU only and no remote use. */
 static __noinline void flow_perf_set(s32 cpu, u32 want)
 {
 	u32 cap;
@@ -74,10 +75,14 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 	/* Old kernels hold no set, so skip with no call. */
 	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
 		return;
-	/* Unknown CPUs hold no level, so skip with no call. */
+	/* Unknown CPUs hold no level, so skip with no call and no cap poll. */
+	/* Live already covers the bound, the bound check keeps the helper */
+	/* safe apart with no caller trust. */
 	if (cpu < 0)
 		return;
 	if (!flow_cpu_live((u32)cpu))
+		return;
+	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
 		return;
 	/* The allowlist guards the pre cap choice with half plus max. */
 	/* Dead by build here with no other level, kept fail closed. */
@@ -95,11 +100,6 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 		if (want > cap)
 			want = cap;
 	}
-	/* Past bound CPUs hold no row, so skip with no call. Live */
-	/* already covers this bound, the check keeps the helper safe */
-	/* apart with no caller trust. */
-	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		return;
 	key = (u32)cpu;
 	last = bpf_map_lookup_elem(&cpu_perf_last, &key);
 	if (!last)
@@ -138,8 +138,9 @@ static __always_inline void flow_perf_apply(s32 cpu, bool busy)
 }
 /* Update one CPU level from per CPU depth with no call on steady. */
 /* Pairs the probe with the set through apply, so dispatch needs one */
-/* exit call and deboost cannot be skipped. Same CPU only with no */
-/* remote use and no tier prescan. */
+/* exit call and deboost cannot be skipped. The cached last level check */
+/* in the set keeps steady passes cheap with no extra call. Same CPU */
+/* only with no remote use and no tier prescan. */
 static __always_inline void flow_perf_update(s32 cpu)
 {
 	flow_perf_apply(cpu, flow_perf_busy(cpu));
