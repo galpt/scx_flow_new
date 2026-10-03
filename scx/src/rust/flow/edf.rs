@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Deadline plus admission helpers for the flow scheduler.
+//! Deadline helpers for the flow scheduler.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -8,7 +8,9 @@
 //! deadline lives in intf.h with the drain checks in
 //! main/deadline.bpf.c, and this file mirrors the math with no map use.
 //! Every task joins a queue with no admission bound, so the predictor
-//! shapes only the deadline.
+//! shapes only the deadline. Fact (EEVDF): the queue key is the virtual
+//! deadline vd equal to the absolute deadline, so the earliest vd wins
+//! with no lag compensation.
 
 /// Default period in nanos at 16ms. Holds sixteen slices.
 pub const PERIOD_NS: u64 = 16_000_000;

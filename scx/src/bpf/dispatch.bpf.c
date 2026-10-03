@@ -6,7 +6,9 @@
  * plus overflow in queue order with no move bound and no slot budget.
  * The kernel keeps each priority queue list in deadline order, so each
  * tier takes the earliest matching deadline with mask wins on drain
- * and no BPF sort. Each tier skips unmatching heads uniformly through
+ * and no BPF sort. Fact (EEVDF): the queue key is the virtual
+ * deadline vd equal to the absolute deadline, so the earliest vd wins
+ * with no lag compensation. Each tier skips unmatching heads uniformly
  * the shared move, so one foreign task never stalls its tier for that
  * pass. The overflow tail stays FIFO with one single scan and mask
  * wins on drain, so stale work never stalls live work since the scan

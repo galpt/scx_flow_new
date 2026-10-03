@@ -16,7 +16,8 @@
  */
 /* Insert one task into its local queue with its deadline. */
 /* Uses the priority queue with the deadline as vtime, so the head */
-/* holds the earliest deadline with mask wins on drain. */
+/* holds the earliest deadline with mask wins on drain. Fact (EEVDF): */
+/* the vtime key is the virtual deadline vd, so the earliest vd wins. */
 static __always_inline void flow_local_insert(
 	struct task_struct *p, s32 cpu, u64 deadline)
 {

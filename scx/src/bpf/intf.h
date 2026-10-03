@@ -352,7 +352,9 @@ static __always_inline u64 flow_pred_period(u64 avg,
 /* A zero average means no history, so the hint period applies with */
 /* the default when the hint is zero. Later releases add the */
 /* predicted period with saturation, so a huge release clamps */
-/* instead of wrapping to the front. */
+/* instead of wrapping to the front. Fact (EEVDF): the queue vtime */
+/* key is the virtual deadline vd set equal to this absolute deadline, */
+/* so the earliest vd wins with no lag compensation. */
 static __always_inline u64 flow_pred_deadline(u64 release,
 	u64 avg, u64 dev, u32 hint_us)
 {
