@@ -29,19 +29,20 @@
  * See intf.h for the visit cap plus the deadline helpers and
  * enqueue.bpf.c for the deadline choice with no admission bound.
  *
- * The pass splits across dispatch/probes, drain, failopen, perf plus
- * helpers/move plus helpers/finish with one RCU section per tier scan
- * plus the single overflow scan. Each scan stays noinline with scalar
- * inputs plus a visit capped loop, so the verifier stays small with no
- * unrolled caller tree, while the single task move plus the account
- * stay inline so the deepest path keeps its call frames small.
+ * The pass splits across dispatch/failopen, drain, perf plus
+ * helpers/finish with one RCU section per tier scan plus the single
+ * overflow scan. The probe plus move live in failopen with the overflow
+ * scan, so tiers share one gate with no per tier copy. Each scan stays
+ * noinline with scalar inputs plus a visit capped loop, so the verifier
+ * stays small with no unrolled caller tree, while the single task move
+ * plus the account stay inline so the deepest path keeps its call
+ * frames small. No fair.c helper is used and the queue order stays in
+ * kernel priority queues for tiers plus FIFO for overflow.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#include "dispatch/probes.bpf.c"
-#include "helpers/move.bpf.c"
-#include "dispatch/drain.bpf.c"
 #include "dispatch/failopen.bpf.c"
+#include "dispatch/drain.bpf.c"
 #include "helpers/finish.bpf.c"
 #include "dispatch/perf.bpf.c"
 
