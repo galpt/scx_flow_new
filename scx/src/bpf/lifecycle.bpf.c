@@ -2,8 +2,8 @@
 /*
  * Task lifecycle ops.
  *
- * Running claims the segment start from zero and counts the on CPU
- * gauge once per claim. Stopping claims the start once and charges
+ * Running claims the segment start from zero with no BPF gauge.
+ * The snapshot counts live pids for the on CPU gauge. Stopping claims the start once and charges
  * the raw segment to total runtime, then feeds the burst
  * predictor average plus deviation from the same delta with shifts,
  * then counts one requeue per runnable stop else one completion. A wall
@@ -163,7 +163,7 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	}
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	/* The gauge drop follows the claim with no owner gate. */
+	/* The pid clear stays in the caller with no gauge use. */
 	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
@@ -179,7 +179,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
-	/* The gauge drop follows the claim with no owner gate. */
+	/* The pid clear stays in the caller with no gauge use. */
 	flow_charge_leftover(p, tctx);
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }

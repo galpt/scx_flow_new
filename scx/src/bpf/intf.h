@@ -139,11 +139,12 @@ enum flow_tier {
 /* never queued. Every queue join stamps the task, so queued work */
 /* always carries a stamp. */
 /* Run holds the segment start while on CPU else zero, so a claimed */
-/* start pairs the on CPU gauge with the stopping charge. Running */
+/* start pairs the stopping charge with no BPF gauge. The on CPU */
+/* gauge lives in the snapshot with no BPF count. Running */
 /* claims from zero only with a compare and swap, so a second running */
-/* without a stop keeps the first start with no second count. */
+/* without a stop keeps the first start with no second use. */
 /* Stopping versus disable or exit claims once with atomics, so each */
-/* counted start meets exactly one gauge drop with no owner gate. */
+/* claimed start meets exactly one charge with no owner gate. */
 /* Hint holds the flat period hint in micros for the deadline. A zero */
 /* hint means no hint, so the default period applies. Misses holds */
 /* the count of deadline misses for the life of the task with */
