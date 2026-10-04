@@ -31,147 +31,15 @@
  * poll. See intf.h for the deadline plus fairness helpers and
  * dispatch.bpf.c for the tier scans.
  *
- * The op holds the target plus insert plus kick helpers inline here
- * with the kick noinline on scalar input, so the verifier stays small.
+ * The op holds the target plus insert plus kick helpers in enqueue/
+ * with the fair plus clamp plus pinned plus place plus kick noinline
+ * on scalar input, so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Target plus insert helpers for the enqueue pass. */
-static __always_inline bool flow_task_pinned(const struct task_struct *p)
-{
-	if (is_migration_disabled(p))
-		return true;
-	if (p->nr_cpus_allowed == 1)
-		return true;
-	return false;
-}
-static __always_inline s32 flow_pick_target(struct task_struct *p, s32 sel)
-{
-	s32 first;
-	if (sel >= 0 && flow_cpu_ok(p, sel))
-		return sel;
-	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (flow_cpu_ok(p, first))
-		return first;
-	return -1;
-}
-static __always_inline void flow_local_insert(struct task_struct *p, s32 cpu, u64 vtime)
-{
-	scx_bpf_dsq_insert_vtime(p, flow_local_dsq((u32)cpu), (u64)FLOW_QUANTUM_NS, vtime, 0);
-}
-static __always_inline void flow_node_insert(struct task_struct *p, u32 node, u64 vtime)
-{
-	scx_bpf_dsq_insert_vtime(p, flow_node_dsq(node), (u64)FLOW_QUANTUM_NS, vtime, 0);
-}
-static __always_inline void flow_machine_insert(struct task_struct *p, u64 vtime)
-{
-	scx_bpf_dsq_insert_vtime(p, flow_machine_dsq(), (u64)FLOW_QUANTUM_NS, vtime, 0);
-}
-static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_flags)
-{
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, enq_flags);
-}
-/**
- * flow_tier_insert_hint - tier join from hoisted combined drain.
- * @p: task to join, null is ignored by the insert helpers.
- * @cpu: target CPU for the drain gate.
- * @vtime: fair time used for order plus the drain gate.
- * @now: current time in nanos.
- * @local_q: hoisted own local depth, non-positive means empty.
- * @node_q: hoisted node depth, non-positive means empty.
- *
- * Takes the local tier when the hoisted combined drain finishes before
- * the fair time, else the node tier when live, else the machine tier, so
- * a busy node holds local with no wait and no second poll. Escalation
- * follows the combined drain with mask wins on dispatch drain.
- */
-static __always_inline void flow_tier_insert_hint(struct task_struct *p,
-	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
-{
-	u32 node;
-	if (cpu >= 0 &&
-	    flow_cpu_meets_fair_hint(local_q, node_q, vtime, now)) {
-		flow_local_insert(p, cpu, vtime);
-		return;
-	}
-	if (cpu >= 0) {
-		node = flow_cpu_node((u32)cpu);
-		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids) {
-			flow_node_insert(p, node, vtime);
-			return;
-		}
-	}
-	flow_machine_insert(p, vtime);
-}
-static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64 vtime, u64 now)
-{
-	s32 local_q = 0;
-	s32 node_q = 0;
-	if (cpu >= 0) {
-		u32 node;
-		local_q = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
-		node = flow_cpu_node((u32)cpu);
-		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids)
-			node_q = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
-	}
-	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
-}
-/**
- * flow_make_fair - fair time from task state plus deadline plus hint.
- * @tctx: task state with vruntime plus weight plus slice.
- * @deadline: absolute EDF deadline in nanos.
- * @hint_w: hint share with base for neutral.
- *
- * Reads vruntime plus weight plus slice once and stacks the effective
- * share of task times hint over 128, so pinned plus miss plus open
- * paths share one divide copy with the same order.
- *
- * Returns: fair time as the earlier of deadline plus virtual deadline.
- *
- * Outlined with noinline to keep verifier headroom: pinned plus miss
- * plus open paths share one divide copy with no inline growth.
- */
-static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
-	u64 deadline, u32 hint_w)
-{
-	u64 vr = READ_ONCE(tctx->vruntime);
-	u32 sl = READ_ONCE(tctx->slice_ns);
-	u32 task_w = READ_ONCE(tctx->weight);
-	u32 eff;
-	u64 vd;
-	if (task_w == 0)
-		task_w = (u32)FLOW_WEIGHT_BASE;
-	eff = flow_task_effective_weight(task_w, hint_w);
-	if (sl == 0)
-		sl = (u32)FLOW_QUANTUM_NS;
-	vd = flow_virt_deadline(vr, (u64)sl, eff);
-	return flow_fair_vtime(deadline, vd);
-}
-/**
- * flow_clamp_to_min - clamp vruntime within the lag bound of a CPU.
- * @tctx: task state with vruntime to fold forward.
- * @cpu: target CPU whose minimum bounds the boost.
- *
- * Folds a vruntime more than 2ms behind the minimum forward to minimum
- * minus 2ms with saturation at zero, so long sleepers wake only slightly
- * early with no huge boost. Uses a compare and swap, so a concurrent
- * charge win keeps the winner with no regression.
- *
- * Outlined with noinline to keep verifier headroom: pinned plus open
- * paths share one clamp copy with no inline growth.
- */
-static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
-	u32 cpu)
-{
-	u64 min = flow_cpu_min(cpu);
-	u64 cur = READ_ONCE(tctx->vruntime);
-	u64 bound = (u64)FLOW_VLAG_MAX_NS;
-	u64 floor = 0;
-	if (min > bound)
-		floor = min - bound;
-	if (min > bound && cur < floor)
-		__sync_val_compare_and_swap(&tctx->vruntime, cur, floor);
-}
+#include "enqueue/target.bpf.c"
+#include "enqueue/insert.bpf.c"
+#include "enqueue/kick.bpf.c"
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
@@ -272,55 +140,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinned tasks wait in a tier queue with wait set and one idle kick. */
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
-	/* Queue order uses the fair time of deadline plus virtual deadline. */
-	/* The effective share stacks task times hint over 128 with the hint */
-	/* weight stored alongside the task base. Vruntime clamps to the */
-	/* target minimum minus 2ms like open tasks, and a past deadline */
-	/* counts one miss before the fresh deadline, so pins track lag */
-	/* plus overload with no stale reuse. */
+	/* The pinned wait runs outlined with no order change, so the open */
+	/* path keeps verifier headroom with the same fair time plus miss */
+	/* plus clamp plus kick. */
 	if (unlikely(pinned)) {
-		s32 pc = flow_pick_target(p, sel);
-		u32 ph;
-		u32 phint_w = (u32)FLOW_WEIGHT_BASE;
-		u64 pavg;
-		u64 pdev;
-		u64 pdl;
-		u64 pvt;
-		if (is_reenq) {
-			ph = READ_ONCE(tctx->hint_us);
-			phint_w = READ_ONCE(tctx->hint_w);
-		} else {
-			/* One cache plus one row read for both values, so */
-			/* the fresh pinned path pays no double lookup. */
-			/* The task base stays stored, only the hint reads. */
-			flow_task_hint_weight(p, &ph, &phint_w);
-		}
-		tctx->hint_us = ph;
-		tctx->hint_w = phint_w;
-		/* Clamp vruntime within the lag bound of the pinned target */
-		/* through the shared helper with no order change. */
-		if (pc >= 0 && flow_cpu_ok(p, pc))
-			flow_clamp_to_min(tctx, (u32)pc);
-		/* A past deadline counts one miss before the fresh deadline, */
-		/* so pinned overload tracks like open tasks with no loss. */
-		if (READ_ONCE(tctx->deadline) &&
-		    flow_missed(READ_ONCE(tctx->deadline), now))
-			flow_count_miss(tctx);
-		/* Pinned tasks recompute the deadline from the predictor */
-		/* plus hint with no stale reuse, so a pinned requeue tracks */
-		/* recent bursts like open tasks with no order break. A zero */
-		/* average means no history, so the hint period applies. */
-		pavg = (u64)READ_ONCE(tctx->avg_ns);
-		pdev = (u64)READ_ONCE(tctx->dev_ns);
-		pdl = flow_pred_deadline(now, pavg, pdev, ph);
-		__sync_lock_test_and_set(&tctx->deadline, pdl);
-		tctx->wait_at = now;
-		pvt = flow_make_fair(tctx, pdl, phint_w);
-		if (flow_cpu_ok(p, pc))
-			flow_tier_insert(p, pc, pvt, now);
-		else
-			flow_machine_insert(p, pvt);
-		flow_kick_idle_allowed(p, sel);
+		flow_enqueue_pinned(p, tctx, sel, is_reenq, now);
 		return;
 	}
 	cpu = flow_pick_target(p, sel);
@@ -405,177 +229,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	hoist_lag = READ_ONCE(tctx->vlag);
 	hoist_min = flow_cpu_min((u32)cpu);
 	hoist_elig = flow_eligible(hoist_vr, hoist_min, hoist_lag);
-	/* Idle direct bypass only when tiers hold no earlier fair key. An idle */
-	/* target takes the task straight to its local queue with one idle kick */
-	/* per wait and no preempt, so wakeups skip the tier plus dispatch hop. */
-	/* The bypass runs only when the local plus node plus machine tiers hold */
-	/* no queued work or the target still drains local plus node before the */
-	/* fair time, so an earlier fair time never waits behind this arrival in */
-	/* a tier queue. Local plus node depths hoist once here, so the empty */
-	/* gate plus the drain gate share the same reads with no second poll. */
+	/* Idle direct bypass plus tier join run outlined with no order */
+	/* change, so the drain gate plus the tier escalation share one */
+	/* hoist with no second poll. A direct bypass returns at once with */
+	/* one kick, else the tier join falls into the single kick tail. */
 	/* The deadline plus admit already hold, so order plus counters stay */
-	/* correct with no extra wait. The bypass inserts straight to local */
-	/* with no tier move count, so admits vs moves drift by the bypass */
-	/* count with no loss while dispatch moves still count each tier. */
-	/* Strict fair order gates the bypass with eligibility plus drain, so hogs */
-	/* pace through tiers with no direct jump and one kick per wait stays. */
-	/* The TOCTOU between the empty hints and the direct insert only */
-	/* races a concurrent tier join with no loss, since dispatch still */
-	/* drains in fair order with mask wins on the next pass. */
+	/* correct with no extra wait. Strict fair order gates the bypass */
+	/* with eligibility plus drain, so hogs pace through tiers with no */
+	/* direct jump and one kick per wait stays. The TOCTOU between the */
+	/* empty hints and the direct insert only races a concurrent tier */
+	/* join with no loss, since dispatch still drains in fair order with */
+	/* mask wins on the next pass. */
 	{
-		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
-		if (dst && READ_ONCE(dst->running_pid) == 0) {
-			u64 own = flow_local_dsq((u32)cpu);
-			u32 node = flow_cpu_node((u32)cpu);
-			bool node_valid = false;
-			u64 node_dsq = 0;
-			s32 lq = 0;
-			s32 nq = 0;
-			s32 mq = 0;
-			bool tiers_empty = false;
-			bool drain_ok = false;
-			if (node < (u32)FLOW_MAX_NODES &&
-			    (u64)node < nr_node_ids) {
-				node_dsq = flow_node_dsq(node);
-				node_valid = true;
-			}
-			/* Hoist local plus node plus machine once with signed */
-			/* hints, so the empty gate plus the drain gate plus the */
-			/* tier escalation below share one read with no repoll. */
-			lq = scx_bpf_dsq_nr_queued(own);
-			mq = scx_bpf_dsq_nr_queued(flow_machine_dsq());
-			if (node_valid)
-				nq = scx_bpf_dsq_nr_queued(node_dsq);
-			if (lq <= 0 && mq <= 0 && (!node_valid || nq <= 0))
-				tiers_empty = true;
-			/* Drain gate uses the same hoisted combined drain with */
-			/* no kfunc, so the bypass tests fair order cheap. */
-			drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
-			if ((tiers_empty || drain_ok) && hoist_elig) {
-				scx_bpf_dsq_insert(p,
-				    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
-				    (u64)FLOW_QUANTUM_NS, enq_flags);
-				scx_bpf_test_and_clear_cpu_idle(cpu);
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-				flow_count_kick();
-				return;
-			}
-			/* Tier join through the hoisted combined drain escalation */
-			/* with no second poll. The local tier takes the task when */
-			/* the hoisted drain finishes before the fair key, else the */
-			/* node tier when live, else the machine tier, so no task */
-			/* waits for a busy CPU while shared room stays open. Queue */
-			/* order plus tier choice use the fair time while placement */
-			/* tests the deadline, so the slowest sufficient CPU wins. */
-			/* Mask wins on dispatch drain with the same order. */
-			flow_tier_insert_hint(p, cpu, vtime, now, lq, nq);
-			goto kicked;
-		}
-	}
-	/* Tier join through the shared insert with fair order. */
-	/* The local queue takes the task when the target drains local plus */
-	/* node before the fair key, else the node queue when live, else the */
-	/* machine queue, so no task waits for a busy CPU while shared room */
-	/* stays open. Queue order plus tier choice use the fair time while */
-	/* placement tests the deadline, so the slowest sufficient CPU wins. */
-	flow_tier_insert(p, cpu, vtime, now);
-kicked:
-	/* Idle targets kick at once with strict one kick per wait and no rate */
-	/* window. The idle flag clears first so the kick sticks. The pid read */
-	/* uses a relaxed load to match the running stores. The direct block */
-	/* holds both the idle plus the preempt kick with the idle direct bypass */
-	/* as its mate, so all four points keep one kick per wait with no storm. */
-	/* Requeues skip the occupant lookup with no task_from_pid cost, so slice */
-	/* rotation paces at expiry with no extra kick. Busy preempts count in */
-	/* preempt_kicks on success and in preempt_skipped on every hold by strict */
-	/* margin plus tail plus eligibility with no missing fill, so the two */
-	/* counters track urgency with no extra kick. Strict order uses wrap safe */
-	/* time before throughout, so equal arrivals pace with no bounce. */
-	{
-		struct flow_cpu_state *st = flow_cpu((u32)cpu);
-		u32 occ_pid;
-		struct task_struct *trusted;
-		struct flow_task_ctx *octx;
-		u64 occ_deadline;
-		u64 occ_start;
-		if (!st)
+		struct flow_enqueue_tail tail = {
+			.cpu = cpu,
+			.vtime = vtime,
+			.now = now,
+			.enq_flags = enq_flags,
+			.is_reenq = is_reenq,
+			.hoist_elig = hoist_elig,
+		};
+		if (flow_enqueue_place(p, &tail))
 			return;
-		/* Idle kicks gate on the hoisted eligibility, so hogs pace */
-		/* through tiers with no idle jump while lagging tasks still */
-		/* wake at once. The gate stays with one minimum read per */
-		/* wait, and the ineligible corner paces in tiers with no */
-		/* kick and one skipped preempt with no storm. */
-		if (!hoist_elig) {
-			flow_count_preempt_skip();
-			return;
-		}
-		if (READ_ONCE(st->running_pid) == 0) {
-			scx_bpf_test_and_clear_cpu_idle(cpu);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			flow_count_kick();
-			return;
-		}
-		/* Requeues pace at slice expiry with no occupant preempt, */
-		/* so the task_from_pid plus cgroup plus 16 peer cost stays */
-		/* out of the hot rotation path. */
-		if (is_reenq)
-			return;
-		/* The running pid names the occupant with no curr read. */
-		/* A trusted lookup carries the occupant deadline, and a */
-		/* missing occupant fails closed with no kick and no skipped */
-		/* count, since no urgency holds to track. The occupant CPU */
-		/* validates before the compare, so a migrated occupant never */
-		/* kicks the wrong CPU with no count. A zero occupant deadline */
-		/* means no order yet, so the arrival paces with no kick and */
-		/* no skipped count. Only margin plus tail plus eligibility */
-		/* plus fair order holds count as skipped below. */
-		occ_pid = READ_ONCE(st->running_pid);
-		if (occ_pid == 0 || occ_pid == (u32)p->pid)
-			return;
-		bpf_rcu_read_lock();
-		trusted = bpf_task_from_pid(occ_pid);
-		if (!trusted) {
-			bpf_rcu_read_unlock();
-			return;
-		}
-		if (scx_bpf_task_cpu(trusted) != cpu) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			return;
-		}
-		octx = flow_lookup(trusted);
-		if (!octx) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			return;
-		}
-		occ_deadline = READ_ONCE(octx->deadline);
-		occ_start = READ_ONCE(octx->run_at);
-		if (occ_deadline == 0) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			return;
-		}
-		/* An urgent arrival leads by 100us with more than 100us left */
-		/* on the owner, so near ties plus nearly done owners never */
-		/* bounce. The shared preempt helper holds the margin plus */
-		/* tail with wrap safe order, so only a truly earlier arrival */
-		/* with work left preempts at once with one kick per wait. */
-		/* Equal or later arrivals pace at slice expiry with one */
-		/* skipped preempt. The fair time leads here, so fairness */
-		/* plus urgency gate the kick. Eligibility already passed */
-		/* above, so the helper checks lead plus tail only. */
-		if (!flow_preempt_wants(vtime, occ_deadline, now,
-		    occ_start)) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		bpf_task_release(trusted);
-		bpf_rcu_read_unlock();
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-		flow_count_kick();
-		flow_count_preempt_kick();
+		flow_enqueue_kick(p, &tail);
 	}
 }
