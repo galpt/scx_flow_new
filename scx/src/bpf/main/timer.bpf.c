@@ -22,9 +22,9 @@
 /* predictor average plus deviation update from the same delta with */
 /* shifts plus a first deviation floor at average quarter, so a leftover */
 /* segment still trains later deadlines. The vruntime advance uses the */
-/* effective share of task times hint over 128 with no divide plus a */
-/* minimum fold, so leftovers still pace fairness. Outlined to keep */
-/* disable and exit small. */
+/* effective share of task times stored hint over 128 with no divide */
+/* plus no lookup plus a minimum fold, so leftovers keep the heavy */
+/* share with no neutral cliff. Outlined to keep disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
 	struct flow_task_ctx *tctx)
 {
@@ -52,7 +52,7 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
 		u32 task_w = READ_ONCE(tctx->weight);
-		u32 hint_w = flow_cached_hint_weight(p);
+		u32 hint_w = READ_ONCE(tctx->hint_w);
 		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
 		u64 n_dev = flow_pred_dev(dev, avg, delta);

@@ -123,7 +123,8 @@ enum flow_tier {
 	FLOW_TIER_MACHINE = 2,
 };
 /* Per task state at 64B with vruntime plus deadline plus stamps plus */
-/* predictor plus lag plus weight plus slice plus hint plus misses. */
+/* predictor plus lag plus weight plus slice plus hint plus hint weight */
+/* plus misses. */
 /* Vruntime holds the scaled service in nanos with zero for no history. */
 /* A zero vruntime means no service yet, so the first virtual deadline */
 /* falls near now with no boost past the lag bound. Deadline holds the */
@@ -138,8 +139,11 @@ enum flow_tier {
 /* a compare and swap, so a second running without a stop keeps the */
 /* first start with no second use. Stopping versus disable or exit */
 /* claims once with atomics, so each claimed start meets exactly one */
-/* charge with no owner gate. Period holds the relative period in nanos */
-/* for the next deadline in 32 bits with zero for no hint. Avg holds */
+/* charge with no owner gate. Hint weight holds the flat hint share */
+/* clamped to range with 128 for neutral, stored alongside the task */
+/* base so requeues plus stopping plus leftover keep the heavy share */
+/* with no cache lookup and no neutral cliff. A zero means no history, */
+/* so the effective helper maps it to neutral. Avg holds */
 /* the burst average in nanos in 32 bits with zero for no history. Dev */
 /* holds the burst deviation in nanos in 32 bits with zero for no */
 /* history. Values clamp to 1ns to 1s, so a huge burst never wraps. */
@@ -159,7 +163,7 @@ struct flow_task_ctx {
 	u64 deadline;
 	u64 wait_at;
 	u64 run_at;
-	u32 period;
+	u32 hint_w;
 	u32 avg_ns;
 	u32 dev_ns;
 	s32 vlag;
@@ -277,7 +281,9 @@ static __always_inline u64 flow_sat_add(u64 a,
  * flow_weight_clamp - clamp one share into range.
  * @w: raw share with zero for no history.
  *
- * Zero or oversize shares fail closed to the nearer bound.
+ * Zero maps to 1, so an explicit zero earns the lightest share while
+ * missing state stays neutral via the effective helper. Oversize
+ * shares fail closed to the top bound.
  *
  * Returns: clamped share from 1 to 16384.
  */

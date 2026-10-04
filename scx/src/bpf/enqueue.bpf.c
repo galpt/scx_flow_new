@@ -47,7 +47,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	s32 cpu = -1;
 	bool pinned = false;
 	u64 now;
-	u64 period;
 	u64 deadline;
 	u64 vtime;
 	u32 hint;
@@ -59,9 +58,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	bool is_reenq = false;
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
 	/* the occupant preempt lookup, so slice rotation stays cheap. The */
-	/* cached hint in the task state carries the period, and the owner */
-	/* paces at slice expiry with no extra kick. The requeue case is */
-	/* rare beside fresh wakeups, so it stays unlikely. */
+	/* stored hint plus hint weight in the task state carry the period */
+	/* plus the share, and the owner paces at slice expiry with no */
+	/* extra kick. The requeue case is rare beside fresh wakeups, so */
+	/* it stays unlikely. */
 	if (unlikely(enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST)))
 		is_reenq = true;
 	/* Exiting tasks run at once on the task CPU with no queue wait. */
@@ -146,7 +146,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
 	/* Queue order uses the fair time of deadline plus virtual deadline. */
-	/* The effective share stacks task times hint over 128 with no store. */
+	/* The effective share stacks task times hint over 128 with the hint */
+	/* weight stored alongside the task base. */
 	if (unlikely(pinned)) {
 		s32 pc = flow_pick_target(p, sel);
 		u32 ph;
@@ -160,7 +161,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 pvt;
 		if (is_reenq) {
 			ph = READ_ONCE(tctx->hint_us);
-			phint_w = flow_cached_hint_weight(p);
+			phint_w = READ_ONCE(tctx->hint_w);
 		} else {
 			/* One cache plus one row read for both values, so */
 			/* the fresh pinned path pays no double lookup. */
@@ -168,6 +169,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			flow_task_hint_weight(p, &ph, &phint_w);
 		}
 		tctx->hint_us = ph;
+		tctx->hint_w = phint_w;
 		pdl = flow_fallback_deadline(now, ph);
 		tctx->wait_at = now;
 		if (READ_ONCE(tctx->deadline) == 0)
@@ -217,19 +219,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* while the predictor shapes only the deadline once history exists. */
 	/* A miss on the last deadline counts before the new deadline, so */
 	/* the miss count tracks wall completion past deadline. Requeues */
-	/* reuse the cached hint with one cached weight read and no cgroup */
-	/* acquire, so slice rotation pays no hierarchy cost. The reuse may */
-	/* stay stale across one slice when the share changed, so the new */
-	/* values show on the next fresh wakeup with no order break. */
-	/* The cache clears on migrate plus exit elsewhere, so reuse stays */
-	/* correct. Vruntime clamps within the lag bound of the target */
+	/* reuse the stored hint plus hint weight with no lookup and no */
+	/* cgroup acquire, so slice rotation keeps the heavy share with no */
+	/* neutral cliff. The reuse may stay stale across one slice when */
+	/* the share changed, so the new values show on the next fresh */
+	/* wakeup with no order break. A cgroup move shows the same way */
+	/* on the next fresh wakeup with no order break. Vruntime clamps within the lag bound of the target */
 	/* minimum with a compare and swap, so sleepers gain no more than */
 	/* one boost with no storm. The effective share stacks task times */
 	/* hint over 128 on the stack, so every task earns a clamped share */
-	/* with no special case and no weight store. */
+	/* with no special case and the hint weight stored alongside. */
 	if (is_reenq) {
 		hint = READ_ONCE(tctx->hint_us);
-		hint_w = flow_cached_hint_weight(p);
+		hint_w = READ_ONCE(tctx->hint_w);
 	} else {
 		/* One cache plus one row read for both values, so the fresh */
 		/* path pays no double lookup with no behavior change. The */
@@ -238,11 +240,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	avg = (u64)READ_ONCE(tctx->avg_ns);
 	dev = (u64)READ_ONCE(tctx->dev_ns);
-	if (avg == 0)
-		period = flow_task_period(hint);
-	else
-		period = flow_pred_period(avg, dev);
 	tctx->hint_us = hint;
+	tctx->hint_w = hint_w;
 	/* Clamp vruntime within the lag bound of the target minimum. */
 	/* A vruntime more than 2ms behind the minimum folds forward to */
 	/* minimum minus 2ms with saturation at zero, so a long sleeper */
@@ -271,7 +270,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 nvt;
 		flow_count_miss(tctx);
 		tctx->wait_at = now;
-		__sync_lock_test_and_set(&tctx->period, (u32)period);
 		ndl = flow_pred_deadline(now, avg, dev, hint);
 		__sync_lock_test_and_set(&tctx->deadline, ndl);
 		nvr = READ_ONCE(tctx->vruntime);
@@ -288,7 +286,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
-	__sync_lock_test_and_set(&tctx->period, (u32)period);
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
 	tctx->wait_at = now;

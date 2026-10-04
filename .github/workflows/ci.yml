@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 env:
-  BPF_CLANG: clang-19
+  BPF_CLANG: clang-20
   # Pinned upstream workspace ref (sched-ext/scx main as of 2026-09-15).
   # Bump deliberately after verifying the overlay still builds; the
   # overlay needs scx_* 1.1.3 + libbpf-rs 0.27.1 from the workspace.
@@ -31,7 +31,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
+          sudo apt-get install -y pkg-config lld clang clang-20 llvm-20 \
             libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
             libseccomp-dev libcap-ng-dev stress-ng mold
       - name: Assemble the scheduler workspace
@@ -73,7 +73,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
+          sudo apt-get install -y pkg-config lld clang clang-20 llvm-20 \
             libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
             libseccomp-dev libcap-ng-dev mold
       - name: Assemble the scheduler workspace

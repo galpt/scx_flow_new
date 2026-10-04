@@ -4,21 +4,25 @@
  *
  * Holds the per task base share stored by the set weight op. The base
  * stays clamped to range with neutral on missing state, and the
- * effective share stacks task times hint over 128 on the stack at
- * enqueue plus stopping time with no extra store. A missing task state
- * fails closed with no create and no count, so a weight change before
- * enable never allocates. Runs under the caller with no lock.
+ * effective share stacks task times stored hint over 128 on the stack
+ * at enqueue plus stopping time with no extra lookup. A zero input
+ * clamps to 1, so an explicit zero earns the lightest share while
+ * missing state stays neutral via the effective helper. A missing
+ * task state fails closed with no create and no count, so a weight
+ * change before enable never allocates. Runs under the caller with
+ * no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /**
  * flow_set_weight - store one task base share with clamp.
  * @p: task to reweight, null fails closed.
- * @weight: raw share, clamped to range with fail closed to bounds.
+ * @weight: raw share, clamped to range with zero mapping to 1.
  *
  * Stores the clamped base in task state with no hint use, so later
- * enqueues stack the effective share with the flat hint. A missing
- * task state fails closed with no create and no stall.
+ * enqueues stack the effective share with the stored flat hint. A
+ * zero input stores 1 for the lightest share with no neutral. A
+ * missing task state fails closed with no create and no stall.
  */
 void BPF_STRUCT_OPS(flow_set_weight, struct task_struct *p,
 	u32 weight)

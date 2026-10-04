@@ -57,11 +57,68 @@ case "${WS}" in
         exit 1
         ;;
 esac
+# Canonicalize for symlink plus dotdot safety with no require-existing,
+# so /tmp/scx-foo/../opencode still refuses as /tmp/opencode.
+if command -v realpath >/dev/null 2>&1; then
+    WS="$(realpath -m "${WS}")"
+elif command -v readlink >/dev/null 2>&1; then
+    WS="$(readlink -m "${WS}")"
+else
+    echo "refusing without canonical tool" >&2
+    exit 1
+fi
+DEST="${WS}/scheds/experimental/scx_flow"
 # Never clean the shared CI tree at /tmp/opencode, so local runs keep
 # the pinned workspace plus caches intact with no accidental remove.
 case "${WS}" in
     /tmp/opencode | /tmp/opencode/*)
         echo "refusing to clean /tmp/opencode" >&2
+        exit 1
+        ;;
+esac
+# Never clean the bare /tmp dir, so only allowlisted workspaces may
+# live under /tmp with no accidental remove.
+if [ "${WS}" = "/tmp" ]; then
+    echo "refusing to clean /tmp" >&2
+    exit 1
+fi
+# Allowlist /tmp/scx-* workspaces only under /tmp, so stray /tmp trees
+# never clean with no accidental remove.
+case "${WS}" in
+    /tmp/*)
+        case "${WS}" in
+            /tmp/scx-*) ;;
+            *)
+                echo "refusing to clean non allowlisted /tmp path" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+esac
+# Never clean home plus system trees, so user data plus OS stays intact.
+if [ -n "${HOME:-}" ]; then
+    if [ "${WS}" = "${HOME}" ]; then
+        echo "refusing to clean HOME" >&2
+        exit 1
+    fi
+    case "${WS}" in
+        "${HOME}"/*)
+            echo "refusing to clean HOME tree" >&2
+            exit 1
+            ;;
+    esac
+fi
+case "${WS}" in
+    /home | /home/*)
+        echo "refusing to clean /home" >&2
+        exit 1
+        ;;
+    /usr | /usr/*)
+        echo "refusing to clean /usr" >&2
+        exit 1
+        ;;
+    /var | /var/*)
+        echo "refusing to clean /var" >&2
         exit 1
         ;;
 esac

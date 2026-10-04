@@ -76,64 +76,14 @@ static __always_inline u32 flow_task_hint(
 		return hint;
 	}
 }
-/* Weight of one task from its hierarchy with paired release. */
-/* Follows the same cached id path as the hint with uniform handling */
-/* for cgroup plus root tasks, so every task earns a clamped share with */
-/* no special case. A null hierarchy means the root, so the neutral */
-/* share applies with no hint use. Requeues reuse the stored weight */
-/* with no acquire, so slice rotation pays no hierarchy cost. */
-static __always_inline u32 flow_task_weight(
-	struct task_struct *p)
-{
-	u32 pid = (u32)p->pid;
-	u64 *cached;
-	u64 id;
-	if (pid) {
-		cached = bpf_map_lookup_elem(&cgrp_cache_stor,
-		    &pid);
-		if (cached && *cached)
-			return flow_hint_weight(*cached);
-	}
-	{
-		struct cgroup *cgrp = flow_task_cgrp(p);
-		if (!cgrp)
-			return (u32)FLOW_WEIGHT_BASE;
-		id = flow_cgrp_id(cgrp);
-		flow_cgrp_put(cgrp);
-		if (pid)
-			bpf_map_update_elem(&cgrp_cache_stor,
-			    &pid, &id, BPF_ANY);
-		return flow_hint_weight(id);
-	}
-}
-/* Cached hint weight with no acquire for hot paths. */
-/* Reads the pid cache plus one hint row with no acquire, so requeues */
-/* plus stopping plus leftover charge pay no hierarchy cost on hit. A */
-/* miss fails closed to neutral with no acquire and no stall, so slice */
-/* rotation never blocks. The flat row still reads fresh on hit, so a */
-/* weight change shows at once with no cache clear. */
-static __always_inline u32 flow_cached_hint_weight(
-	struct task_struct *p)
-{
-	u32 pid;
-	u64 *cached;
-	if (!p)
-		return (u32)FLOW_WEIGHT_BASE;
-	pid = (u32)p->pid;
-	if (!pid)
-		return (u32)FLOW_WEIGHT_BASE;
-	cached = bpf_map_lookup_elem(&cgrp_cache_stor, &pid);
-	if (!cached || !*cached)
-		return (u32)FLOW_WEIGHT_BASE;
-	return flow_hint_weight(*cached);
-}
 /* Hint plus weight of one task with one cache plus one row read. */
 /* Single fast path for fresh enqueues that need both values, so the */
 /* hot path pays one cache lookup plus one hint row read instead of */
 /* two of each with no behavior change. A null hierarchy means the */
 /* root, so the default period plus neutral share apply. Requeues */
-/* use the cached weight helper with no acquire elsewhere, so slice */
-/* rotation pays no hierarchy cost. */
+/* plus stopping plus leftover reuse the stored hint weight in task */
+/* state with no lookup, so slice rotation keeps the heavy share with */
+/* no neutral cliff and no acquire. */
 static __always_inline void flow_task_hint_weight(
 	struct task_struct *p, u32 *hint_us, u32 *weight)
 {

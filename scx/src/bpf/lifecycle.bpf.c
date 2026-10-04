@@ -11,8 +11,8 @@
  * completion. A wall completion past the deadline counts one miss with
  * no wait and no kick, since the task already left the CPU. Enable
  * clears vruntime plus deadline plus stamps plus predictor plus lag
- * plus weight plus slice plus hint plus misses, and disable plus exit
- * charge a leftover segment at most once when stopping never ran with
+ * plus weight plus slice plus hint plus hint weight plus misses, and
+ * disable plus exit charge a leftover segment at most once when stopping never ran with
  * the same advance plus minimum fold. A closed gate still counts one
  * reject with no charge. Release clears a stale running view with no
  * charge. The gate runs first in every op except the exiting paths, so
@@ -103,16 +103,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* quarter, so later deadlines track recent bursts with no extra */
 	/* walk. A zero delta keeps the predictor with no train, so a */
 	/* backward clock never pulls the average to 1ns. The vruntime */
-	/* advance uses the effective share of task times hint over 128 */
-	/* with no divide, so heavy tasks move slowly while light tasks */
-	/* move quickly. The CPU minimum folds forward best effort with no */
-	/* regression past a concurrent win. */
+	/* advance uses the effective share of task times stored hint over */
+	/* 128 with no divide and no lookup, so heavy tasks move slowly */
+	/* while light tasks move quickly with no neutral cliff. The CPU */
+	/* minimum folds forward best effort with no regression past a */
+	/* concurrent win. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
 		u32 task_w = READ_ONCE(tctx->weight);
-		u32 hint_w = flow_cached_hint_weight(p);
+		u32 hint_w = READ_ONCE(tctx->hint_w);
 		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
 		u64 n_dev = flow_pred_dev(dev, avg, delta);
@@ -152,18 +153,18 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	if (!tctx)
 		return;
 	/* Fresh tasks hold no vruntime, no deadline, no stamps, no */
-	/* predictor, no lag, neutral weight, fixed slice, no hint, and no */
-	/* misses. The first enqueue clamps vruntime to the CPU minimum */
-	/* minus the lag bound with a fallback deadline plus a virtual */
-	/* deadline, so sleepers gain no more than one boost. The cached */
-	/* hierarchy id clears too, so a reused pid never reads a stale */
-	/* hierarchy. */
+	/* predictor, no lag, neutral weight, fixed slice, no hint, neutral */
+	/* hint weight, and no misses. The first enqueue clamps vruntime to */
+	/* the CPU minimum minus the lag bound with a fallback deadline */
+	/* plus a virtual deadline, so sleepers gain no more than one */
+	/* boost. The cached hierarchy id clears too, so a reused pid */
+	/* never reads a stale hierarchy. */
 	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx->vruntime = 0;
 	tctx->deadline = 0;
 	tctx->wait_at = 0;
 	tctx->run_at = 0;
-	tctx->period = 0;
+	tctx->hint_w = (u32)FLOW_WEIGHT_BASE;
 	tctx->avg_ns = 0;
 	tctx->dev_ns = 0;
 	tctx->vlag = 0;

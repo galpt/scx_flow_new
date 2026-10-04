@@ -30,13 +30,30 @@ grep -q "^TAB=\$'\\\\t'$" "${INST}" || fail "TAB guard form bad"
 # Shared CI tree stays protected with no clean.
 grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 
-# Each bad workspace path fails closed before any fetch.
+# Canonical plus allowlist guards stay present.
+grep -q "realpath -m" "${INST}" || fail "realpath guard missing"
+grep -q "readlink -m" "${INST}" || fail "readlink fallback missing"
+grep -q "/tmp/scx-" "${INST}" || fail "allowlist guard missing"
+grep -q "/home | /home" "${INST}" || fail "home guard missing"
+grep -q "/usr | /usr" "${INST}" || fail "usr guard missing"
+grep -q "/var | /var" "${INST}" || fail "var guard missing"
+
+# Each bad workspace path fails closed before any fetch with a refusing
+# note on stderr, so silent drops never pass.
 check_refuse() {
     local path="$1"
     local label="$2"
-    if bash "${INST}" "${path}" >/dev/null 2>&1; then
+    local err
+    if err="$(bash "${INST}" "${path}" 2>&1 >/dev/null)"; then
         fail "accepted bad path ${label}"
     fi
+    case "${err}" in
+        *refusing*)
+            ;;
+        *)
+            fail "missing refusing text for ${label}: ${err}"
+            ;;
+    esac
 }
 
 check_refuse "/" "root"
@@ -46,5 +63,18 @@ check_refuse "/tmp/with space" "space"
 check_refuse "/tmp/with*glob" "glob"
 check_refuse "/tmp/opencode" "opencode root"
 check_refuse "/tmp/opencode/scx" "opencode tree"
+check_refuse "/tmp" "tmp root"
+check_refuse "/tmp/other" "tmp non allowlisted"
+check_refuse "/tmp/scx-workspace/../opencode" "dotdot escape"
+check_refuse "/home" "home root"
+check_refuse "/home/user/ws" "home tree"
+check_refuse "/usr" "usr root"
+check_refuse "/usr/local/ws" "usr tree"
+check_refuse "/var" "var root"
+check_refuse "/var/tmp/ws" "var tree"
+if [ -n "${HOME:-}" ]; then
+    check_refuse "${HOME}" "home env root"
+    check_refuse "${HOME}/ws" "home env tree"
+fi
 
 echo "guard tests passed"
