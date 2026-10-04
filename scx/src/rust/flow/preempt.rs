@@ -50,17 +50,57 @@ pub fn eligible(vruntime: u64, min_vruntime: u64, vlag: i32) -> bool {
     crate::flow::edf::eligible(vruntime, min_vruntime, vlag)
 }
 
+/// True when one arrival leads the occupant with margin plus tail.
+/// Mirrors BPF flow_preempt_wants with the same now plus start inputs:
+/// the arrival leads strictly with the margin also strictly before,
+/// the owner started, and more than the tail remains on the owner with
+/// wrap safe order throughout. A max arrival or a saturated margin or
+/// tail fails closed. Eligibility stays outside like BPF enqueue, so
+/// callers gate with eligible first.
+#[cfg(test)]
+pub fn preempt_leads(arrival: u64, occupant: u64, now: u64, occ_start: u64) -> bool {
+    if arrival == 0 || arrival == u64::MAX {
+        return false;
+    }
+    if occupant == 0 {
+        return false;
+    }
+    if !time_before(arrival, occupant) {
+        return false;
+    }
+    let margin = arrival.saturating_add(PREEMPT_MARGIN_NS);
+    if margin == u64::MAX {
+        return false;
+    }
+    if !time_before(margin, occupant) {
+        return false;
+    }
+    if occ_start == 0 {
+        return false;
+    }
+    let occ_end = occ_start.saturating_add(crate::flow::slice::QUANTUM_NS);
+    if occ_end == u64::MAX {
+        return false;
+    }
+    let tail = now.saturating_add(PREEMPT_TAIL_NS);
+    if tail == u64::MAX {
+        return false;
+    }
+    if !time_before(tail, occ_end) {
+        return false;
+    }
+    true
+}
+
 /// True when one arrival strictly preempts with eligibility plus margin plus tail.
-/// The arrival must be eligible against the target minimum, then lead
-/// the occupant strictly with the margin also strictly before, so near
-/// ties never bounce. The owner must have started with remaining slice
-/// strictly past the tail, so nearly done owners finish instead of
-/// taking a kick. A zero occupant deadline or a zero owner start means
-/// no order yet, so no kick. A max arrival or a saturated margin fails
-/// closed. Remain holds the owner end minus now saturating, so remain
-/// must exceed the tail strictly with wrap safe order. Order uses wrap
-/// safe time before throughout, including the tail, so the check holds
-/// across the u64 wrap with no branch.
+/// Eligibility gates first like BPF enqueue, then the lead plus tail
+/// check matches preempt_leads with remain as the saturating owner end
+/// minus now. The arrival must be eligible against the target minimum,
+/// then lead the occupant strictly with the margin also strictly before,
+/// so near ties never bounce. A zero occupant deadline or a zero owner
+/// start means no order yet, so no kick. Order uses wrap safe time
+/// before throughout, including the tail, so the check holds across
+/// the u64 wrap with no branch.
 #[cfg(test)]
 pub fn preempt_wants(
     arrival: u64,
@@ -176,6 +216,24 @@ mod tests {
         assert!(!preempt_wants(10, 1_000_000, 100_000, 1, 0, 0, 0));
         assert!(preempt_wants(10, 1_000_000, 100_001, 1, 0, 0, 0));
         assert!(!preempt_wants(10, 1_000_000, 0, 1, 0, 0, 0));
+    }
+
+    #[test]
+    fn leads_matches_bpf_helper_inputs() {
+        // Same now plus start inputs as BPF flow_preempt_wants.
+        // Owner starts at 1 with a 1ms slice, so now at 0 leaves
+        // the full slice while now near the end holds the tail.
+        assert!(preempt_leads(10, 600_000, 0, 1));
+        assert!(!preempt_leads(19, 20, 0, 1));
+        assert!(!preempt_leads(10, 100_010, 0, 1));
+        assert!(preempt_leads(10, 100_011, 0, 1));
+        assert!(!preempt_leads(10, 1_000_000, 900_001, 1));
+        assert!(preempt_leads(10, 1_000_000, 900_000, 1));
+        assert!(preempt_leads(10, 1_000_000, 899_999, 1));
+        assert!(!preempt_leads(0, 20, 0, 1));
+        assert!(!preempt_leads(10, 0, 0, 1));
+        assert!(!preempt_leads(10, 600_000, 0, 0));
+        assert!(!preempt_leads(u64::MAX, 600_000, 0, 1));
     }
 
     #[test]

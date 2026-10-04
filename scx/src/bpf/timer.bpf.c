@@ -16,7 +16,9 @@
 /* Disabled by default with no call from any op, so the helper costs */
 /* nothing unless the operator wires it. When enabled, moves the */
 /* minimum forward by at most one lag bound toward the sample with */
-/* saturation, so a stale minimum rejoins without a jump. */
+/* saturation, so a stale minimum rejoins without a jump. Kept */
+/* intentionally as the optional decay point with a Rust no-op mirror */
+/* in timer.rs for tests, so veristat keeps one decay symbol. */
 static __always_inline void flow_timer_decay(u32 cpu, u64 sample)
 {
 	(void)cpu;

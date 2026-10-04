@@ -11,13 +11,15 @@
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Resolve the local row pointer for direct field adds. */
+/* Returns null on an out of bound id with no fold to row zero, so a */
+/* stale CPU never attributes to CPU zero. Callers skip on null. */
 static __always_inline struct flow_sched_stats *flow_stat_row(void)
 {
 	u32 cpu = bpf_get_smp_processor_id();
 	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
-		cpu = 0;
+		return NULL;
 	if ((u64)cpu >= nr_cpu_ids)
-		cpu = 0;
+		return NULL;
 	return bpf_map_lookup_elem(&cpu_stats_stor, &cpu);
 }
 /* Count one closed gate rejection with saturation. */

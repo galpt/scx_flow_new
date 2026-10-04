@@ -16,7 +16,10 @@
 /* The arrival must lead the occupant strictly with the margin also */
 /* strictly before, so near ties never bounce. The owner must have */
 /* started with remaining slice strictly past the tail, so nearly done */
-/* owners finish instead of taking a kick. */
+/* owners finish instead of taking a kick. The enqueue busy path calls */
+/* this helper after the eligibility gate, so eligibility stays outside */
+/* here with one minimum read per wait. Mirrored by preempt_leads in */
+/* Rust for tests with the same now plus start inputs. */
 static __always_inline bool flow_preempt_wants(u64 arrival,
 	u64 occupant, u64 now, u64 occ_start)
 {

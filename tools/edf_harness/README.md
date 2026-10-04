@@ -88,7 +88,9 @@ A value of 100 percent is a measured rate at feasible
 use only with no guarantee. There is no threshold on 98.5.
 Report topology plus variance with each run. Use
 `stress-ng` only as background load plus `cyclictest`
-plus `schbench` as cross checks with no threshold.
+plus `schbench` as cross checks with no threshold. The
+10ms probe reports average plus max delay only with no
+per-op latency histogram, so tail claims need raw runs.
 
 ## Results (4.2.4 vs 4.2.5)
 

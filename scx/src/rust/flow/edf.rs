@@ -176,15 +176,11 @@ pub fn weight_clamp(w: u32) -> u32 {
 /// Mirrors BPF flow_scaled_delta plus weight calc_delta_fair.
 #[cfg(test)]
 pub fn scaled_delta(delta: u64, weight: u32) -> u64 {
+    // Clamp never returns zero, so no zero guard is needed here.
     let w = weight_clamp(weight);
     if delta == 0 {
         return 0;
     }
-    let w = if w == 0 {
-        crate::flow::slice::WEIGHT_MIN
-    } else {
-        w
-    };
     if delta > u64::MAX / crate::flow::slice::WEIGHT_BASE as u64 {
         return u64::MAX;
     }

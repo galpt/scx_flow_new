@@ -443,10 +443,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		struct task_struct *trusted;
 		struct flow_task_ctx *octx;
 		u64 occ_deadline;
-		u64 margin;
 		u64 occ_start;
-		u64 occ_end;
-		u64 tail;
 		u64 avr;
 		s32 avlag;
 		u64 cmin;
@@ -513,56 +510,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		/* An urgent arrival leads by 100us with more than 100us left */
 		/* on the owner, so near ties plus nearly done owners never */
-		/* bounce. The margin adds 100us to the arrival with */
-		/* saturation, and the tail needs more than 100us left on the */
-		/* owner with wrap safe order, so only a truly earlier arrival */
+		/* bounce. The shared preempt helper holds the margin plus */
+		/* tail with wrap safe order, so only a truly earlier arrival */
 		/* with work left preempts at once with one kick per wait. */
 		/* Equal or later arrivals pace at slice expiry with one */
 		/* skipped preempt. The fair time leads here, so fairness */
-		/* plus urgency gate the kick. */
-		if (!flow_time_before(vtime, occ_deadline)) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		margin = flow_sat_add(vtime,
-		    (u64)FLOW_PREEMPT_MARGIN_NS);
-		if (margin == (u64)~0ULL) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		if (!flow_time_before(margin, occ_deadline)) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		if (occ_start == 0) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		occ_end = flow_sat_add(occ_start,
-		    (u64)FLOW_QUANTUM_NS);
-		if (occ_end == (u64)~0ULL) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		tail = flow_sat_add(now,
-		    (u64)FLOW_PREEMPT_TAIL_NS);
-		if (tail == (u64)~0ULL) {
-			bpf_task_release(trusted);
-			bpf_rcu_read_unlock();
-			flow_count_preempt_skip();
-			return;
-		}
-		if (!flow_time_before(tail, occ_end)) {
+		/* plus urgency gate the kick. Eligibility already passed */
+		/* above, so the helper checks lead plus tail only. */
+		if (!flow_preempt_wants(vtime, occ_deadline, now,
+		    occ_start)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
 			flow_count_preempt_skip();

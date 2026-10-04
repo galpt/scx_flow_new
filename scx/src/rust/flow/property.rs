@@ -3,10 +3,12 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds deterministic property checks over the 1:1 mirrors with fixed
-//! seeds and no randomness, so CI stays repeatable. Each property walks
-//! a bounded input space and asserts the invariant the BPF side relies
-//! on for veristat plus tail latency.
+//! Holds deterministic property checks over the test-only mirrors with
+//! fixed seeds and no randomness, so CI stays repeatable. Each property
+//! walks a bounded input space and asserts the invariant the BPF side
+//! relies on for veristat plus tail latency. Mirrors cover the math
+//! subset for tests only with no map or RCU use; kernel order stays in
+//! the priority queues and kicks stay in BPF.
 
 #[cfg(test)]
 mod tests {
@@ -119,5 +121,40 @@ mod tests {
         assert_eq!(crate::flow::vtime::min_advance(100, 0), 100);
         assert_eq!(crate::flow::vtime::min_advance(100, 200), 200);
         assert_eq!(crate::flow::weight::nice_to_weight(0), 128);
+    }
+
+    #[test]
+    fn bsf_and_steal_hold_combined_drain() {
+        // BSF takes the smallest combined drain that still meets.
+        let got = crate::flow::select::bsf_pick(
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[9, 0, 5],
+            &[9, 0, 0],
+            100,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(got, 2);
+        // Four-tier steal skips on any tier backlog with visits shared.
+        assert!(!crate::flow::select::steal_should_skip(0, 0, 0, 0));
+        assert!(crate::flow::select::steal_should_skip(0, 0, 0, 1));
+        assert!(crate::flow::dispatch::should_steal(0, 0, 0, 0, 0));
+        assert!(!crate::flow::dispatch::should_steal(0, 0, 0, 1, 0));
+        assert_eq!(crate::flow::dispatch::VISIT_MAX, 8);
+        assert_eq!(crate::flow::select::steal_window(0), 8);
+        assert_eq!(crate::flow::select::cursor_next(0, 4), 2);
+    }
+
+    #[test]
+    fn lifecycle_and_timer_hold_charge() {
+        assert_eq!(crate::flow::lifecycle::charge_delta(200, 100), 100);
+        assert_eq!(crate::flow::lifecycle::charge_delta(50, 100), 0);
+        assert!(crate::flow::lifecycle::should_count_miss(100, 101, false));
+        assert!(!crate::flow::lifecycle::should_count_miss(100, 101, true));
+        assert_eq!(crate::flow::timer::decay_noop(100, 200), 100);
+        assert!(crate::flow::preempt::preempt_leads(10, 600_000, 0, 1));
+        assert!(!crate::flow::preempt::preempt_leads(19, 20, 0, 1));
     }
 }

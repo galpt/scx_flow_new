@@ -4,8 +4,9 @@
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one overflow FIFO.
- * Homeless work waits in the machine queue with all other shared work.
- * Idle CPUs steal one task from peer locals as the fourth tier with
+ * Homeless work with no live CPU plus gate misses wait in the
+ * overflow FIFO in arrival order with mask wins on drain.
+ * Idle CPUs steal one task from peer locals as the fifth tier with
  * a bounded window of 4 to 8 peers proportional to remaining visits.
  * Every task earns an absolute deadline from now plus a period, and
  * each queue orders by the fair time through the kernel priority
@@ -212,10 +213,11 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
-/* Scheduler counters with 15 fields. Homeless work counts in the */
-/* machine moves, so every tier move has a live counter. Rejects stay */
-/* dead at zero for wire compat only with no writer, while real rejects */
-/* count in gate_rejects. Readers must use gate_rejects for drops. */
+/* Scheduler counters with 15 fields. Overflow plus steal moves count */
+/* in the local bucket with no new counter, so stats stay at 120B. */
+/* Rejects stay dead at zero for wire compat only with no writer, */
+/* while real rejects count in gate_rejects. Readers must use */
+/* gate_rejects for drops. */
 /* Preempt kicks count busy preempts sent, and preempt skipped counts */
 /* suppressed preempts held by margin plus tail plus eligibility. */
 struct flow_sched_stats {
@@ -365,8 +367,7 @@ static __always_inline u64 flow_scaled_delta(u64 delta,
 	u64 out;
 	if (delta == 0)
 		return 0;
-	if (w == 0)
-		w = (u32)FLOW_WEIGHT_MIN;
+	/* Clamp never returns zero, so no zero guard is needed here. */
 	if (delta > (u64)~0ULL / (u64)FLOW_WEIGHT_BASE)
 		return (u64)~0ULL;
 	prod = delta * (u64)FLOW_WEIGHT_BASE;

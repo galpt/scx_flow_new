@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "4.7.6" ] || fail "version not at 4.7.6"
+[ "${want}" = "4.8.0" ] || fail "version not at 4.8.0"
 
 # Newline plus tab use ANSI-C quoting with no command substitution.
 grep -q "^NL=\$'\\\\n'$" "${INST}" || fail "NL guard form bad"
@@ -35,6 +35,7 @@ grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 grep -q "realpath -m" "${INST}" || fail "realpath guard missing"
 grep -q "readlink -m" "${INST}" || fail "readlink fallback missing"
 grep -q '\[ -L "${WS}" \]' "${INST}" || fail "symlink guard missing"
+grep -q 'symlinked parent' "${INST}" || fail "parent symlink guard missing"
 grep -q 'rm -rf --' "${INST}" || fail "rm dash guard missing"
 grep -q "/tmp/scx-" "${INST}" || fail "allowlist guard missing"
 grep -q "/home | /home" "${INST}" || fail "home guard missing"

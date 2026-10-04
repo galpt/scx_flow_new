@@ -95,23 +95,9 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 		return 0;
 	return READ_ONCE(h->period_us);
 }
-/* Flat weight hint for one id with base on miss. */
-static __always_inline u32 flow_hint_weight(u64 cgid)
-{
-	struct flow_hint *h;
-	if (!cgid)
-		return (u32)FLOW_WEIGHT_BASE;
-	h = bpf_map_lookup_elem(&hint_stor, &cgid);
-	if (!h)
-		return (u32)FLOW_WEIGHT_BASE;
-	{
-		u32 w = READ_ONCE(h->weight);
-		if (w == 0)
-			return (u32)FLOW_WEIGHT_BASE;
-		return flow_weight_clamp(w);
-	}
-}
 /* Hint of one task from its hierarchy with paired release. */
+/* Weight reads share flow_task_hint_weight with one cache plus one */
+/* row read, so no single weight lookup helper is kept here. */
 static __always_inline u32 flow_task_hint(struct task_struct *p)
 {
 	u32 pid = (u32)p->pid;

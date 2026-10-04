@@ -4,6 +4,9 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Serves the embedded page plus the live snapshot as JSON on loopback.
+//! Uses tiny_http 0.12 pinned in Cargo.toml with loopback only plus no
+//! TLS plus no store. Binds IPv6 loopback first with IPv4 fallback and
+//! serves no WAN route, so the page plus JSON never leave the host.
 
 use std::sync::Arc;
 use std::sync::Mutex;

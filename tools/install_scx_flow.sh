@@ -76,6 +76,17 @@ if [ -L "${WS}" ]; then
     echo "refusing a symlinked workspace path" >&2
     exit 1
 fi
+# Refuse a symlinked parent, since a clean under a linked parent would
+# remove outside the allowlist with no dotdot text. Walks each parent
+# up to root with no command substitution on the path itself.
+_parent="${WS}"
+while [ "${_parent}" != "/" ] && [ "${_parent}" != "." ] && [ -n "${_parent}" ]; do
+    if [ -L "${_parent}" ]; then
+        echo "refusing a symlinked parent path" >&2
+        exit 1
+    fi
+    _parent="$(dirname "${_parent}")"
+done
 DEST="${WS}/scheds/experimental/scx_flow"
 # Never clean the shared CI tree at /tmp/opencode, so local runs keep
 # the pinned workspace plus caches intact with no accidental remove.

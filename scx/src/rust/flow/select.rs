@@ -94,20 +94,90 @@ pub fn steal_window(visits: u32) -> u32 {
     window.clamp(4, 8)
 }
 
-/// Saturated backlog of tier queues as local plus node plus machine.
-/// Mirrors BPF dispatch steal early-out counts with saturation, so a
-/// huge depth clamps instead of wrapping to idle. Visits stay shared.
+/// Saturated backlog of tier queues as local plus node plus machine
+/// plus overflow. Mirrors BPF dispatch steal early-out counts with
+/// saturation, so a huge depth clamps instead of wrapping to idle.
+/// Visits stay shared across the five tiers.
 #[cfg(test)]
-pub fn steal_backlog(local: u64, node: u64, machine: u64) -> u64 {
-    local.saturating_add(node).saturating_add(machine)
+pub fn steal_backlog(local: u64, node: u64, machine: u64, overflow: u64) -> u64 {
+    local
+        .saturating_add(node)
+        .saturating_add(machine)
+        .saturating_add(overflow)
 }
 
 /// True when the steal tier skips its peer scan for this pass.
-/// Mirrors BPF dispatch saturated early-out, so a globally busy pass
-/// with any tier backlog skips up to eight peer scans cheaply.
+/// Mirrors BPF dispatch saturated early-out over all four queued
+/// tiers, so a globally busy pass with any tier backlog skips up to
+/// eight peer scans cheaply.
 #[cfg(test)]
-pub fn steal_should_skip(local: u64, node: u64, machine: u64) -> bool {
-    steal_backlog(local, node, machine) != 0
+pub fn steal_should_skip(local: u64, node: u64, machine: u64, overflow: u64) -> bool {
+    steal_backlog(local, node, machine, overflow) != 0
+}
+
+/// Next placement cursor after one successful pick.
+/// Mirrors BPF select advance of start plus one where start is cursor
+/// plus one, so the cursor moves by two per pick with no hotspot.
+/// Returns zero on an empty host with no divide.
+#[cfg(test)]
+pub fn cursor_next(cursor: u32, n: usize) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    let n = n as u32;
+    let start = cursor.wrapping_add(1) % n;
+    (start.wrapping_add(1)) % n
+}
+
+/// Best sufficient fallback with the smallest combined drain.
+/// Mirrors BPF flow_bsf_pick with no topology signal: scans at most
+/// eight peers from the cursor, skips the busy waker, keeps only peers
+/// that meet the deadline via combined local plus node drain, then
+/// takes the smallest combined drain. Ties keep the first peer in
+/// scan order. Returns minus one when no allowed peer meets.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn bsf_pick(
+    allowed: &[i32],
+    live: &[i32],
+    local: &[u64],
+    node: &[u64],
+    deadline: u64,
+    now: u64,
+    this_cpu: i32,
+    cursor: u32,
+) -> i32 {
+    let n = live.len();
+    if n <= 1 || n > 1024 {
+        return -1;
+    }
+    let start = ((cursor.wrapping_add(1)) % n as u32) as usize;
+    let mut best: i32 = -1;
+    let mut best_drain: u64 = u64::MAX;
+    for off in 0..SHARED_SCAN_BOUND as usize {
+        if off >= n {
+            break;
+        }
+        let idx = (start + off) % n;
+        let cpu = live[idx];
+        if cpu == this_cpu {
+            continue;
+        }
+        if !allowed.contains(&cpu) {
+            continue;
+        }
+        let ld = local.get(idx).copied().unwrap_or(0);
+        let nd = node.get(idx).copied().unwrap_or(0);
+        if !cpu_meets_combined(ld, nd, deadline, now) {
+            continue;
+        }
+        let drain = drain_combined(ld, nd);
+        if best == -1 || drain < best_drain {
+            best_drain = drain;
+            best = cpu;
+        }
+    }
+    best
 }
 
 /// Placement pick among idle plus previous plus shared with fair tiebreak.
@@ -115,14 +185,17 @@ pub fn steal_should_skip(local: u64, node: u64, machine: u64) -> bool {
 /// deadline, then the slowest sufficient shared CPU with near minimum
 /// tiebreak on the smallest minimum vruntime. Peers within 64 capacity
 /// units of the best count as tied, so lagging CPUs take work first.
-/// Test-only mirror with no map use where the BPF pass scans at most
-/// eight peers from the cursor and skips the busy waker, and this
+/// Test-only SSF mirror with no map use where the BPF pass scans at
+/// most eight peers from the cursor and skips the busy waker, and this
 /// mirror walks the same bounded window from the passed cursor with
-/// the same skip. Minimum order uses the wrap safe signed diff like
-/// BPF, so the tiebreak holds across the u64 wrap. Callers pass
-/// host-sized slices within the 1024 CPU bound with units plus
-/// minimums parallel to live. Returns minus one when no allowed CPU
-/// is live. Perf stays bounded at eight peers with no extra walk.
+/// the same skip. BPF tries SSF then the bsf_pick fallback with the
+/// smallest combined drain, so callers try place then bsf_pick in the
+/// same order. Minimum order uses the wrap safe signed diff like BPF,
+/// so the tiebreak holds across the u64 wrap. Callers pass host-sized
+/// slices within the 1024 CPU bound with units plus minimums parallel
+/// to live. Returns minus one when no allowed CPU is live. Perf stays
+/// bounded at eight peers with no extra walk. Cursor advance uses
+/// cursor_next with plus two per pick.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -438,12 +511,47 @@ mod tests {
 
     #[test]
     fn steal_skips_when_tiers_busy() {
-        // Saturated early-out mirrors BPF dispatch with shared visits.
-        assert!(!steal_should_skip(0, 0, 0));
-        assert!(steal_should_skip(1, 0, 0));
-        assert!(steal_should_skip(0, 1, 0));
-        assert!(steal_should_skip(0, 0, 1));
-        assert_eq!(steal_backlog(u64::MAX, 1, 1), u64::MAX);
-        assert!(steal_should_skip(u64::MAX, 0, 0));
+        // Saturated early-out mirrors BPF dispatch over local plus
+        // node plus machine plus overflow with shared visits.
+        assert!(!steal_should_skip(0, 0, 0, 0));
+        assert!(steal_should_skip(1, 0, 0, 0));
+        assert!(steal_should_skip(0, 1, 0, 0));
+        assert!(steal_should_skip(0, 0, 1, 0));
+        assert!(steal_should_skip(0, 0, 0, 1));
+        assert_eq!(steal_backlog(u64::MAX, 1, 1, 1), u64::MAX);
+        assert!(steal_should_skip(u64::MAX, 0, 0, 0));
+    }
+
+    #[test]
+    fn bsf_takes_smallest_combined_drain() {
+        // Symmetric hosts spread via the smallest combined drain.
+        let got = bsf_pick(
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[9, 0, 5],
+            &[9, 0, 0],
+            100,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(got, 2);
+        // No peer meets when every drain misses the deadline.
+        let miss = bsf_pick(&[1, 2], &[1, 2], &[9, 9], &[9, 9], 5, 0, 99, 0);
+        assert_eq!(miss, -1);
+        // Busy waker stays out while the window still finds a peer.
+        let skip = bsf_pick(&[1, 2, 3], &[1, 2, 3], &[0, 0, 0], &[0, 0, 0], 100, 0, 1, 2);
+        assert_ne!(skip, 1);
+        assert!(skip == 2 || skip == 3);
+    }
+
+    #[test]
+    fn cursor_advances_by_two() {
+        assert_eq!(cursor_next(0, 4), 2);
+        assert_eq!(cursor_next(3, 4), 1);
+        assert_eq!(cursor_next(0, 0), 0);
+        // Window stays four to eight with the cursor spread.
+        assert_eq!(steal_window(0), 8);
+        assert_eq!(cursor_next(1, 3), 0);
     }
 }

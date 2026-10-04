@@ -162,13 +162,14 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 			units = flow_cpu_units(peer);
 			pmin = flow_cpu_min(peer);
 			if (best != 0xffffffffU) {
-				if (units + 64U < best_units) {
+				/* u64 adds keep the 64-unit window wrap safe. */
+				if ((u64)units + 64ULL < (u64)best_units) {
 					best_units = units;
 					best_min = pmin;
 					best = peer;
 					continue;
 				}
-				if (units > best_units + 64U)
+				if ((u64)units > (u64)best_units + 64ULL)
 					continue;
 				if (!flow_time_before(pmin, best_min) &&
 				    pmin != best_min)
