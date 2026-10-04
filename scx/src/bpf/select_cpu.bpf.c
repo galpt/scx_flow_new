@@ -4,15 +4,15 @@
  *
  * Takes idle first with no state cost, then the previous CPU when it
  * meets the deadline, then the slowest sufficient fit in O(VISIT) with
- * VISIT at most eight peers, then the best sufficient fallback over the
- * next four peers past the SSF window from cursor plus 9 with no
- * topology signal. The two scans cover twelve unique peers with no
- * overlap, so the fallback extends coverage instead of rescanning. The
- * shared cursor with dispatch steal advances by two with best effort
- * races and no atomic order. Pinned tasks stay where the mask allows
- * with no scan. An empty mask falls through to the machine tier at
- * enqueue. One ktime read serves the previous plus SSF plus BSF checks,
- * and pow2 hosts mask with no divide.
+ * VISIT at most eight peers in two node-local phases, then the best
+ * sufficient fallback over the next four peers past the SSF window from
+ * cursor plus 9 with drain plus minimum plus id tiebreak. The two scans
+ * cover twelve unique peers with no overlap, so the fallback extends
+ * coverage instead of rescanning. The shared cursor with dispatch steal
+ * advances by two with best effort races and no atomic order. Pinned
+ * tasks stay where the mask allows with no scan. An empty mask falls
+ * through to the machine tier at enqueue. One ktime read serves the
+ * previous plus SSF plus BSF checks, and pow2 hosts mask with no divide.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

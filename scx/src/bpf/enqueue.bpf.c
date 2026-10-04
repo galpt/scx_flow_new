@@ -26,7 +26,9 @@
  * with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays.
  * Slice expiry paces the rest, so no slice write and no stamp run
- * here. See intf.h for the deadline plus fairness helpers and
+ * here. Local plus node depths hoist once, so the drain gated bypass
+ * plus the combined drain tier escalation share one read with no second
+ * poll. See intf.h for the deadline plus fairness helpers and
  * dispatch.bpf.c for the tier scans.
  *
  * The op holds the target plus insert plus kick helpers inline here
@@ -69,10 +71,26 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
 {
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, enq_flags);
 }
-static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64 vtime, u64 now)
+/**
+ * flow_tier_insert_hint - tier join from hoisted combined drain.
+ * @p: task to join, null is ignored by the insert helpers.
+ * @cpu: target CPU for the drain gate.
+ * @vtime: fair time used for order plus the drain gate.
+ * @now: current time in nanos.
+ * @local_q: hoisted own local depth, non-positive means empty.
+ * @node_q: hoisted node depth, non-positive means empty.
+ *
+ * Takes the local tier when the hoisted combined drain finishes before
+ * the fair time, else the node tier when live, else the machine tier, so
+ * a busy node holds local with no wait and no second poll. Escalation
+ * follows the combined drain with mask wins on dispatch drain.
+ */
+static __always_inline void flow_tier_insert_hint(struct task_struct *p,
+	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
 {
 	u32 node;
-	if (cpu >= 0 && flow_cpu_meets_fair((u32)cpu, vtime, now)) {
+	if (cpu >= 0 &&
+	    flow_cpu_meets_fair_hint(local_q, node_q, vtime, now)) {
 		flow_local_insert(p, cpu, vtime);
 		return;
 	}
@@ -84,6 +102,19 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 		}
 	}
 	flow_machine_insert(p, vtime);
+}
+static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64 vtime, u64 now)
+{
+	s32 local_q = 0;
+	s32 node_q = 0;
+	if (cpu >= 0) {
+		u32 node;
+		local_q = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
+		node = flow_cpu_node((u32)cpu);
+		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids)
+			node_q = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
+	}
+	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
@@ -390,10 +421,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The bypass runs only when the local plus node plus machine tiers hold */
 	/* no queued work or the target still drains local plus node before the */
 	/* fair time, so an earlier fair time never waits behind this arrival in */
-	/* a tier queue. The deadline plus admit already hold, so order plus */
-	/* counters stay correct with no extra wait. The bypass inserts straight */
-	/* to local with no tier move count, so admits vs moves drift by the */
-	/* bypass count with no loss while dispatch moves still count each tier. */
+	/* a tier queue. Local plus node depths hoist once here, so the empty */
+	/* gate plus the drain gate share the same reads with no second poll. */
+	/* The deadline plus admit already hold, so order plus counters stay */
+	/* correct with no extra wait. The bypass inserts straight to local */
+	/* with no tier move count, so admits vs moves drift by the bypass */
+	/* count with no loss while dispatch moves still count each tier. */
 	/* Strict fair order gates the bypass with eligibility plus drain, so hogs */
 	/* pace through tiers with no direct jump and one kick per wait stays. */
 	/* The TOCTOU between the empty hints and the direct insert only */
@@ -406,21 +439,29 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u32 node = flow_cpu_node((u32)cpu);
 			bool node_valid = false;
 			u64 node_dsq = 0;
+			s32 lq = 0;
+			s32 nq = 0;
+			s32 mq = 0;
 			bool tiers_empty = false;
+			bool drain_ok = false;
 			if (node < (u32)FLOW_MAX_NODES &&
 			    (u64)node < nr_node_ids) {
 				node_dsq = flow_node_dsq(node);
 				node_valid = true;
 			}
-			if (scx_bpf_dsq_nr_queued(own) <= 0 &&
-			    scx_bpf_dsq_nr_queued(
-			        flow_machine_dsq()) <= 0 &&
-			    (!node_valid ||
-			     scx_bpf_dsq_nr_queued(node_dsq) <= 0))
+			/* Hoist local plus node plus machine once with signed */
+			/* hints, so the empty gate plus the drain gate plus the */
+			/* tier escalation below share one read with no repoll. */
+			lq = scx_bpf_dsq_nr_queued(own);
+			mq = scx_bpf_dsq_nr_queued(flow_machine_dsq());
+			if (node_valid)
+				nq = scx_bpf_dsq_nr_queued(node_dsq);
+			if (lq <= 0 && mq <= 0 && (!node_valid || nq <= 0))
 				tiers_empty = true;
-			if ((tiers_empty ||
-			    flow_cpu_meets_fair((u32)cpu, vtime, now)) &&
-			    hoist_elig) {
+			/* Drain gate uses the same hoisted combined drain with */
+			/* no kfunc, so the bypass tests fair order cheap. */
+			drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
+			if ((tiers_empty || drain_ok) && hoist_elig) {
 				scx_bpf_dsq_insert(p,
 				    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
 				    (u64)FLOW_QUANTUM_NS, enq_flags);
@@ -429,6 +470,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				flow_count_kick();
 				return;
 			}
+			/* Tier join through the hoisted combined drain escalation */
+			/* with no second poll. The local tier takes the task when */
+			/* the hoisted drain finishes before the fair key, else the */
+			/* node tier when live, else the machine tier, so no task */
+			/* waits for a busy CPU while shared room stays open. Queue */
+			/* order plus tier choice use the fair time while placement */
+			/* tests the deadline, so the slowest sufficient CPU wins. */
+			/* Mask wins on dispatch drain with the same order. */
+			flow_tier_insert_hint(p, cpu, vtime, now, lq, nq);
+			goto kicked;
 		}
 	}
 	/* Tier join through the shared insert with fair order. */
@@ -438,6 +489,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* stays open. Queue order plus tier choice use the fair time while */
 	/* placement tests the deadline, so the slowest sufficient CPU wins. */
 	flow_tier_insert(p, cpu, vtime, now);
+kicked:
 	/* Idle targets kick at once with strict one kick per wait and no rate */
 	/* window. The idle flag clears first so the kick sticks. The pid read */
 	/* uses a relaxed load to match the running stores. The direct block */

@@ -41,10 +41,12 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 1ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
-    /// Dispatch moves at most one per tier bounded by remaining slots
-    /// with visits capped at 8 per pass shared across five tiers plus
-    /// no batch plus no flood plus no step plus steal window 4 to 8 plus
-    /// BSF four disjoint past SSF eight for twelve unique peers,
+    /// Dispatch moves at most one hint threaded move per tier bounded
+    /// by remaining slots with visits capped at 8 per pass shared across
+    /// five tiers plus five hoisted hints plus fused perf with no kfunc
+    /// plus no batch plus no flood plus no step plus steal window 4 to 8
+    /// plus BSF four disjoint past SSF eight for twelve unique peers
+    /// with node-local phases plus drain plus minimum plus id tiebreak,
     /// and joins carry no admission
     /// bound with base capacity 1024. Queues hold 1024 local plus 16 node
     /// plus machine plus overflow with ids in the 0x5100 region. Hints hold 8192

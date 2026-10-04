@@ -5,15 +5,18 @@
 
 //! Mirrors BPF dispatch.bpf.c with the fixed five-tier order plus the
 //! shared visit cap plus the saturated steal early-out plus the Q1
-//! only fast path. Tier order is local plus node plus machine plus
-//! overflow plus steal with at most one move per tier bounded by
-//! remaining slots. Visits cap at eight per pass shared across tiers
-//! with resume next pass. Steal scans four to eight peers proportional
-//! to remaining visits and only when all four queued tiers hold no
-//! backlog. The shared cursor with select advances by two on success
-//! with best effort races, and the TOCTOU between hoisted hints and
-//! moves only repeats or skips a pass with no loss. Test-only with no
-//! map use.
+//! only fast path plus hint threaded moves plus fused perf. Tier order
+//! is local plus node plus machine plus overflow plus steal with at most
+//! one hint move per tier bounded by remaining slots. Five depths hoist
+//! once, so tiers plus steal plus perf share the same reads with no
+//! second poll. Visits cap at eight per pass shared across tiers with
+//! resume next pass. Steal scans four to eight peers proportional to
+//! remaining visits and only when all four queued tiers hold no backlog
+//! with per peer hints threaded into the shared hint move. Perf reuses
+//! the hoisted local plus local on plus node hints with no kfunc. The
+//! shared cursor with select advances by two on success with best effort
+//! races, and the TOCTOU between hoisted hints and moves only repeats or
+//! skips a pass with no loss. Test-only with no map use.
 
 //! Clippy stays clean on stable 1.91 with `-Dwarnings`.
 
@@ -46,6 +49,22 @@ pub fn q1_only(local: u64, node: u64, machine: u64, overflow: u64) -> bool {
 #[cfg(test)]
 pub fn should_steal(local: u64, node: u64, machine: u64, overflow: u64, visits: u32) -> bool {
     visit_ok(visits) && !crate::flow::select::steal_should_skip(local, node, machine, overflow)
+}
+
+/// True when a hint threaded move runs for one tier.
+/// Mirrors BPF flow_move_one_hint: non-positive hints skip with no RCU
+/// cost, otherwise the tier moves within the shared visit cap.
+#[cfg(test)]
+pub fn move_hint_ok(hint: i32, visits: u32) -> bool {
+    hint > 0 && visit_ok(visits)
+}
+
+/// True when the fused perf probe sees busy from hoisted hints.
+/// Mirrors BPF flow_perf_busy_hint with no kfunc: any positive hint or
+/// a running pid means busy with signed hints.
+#[cfg(test)]
+pub fn perf_busy_hint(local_q: i32, local_on_q: i32, node_q: i32, running: bool) -> bool {
+    local_q > 0 || local_on_q > 0 || node_q > 0 || running
 }
 
 #[cfg(test)]
@@ -97,5 +116,21 @@ mod tests {
         // Q1 still needs visit room like other tiers.
         assert!(visit_ok(0));
         assert!(!visit_ok(8));
+    }
+
+    #[test]
+    fn hint_moves_and_perf_fuse() {
+        // Hint threaded moves skip empty tiers with no RCU cost.
+        assert!(move_hint_ok(1, 0));
+        assert!(!move_hint_ok(0, 0));
+        assert!(!move_hint_ok(-1, 0));
+        assert!(!move_hint_ok(1, 8));
+        // Fused perf reuses hoisted hints with no kfunc.
+        assert!(perf_busy_hint(1, 0, 0, false));
+        assert!(perf_busy_hint(0, 1, 0, false));
+        assert!(perf_busy_hint(0, 0, 1, false));
+        assert!(perf_busy_hint(0, 0, 0, true));
+        assert!(!perf_busy_hint(0, 0, 0, false));
+        assert!(!perf_busy_hint(-1, 0, 0, false));
     }
 }

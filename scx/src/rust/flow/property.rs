@@ -135,12 +135,50 @@ mod tests {
             &[1, 2, 3],
             &[9, 0, 5],
             &[9, 0, 0],
+            &[0, 0, 0],
             100,
             0,
             99,
             0,
         );
         assert_eq!(got, 2);
+        // Equal drains break toward the smallest minimum then id.
+        let tie = crate::flow::select::bsf_pick(
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[0, 0, 0],
+            &[0, 0, 0],
+            &[300, 100, 200],
+            100,
+            0,
+            99,
+            2,
+        );
+        assert_eq!(tie, 2);
+        // Node-local SSF prefers the close peer with no extra scan.
+        let local = crate::flow::select::place_nodelocal(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[1024, 512],
+            &[100, 900],
+            &[0, 1],
+            1,
+            100,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(local, 2);
+        // Hint moves plus fused perf plus hoisted drain share one read.
+        assert!(crate::flow::dispatch::move_hint_ok(1, 0));
+        assert!(!crate::flow::dispatch::move_hint_ok(0, 0));
+        assert!(crate::flow::dispatch::perf_busy_hint(1, 0, 0, false));
+        assert!(!crate::flow::dispatch::perf_busy_hint(0, 0, 0, false));
+        assert!(crate::flow::select::cpu_meets_fair_hint(0, 0, 100, 0));
+        assert!(crate::flow::select::tier_takes_local(0, 0, 100, 0));
         // Four-tier steal skips on any tier backlog with visits shared.
         assert!(!crate::flow::select::steal_should_skip(0, 0, 0, 0));
         assert!(crate::flow::select::steal_should_skip(0, 0, 0, 1));

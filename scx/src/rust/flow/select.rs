@@ -7,11 +7,14 @@
 //! slowest sufficient pick plus near minimum tiebreak shared by BPF and
 //! userspace tests. The BPF placement lives in select_cpu.bpf.c, and
 //! this file mirrors the order with no map use. SSF scans eight peers
-//! from cursor plus one while BSF scans the next four past SSF from
-//! cursor plus nine, so the two cover twelve unique peers with no
-//! overlap. The cursor is shared with dispatch steal at stride two with
-//! best effort races, and queue hints gate RCU with a benign TOCTOU that
-//! only delays work to the next pass.
+//! from cursor plus one in two node-local phases with the same slowest
+//! sufficient rule, so close peers win with no extra scan while BSF
+//! scans the next four past SSF from cursor plus nine with drain plus
+//! minimum plus id tiebreak, so the two cover twelve unique peers with
+//! no overlap. The cursor is shared with dispatch steal at stride two
+//! with best effort races, and queue hints gate RCU with a benign TOCTOU
+//! that only delays work to the next pass. Hoisted depths feed drain
+//! plus bypass plus tier escalation with no second poll.
 
 //! Clippy stays clean on stable 1.91 with `-Dwarnings`; the
 //! `too_many_arguments` allow keeps the test-only place plus bsf mirrors
@@ -75,6 +78,24 @@ pub fn drain_combined(local: u64, node: u64) -> u64 {
     drain_ns(local).saturating_add(drain_ns(node))
 }
 
+/// Drain nanos from a hoisted signed hint with no poll.
+/// Mirrors BPF flow_drain_from_q: non-positive hints read zero with no
+/// boost and saturation on wrap.
+#[cfg(test)]
+pub fn drain_from_q(hint: i32) -> u64 {
+    if hint <= 0 {
+        return 0;
+    }
+    (hint as u64).saturating_mul(crate::flow::slice::QUANTUM_NS)
+}
+
+/// Combined drain nanos from hoisted local plus node hints.
+/// Mirrors BPF flow_cpu_drain_hint with no kfunc and saturation.
+#[cfg(test)]
+pub fn drain_hint(local_q: i32, node_q: i32) -> u64 {
+    drain_from_q(local_q).saturating_add(drain_from_q(node_q))
+}
+
 /// True when one CPU can finish its drain before a deadline.
 /// A zero deadline means no order yet, so every CPU meets. BPF sums
 /// local plus node via drain_combined for the tier plus bypass checks,
@@ -127,6 +148,36 @@ pub fn cpu_meets_fair_combined(local: u64, node: u64, vtime: u64, now: u64) -> b
     ready <= vtime
 }
 
+/// True when hoisted hints finish before a deadline with no poll.
+/// Mirrors BPF flow_cpu_meets_hint with saturation and no kfunc.
+#[cfg(test)]
+pub fn cpu_meets_hint(local_q: i32, node_q: i32, deadline: u64, now: u64) -> bool {
+    if deadline == 0 {
+        return true;
+    }
+    let ready = now.saturating_add(drain_hint(local_q, node_q));
+    ready <= deadline
+}
+
+/// True when hoisted hints finish before a fair time with no poll.
+/// Mirrors BPF flow_cpu_meets_fair_hint for the bypass plus tier gates.
+#[cfg(test)]
+pub fn cpu_meets_fair_hint(local_q: i32, node_q: i32, vtime: u64, now: u64) -> bool {
+    if vtime == 0 {
+        return true;
+    }
+    let ready = now.saturating_add(drain_hint(local_q, node_q));
+    ready <= vtime
+}
+
+/// True when the tier escalation takes the local tier from hints.
+/// Mirrors BPF flow_tier_insert_hint: local wins when the hoisted
+/// combined drain finishes before the fair time.
+#[cfg(test)]
+pub fn tier_takes_local(local_q: i32, node_q: i32, vtime: u64, now: u64) -> bool {
+    cpu_meets_fair_hint(local_q, node_q, vtime, now)
+}
+
 /// Steal window in peers from remaining visits with 4 to 8 bounds.
 /// Mirrors BPF flow_steal_one proportional window, so a fresh pass scans
 /// eight peers while a spent pass scans four peers with no hotspot.
@@ -176,14 +227,15 @@ pub fn cursor_next(cursor: u32, n: usize) -> u32 {
     wrap_idx(start.wrapping_add(1) as u64, n)
 }
 
-/// Best sufficient fallback with the smallest combined drain.
+/// Best sufficient fallback with the smallest combined drain plus tiebreak.
 /// Mirrors BPF flow_bsf_pick with no topology signal: scans the next four
 /// peers past the SSF window from cursor plus nine, skips the busy waker,
 /// keeps only peers that meet the deadline via combined local plus node
-/// drain, then takes the smallest combined drain. The disjoint window
-/// keeps twelve unique peers with SSF and no overlap, so the fallback
-/// extends coverage instead of rescanning. Ties keep the first peer in
-/// scan order. Returns minus one when no allowed peer meets.
+/// drain, then takes the smallest combined drain with minimum plus id
+/// tiebreak. Equal drains break toward the smallest minimum with wrap
+/// safe order, then the smallest peer id. The disjoint window keeps
+/// twelve unique peers with SSF and no overlap, so the fallback extends
+/// coverage instead of rescanning. Returns minus one when no peer meets.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn bsf_pick(
@@ -191,6 +243,7 @@ pub fn bsf_pick(
     live: &[i32],
     local: &[u64],
     node: &[u64],
+    mins: &[u64],
     deadline: u64,
     now: u64,
     this_cpu: i32,
@@ -204,6 +257,7 @@ pub fn bsf_pick(
     let bsf_start = wrap_idx(start as u64 + SHARED_SCAN_BOUND as u64, n as u32) as usize;
     let mut best: i32 = -1;
     let mut best_drain: u64 = u64::MAX;
+    let mut best_min: u64 = u64::MAX;
     for off in 0..BSF_SCAN_BOUND as usize {
         if off >= n {
             break;
@@ -222,10 +276,24 @@ pub fn bsf_pick(
             continue;
         }
         let drain = drain_combined(ld, nd);
+        let pmin = mins.get(idx).copied().unwrap_or(0);
         if best == -1 || drain < best_drain {
             best_drain = drain;
+            best_min = pmin;
             best = cpu;
+            continue;
         }
+        if drain != best_drain {
+            continue;
+        }
+        if pmin != best_min && !crate::flow::edf::time_before(pmin, best_min) {
+            continue;
+        }
+        if pmin == best_min && cpu >= best {
+            continue;
+        }
+        best_min = pmin;
+        best = cpu;
     }
     best
 }
@@ -239,12 +307,15 @@ pub fn bsf_pick(
 /// most eight peers from the cursor and skips the busy waker, and this
 /// mirror walks the same bounded window from the passed cursor with
 /// the same skip. BPF tries SSF then the disjoint bsf_pick fallback over
-/// the next four peers with the smallest combined drain, so callers try
-/// place then bsf_pick in the same order with twelve unique peers. Minimum order uses the wrap safe signed diff like BPF,
-/// so the tiebreak holds across the u64 wrap. Callers pass host-sized
-/// slices within the 1024 CPU bound with units plus minimums parallel
-/// to live. Returns minus one when no allowed CPU is live. Perf stays
-/// bounded at eight peers with no extra walk. Cursor advance uses
+/// the next four peers with drain plus minimum plus id tiebreak, so
+/// callers try place then bsf_pick in the same order with twelve unique
+/// peers. Minimum order uses the wrap safe signed diff like BPF,
+/// so the tiebreak holds across the u64 wrap. This entry treats all
+/// peers as node-local and delegates to place_nodelocal, so old callers
+/// keep the slowest sufficient order with no node split. Callers pass
+/// host-sized slices within the 1024 CPU bound with units plus minimums
+/// parallel to live. Returns minus one when no allowed CPU is live. Perf
+/// stays bounded at eight peers with no extra walk. Cursor advance uses
 /// cursor_next with plus two per pick.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -256,6 +327,36 @@ pub fn place(
     depths: &[u64],
     units: &[u32],
     mins: &[u64],
+    deadline: u64,
+    now: u64,
+    this_cpu: i32,
+    cursor: u32,
+) -> i32 {
+    let n = live.len();
+    let nodes = vec![0u32; n];
+    place_nodelocal(
+        idle, prev, allowed, live, depths, units, mins, &nodes, 0, deadline, now, this_cpu, cursor,
+    )
+}
+
+/// Node-local two-phase placement pick in O(VISIT) with no extra scan.
+/// Mirrors BPF flow_ssf_pick: one eight peer pass keeps a single best
+/// plus a locality flag with the same slowest sufficient plus near
+/// minimum rule, then local wins ties in the window. Same node means the
+/// peer node equals this_node. The flag keeps one pass with no extra
+/// visits, so the twelve peer budget with BSF holds with no extra walk.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub fn place_nodelocal(
+    idle: &[i32],
+    prev: i32,
+    allowed: &[i32],
+    live: &[i32],
+    depths: &[u64],
+    units: &[u32],
+    mins: &[u64],
+    nodes: &[u32],
+    this_node: u32,
     deadline: u64,
     now: u64,
     this_cpu: i32,
@@ -279,6 +380,7 @@ pub fn place(
     let mut best: i32 = -1;
     let mut best_units: u32 = u32::MAX;
     let mut best_min: u64 = u64::MAX;
+    let mut best_local = false;
     let n = live.len();
     if n > 1 && n <= 1024 {
         let start = wrap_idx(cursor.wrapping_add(1) as u64, n as u32) as usize;
@@ -305,19 +407,36 @@ pub fn place(
             }
             let unit = units.get(idx).copied().unwrap_or(1024);
             let min = mins.get(idx).copied().unwrap_or(0);
+            let pnode = nodes.get(idx).copied().unwrap_or(0);
+            let same = pnode == this_node;
             if best == -1 {
                 best = cpu;
                 best_units = unit;
                 best_min = min;
+                best_local = same;
                 continue;
             }
             if unit.saturating_add(NEAR_MIN_WINDOW) < best_units {
                 best = cpu;
                 best_units = unit;
                 best_min = min;
+                best_local = same;
                 continue;
             }
             if unit > best_units.saturating_add(NEAR_MIN_WINDOW) {
+                continue;
+            }
+            // Node-local phase wins ties in the window with no extra scan.
+            if same && !best_local {
+                if unit < best_units {
+                    best_units = unit;
+                }
+                best_min = min;
+                best = cpu;
+                best_local = true;
+                continue;
+            }
+            if !same && best_local {
                 continue;
             }
             if min != best_min && !crate::flow::edf::time_before(min, best_min) {
@@ -331,6 +450,7 @@ pub fn place(
             }
             best_min = min;
             best = cpu;
+            best_local = same;
         }
     }
     if best != -1 {
@@ -548,6 +668,55 @@ mod tests {
         assert!(!cpu_meets(9, 5, 0));
         assert!(!cpu_meets_fair(9, 5, 0));
         assert!(cpu_meets(0, 100, 0));
+        // Hoisted hints share one read with no second poll.
+        assert_eq!(drain_from_q(0), 0);
+        assert_eq!(drain_from_q(-1), 0);
+        assert_eq!(drain_from_q(1), 1_000_000);
+        assert_eq!(drain_hint(1, 1), 2_000_000);
+        assert!(cpu_meets_hint(0, 0, 100, 0));
+        assert!(!cpu_meets_hint(9, 9, 5, 0));
+        assert!(cpu_meets_fair_hint(0, 0, 100, 0));
+        assert!(!cpu_meets_fair_hint(9, 9, 5, 0));
+        assert!(tier_takes_local(0, 0, 100, 0));
+        assert!(!tier_takes_local(9, 9, 5, 0));
+    }
+
+    #[test]
+    fn ssf_prefers_node_local_then_tiebreak() {
+        // Same slowest sufficient order but local wins the phase.
+        let local_win = place_nodelocal(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[1024, 512],
+            &[100, 900],
+            &[0, 1],
+            1,
+            100,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(local_win, 2);
+        // Remote fills when no local meets the deadline.
+        let remote_fill = place_nodelocal(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[9, 0],
+            &[1024, 1024],
+            &[0, 0],
+            &[0, 1],
+            0,
+            5,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(remote_fill, 2);
     }
 
     #[test]
@@ -590,6 +759,7 @@ mod tests {
             &[1, 2, 3],
             &[9, 0, 5],
             &[9, 0, 0],
+            &[0, 0, 0],
             100,
             0,
             99,
@@ -597,10 +767,20 @@ mod tests {
         );
         assert_eq!(got, 2);
         // No peer meets when every drain misses the deadline.
-        let miss = bsf_pick(&[1, 2], &[1, 2], &[9, 9], &[9, 9], 5, 0, 99, 0);
+        let miss = bsf_pick(&[1, 2], &[1, 2], &[9, 9], &[9, 9], &[0, 0], 5, 0, 99, 0);
         assert_eq!(miss, -1);
         // Busy waker stays out while the window still finds a peer.
-        let skip = bsf_pick(&[1, 2, 3], &[1, 2, 3], &[0, 0, 0], &[0, 0, 0], 100, 0, 1, 2);
+        let skip = bsf_pick(
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[0, 0, 0],
+            &[0, 0, 0],
+            &[0, 0, 0],
+            100,
+            0,
+            1,
+            2,
+        );
         assert_ne!(skip, 1);
         assert!(skip == 2 || skip == 3);
         // Disjoint window extends past SSF: with sixteen live CPUs the
@@ -611,11 +791,25 @@ mod tests {
         let allowed: Vec<i32> = (0..16).collect();
         let mut local = vec![9u64; 16];
         let mut node = vec![9u64; 16];
+        let mins = vec![0u64; 16];
         // Only peer twelve meets the deadline with an empty drain.
         local[12] = 0;
         node[12] = 0;
-        let disjoint = bsf_pick(&allowed, &live, &local, &node, 100, 0, 99, 0);
+        let disjoint = bsf_pick(&allowed, &live, &local, &node, &mins, 100, 0, 99, 0);
         assert_eq!(disjoint, 12);
+        // Equal drains break toward the smallest minimum then id.
+        let tie = bsf_pick(
+            &[1, 2, 3],
+            &[1, 2, 3],
+            &[0, 0, 0],
+            &[0, 0, 0],
+            &[300, 100, 200],
+            100,
+            0,
+            99,
+            2,
+        );
+        assert_eq!(tie, 2);
     }
 
     #[test]
