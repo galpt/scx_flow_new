@@ -157,4 +157,5 @@ plus seeds when measured.
 
 - `harness.c` periodic worker plus probe plus CSV plus JSON
 - `run.sh` calibration plus sweep plus summary plus control
+- `property.sh` locked invariant checks for visit plus steal plus queues
 - `README.md` this note

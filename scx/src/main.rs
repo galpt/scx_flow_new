@@ -361,10 +361,14 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_MACHINE as u64
         );
         assert_eq!(
+            crate::flow::slot::SLOT_OVERFLOW,
+            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
+        );
+        assert_eq!(
             crate::flow::slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 1041);
+        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 1042);
     }
 
     #[test]

@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.8.0
+
+- Reshape into per logic files with `intf.h` truth plus `main.bpf.c` maps plus ops only plus `cgroup.bpf.c` gate plus `weight.bpf.c` nice table plus `calc_delta_fair` plus `vtime.bpf.c` ledger plus min plus `edf.bpf.c` deadline plus eligibility plus `task_placement.bpf.c` SSF scan in `O(VISIT)` with `VISIT` at `8` plus steal plus thin `select_cpu` plus `enqueue` with `insert_vtime` plus overflow FIFO plus `preempt` lead plus tail with at most one kick plus `dispatch` bounded drain plus steal plus fail open plus `lifecycle` charge only in stopping plus per CPU `stats` with no shared modify plus optional `timer` decay. Queues grow to `1042` with overflow FIFO, visits fall to `8` with steal `4` to `8` and placement `8`, scaler moves to one divide with a `40` entry nice table centred at `128`, and Rust mirrors plus `edf_harness` property checks track the shape with `1042` queue plus `8` visit plus `120B` stats checks.
+- Keep single weighting through one shared band with `0` scoping to defaults and zero sentinel to acquire. Moves plus disable plus enable plus exit invalidate the cached id, so reused pids never read stale with no double count.
+- Tier takes the fair key with local plus node drain, so busy nodes hold local with no wait. Pinned tasks recompute the deadline from predictor plus hint with no stale reuse. Deviation trains from the new average, so margins track the fresh mean with no lagging bound.
+- Preempt keeps strict one kick per wait with every hold counted in skipped and bypass gated on fair plus eligibility with no storm. Running claims the pid with compare and swap, minimum folds with bounded retry, negative lag maps to zero, sparse nodes fold safe, and perf polls node with no machine walk. Docs plus mirrors plus UI track the new shape with 50 word subsections, 1042 queue checks, and fifteen counters with preempt cards. No `dhq.h` plus no `fair.c` helper is used and the queue order stays in kernel priority queues.
+
 ## 4.7.6
 
 - Scale to `1024` CPUs plus `16` nodes plus `8192` hints plus `2048` cache with `1041` queues. Dispatch drains local plus node plus machine plus steal in fair order with one move per tier capped by slots and `64` shared visits with resume. Steal scans `8` to `16` peers proportional to remaining visits with mask wins and local counting, so stats stay at `120B`. Placement scans `16` peers with the same bound.
