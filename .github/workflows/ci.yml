@@ -14,8 +14,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail -x {0}
+
 env:
-  BPF_CLANG: clang-20
+  PS4: '+ $(date "+%H:%M:%S") '
+  BPF_CLANG: clang-19
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
   # Pinned upstream workspace ref (sched-ext/scx main as of 2026-09-15).
   # Bump deliberately after verifying the overlay still builds; the
   # overlay needs scx_* 1.1.3 + libbpf-rs 0.27.1 from the workspace.
@@ -28,12 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y pkg-config lld clang clang-20 llvm-20 \
+          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
             libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
             libseccomp-dev libcap-ng-dev stress-ng mold
+          echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
@@ -51,13 +63,13 @@ jobs:
         run: cargo fmt -p scx_flow --check
       - name: Clippy
         working-directory: /tmp/opencode/scx
-        run: cargo clippy --profile ci --no-deps -p scx_flow -- -D warnings
+        run: cargo clippy --profile ci --no-deps --locked -p scx_flow -- -Dwarnings
       - name: Build
         working-directory: /tmp/opencode/scx
-        run: cargo build --profile ci -p scx_flow
+        run: cargo build --profile ci --locked -p scx_flow
       - name: Unit tests
         working-directory: /tmp/opencode/scx
-        run: cargo test --profile ci -p scx_flow
+        run: cargo test --profile ci --locked -p scx_flow
       - name: Smoke test (no kernel needed)
         working-directory: /tmp/opencode/scx
         run: |
@@ -70,12 +82,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
       - name: Install build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y pkg-config lld clang clang-20 llvm-20 \
+          sudo apt-get install -y pkg-config lld clang clang-19 llvm-19 \
             libbpf-dev libelf-dev libzstd-dev protobuf-compiler \
             libseccomp-dev libcap-ng-dev mold
+          echo /usr/lib/llvm-19/bin >> $GITHUB_PATH
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
@@ -95,11 +111,11 @@ jobs:
           make -C /tmp/veristat/src -j$(nproc)
           sudo cp /tmp/veristat/src/veristat /usr/local/bin/
           sudo setcap cap_bpf,cap_perfmon+ep /usr/local/bin/veristat
-          cargo install cargo-veristat
+          cargo install cargo-veristat --locked
       - name: Build and verify
         working-directory: /tmp/opencode/scx
         run: |
-          cargo build --profile ci -p scx_flow
+          cargo build --profile ci --locked -p scx_flow
           cargo metadata --format-version 1 > /tmp/meta.json
           cargo veristat --profile ci --metadata-json /tmp/meta.json \
             --no-build scx_flow
