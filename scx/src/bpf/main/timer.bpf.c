@@ -22,8 +22,9 @@
 /* predictor average plus deviation update from the same delta with */
 /* shifts plus a first deviation floor at average quarter, so a leftover */
 /* segment still trains later deadlines. The vruntime advance uses the */
-/* task weight with no divide plus a minimum fold, so leftovers still */
-/* pace fairness. Outlined to keep disable and exit small. */
+/* effective share of task times hint over 128 with no divide plus a */
+/* minimum fold, so leftovers still pace fairness. Outlined to keep */
+/* disable and exit small. */
 static __noinline void flow_charge_leftover(struct task_struct *p,
 	struct flow_task_ctx *tctx)
 {
@@ -50,14 +51,17 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
-		u32 weight = READ_ONCE(tctx->weight);
+		u32 task_w = READ_ONCE(tctx->weight);
+		u32 hint_w = flow_cached_hint_weight(p);
+		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
 		u64 n_dev = flow_pred_dev(dev, avg, delta);
 		u64 vrun = READ_ONCE(tctx->vruntime);
 		u64 n_vrun;
-		if (weight == 0)
-			weight = (u32)FLOW_WEIGHT_BASE;
-		n_vrun = flow_vruntime_advance(vrun, delta, weight);
+		if (task_w == 0)
+			task_w = (u32)FLOW_WEIGHT_BASE;
+		eff_w = flow_task_effective_weight(task_w, hint_w);
+		n_vrun = flow_vruntime_advance(vrun, delta, eff_w);
 		__sync_lock_test_and_set(&tctx->avg_ns, (u32)n_avg);
 		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
 		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);

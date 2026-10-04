@@ -51,6 +51,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 deadline;
 	u64 vtime;
 	u32 hint;
+	u32 hint_w = (u32)FLOW_WEIGHT_BASE;
+	u32 task_w = (u32)FLOW_WEIGHT_BASE;
+	u32 eff_w = (u32)FLOW_WEIGHT_BASE;
 	u64 avg = 0;
 	u64 dev = 0;
 	bool is_reenq = false;
@@ -143,25 +146,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
 	/* Queue order uses the fair time of deadline plus virtual deadline. */
-	/* Weight copies uniformly with no cgroup special case. */
+	/* The effective share stacks task times hint over 128 with no store. */
 	if (unlikely(pinned)) {
 		s32 pc = flow_pick_target(p, sel);
 		u32 ph;
+		u32 phint_w = (u32)FLOW_WEIGHT_BASE;
 		u64 pdl;
 		u64 pvr;
-		u32 pw;
+		u32 ptask_w;
+		u32 peff;
 		u32 ps;
 		u64 pvd;
 		u64 pvt;
 		if (is_reenq) {
 			ph = READ_ONCE(tctx->hint_us);
+			phint_w = flow_cached_hint_weight(p);
 		} else {
-			u32 pwgt = (u32)FLOW_WEIGHT_BASE;
 			/* One cache plus one row read for both values, so */
 			/* the fresh pinned path pays no double lookup. */
-			flow_task_hint_weight(p, &ph, &pwgt);
-			__sync_lock_test_and_set(&tctx->weight,
-			    flow_weight_clamp(pwgt));
+			/* The task base stays stored, only the hint reads. */
+			flow_task_hint_weight(p, &ph, &phint_w);
 		}
 		tctx->hint_us = ph;
 		pdl = flow_fallback_deadline(now, ph);
@@ -170,13 +174,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_lock_test_and_set(&tctx->deadline, pdl);
 		pdl = READ_ONCE(tctx->deadline);
 		pvr = READ_ONCE(tctx->vruntime);
-		pw = READ_ONCE(tctx->weight);
+		ptask_w = READ_ONCE(tctx->weight);
 		ps = READ_ONCE(tctx->slice_ns);
-		if (pw == 0)
-			pw = (u32)FLOW_WEIGHT_BASE;
+		if (ptask_w == 0)
+			ptask_w = (u32)FLOW_WEIGHT_BASE;
 		if (ps == 0)
 			ps = (u32)FLOW_QUANTUM_NS;
-		pvd = flow_virt_deadline(pvr, (u64)ps, pw);
+		peff = flow_task_effective_weight(ptask_w, phint_w);
+		pvd = flow_virt_deadline(pvr, (u64)ps, peff);
 		pvt = flow_fair_vtime(pdl, pvd);
 		if (flow_cpu_ok(p, pc))
 			flow_tier_insert(p, pc, pdl, pvt, now);
@@ -208,28 +213,28 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A zero average means no history, so the fresh hint period */
 	/* applies with the default when the hint is zero. Later wakeups */
 	/* add average plus deviation with saturation, so short bursts earn */
-	/* tight deadlines with no table walk. The hint plus the weight */
-	/* store with no lag, while the predictor shapes only the deadline */
-	/* once history exists. A miss on the last deadline counts before */
-	/* the new deadline, so the miss count tracks wall completion past */
-	/* deadline. Requeues reuse the cached hint plus weight with no */
-	/* cgroup acquire, so slice rotation pays no hierarchy cost. The */
-	/* reuse may stay stale across one slice when the share changed, so */
-	/* the new values show on the next fresh wakeup with no order break. */
+	/* tight deadlines with no table walk. The hint stores with no lag, */
+	/* while the predictor shapes only the deadline once history exists. */
+	/* A miss on the last deadline counts before the new deadline, so */
+	/* the miss count tracks wall completion past deadline. Requeues */
+	/* reuse the cached hint with one cached weight read and no cgroup */
+	/* acquire, so slice rotation pays no hierarchy cost. The reuse may */
+	/* stay stale across one slice when the share changed, so the new */
+	/* values show on the next fresh wakeup with no order break. */
 	/* The cache clears on migrate plus exit elsewhere, so reuse stays */
 	/* correct. Vruntime clamps within the lag bound of the target */
 	/* minimum with a compare and swap, so sleepers gain no more than */
-	/* one boost with no storm. Weight copies uniformly for cgroup plus */
-	/* root tasks with neutral on miss, so every task earns a clamped */
-	/* share with no special case. */
+	/* one boost with no storm. The effective share stacks task times */
+	/* hint over 128 on the stack, so every task earns a clamped share */
+	/* with no special case and no weight store. */
 	if (is_reenq) {
 		hint = READ_ONCE(tctx->hint_us);
+		hint_w = flow_cached_hint_weight(p);
 	} else {
-		u32 wgt = (u32)FLOW_WEIGHT_BASE;
 		/* One cache plus one row read for both values, so the fresh */
-		/* path pays no double lookup with no behavior change. */
-		flow_task_hint_weight(p, &hint, &wgt);
-		__sync_lock_test_and_set(&tctx->weight, flow_weight_clamp(wgt));
+		/* path pays no double lookup with no behavior change. The */
+		/* task base stays stored, only the hint reads here. */
+		flow_task_hint_weight(p, &hint, &hint_w);
 	}
 	avg = (u64)READ_ONCE(tctx->avg_ns);
 	dev = (u64)READ_ONCE(tctx->dev_ns);
@@ -259,7 +264,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	    flow_missed(READ_ONCE(tctx->deadline), now)) {
 		u64 ndl;
 		u64 nvr;
-		u32 nw;
+		u32 ntask_w;
+		u32 neff;
 		u32 ns;
 		u64 nvd;
 		u64 nvt;
@@ -269,13 +275,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		ndl = flow_pred_deadline(now, avg, dev, hint);
 		__sync_lock_test_and_set(&tctx->deadline, ndl);
 		nvr = READ_ONCE(tctx->vruntime);
-		nw = READ_ONCE(tctx->weight);
+		ntask_w = READ_ONCE(tctx->weight);
 		ns = READ_ONCE(tctx->slice_ns);
-		if (nw == 0)
-			nw = (u32)FLOW_WEIGHT_BASE;
+		if (ntask_w == 0)
+			ntask_w = (u32)FLOW_WEIGHT_BASE;
 		if (ns == 0)
 			ns = (u32)FLOW_QUANTUM_NS;
-		nvd = flow_virt_deadline(nvr, (u64)ns, nw);
+		neff = flow_task_effective_weight(ntask_w, hint_w);
+		nvd = flow_virt_deadline(nvr, (u64)ns, neff);
 		nvt = flow_fair_vtime(ndl, nvd);
 		flow_tier_insert(p, cpu, ndl, nvt, now);
 		flow_kick_idle_allowed(p, sel);
@@ -288,17 +295,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Fair time from the virtual deadline plus the EDF deadline. */
 	/* Heavy tasks earn a near virtual time while light tasks earn a */
 	/* far one with no divide, so the earlier of the two paces order */
-	/* with latency still capped by the deadline. */
+	/* with latency still capped by the deadline. The effective share */
+	/* stacks task times hint over 128, so cgroup plus task weights */
+	/* shape fairness together. */
 	{
 		u64 vr = READ_ONCE(tctx->vruntime);
-		u32 wt = READ_ONCE(tctx->weight);
 		u32 sl = READ_ONCE(tctx->slice_ns);
 		u64 vd;
-		if (wt == 0)
-			wt = (u32)FLOW_WEIGHT_BASE;
+		task_w = READ_ONCE(tctx->weight);
+		if (task_w == 0)
+			task_w = (u32)FLOW_WEIGHT_BASE;
+		eff_w = flow_task_effective_weight(task_w, hint_w);
 		if (sl == 0)
 			sl = (u32)FLOW_QUANTUM_NS;
-		vd = flow_virt_deadline(vr, (u64)sl, wt);
+		vd = flow_virt_deadline(vr, (u64)sl, eff_w);
 		vtime = flow_fair_vtime(deadline, vd);
 	}
 	/* Every join counts one admit with no bound and no reject, so the */
@@ -365,7 +375,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* direct bypass as its mate, so all four points keep one kick per */
 	/* wait with no storm. Requeues skip the occupant lookup with no */
 	/* task_from_pid cost, so slice rotation paces at expiry with no */
-	/* extra kick. */
+	/* extra kick. Busy preempts count in preempt_kicks on success and */
+	/* in preempt_skipped when margin plus tail plus eligibility hold */
+	/* the kick, so the two counters track urgency with no extra kick. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
@@ -385,12 +397,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* through tiers with no idle jump while lagging tasks still */
 		/* wake at once. The gate stays with one minimum read per */
 		/* wait, and the ineligible corner paces in tiers with no */
-		/* kick and no storm. */
+		/* kick and one skipped preempt with no storm. */
 		avr = READ_ONCE(tctx->vruntime);
 		avlag = READ_ONCE(tctx->vlag);
 		cmin = flow_cpu_min((u32)cpu);
-		if (!flow_eligible(avr, cmin, avlag))
+		if (!flow_eligible(avr, cmin, avlag)) {
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
+		}
 		if (READ_ONCE(st->running_pid) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -442,12 +456,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* saturation, and the tail needs more than 100us left on the */
 		/* owner with wrap safe order, so only a truly earlier arrival */
 		/* with work left preempts at once with one kick per wait. */
-		/* Equal or later arrivals pace at slice expiry with no count. */
-		/* The fair time leads here, so fairness plus urgency gate */
-		/* the kick. */
+		/* Equal or later arrivals pace at slice expiry with one */
+		/* skipped preempt. The fair time leads here, so fairness */
+		/* plus urgency gate the kick. */
 		if (!flow_time_before(vtime, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		margin = flow_sat_add(vtime,
@@ -455,11 +470,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (margin == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		if (!flow_time_before(margin, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		if (occ_start == 0) {
@@ -472,6 +489,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (occ_end == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		tail = flow_sat_add(now,
@@ -479,16 +497,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (tail == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		if (!flow_time_before(tail, occ_end)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 		__sync_fetch_and_add(&flow_stats.kicks, 1);
+		__sync_fetch_and_add(&flow_stats.preempt_kicks, 1);
 	}
 }

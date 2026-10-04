@@ -103,21 +103,25 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* quarter, so later deadlines track recent bursts with no extra */
 	/* walk. A zero delta keeps the predictor with no train, so a */
 	/* backward clock never pulls the average to 1ns. The vruntime */
-	/* advance uses the task weight with no divide, so heavy tasks move */
-	/* slowly while light tasks move quickly. The CPU minimum folds */
-	/* forward best effort with no regression past a concurrent win. */
+	/* advance uses the effective share of task times hint over 128 */
+	/* with no divide, so heavy tasks move slowly while light tasks */
+	/* move quickly. The CPU minimum folds forward best effort with no */
+	/* regression past a concurrent win. */
 	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
-		u32 weight = READ_ONCE(tctx->weight);
+		u32 task_w = READ_ONCE(tctx->weight);
+		u32 hint_w = flow_cached_hint_weight(p);
+		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
 		u64 n_dev = flow_pred_dev(dev, avg, delta);
 		u64 vrun = READ_ONCE(tctx->vruntime);
 		u64 n_vrun;
-		if (weight == 0)
-			weight = (u32)FLOW_WEIGHT_BASE;
-		n_vrun = flow_vruntime_advance(vrun, delta, weight);
+		if (task_w == 0)
+			task_w = (u32)FLOW_WEIGHT_BASE;
+		eff_w = flow_task_effective_weight(task_w, hint_w);
+		n_vrun = flow_vruntime_advance(vrun, delta, eff_w);
 		__sync_lock_test_and_set(&tctx->avg_ns, (u32)n_avg);
 		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
 		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);

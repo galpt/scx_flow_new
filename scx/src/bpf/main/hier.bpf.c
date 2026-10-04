@@ -106,12 +106,33 @@ static __always_inline u32 flow_task_weight(
 		return flow_hint_weight(id);
 	}
 }
+/* Cached hint weight with no acquire for hot paths. */
+/* Reads the pid cache plus one hint row with no acquire, so requeues */
+/* plus stopping plus leftover charge pay no hierarchy cost on hit. A */
+/* miss fails closed to neutral with no acquire and no stall, so slice */
+/* rotation never blocks. The flat row still reads fresh on hit, so a */
+/* weight change shows at once with no cache clear. */
+static __always_inline u32 flow_cached_hint_weight(
+	struct task_struct *p)
+{
+	u32 pid;
+	u64 *cached;
+	if (!p)
+		return (u32)FLOW_WEIGHT_BASE;
+	pid = (u32)p->pid;
+	if (!pid)
+		return (u32)FLOW_WEIGHT_BASE;
+	cached = bpf_map_lookup_elem(&cgrp_cache_stor, &pid);
+	if (!cached || !*cached)
+		return (u32)FLOW_WEIGHT_BASE;
+	return flow_hint_weight(*cached);
+}
 /* Hint plus weight of one task with one cache plus one row read. */
 /* Single fast path for fresh enqueues that need both values, so the */
 /* hot path pays one cache lookup plus one hint row read instead of */
 /* two of each with no behavior change. A null hierarchy means the */
 /* root, so the default period plus neutral share apply. Requeues */
-/* reuse the stored weight with no acquire elsewhere, so slice */
+/* use the cached weight helper with no acquire elsewhere, so slice */
 /* rotation pays no hierarchy cost. */
 static __always_inline void flow_task_hint_weight(
 	struct task_struct *p, u32 *hint_us, u32 *weight)

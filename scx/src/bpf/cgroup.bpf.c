@@ -79,6 +79,36 @@ void BPF_STRUCT_OPS(flow_cgroup_cancel_move, struct task_struct *p,
 	(void)from;
 	(void)to;
 }
+/* Shared share band for cgroup plus task paths. */
+/* Maps one clamped share to period plus weight bands with no divide. */
+/* Light shares map to long periods plus small weights and heavy shares */
+/* map to short periods plus large weights, so the hint tunes the */
+/* deadline period while the weight tunes vruntime speed. Bands sit on */
+/* powers of two, so the scaler shifts exactly with no table walk. */
+static __always_inline void flow_share_band(u32 w, u32 *period_us,
+	u32 *weight)
+{
+	u32 p = 8000;
+	u32 b = 256;
+	u32 c = flow_weight_clamp(w);
+	if (c < 64) {
+		p = 32000;
+		b = 32;
+	} else if (c < 128) {
+		p = 16000;
+		b = 64;
+	} else if (c < 512) {
+		p = 8000;
+		b = 256;
+	} else {
+		p = 4000;
+		b = 1024;
+	}
+	if (period_us)
+		*period_us = p;
+	if (weight)
+		*weight = b;
+}
 /* Update one flat hint from the share with fixed bands. */
 /* Light shares map to long periods plus small weights and heavy shares */
 /* map to short periods plus large weights, so the hint tunes the */
@@ -90,27 +120,13 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp,
 	u32 weight)
 {
 	u64 id;
-	u32 w;
 	struct flow_hint h = {};
 	if (!cgrp)
 		return;
 	id = flow_cgrp_id(cgrp);
 	if (!id)
 		return;
-	w = flow_weight_clamp(weight);
-	if (w < 64) {
-		h.period_us = 32000;
-		h.weight = 32;
-	} else if (w < 128) {
-		h.period_us = 16000;
-		h.weight = 64;
-	} else if (w < 512) {
-		h.period_us = 8000;
-		h.weight = 256;
-	} else {
-		h.period_us = 4000;
-		h.weight = 1024;
-	}
+	flow_share_band(weight, &h.period_us, &h.weight);
 	if (bpf_map_update_elem(&hint_stor, &id, &h, BPF_ANY) < 0)
 		return;
 }

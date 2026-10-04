@@ -144,15 +144,16 @@ enum flow_tier {
 /* holds the burst deviation in nanos in 32 bits with zero for no */
 /* history. Values clamp to 1ns to 1s, so a huge burst never wraps. */
 /* Vlag holds the allowed lag in nanos as a signed bound with zero for */
-/* no slack. Weight holds the scheduling share clamped to range with */
-/* 128 for neutral. Slice holds the per task slice in nanos with the */
-/* quantum as the default. Hint holds the flat period hint in micros */
-/* for the deadline. A zero hint means no hint, so the default period */
-/* applies. Misses holds the count of deadline misses for the life of */
-/* the task with saturating adds, so a huge miss count clamps instead */
-/* of wrapping. Stamps stay per task owned with no atomics except the */
-/* run claim, only counters use atomics. Cursor and miss scans stay */
-/* best effort with no atomic order. */
+/* no slack. Weight holds the task base share clamped to range with */
+/* 128 for neutral, and the effective share stacks task times hint */
+/* over 128 on the stack with no store. Slice holds the per task slice */
+/* in nanos with the quantum as the default. Hint holds the flat period */
+/* hint in micros for the deadline. A zero hint means no hint, so the */
+/* default period applies. Misses holds the count of deadline misses */
+/* for the life of the task with saturating adds, so a huge miss count */
+/* clamps instead of wrapping. Stamps stay per task owned with no */
+/* atomics except the run claim, only counters use atomics. Cursor and */
+/* miss scans stay best effort with no atomic order. */
 struct flow_task_ctx {
 	u64 vruntime;
 	u64 deadline;
@@ -201,10 +202,12 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
-/* Scheduler counters with 13 fields. Homeless work counts in the */
+/* Scheduler counters with 15 fields. Homeless work counts in the */
 /* machine moves, so every tier move has a live counter. Rejects stay */
 /* dead at zero for wire compat only with no writer, while real rejects */
 /* count in gate_rejects. Readers must use gate_rejects for drops. */
+/* Preempt kicks count busy preempts sent, and preempt skipped counts */
+/* suppressed preempts held by margin plus tail plus eligibility. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -219,6 +222,8 @@ struct flow_sched_stats {
 	u64 rejects;
 	u64 misses;
 	u64 gate_rejects;
+	u64 preempt_kicks;
+	u64 preempt_skipped;
 };
 /* Task state holds vruntime plus deadline plus stamps plus predictor */
 /* plus lag plus weight plus slice plus hint plus misses in 64 bytes. */
@@ -226,26 +231,40 @@ _Static_assert(sizeof(struct flow_task_ctx) == 64,
 	"task state stays at 64B");
 /* CPU state holds pid plus cursor plus minimum vruntime in 16 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 16,
-	"cpu state stays at 16B");
+	"CPU state stays at 16B");
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 13 counters in 104 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 104,
-	"stats stay at 104B");
+/* Stats hold 15 counters in 120 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 120,
+	"stats stay at 120B");
 /* Queue count holds local plus node plus machine with no overflow. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 1,
 	"dsq count stays local plus node plus one");
-/* True when the first time is before the second with wrap safety. */
-/* The signed diff keeps order across the u64 wrap with no branch. */
+/**
+ * flow_time_before - test time order with wrap safety.
+ * @a: first time in nanos.
+ * @b: second time in nanos.
+ *
+ * The signed diff keeps order across the u64 wrap with no branch.
+ *
+ * Returns: true when @a falls before @b, else false.
+ */
 static __always_inline bool flow_time_before(u64 a,
 	u64 b)
 {
 	return (s64)(a - b) < 0;
 }
-/* Saturated add of two times with clamp on wrap. */
-/* A wrap clamps to max, so a huge sum never falls to the front. */
+/**
+ * flow_sat_add - add two times with clamp on wrap.
+ * @a: first addend in nanos.
+ * @b: second addend in nanos.
+ *
+ * A wrap clamps to max, so a huge sum never falls to the front.
+ *
+ * Returns: saturated sum of @a plus @b.
+ */
 static __always_inline u64 flow_sat_add(u64 a,
 	u64 b)
 {
@@ -254,8 +273,14 @@ static __always_inline u64 flow_sat_add(u64 a,
 		return (u64)~0ULL;
 	return out;
 }
-/* Weight of one hint level clamped into range. */
-/* Zero or oversize weights fail closed to the nearer bound. */
+/**
+ * flow_weight_clamp - clamp one share into range.
+ * @w: raw share with zero for no history.
+ *
+ * Zero or oversize shares fail closed to the nearer bound.
+ *
+ * Returns: clamped share from 1 to 16384.
+ */
 static __always_inline u32 flow_weight_clamp(u32 w)
 {
 	if (w < (u32)FLOW_WEIGHT_MIN)
@@ -264,11 +289,61 @@ static __always_inline u32 flow_weight_clamp(u32 w)
 		return (u32)FLOW_WEIGHT_MAX;
 	return w;
 }
-/* Scaled service for one delta at one weight with no divide. */
-/* The neutral weight of 128 keeps the delta unchanged, lighter tasks */
-/* shift left for more charge while heavier tasks shift right for less */
-/* charge. Bands follow powers of two with saturation on shift, so the */
-/* verifier sees no divide and a huge shift clamps instead of wrapping. */
+/**
+ * flow_share_combine - combine two shares into one effective share.
+ * @task_w: task base share, clamped to range.
+ * @hint_w: hint share, clamped to range.
+ *
+ * Multiplies the shares then shifts right by 7 for divide by 128,
+ * so the neutral pair of 128 plus 128 stays neutral with no divide.
+ * A small product clamps to the floor, and a large product clamps
+ * to the top with no wrap.
+ *
+ * Returns: effective share from 1 to 16384.
+ */
+static __always_inline u32 flow_share_combine(u32 task_w,
+	u32 hint_w)
+{
+	u32 t = flow_weight_clamp(task_w);
+	u32 h = flow_weight_clamp(hint_w);
+	u64 prod = (u64)t * (u64)h;
+	u64 eff = prod >> 7;
+	if (eff < (u64)FLOW_WEIGHT_MIN)
+		return (u32)FLOW_WEIGHT_MIN;
+	if (eff > (u64)FLOW_WEIGHT_MAX)
+		return (u32)FLOW_WEIGHT_MAX;
+	return (u32)eff;
+}
+/**
+ * flow_task_effective_weight - effective share of one task plus hint.
+ * @task_w: task base share with zero for neutral.
+ * @hint_w: hint share with zero for neutral.
+ *
+ * Maps each zero input to the neutral share of 128, then combines
+ * with the shared helper, so missing state stays neutral with no
+ * special case at the caller.
+ *
+ * Returns: effective share from 1 to 16384.
+ */
+static __always_inline u32 flow_task_effective_weight(u32 task_w,
+	u32 hint_w)
+{
+	u32 t = task_w ? task_w : (u32)FLOW_WEIGHT_BASE;
+	u32 h = hint_w ? hint_w : (u32)FLOW_WEIGHT_BASE;
+	return flow_share_combine(t, h);
+}
+/**
+ * flow_scaled_delta - scaled service for one delta at one weight.
+ * @delta: raw service in nanos.
+ * @weight: scheduling share, clamped to range.
+ *
+ * The neutral weight of 128 keeps the delta unchanged, lighter tasks
+ * shift left for more charge while heavier tasks shift right for less
+ * charge. Bands follow powers of two with saturation on shift, so the
+ * verifier sees no divide and a huge shift clamps instead of wrapping.
+ *
+ * Returns: scaled service in nanos.
+ */
 static __always_inline u64 flow_scaled_delta(u64 delta,
 	u32 weight)
 {
@@ -311,18 +386,32 @@ static __always_inline u64 flow_scaled_delta(u64 delta,
 		return 1;
 	return out;
 }
-/* Advanced vruntime after one delta at one weight with saturation. */
-/* Adds the scaled service to the base, so heavy tasks advance slowly */
-/* while light tasks advance quickly with no divide. A wrap clamps to */
-/* max, so a huge vruntime never falls to the front. */
+/**
+ * flow_vruntime_advance - advance vruntime by one delta at one weight.
+ * @vruntime: base vruntime in nanos.
+ * @delta: raw service in nanos.
+ * @weight: scheduling share, clamped to range.
+ *
+ * Adds the scaled service to the base, so heavy tasks advance slowly
+ * while light tasks advance quickly with no divide. A wrap clamps to
+ * max, so a huge vruntime never falls to the front.
+ *
+ * Returns: advanced vruntime in nanos.
+ */
 static __always_inline u64 flow_vruntime_advance(u64 vruntime,
 	u64 delta, u32 weight)
 {
 	return flow_sat_add(vruntime, flow_scaled_delta(delta, weight));
 }
-/* Clamped lag in nanos within the allowed bound. */
-/* Values past plus or minus 2ms fold to the nearer bound, so a stale */
-/* lag never grants a huge boost with no storm. */
+/**
+ * flow_lag_clamp - clamp lag within the allowed bound.
+ * @lag: raw lag in nanos as a signed bound.
+ *
+ * Values past plus or minus 2ms fold to the nearer bound, so a stale
+ * lag never grants a huge boost with no storm.
+ *
+ * Returns: clamped lag from minus 2ms to 2ms.
+ */
 static __always_inline s32 flow_lag_clamp(s32 lag)
 {
 	s32 bound = (s32)FLOW_VLAG_MAX_NS;
@@ -332,11 +421,19 @@ static __always_inline s32 flow_lag_clamp(s32 lag)
 		return -bound;
 	return lag;
 }
-/* True when one vruntime is eligible against the CPU minimum. */
-/* Eligible means the vruntime falls no more than the allowed lag past */
-/* the minimum, so lagging tasks wait while leading tasks pace. The */
-/* signed diff keeps order across the u64 wrap with no branch, and a */
-/* saturated minimum plus lag never wraps to the front. */
+/**
+ * flow_eligible - test vruntime eligibility against the CPU minimum.
+ * @vruntime: task vruntime in nanos.
+ * @min_vruntime: CPU minimum vruntime in nanos.
+ * @vlag: allowed lag in nanos as a signed bound.
+ *
+ * Eligible means the vruntime falls no more than the allowed lag past
+ * the minimum, so lagging tasks wait while leading tasks pace. The
+ * signed diff keeps order across the u64 wrap with no branch, and a
+ * saturated minimum plus lag never wraps to the front.
+ *
+ * Returns: true when eligible, else false.
+ */
 static __always_inline bool flow_eligible(u64 vruntime,
 	u64 min_vruntime, s32 vlag)
 {
@@ -351,21 +448,36 @@ static __always_inline bool flow_eligible(u64 vruntime,
 		return true;
 	return flow_time_before(vruntime, limit);
 }
-/* Virtual deadline from eligible plus request over weight. */
-/* Adds the scaled request to the eligible base with saturation, so a */
-/* heavy task earns a near deadline while a light task earns a far one */
-/* with no divide. A wrap clamps to max, so a huge sum never jumps to */
-/* the front. */
+/**
+ * flow_virt_deadline - virtual deadline from base plus request.
+ * @ve: eligible base in nanos.
+ * @request: requested service in nanos.
+ * @weight: scheduling share, clamped to range.
+ *
+ * Adds the scaled request to the eligible base with saturation, so a
+ * heavy task earns a near deadline while a light task earns a far one
+ * with no divide. A wrap clamps to max, so a huge sum never jumps to
+ * the front.
+ *
+ * Returns: virtual deadline in nanos.
+ */
 static __always_inline u64 flow_virt_deadline(u64 ve,
 	u64 request, u32 weight)
 {
 	return flow_sat_add(ve, flow_scaled_delta(request, weight));
 }
-/* Fair queue key as the earlier of deadline plus virtual deadline. */
-/* The EDF deadline caps latency while the virtual deadline paces */
-/* fairness, so urgent tasks still win while hogs fall behind. A zero */
-/* deadline means no EDF order yet, so the virtual deadline rules. The */
-/* signed diff picks the earlier time with wrap safety. */
+/**
+ * flow_fair_vtime - fair queue key from deadline plus virtual time.
+ * @deadline: absolute EDF deadline in nanos, zero for no order.
+ * @vd: virtual deadline in nanos, zero for no order.
+ *
+ * The EDF deadline caps latency while the virtual deadline paces
+ * fairness, so urgent tasks still win while hogs fall behind. A zero
+ * deadline means no EDF order yet, so the virtual deadline rules. The
+ * signed diff picks the earlier time with wrap safety.
+ *
+ * Returns: earlier of @deadline plus @vd in nanos.
+ */
 static __always_inline u64 flow_fair_vtime(u64 deadline,
 	u64 vd)
 {
@@ -377,18 +489,31 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
 		return vd;
 	return deadline;
 }
-/* Absolute deadline from now plus relative period. */
-/* The add saturates, so a huge now clamps instead of wrapping */
-/* to the front. */
+/**
+ * flow_deadline_at - absolute deadline from now plus period.
+ * @now: current time in nanos.
+ * @period: relative period in nanos.
+ *
+ * The add saturates, so a huge now clamps instead of wrapping to
+ * the front.
+ *
+ * Returns: absolute deadline in nanos.
+ */
 static __always_inline u64 flow_deadline_at(u64 now,
 	u64 period)
 {
 	return flow_sat_add(now, period);
 }
-/* Period for one task from hint else default. */
-/* A zero hint means no hint, so the default period applies. The hint */
-/* converts from micros to nanos with saturation, so a huge hint */
-/* clamps instead of wrapping to a short period. */
+/**
+ * flow_task_period - period for one task from hint else default.
+ * @hint_us: flat period hint in micros, zero for no hint.
+ *
+ * A zero hint means no hint, so the default period of 16ms applies.
+ * The hint converts from micros to nanos with saturation, so a huge
+ * hint clamps instead of wrapping to a short period.
+ *
+ * Returns: period in nanos.
+ */
 static __always_inline u64 flow_task_period(u32 hint_us)
 {
 	u64 hint;
@@ -399,9 +524,15 @@ static __always_inline u64 flow_task_period(u32 hint_us)
 		return (u64)~0ULL;
 	return hint * 1000ULL;
 }
-/* Clamped predictor value in 1ns to 1s with no wrap. */
-/* Values below the floor rise to 1ns and values past the top fall */
-/* to 1s, so a huge burst never wraps to a short deadline. */
+/**
+ * flow_pred_clamp - clamp predictor value to 1ns to 1s.
+ * @v: raw value in nanos.
+ *
+ * Values below the floor rise to 1ns and values past the top fall
+ * to 1s, so a huge burst never wraps to a short deadline.
+ *
+ * Returns: clamped value in nanos.
+ */
 static __always_inline u64 flow_pred_clamp(u64 v)
 {
 	if (v < (u64)FLOW_PRED_MIN_NS)
@@ -410,11 +541,18 @@ static __always_inline u64 flow_pred_clamp(u64 v)
 		return (u64)FLOW_PRED_MAX_NS;
 	return v;
 }
-/* Updated burst average with shift 3 and saturation. */
-/* A zero average means no history, so the first sample sets the */
-/* average at once. Later samples move one eighth toward the new */
-/* delta with shifts only, so the verifier keeps no divide. The */
-/* result clamps to 1ns to 1s, so a spike never wraps. */
+/**
+ * flow_pred_avg - updated burst average with shift 3.
+ * @avg: old average in nanos, zero for no history.
+ * @delta: new sample in nanos.
+ *
+ * A zero average means no history, so the first sample sets the
+ * average at once. Later samples move one eighth toward the new
+ * delta with shifts only, so the verifier keeps no divide. The
+ * result clamps to 1ns to 1s, so a spike never wraps.
+ *
+ * Returns: updated average in nanos.
+ */
 static __always_inline u64 flow_pred_avg(u64 avg,
 	u64 delta)
 {
@@ -434,13 +572,21 @@ static __always_inline u64 flow_pred_avg(u64 avg,
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(avg - diff);
 }
-/* Updated burst deviation with shift 2 and saturation. */
-/* Tracks the absolute error between delta and average with one */
-/* quarter steps, so a stable burst keeps a small margin while a */
-/* ragged burst widens the deadline with no jump. A zero deviation */
-/* means no history, so the first value takes the max of error and */
-/* average quarter as the floor. The result clamps the same way with */
-/* no divide and shifts stay at 2. */
+/**
+ * flow_pred_dev - updated burst deviation with shift 2.
+ * @dev: old deviation in nanos, zero for no history.
+ * @avg: old average in nanos, zero for no history.
+ * @delta: new sample in nanos.
+ *
+ * Tracks the absolute error between delta and average with one
+ * quarter steps, so a stable burst keeps a small margin while a
+ * ragged burst widens the deadline with no jump. A zero deviation
+ * means no history, so the first value takes the max of error and
+ * average quarter as the floor. The result clamps the same way with
+ * no divide and shifts stay at 2.
+ *
+ * Returns: updated deviation in nanos.
+ */
 static __always_inline u64 flow_pred_dev(u64 dev,
 	u64 avg, u64 delta)
 {
@@ -471,11 +617,18 @@ static __always_inline u64 flow_pred_dev(u64 dev,
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(dev - diff);
 }
-/* Predicted period from average plus deviation with fallback. */
-/* A zero average means no history, so the default period applies. */
-/* Later periods add average plus deviation with saturation, so a */
-/* stable burst keeps a tight deadline while a ragged burst holds */
-/* margin with no wrap past 1s. */
+/**
+ * flow_pred_period - predicted period from average plus deviation.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ *
+ * A zero average means no history, so the default period of 16ms
+ * applies. Later periods add average plus deviation with saturation,
+ * so a stable burst keeps a tight deadline while a ragged burst holds
+ * margin with no wrap past 1s.
+ *
+ * Returns: predicted period in nanos.
+ */
 static __always_inline u64 flow_pred_period(u64 avg,
 	u64 dev)
 {
@@ -487,13 +640,22 @@ static __always_inline u64 flow_pred_period(u64 avg,
 		return (u64)FLOW_PRED_MAX_NS;
 	return flow_pred_clamp(sum);
 }
-/* Predicted deadline from now plus predictor else hint period. */
-/* A zero average means no history, so the hint period applies with */
-/* the default when the hint is zero. Later wakeups add the */
-/* predicted period with saturation, so a huge now clamps */
-/* instead of wrapping to the front. Fair order via kernel priority */
-/* queue: the vtime key holds the earlier of this deadline plus the */
-/* virtual deadline, so the earliest fair time wins with lag bounds. */
+/**
+ * flow_pred_deadline - predicted deadline from now plus predictor.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @hint_us: flat period hint in micros, zero for no hint.
+ *
+ * A zero average means no history, so the hint period applies with
+ * the default of 16ms when the hint is zero. Later wakeups add the
+ * predicted period with saturation, so a huge now clamps instead of
+ * wrapping to the front. Fair order via kernel priority queue holds
+ * the earlier of this deadline plus the virtual deadline, so the
+ * earliest fair time wins with lag bounds.
+ *
+ * Returns: absolute deadline in nanos.
+ */
 static __always_inline u64 flow_pred_deadline(u64 now,
 	u64 avg, u64 dev, u32 hint_us)
 {
@@ -504,18 +666,32 @@ static __always_inline u64 flow_pred_deadline(u64 now,
 		period = flow_pred_period(avg, dev);
 	return flow_deadline_at(now, period);
 }
-/* Fallback deadline from now plus the hint period with saturation. */
-/* Tasks with no state or no history join a tier queue at once with */
-/* this deadline, so no path needs a tail queue with no wait. */
+/**
+ * flow_fallback_deadline - fallback deadline from now plus hint.
+ * @now: current time in nanos.
+ * @hint_us: flat period hint in micros, zero for no hint.
+ *
+ * Tasks with no state or no history join a tier queue at once with
+ * this deadline, so no path needs a tail queue with no wait.
+ *
+ * Returns: absolute deadline in nanos.
+ */
 static __always_inline u64 flow_fallback_deadline(u64 now,
 	u32 hint_us)
 {
 	return flow_deadline_at(now, flow_task_period(hint_us));
 }
-/* True when one task missed its deadline at the given time. */
-/* A zero deadline means no order yet, so the check skips. A time that */
-/* falls before or on the deadline passes, so only a strictly later */
-/* time counts a miss with wrap safety. */
+/**
+ * flow_missed - test deadline miss at the given time.
+ * @deadline: absolute deadline in nanos, zero for no order.
+ * @now: current time in nanos.
+ *
+ * A zero deadline means no order yet, so the check skips. A time that
+ * falls before or on the deadline passes, so only a strictly later
+ * time counts a miss with wrap safety.
+ *
+ * Returns: true when missed, else false.
+ */
 static __always_inline bool flow_missed(u64 deadline,
 	u64 now)
 {
@@ -527,27 +703,50 @@ static __always_inline bool flow_missed(u64 deadline,
 		return false;
 	return true;
 }
-/* Local queue id of one CPU from base plus id. */
-/* One ordered queue per CPU keeps fair order local. */
+/**
+ * flow_local_dsq - local queue id of one CPU.
+ * @cpu: CPU id below the 512 bound.
+ *
+ * One ordered queue per CPU keeps fair order local.
+ *
+ * Returns: local queue id.
+ */
 static __always_inline u64 flow_local_dsq(u32 cpu)
 {
 	return (u64)FLOW_LOCAL_BASE + (u64)cpu;
 }
-/* Shared queue id of one node from base plus id. */
-/* One ordered queue per node shares work inside the node. */
+/**
+ * flow_node_dsq - shared queue id of one node.
+ * @node: node id below the 8 bound.
+ *
+ * One ordered queue per node shares work inside the node.
+ *
+ * Returns: node queue id.
+ */
 static __always_inline u64 flow_node_dsq(u32 node)
 {
 	return (u64)FLOW_NODE_BASE + (u64)node;
 }
-/* Id of the machine queue shared by every CPU. */
-/* Work with no node home rests here with mask wins on drain. */
+/**
+ * flow_machine_dsq - id of the machine queue.
+ *
+ * Work with no node home rests here with mask wins on drain.
+ *
+ * Returns: machine queue id shared by every CPU.
+ */
 static __always_inline u64 flow_machine_dsq(void)
 {
 	return (u64)FLOW_MACHINE;
 }
-/* True when one id names a live scheduler queue. */
-/* Local plus node plus machine pass, and all other ids fail, so a */
-/* stale id never moves work. */
+/**
+ * flow_dsq_valid - test live scheduler queue id.
+ * @dsq: queue id to test.
+ *
+ * Local plus node plus machine pass, and all other ids fail, so a
+ * stale id never moves work.
+ *
+ * Returns: true when live, else false.
+ */
 static __always_inline bool flow_dsq_valid(u64 dsq)
 {
 	if (dsq >= (u64)FLOW_LOCAL_BASE &&

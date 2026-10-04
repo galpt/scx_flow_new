@@ -8,9 +8,9 @@
  * queue with no overflow tail, and it fails loudly when an id reaches the local range. Ops split across
  * select_cpu, enqueue plus enqueue/, dispatch plus dispatch/,
  * lifecycle, and flat hierarchy files. Shared helpers split across
- * main/task, deadline, hier, cpu, and timer files with maps plus
- * init here. Hotplug needs a restart, and the watchdog stays at
- * 20 seconds.
+ * main/task, main/weight, deadline, hier, cpu, and timer files with
+ * maps plus init here. Hotplug needs a restart, and the watchdog
+ * stays at 20 seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -73,6 +73,7 @@ volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 volatile struct flow_sched_stats flow_stats;
 #include "main/task.bpf.c"
+#include "main/weight.bpf.c"
 #include "main/cpu.bpf.c"
 #include "main/hier.bpf.c"
 #include "main/deadline.bpf.c"
@@ -82,6 +83,16 @@ volatile struct flow_sched_stats flow_stats;
 #include "dispatch.bpf.c"
 #include "lifecycle.bpf.c"
 #include "cgroup.bpf.c"
+/**
+ * flow_init - create queues plus seed CPU state.
+ *
+ * Creates one local queue per CPU plus one node queue per node plus
+ * one machine queue with no overflow tail. Seeds per CPU state plus
+ * capacity rows, then derives the node count from the seeded view.
+ * Fails loudly on over bound counts with no partial attach.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	s32 ret;
@@ -211,6 +222,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	return 0;
 }
+/**
+ * flow_exit - record exit info on teardown.
+ * @info: exit info from the kernel.
+ *
+ * Records the exit reason with no extra work.
+ */
 void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
 {
 	UEI_RECORD(uei, info);
@@ -232,6 +249,7 @@ SCX_OPS_DEFINE(flow_ops,
 	       .cgroup_move		= (void *)flow_cgroup_move,
 	       .cgroup_cancel_move	= (void *)flow_cgroup_cancel_move,
 	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
+	       .set_weight		= (void *)flow_set_weight,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |
