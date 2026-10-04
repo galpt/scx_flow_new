@@ -81,22 +81,24 @@ enum flow_consts {
 	FLOW_NODE_BASE = 0x5900ULL,
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
-	/* Queue count of 1041. Holds 1024 local plus 16 node plus one */
-	/* machine with no overflow. */
-	FLOW_MAX_DSQS = 1041ULL,
-	/* Dispatch visit cap of 64 entries per pass with no knob. Caps */
-	/* visited entries per pass shared across four tiers regardless of */
+	/* Overflow FIFO id for admitted bursts past tier order. */
+	FLOW_OVERFLOW = 0x5A01ULL,
+	/* Queue count of 1042. Holds 1024 local plus 16 node plus one */
+	/* machine plus one overflow FIFO. */
+	FLOW_MAX_DSQS = 1042ULL,
+	/* Dispatch visit cap of 8 entries per pass with no knob. Caps */
+	/* visited entries per pass shared across five tiers regardless of */
 	/* moves, so one pass never holds RCU across the whole queue on */
 	/* mask misses. Moves take at most one per tier per pass bounded */
 	/* by remaining dispatch slots, and leftover work resumes next pass, */
 	/* so the pass stays work conserving across passes. The steal window */
-	/* spans 8 to 16 peers proportional to remaining visits. */
-	FLOW_DISPATCH_MAX_VISIT = 64ULL,
-	/* Steal peer window with no knob. Scans at least 8 peers and at */
-	/* most 16 peers per pass, so the steal stays bounded with no */
+	/* spans 4 to 8 peers proportional to remaining visits. */
+	FLOW_DISPATCH_MAX_VISIT = 8ULL,
+	/* Steal peer window with no knob. Scans at least 4 peers and at */
+	/* most 8 peers per pass, so the steal stays bounded with no */
 	/* hotspot while large hosts still find work. */
-	FLOW_STEAL_MIN_PEERS = 8ULL,
-	FLOW_STEAL_MAX_PEERS = 16ULL,
+	FLOW_STEAL_MIN_PEERS = 4ULL,
+	FLOW_STEAL_MAX_PEERS = 8ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
@@ -120,12 +122,12 @@ enum flow_consts {
 	FLOW_VLAG_MAX_NS = 2000000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
-/* machine plus steal drain in fair order through the kernel priority */
-/* queue with no overflow tail. Every pass follows this order with no */
-/* load based swap, so the verifier sees one fixed path. Dispatch calls */
-/* the tier moves directly with no index switch, so no tier index needs */
-/* storage. The steal tier scans peer locals within the bounded window */
-/* with mask wins. */
+/* machine plus overflow plus steal drain in fair order through the */
+/* kernel priority queues with the overflow as FIFO. Every pass follows */
+/* this order with no load based swap, so the verifier sees one fixed */
+/* path. Dispatch calls the tier moves directly with no index switch, */
+/* so no tier index needs storage. The steal tier scans peer locals */
+/* within the bounded window with mask wins. */
 /* Per task state at 64B with vruntime plus deadline plus stamps plus */
 /* predictor plus lag plus weight plus slice plus hint plus hint weight */
 /* plus misses. */
@@ -246,11 +248,11 @@ _Static_assert(sizeof(struct flow_topo) == 8,
 /* Stats hold 15 counters in 120 bytes. */
 _Static_assert(sizeof(struct flow_sched_stats) == 120,
 	"stats stay at 120B");
-/* Queue count holds local plus node plus machine with no overflow. */
+/* Queue count holds local plus node plus machine plus overflow. */
 /* Steal reuses peer locals with no new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
-	FLOW_MAX_CPUS + FLOW_MAX_NODES + 1,
-	"dsq count stays local plus node plus one");
+	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
+	"dsq count stays local plus node plus two");
 /**
  * flow_time_before - test time order with wrap safety.
  * @a: first time in nanos.
@@ -348,10 +350,10 @@ static __always_inline u32 flow_task_effective_weight(u32 task_w,
  * @delta: raw service in nanos.
  * @weight: scheduling share, clamped to range.
  *
- * The neutral weight of 128 keeps the delta unchanged, lighter tasks
- * shift left for more charge while heavier tasks shift right for less
- * charge. Bands follow powers of two with saturation on shift, so the
- * verifier sees no divide and a huge shift clamps instead of wrapping.
+ * Scales inversely with weight through one divide, so the neutral
+ * weight of 128 keeps the delta unchanged while lighter tasks grow
+ * and heavier tasks shrink with no band jump. Mirrors the fair
+ * scaler in weight.bpf.c with saturation and a floor of one.
  *
  * Returns: scaled service in nanos.
  */
@@ -359,41 +361,17 @@ static __always_inline u64 flow_scaled_delta(u64 delta,
 	u32 weight)
 {
 	u32 w = flow_weight_clamp(weight);
+	u64 prod;
 	u64 out;
-	if (w < 16U) {
-		if (delta > ((u64)~0ULL >> 4))
-			return (u64)~0ULL;
-		return delta << 4;
-	}
-	if (w < 32U) {
-		if (delta > ((u64)~0ULL >> 3))
-			return (u64)~0ULL;
-		return delta << 3;
-	}
-	if (w < 64U) {
-		if (delta > ((u64)~0ULL >> 2))
-			return (u64)~0ULL;
-		return delta << 2;
-	}
-	if (w < 96U) {
-		if (delta > ((u64)~0ULL >> 1))
-			return (u64)~0ULL;
-		return delta << 1;
-	}
-	if (w < 192U)
-		return delta;
-	if (w < 384U)
-		return delta >> 1;
-	if (w < 768U)
-		return delta >> 2;
-	if (w < 1536U)
-		return delta >> 3;
-	if (w < 3072U)
-		return delta >> 4;
-	if (w < 6144U)
-		return delta >> 5;
-	out = delta >> 6;
-	if (out == 0 && delta != 0)
+	if (delta == 0)
+		return 0;
+	if (w == 0)
+		w = (u32)FLOW_WEIGHT_MIN;
+	if (delta > (u64)~0ULL / (u64)FLOW_WEIGHT_BASE)
+		return (u64)~0ULL;
+	prod = delta * (u64)FLOW_WEIGHT_BASE;
+	out = prod / (u64)w;
+	if (out == 0)
 		return 1;
 	return out;
 }
@@ -752,13 +730,25 @@ static __always_inline u64 flow_machine_dsq(void)
 	return (u64)FLOW_MACHINE;
 }
 /**
+ * flow_overflow_dsq - id of the overflow FIFO queue.
+ *
+ * Bursts past tier order wait here in arrival order with mask wins.
+ *
+ * Returns: overflow queue id shared by every CPU.
+ */
+static __always_inline u64 flow_overflow_dsq(void)
+{
+	return (u64)FLOW_OVERFLOW;
+}
+/**
  * flow_dsq_valid - test live scheduler queue id.
  * @dsq: queue id to test.
  *
- * Local plus node plus machine pass, and all other ids fail, so a
- * stale id never moves work. Sparse nodes fold to machine at the caller
- * with no panic, so holes in the node view stay safe. The kernel global
- * queue never passes for wire compat with homeless work in machine.
+ * Local plus node plus machine plus overflow pass, and all other ids
+ * fail, so a stale id never moves work. Sparse nodes fold to machine
+ * at the caller with no panic, so holes in the node view stay safe.
+ * The kernel global queue never passes for wire compat with homeless
+ * work in machine.
  *
  * Returns: true when live, else false.
  */
@@ -771,6 +761,8 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 	    dsq < (u64)FLOW_NODE_BASE + (u64)FLOW_MAX_NODES)
 		return true;
 	if (dsq == (u64)FLOW_MACHINE)
+		return true;
+	if (dsq == (u64)FLOW_OVERFLOW)
 		return true;
 	return false;
 }

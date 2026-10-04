@@ -35,9 +35,57 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#include "enqueue/target.bpf.c"
-#include "enqueue/insert.bpf.c"
-#include "enqueue/kick.bpf.c"
+/* Target plus insert helpers for the enqueue pass. */
+static __always_inline bool flow_task_pinned(const struct task_struct *p)
+{
+	if (is_migration_disabled(p))
+		return true;
+	if (p->nr_cpus_allowed == 1)
+		return true;
+	return false;
+}
+static __always_inline s32 flow_pick_target(struct task_struct *p, s32 sel)
+{
+	s32 first;
+	if (sel >= 0 && flow_cpu_ok(p, sel))
+		return sel;
+	first = (s32)bpf_cpumask_first(p->cpus_ptr);
+	if (flow_cpu_ok(p, first))
+		return first;
+	return -1;
+}
+static __always_inline void flow_local_insert(struct task_struct *p, s32 cpu, u64 vtime)
+{
+	scx_bpf_dsq_insert_vtime(p, flow_local_dsq((u32)cpu), (u64)FLOW_QUANTUM_NS, vtime, 0);
+}
+static __always_inline void flow_node_insert(struct task_struct *p, u32 node, u64 vtime)
+{
+	scx_bpf_dsq_insert_vtime(p, flow_node_dsq(node), (u64)FLOW_QUANTUM_NS, vtime, 0);
+}
+static __always_inline void flow_machine_insert(struct task_struct *p, u64 vtime)
+{
+	scx_bpf_dsq_insert_vtime(p, flow_machine_dsq(), (u64)FLOW_QUANTUM_NS, vtime, 0);
+}
+static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_flags)
+{
+	scx_bpf_dsq_insert(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, enq_flags);
+}
+static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64 vtime, u64 now)
+{
+	u32 node;
+	if (cpu >= 0 && flow_cpu_meets_fair((u32)cpu, vtime, now)) {
+		flow_local_insert(p, cpu, vtime);
+		return;
+	}
+	if (cpu >= 0) {
+		node = flow_cpu_node((u32)cpu);
+		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids) {
+			flow_node_insert(p, node, vtime);
+			return;
+		}
+	}
+	flow_machine_insert(p, vtime);
+}
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
@@ -79,8 +127,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    READ_ONCE(tst->running_pid) == 0) {
 				scx_bpf_kick_cpu(tgt,
 				    SCX_KICK_IDLE);
-				__sync_fetch_and_add(
-				    &flow_stats.kicks, 1);
+				flow_count_kick();
 			}
 			return;
 		}
@@ -92,23 +139,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The gate runs first with no state create, so stale CPUs plus */
 	/* moved tasks fail closed with no alloc cost. The lookup stays */
 	/* read only here, and the create follows only on pass. Rejects are */
-	/* rare, so they stay unlikely. Gate misses rejoin the machine tier */
-	/* with a fallback deadline as the fair time, so no path needs a */
-	/* tail queue. */
+	/* rare, so they stay unlikely. Gate misses join the overflow FIFO */
+	/* with no deadline wait, so no path needs a tail queue. */
 	if (unlikely(!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
 	    scx_bpf_task_cpu(p), p, 0))) {
 		struct flow_task_ctx *lctx = flow_lookup(p);
-		u32 fh = 0;
-		u64 fdl;
 		flow_gate_reject();
-		if (lctx) {
+		if (lctx)
 			lctx->wait_at = now;
-			fh = READ_ONCE(lctx->hint_us);
-		}
-		if (fh == 0)
-			fh = flow_task_hint(p);
-		fdl = flow_fallback_deadline(now, fh);
-		flow_machine_insert(p, fdl);
+		flow_overflow_insert(p, enq_flags);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -223,53 +262,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	cpu = flow_pick_target(p, sel);
 	/* No live CPU waits in the machine tier with an idle kick. */
 	/* The predictor shapes the deadline when history exists else the */
-	/* hint period, and the fair time paces order like tiered tasks, so */
-	/* homeless work keeps fair order with no global queue use. */
+	/* homeless work waits in the overflow FIFO with no fair key, so */
+	/* no insert touches the kernel global queue. */
 	if (!flow_cpu_ok(p, cpu)) {
-		u32 nh;
-		u32 nh_w = (u32)FLOW_WEIGHT_BASE;
-		u64 havg;
-		u64 hdev;
-		u64 ndl;
-		u64 hvr;
-		u32 htask_w;
-		u32 heff;
-		u32 hsl;
-		u64 hvd;
-		u64 hvt;
 		flow_gate_reject();
 		tctx->wait_at = now;
-		if (is_reenq) {
-			nh = READ_ONCE(tctx->hint_us);
-			nh_w = READ_ONCE(tctx->hint_w);
-		} else {
-			flow_task_hint_weight(p, &nh, &nh_w);
-		}
-		if (READ_ONCE(tctx->deadline) &&
-		    flow_missed(READ_ONCE(tctx->deadline), now))
-			flow_count_miss(tctx);
-		havg = (u64)READ_ONCE(tctx->avg_ns);
-		hdev = (u64)READ_ONCE(tctx->dev_ns);
-		ndl = flow_pred_deadline(now, havg, hdev, nh);
-		__sync_lock_test_and_set(&tctx->deadline, ndl);
-		tctx->hint_us = nh;
-		tctx->hint_w = nh_w;
-		hvr = READ_ONCE(tctx->vruntime);
-		htask_w = READ_ONCE(tctx->weight);
-		hsl = READ_ONCE(tctx->slice_ns);
-		if (htask_w == 0)
-			htask_w = (u32)FLOW_WEIGHT_BASE;
-		if (hsl == 0)
-			hsl = (u32)FLOW_QUANTUM_NS;
-		heff = flow_task_effective_weight(htask_w, nh_w);
-		hvd = flow_virt_deadline(hvr, (u64)hsl, heff);
-		hvt = flow_fair_vtime(ndl, hvd);
-		flow_machine_insert(p, hvt);
+		flow_overflow_insert(p, enq_flags);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
 	if (READ_ONCE(tctx->deadline) == 0 && READ_ONCE(tctx->wait_at) == 0)
-		__sync_fetch_and_add(&flow_stats.inserts, 1);
+		flow_count_insert();
 	/* One predictor period plus one EDF deadline plus one fair time. */
 	/* A zero average means no history, so the fresh hint period */
 	/* applies with the default when the hint is zero. Later wakeups */
@@ -369,7 +372,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while tier queues hold misses plus pins. */
-	__sync_fetch_and_add(&flow_stats.admits, 1);
+	flow_count_admit();
 	/* Idle direct bypass only when tiers hold no earlier fair key. An idle */
 	/* target takes the task straight to its local queue with one idle kick */
 	/* per wait and no preempt, so wakeups skip the tier plus dispatch hop. */
@@ -412,7 +415,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				    (u64)FLOW_QUANTUM_NS, enq_flags);
 				scx_bpf_test_and_clear_cpu_idle(cpu);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-				__sync_fetch_and_add(&flow_stats.kicks, 1);
+				flow_count_kick();
 				return;
 			}
 		}
@@ -459,13 +462,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		avlag = READ_ONCE(tctx->vlag);
 		cmin = flow_cpu_min((u32)cpu);
 		if (!flow_eligible(avr, cmin, avlag)) {
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		if (READ_ONCE(st->running_pid) == 0) {
 			scx_bpf_test_and_clear_cpu_idle(cpu);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			__sync_fetch_and_add(&flow_stats.kicks, 1);
+			flow_count_kick();
 			return;
 		}
 		/* Requeues pace at slice expiry with no occupant preempt, */
@@ -521,7 +524,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (!flow_time_before(vtime, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		margin = flow_sat_add(vtime,
@@ -529,19 +532,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (margin == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		if (!flow_time_before(margin, occ_deadline)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		if (occ_start == 0) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		occ_end = flow_sat_add(occ_start,
@@ -549,7 +552,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (occ_end == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		tail = flow_sat_add(now,
@@ -557,19 +560,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (tail == (u64)~0ULL) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		if (!flow_time_before(tail, occ_end)) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
-			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
+			flow_count_preempt_skip();
 			return;
 		}
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-		__sync_fetch_and_add(&flow_stats.kicks, 1);
-		__sync_fetch_and_add(&flow_stats.preempt_kicks, 1);
+		flow_count_kick();
+		flow_count_preempt_kick();
 	}
 }

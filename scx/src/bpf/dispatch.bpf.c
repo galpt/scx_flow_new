@@ -1,52 +1,91 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Dispatch op.
+ * Dispatch with bounded drain plus steal plus fail open.
  *
- * Each pass drains local plus node plus machine plus steal in fair
- * order with at most one move per tier bounded by remaining dispatch
- * slots and visits capped at sixty four per pass shared across tiers. The kernel keeps
- * each priority queue list in fair order, so each tier takes the
- * earliest matching fair time with mask wins on drain and no BPF
- * sort. Fair order via kernel priority queue: the vtime key holds
- * the earlier of deadline plus virtual deadline, so the earliest
- * fair time wins with the 2ms lag bound. Each tier
- * skips unmatching heads uniformly through the shared move, so one
- * foreign task never stalls its tier for that pass. The steal tier scans
- * peer locals within 8 to 16 peers proportional to remaining visits,
- * with a saturated early out when local plus node plus machine still
- * hold queued work, so busy passes skip the peer scan cheaply.
- * Visits cap at sixty four per pass shared regardless of moves with
- * leftover work resuming
- * next pass, so one pass never holds RCU across the whole queue on
- * mask misses while staying work conserving across passes.
- * The gate runs first for the CPU, then the remaining dispatch slots
- * bound the moves with no clamp, so every tier shares one exact move
- * bound with no overfill. The queue depth leaves at once per tier with
- * no RCU hold through the shared move, so idle tiers stay cheap. Static
- * tier order is local plus node plus machine plus steal with no
- * reorder, so the pass follows one fixed path. Per tier moves count once with no lock
- * through one exit, and the level follows after all moves with the
- * same CPU only, so idle cannot be skipped. No consumable slots leaves
- * at once with no scan, so idle stays cheap.
- * See intf.h for the visit cap plus the deadline helpers and
- * enqueue.bpf.c for the deadline choice with no admission bound.
- *
- * The pass splits across dispatch/failopen, drain, perf plus
- * helpers/finish with one RCU section per tier scan. The probe plus
- * move live in failopen, so tiers share one gate with no per tier
- * copy. Each scan stays noinline with scalar inputs plus a visit
- * capped loop, so the verifier stays small with no unrolled caller
- * tree, while the single task move plus the account stay inline so
- * the deepest path keeps its call frames small. No fair.c helper is
- * used and the queue order stays in kernel priority queues.
+ * Each pass drains local plus node plus machine plus overflow plus
+ * steal in order with at most one move per tier bounded by remaining
+ * slots and visits capped at eight per pass shared across tiers. The
+ * overflow tier holds FIFO bursts with mask wins, so overload still
+ * drains with no priority inversion. The steal tier scans four to
+ * eight peers proportional to remaining visits with a saturated early
+ * out when tiers still hold work. Fail open moves through the shared
+ * mask gate, so one foreign head never stalls its tier. The level
+ * follows after all moves with the same CPU only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#include "dispatch/failopen.bpf.c"
-#include "dispatch/drain.bpf.c"
-#include "helpers/finish.bpf.c"
-#include "dispatch/perf.bpf.c"
-
+/* Depth probe with own plus local plus node plus running. */
+static __noinline bool flow_perf_busy(s32 cpu)
+{
+	s32 own;
+	s32 local;
+	u64 depth = 0;
+	struct flow_cpu_state *st;
+	if (cpu < 0)
+		return false;
+	if (!flow_cpu_live((u32)cpu))
+		return false;
+	own = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
+	if (own > 0)
+		depth += (u64)own;
+	local = scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
+	    (u64)(u32)cpu);
+	if (local > 0)
+		depth += (u64)local;
+	{
+		u32 node = flow_cpu_node((u32)cpu);
+		if (node < (u32)FLOW_MAX_NODES &&
+		    (u64)node < nr_node_ids) {
+			s32 shared = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
+			if (shared > 0)
+				depth += (u64)shared;
+		}
+	}
+	st = flow_cpu((u32)cpu);
+	if (st && READ_ONCE(st->running_pid) != 0)
+		depth += 1;
+	return depth > 0;
+}
+/* Core perf set with transition only store. */
+static __noinline void flow_perf_set(s32 cpu, u32 want)
+{
+	u32 cap;
+	u32 key;
+	u32 *last;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	if (cpu < 0)
+		return;
+	if (!flow_cpu_live((u32)cpu))
+		return;
+	if ((u64)cpu >= (u64)FLOW_MAX_CPUS)
+		return;
+	if (want != (u32)FLOW_CPU_PERF_HALF &&
+	    want != (u32)FLOW_CPU_PERF_MAX)
+		return;
+	if (bpf_ksym_exists(scx_bpf_cpuperf_cap)) {
+		cap = scx_bpf_cpuperf_cap(cpu);
+		if (cap == 0)
+			return;
+		if (want > cap)
+			want = cap;
+	}
+	key = (u32)cpu;
+	last = bpf_map_lookup_elem(&cpu_perf_last, &key);
+	if (!last)
+		return;
+	if (READ_ONCE(*last) == want)
+		return;
+	__sync_lock_test_and_set(last, want);
+	scx_bpf_cpuperf_set(cpu, want);
+}
+static __always_inline void flow_perf_update(s32 cpu)
+{
+	if (flow_perf_busy(cpu))
+		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_MAX);
+	else
+		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
@@ -56,73 +95,59 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 local_moved = 0;
 	u32 node_moved = 0;
 	u32 machine_moved = 0;
+	u32 overflow_moved = 0;
 	u64 own_local;
 	u32 node;
 	u64 node_dsq;
 	u64 machine_dsq;
+	u64 overflow_dsq;
 	(void)prev;
-	/* The gate runs first with no queue cost, so a stale CPU fails */
-	/* closed at once. A negative CPU is an idle call with no work, so */
-	/* it leaves with no count while only live rejects count. */
 	if (unlikely(cpu < 0))
 		return;
 	if (unlikely(!flow_cpu_live((u32)cpu))) {
 		flow_gate_reject();
 		return;
 	}
-	/* Moves hoist the remaining dispatch slots once at entry with no */
-	/* clamp, so every tier shares one exact move bound with no */
-	/* overfill. No consumable slots leaves at once with no scan, so */
-	/* idle stays cheap. */
 	budget = scx_bpf_dispatch_nr_slots();
 	if (unlikely(budget == 0))
 		goto out;
-	/* Handles stay hoisted once at entry, so pops pay no extra lookup. */
 	own_local = flow_local_dsq((u32)cpu);
 	node = flow_cpu_node((u32)cpu);
-	/* Fold past the derived count to zero like enqueue, so the node */
-	/* turn always names a created queue with no stale id. */
 	if (node >= (u32)FLOW_MAX_NODES ||
 	    (u64)node >= nr_node_ids)
 		node = 0;
 	node_dsq = flow_node_dsq(node);
 	machine_dsq = flow_machine_dsq();
+	overflow_dsq = flow_overflow_dsq();
 	left = budget;
-	/* Local tier first with no scan on empty. The kernel holds */
-	/* fair order plus mask wins, so the earliest matching fair time */
-	/* moves at once within the shared per pass visit cap with at most */
-	/* one move for this tier. The likely busy tiers run first in static */
-	/* order with no reorder. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		local_moved = flow_move_one(own_local, cpu, &visits);
 		if (local_moved > left)
 			local_moved = left;
 		left -= local_moved;
 	}
-	/* Node tier next with no scan on empty. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		node_moved = flow_move_one(node_dsq, cpu, &visits);
 		if (node_moved > left)
 			node_moved = left;
 		left -= node_moved;
 	}
-	/* Machine tier next with no scan on empty. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		machine_moved = flow_move_one(machine_dsq, cpu, &visits);
 		if (machine_moved > left)
 			machine_moved = left;
 		left -= machine_moved;
 	}
-	/* Steal tier last with a bounded 8 to 16 peer window. The window */
-	/* spans proportional to remaining visits, so a fresh pass scans */
-	/* sixteen peers while a spent pass scans eight peers with no */
-	/* hotspot. A saturated early out skips the peer scan when local */
-	/* plus node plus machine still hold queued work, so a globally busy */
-	/* pass pays three depth polls with no RCU instead of up to sixteen */
-	/* peer scans. The sum saturates, so a huge depth clamps instead of */
-	/* wrapping to idle. Visits stay shared across tiers with resume next */
-	/* pass. Stolen work counts in the local bucket with no new counter, */
-	/* so stats stay at 120B with mask wins on drain. */
+	/* Overflow FIFO tier with the same visit cap and mask wins. */
+	/* Bursts past tier order drain here in arrival order. */
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+		overflow_moved = flow_move_one(overflow_dsq, cpu, &visits);
+		if (overflow_moved > left)
+			overflow_moved = left;
+		left -= overflow_moved;
+	}
+	/* Steal tier last with a bounded 4 to 8 peer window. Only steals */
+	/* when tiers drained, so busy passes skip cheap with three polls. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		u32 steal_moved = 0;
 		struct flow_cpu_state *cst;
@@ -130,17 +155,20 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		s32 lq;
 		s32 nq;
 		s32 mq;
+		s32 oq;
 		u64 backlog = 0;
 		lq = scx_bpf_dsq_nr_queued(own_local);
 		nq = scx_bpf_dsq_nr_queued(node_dsq);
 		mq = scx_bpf_dsq_nr_queued(machine_dsq);
+		oq = scx_bpf_dsq_nr_queued(overflow_dsq);
 		if (lq > 0)
 			backlog = flow_sat_add(backlog, (u64)lq);
 		if (nq > 0)
 			backlog = flow_sat_add(backlog, (u64)nq);
 		if (mq > 0)
 			backlog = flow_sat_add(backlog, (u64)mq);
-		/* Only steal when tiers drained, so busy passes skip cheap. */
+		if (oq > 0)
+			backlog = flow_sat_add(backlog, (u64)oq);
 		if (backlog == 0) {
 			cst = flow_cpu((u32)cpu);
 			cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
@@ -151,12 +179,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 			local_moved += steal_moved;
 		}
 	}
-	flow_account_local(local_moved);
+	flow_account_local(local_moved + overflow_moved);
 	flow_account_node(node_moved);
 	flow_account_machine(machine_moved);
 out:
-	/* Level follows after all moves with the same CPU only through */
-	/* one exit, so idle cannot be skipped and a steady level makes */
-	/* no call through the cached compare. */
 	flow_perf_update(cpu);
 }

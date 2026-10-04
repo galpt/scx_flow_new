@@ -3,7 +3,7 @@
  * Task lifecycle ops.
  *
  * Running claims the segment start from zero with an unconditional
- * pid store and no BPF gauge.
+ * pid store and no BPF gauge. Only stopping charges.
  * The snapshot counts live pids for the on CPU gauge. Stopping claims
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
@@ -13,8 +13,8 @@
  * no wait and no kick, since the task already left the CPU. Enable
  * clears vruntime plus deadline plus stamps plus predictor plus lag
  * plus weight plus slice plus hint plus hint weight plus misses, and
- * disable plus exit charge a leftover segment at most once when stopping never ran with
- * the same advance plus minimum fold. Disable clears the cached hierarchy
+ * Disable plus exit clear with no charge, so each segment meets exactly
+ * one charge in stopping with no double count. Disable clears the cached hierarchy
  * id like move plus enable plus exit, so a reused pid never reads stale. A closed gate still counts one
  * reject with no charge. Release clears a stale running view with no
  * charge. The gate runs first in every op except the exiting paths, so
@@ -94,8 +94,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		return;
 	}
-	/* The start claims with an exchange, so stopping versus disable */
-	/* or exit charges once. A zero claim means no counted start, */
+	/* The start claims with an exchange, so only stopping charges. */
+	/* A zero claim means no counted start, */
 	/* so this pass drops with no charge. The on CPU gauge lives in */
 	/* the snapshot with no BPF drop, so every pass ends here with no */
 	/* gauge use. */
@@ -119,7 +119,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* while light tasks move quickly with no neutral cliff. The CPU */
 	/* minimum folds forward best effort with no regression past a */
 	/* concurrent win. */
-	__sync_fetch_and_add(&flow_stats.total_runtime, delta);
+	flow_count_runtime(delta);
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
@@ -135,7 +135,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		if (task_w == 0)
 			task_w = (u32)FLOW_WEIGHT_BASE;
 		eff_w = flow_task_effective_weight(task_w, hint_w);
-		n_vrun = flow_vruntime_advance(vrun, delta, eff_w);
+		n_vrun = flow_ledger_advance(vrun, delta, eff_w);
 		__sync_lock_test_and_set(&tctx->avg_ns, (u32)n_avg);
 		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
 		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);
@@ -149,10 +149,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
 	if (runnable) {
-		__sync_fetch_and_add(&flow_stats.requeues, 1);
+		flow_count_requeue(true);
 		return;
 	}
-	__sync_fetch_and_add(&flow_stats.completions, 1);
+	flow_count_requeue(false);
 }
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
@@ -188,7 +188,6 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
-	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
@@ -198,30 +197,21 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	/* reuse never reads a stale hierarchy like move plus enable plus */
 	/* exit. A zero pid needs no clear with the zero sentinel. */
 	flow_cgrp_cache_invalidate((u32)p->pid);
-	tctx = flow_lookup(p);
-	/* Charge a running segment stopping never saw at most once. */
-	/* The advance plus the minimum fold match stopping, so a leftover */
-	/* still paces fairness with no double charge. The pid clear stays */
-	/* in the caller with no gauge use. */
-	flow_charge_leftover(p, tctx);
+	/* Charge lives only in stopping with no leftover, so disable */
+	/* clears the pid view with no advance and no minimum fold. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p,
 	struct scx_exit_task_args *args)
 {
-	struct flow_task_ctx *tctx;
 	s32 cpu = scx_bpf_task_cpu(p);
 	(void)args;
 	/* Exiting tasks stay exempt from the gate with no count. The */
 	/* cached hierarchy id clears too, so a later pid reuse never */
 	/* reads a stale hierarchy. */
 	flow_cgrp_cache_invalidate((u32)p->pid);
-	tctx = flow_lookup(p);
-	/* Charge a running segment stopping never saw at most once. */
-	/* The advance plus the minimum fold match stopping, so a leftover */
-	/* still paces fairness with no double charge. The pid clear stays */
-	/* in the caller with no gauge use. */
-	flow_charge_leftover(p, tctx);
+	/* Charge lives only in stopping with no leftover, so exit clears */
+	/* the pid view with no advance and no minimum fold. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 }
 void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu,

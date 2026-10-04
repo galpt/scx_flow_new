@@ -1,20 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Select CPU op.
+ * Select CPU thin wrapper over the SSF placement.
  *
- * Placement takes idle first, then the previous CPU, then the shared
- * home, and it keeps the slowest sufficient CPU among the allowed
- * set that can meet the deadline with a near minimum tiebreak on the
- * CPU minimum. An idle CPU takes the task at once with no scan. The
- * previous CPU wins next when it can drain before the deadline, so
- * warmth stays free with no cost. The shared home takes the rest, so
- * no task waits for a busy CPU while shared room stays open.
- * Capacities stay symmetric on test hosts, so the lowest sufficient
- * id is the slowest sufficient pick with the smallest minimum winning
- * near ties. Pinned tasks stay where the mask allows with no scan,
- * and the task mask always wins. An empty mask falls through to the
- * machine tier at enqueue. See enqueue.bpf.c for the fair time choice
- * after select.
+ * Takes idle first, then the previous CPU when it meets the deadline,
+ * then the slowest sufficient fit in O(VISIT) with VISIT at most eight
+ * peers, then the best sufficient fallback with no topology signal.
+ * Pinned tasks stay where the mask allows with no scan. An empty mask
+ * falls through to the machine tier at enqueue.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -27,8 +19,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	struct flow_task_ctx *tctx;
 	(void)wake_flags;
 	this_cpu = (s32)bpf_get_smp_processor_id();
-	/* Pinned tasks stay where the mask allows with no scan. Pinning */
-	/* is rare, so it stays unlikely. */
 	if (unlikely(is_migration_disabled(p))) {
 		s32 here = scx_bpf_task_cpu(p);
 		if (flow_cpu_ok(p, here))
@@ -41,8 +31,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		flow_gate_reject();
 		return prev_cpu;
 	}
-	/* Single mask tasks keep the same pinned path with no scan. */
-	/* A single mask is rare, so it stays unlikely. */
 	if (unlikely(p->nr_cpus_allowed == 1)) {
 		s32 here = scx_bpf_task_cpu(p);
 		s32 allow;
@@ -56,133 +44,61 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		flow_gate_reject();
 		return prev_cpu;
 	}
-	/* The gate runs first with the pinned paths, then the idle fast */
-	/* paths leave at once with no state read, so idle stays cheap. */
-	/* The deadline shapes the sufficient check below only, so the */
-	/* lookup waits until the idle paths miss with no cost on hit. */
-	/* The waker CPU is free when it runs nothing and the mask allows. */
-	/* An idle core cannot stack, so the slowest sufficient scan ends */
-	/* here with no cost. The pid read uses a relaxed load to match */
-	/* the running stores. The waker idle hit is rare since the waker */
-	/* runs this op, so the miss path stays likely. */
 	if (likely(flow_cpu_ok(p, this_cpu))) {
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
 		if (wst && READ_ONCE(wst->running_pid) == 0)
 			return this_cpu;
 	}
-	/* One idle scan only with no depth pass. */
-	/* The first idle allowed CPU is the slowest sufficient pick on */
-	/* a symmetric host, so the scan ends here with no drain check. */
 	{
 		s32 picked = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (picked >= 0 && flow_cpu_ok(p, picked))
 			return picked;
 	}
-	/* The deadline shapes the sufficient check below. */
-	/* A missing state means no order yet, so every live CPU meets. */
-	/* The read waits until the idle paths miss, so idle hits pay no */
-	/* state cost. A zero deadline meets everywhere with no drain poll, */
-	/* so the previous CPU wins at once with no 16 peer scan. */
 	tctx = flow_lookup(p);
 	if (likely(tctx))
 		deadline = READ_ONCE(tctx->deadline);
 	if (unlikely(deadline == 0) && likely(flow_cpu_ok(p, prev_cpu)))
 		return prev_cpu;
-	/* The previous CPU wins when it can drain before the deadline. */
-	/* Warmth stays free, and a miss falls to the shared home. The 16 */
-	/* peer scan stays out when the previous CPU already meets, so */
-	/* requeues keep warmth with no extra walk. */
 	if (flow_cpu_ok(p, prev_cpu)) {
 		u64 now = flow_now();
 		if (flow_cpu_meets((u32)prev_cpu, deadline, now))
 			return prev_cpu;
 	}
-	/* The shared home takes the rest in id order with fair tiebreak. */
-	/* The slowest sufficient allowed CPU wins with the lowest units */
-	/* among the peers that drain before the deadline, so light work */
-	/* never takes a fast CPU that other work needs. Peers within 64 */
-	/* units of the best count as near minimum, and the smallest */
-	/* minimum vruntime wins those ties with wrap safe order, so */
-	/* lagging CPUs take work first with no hotspot. Capacities stay */
-	/* symmetric on test hosts, so the first sufficient id usually */
-	/* wins with no extra pass. The cursor spreads passes with no */
-	/* hotspot, and it races best effort with no atomic order. At most */
-	/* sixteen peers run with at most one drain poll plus two map reads */
-	/* each, so the pass stays bounded with no extra walk. */
+	/* Shared SSF scan in O(VISIT) with VISIT at most eight plus the */
+	/* BSF fallback with no topology signal. The cursor spreads passes */
+	/* with no hotspot and races best effort. */
 	{
 		u64 nr = nr_cpu_ids;
 		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
 		u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
-		u32 off;
 		u64 now = flow_now();
-		u32 best = 0xffffffffU;
-		u32 best_units = 0xffffffffU;
-		u64 best_min = (u64)~0ULL;
+		u32 best;
+		u32 bsf;
 		if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
 			u32 n = (u32)nr;
 			u32 start = (cursor + 1U) % n;
-			bpf_for(off, 0, 16) {
-				u32 peer;
-				u32 units;
-				u64 pmin;
-				if ((u64)off >= (u64)n)
-					break;
-				peer = (start + off) % n;
-				/* The busy waker stays out on purpose. */
-				/* An idle waker already returned above, */
-				/* so a busy waker here would only stack */
-				/* on its own depth with no warmth win. */
-				/* The previous CPU below keeps warmth. */
-				if (peer == (u32)this_cpu)
-					continue;
-				if (!flow_cpu_ok(p, (s32)peer))
-					continue;
-				if (!flow_cpu_meets(peer, deadline,
-				    now))
-					continue;
-				units = flow_cpu_units(peer);
-				pmin = flow_cpu_min(peer);
-				/* A clearly slower CPU always wins. */
-				/* A near minimum within 64 units defers */
-				/* to the smallest minimum, so lagging */
-				/* CPUs take work first. */
-				if (best != 0xffffffffU) {
-					if (units + 64U < best_units) {
-						best_units = units;
-						best_min = pmin;
-						best = peer;
-						continue;
-					}
-					if (units > best_units + 64U)
-						continue;
-					if (!flow_time_before(pmin, best_min) &&
-					    pmin != best_min)
-						continue;
-					if (pmin == best_min &&
-					    peer >= best)
-						continue;
-					best_units = units < best_units ?
-					    units : best_units;
-					best_min = pmin;
-					best = peer;
-					continue;
-				}
-				best_units = units;
-				best_min = pmin;
-				best = peer;
-			}
-			if (wst && best != 0xffffffffU)
-				__sync_lock_test_and_set(
-				    &wst->cursor,
-				    (start + 1U) % n);
-			if (best != 0xffffffffU)
+			best = flow_ssf_pick(p, deadline, now,
+			    (u32)this_cpu, cursor, nr);
+			if (best != 0xffffffffU) {
+				if (wst)
+					__sync_lock_test_and_set(&wst->cursor,
+					    (start + 1U) % n);
 				return (s32)best;
+			}
+			/* BSF fallback with the smallest drain and no */
+			/* topology walk, so symmetric hosts still spread. */
+			bsf = flow_bsf_pick(p, deadline, now,
+			    (u32)this_cpu, cursor, nr);
+			if (bsf != 0xffffffffU) {
+				if (wst)
+					__sync_lock_test_and_set(&wst->cursor,
+					    (start + 1U) % n);
+				return (s32)bsf;
+			}
 		}
 	}
-	/* A scan miss keeps the previous CPU when allowed. */
 	if (flow_cpu_ok(p, prev_cpu))
 		return prev_cpu;
-	/* The first allowed CPU is the fail closed fallback. */
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
 	if (flow_cpu_ok(p, first))
 		return first;

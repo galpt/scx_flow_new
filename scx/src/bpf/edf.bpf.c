@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Deadline plus fair helpers for the core.
+ * EDF deadline plus eligibility for the core.
  *
- * Holds the deadline plus fair time plus drain readiness checks with
- * saturating math. Every task joins a tier queue with no bound, and
- * queue order plus tier choice use the fair key while placement tests
- * the deadline. Drain sums local plus node with saturation, so a busy
- * node holds the local tier with no wait. The CPU minimum read stays
- * best effort with zero on miss. Runs under the caller with no lock.
+ * Holds the burst predictor plus the absolute deadline plus the fair
+ * key plus the eligibility gate. Every task earns a deadline from the
+ * predictor else the hint period, and queue order uses the earlier of
+ * deadline plus virtual deadline with a 2ms lag bound. Eligibility
+ * gates every kick, so hogs pace while lagging tasks wake. Drain sums
+ * local plus node with saturation, so a busy node holds the local tier
+ * with no wait. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,15 +25,6 @@ static __always_inline bool flow_deadline_ok(u64 deadline,
 	if (now == deadline)
 		return true;
 	return false;
-}
-/* Minimum vruntime of one CPU with zero on miss. */
-/* A missing row means no history, so zero keeps new tasks eligible. */
-static __always_inline u64 flow_cpu_min(u32 cpu)
-{
-	struct flow_cpu_state *st = flow_cpu(cpu);
-	if (!st)
-		return 0;
-	return READ_ONCE(st->min_vruntime);
 }
 /* Drain depth of one CPU as queued slices times the quantum. */
 /* Saturates on wrap, so a huge depth clamps instead of wrapping to */
@@ -54,7 +46,7 @@ static __always_inline u64 flow_drain_ns(u64 dsq)
 static __always_inline u64 flow_cpu_drain(u32 cpu)
 {
 	u64 local = flow_drain_ns(flow_local_dsq(cpu));
-	u32 node = flow_cpu_node(cpu);
+	u32 node = flow_cpu_node((u32)cpu);
 	u64 shared = 0;
 	if (node < (u32)FLOW_MAX_NODES &&
 	    (u64)node < nr_node_ids)
