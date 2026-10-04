@@ -137,7 +137,14 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 		window = (u32)FLOW_STEAL_MAX_PEERS;
 	{
 		u32 n = (u32)nr;
-		u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
+		bool pow2 = flow_is_pow2((u64)n);
+		u32 start;
+		/* Hoist the pow2 check once per steal, so peers step with */
+		/* one mask or modulo each with no per peer power test. */
+		if (pow2)
+			start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+		else
+			start = (u32)(((u64)cursor + 1ULL) % (u64)n);
 		bpf_for(off, 0, FLOW_STEAL_MAX_PEERS) {
 			u32 peer;
 			u64 peer_dsq;
@@ -150,7 +157,11 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 				break;
 			if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 				break;
-			peer = flow_wrap_idx((u64)start + (u64)off, n);
+			if (pow2)
+				peer = (u32)(((u64)start + (u64)off) &
+				    ((u64)n - 1ULL));
+			else
+				peer = (u32)(((u64)start + (u64)off) % (u64)n);
 			if (peer == (u32)cpu)
 				continue;
 			if (unlikely(!flow_cpu_live(peer)))
@@ -201,7 +212,16 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 	this_node = flow_cpu_node(this_cpu);
 	{
 		u32 n = (u32)nr;
-		u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
+		bool pow2;
+		u32 start;
+		/* Hoist the pow2 check once per scan, so peers step with */
+		/* one mask or modulo each with no per peer power test. */
+		/* Keeps the same wrap order with fewer verifier states. */
+		pow2 = flow_is_pow2((u64)n);
+		if (pow2)
+			start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+		else
+			start = (u32)(((u64)cursor + 1ULL) % (u64)n);
 		bpf_for(off, 0, FLOW_DISPATCH_MAX_VISIT) {
 			u32 peer;
 			u32 units;
@@ -209,7 +229,11 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 			bool same;
 			if ((u64)off >= (u64)n)
 				break;
-			peer = flow_wrap_idx((u64)start + (u64)off, n);
+			if (pow2)
+				peer = (u32)(((u64)start + (u64)off) &
+				    ((u64)n - 1ULL));
+			else
+				peer = (u32)(((u64)start + (u64)off) % (u64)n);
 			if (peer == this_cpu)
 				continue;
 			if (!flow_cpu_ok(p, (s32)peer))
@@ -281,16 +305,34 @@ static __always_inline u32 flow_bsf_pick(const struct task_struct *p,
 		return best;
 	{
 		u32 n = (u32)nr;
-		u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
-		u32 bsf_start = flow_wrap_idx((u64)start +
-		    (u64)FLOW_DISPATCH_MAX_VISIT, n);
+		bool pow2;
+		u32 start;
+		u32 bsf_start;
+		/* Hoist the pow2 check once per fallback, so peers step */
+		/* with one mask or modulo each with no per peer power test. */
+		/* Keeps the same disjoint twelve peer order with fewer states. */
+		pow2 = flow_is_pow2((u64)n);
+		if (pow2) {
+			start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+			bsf_start = (u32)(((u64)start +
+			    (u64)FLOW_DISPATCH_MAX_VISIT) & ((u64)n - 1ULL));
+		} else {
+			start = (u32)(((u64)cursor + 1ULL) % (u64)n);
+			bsf_start = (u32)(((u64)start +
+			    (u64)FLOW_DISPATCH_MAX_VISIT) % (u64)n);
+		}
 		bpf_for(off, 0, FLOW_BSF_MAX_PEERS) {
 			u32 peer;
 			u64 drain;
 			u64 pmin;
 			if ((u64)off >= (u64)n)
 				break;
-			peer = flow_wrap_idx((u64)bsf_start + (u64)off, n);
+			if (pow2)
+				peer = (u32)(((u64)bsf_start + (u64)off) &
+				    ((u64)n - 1ULL));
+			else
+				peer = (u32)(((u64)bsf_start + (u64)off) %
+				    (u64)n);
 			if (peer == this_cpu)
 				continue;
 			if (!flow_cpu_ok(p, (s32)peer))

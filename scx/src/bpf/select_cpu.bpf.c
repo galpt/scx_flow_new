@@ -17,6 +17,60 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
+/**
+ * flow_select_best - slowest plus best sufficient pick in one call.
+ * @p: task to place.
+ * @deadline: absolute deadline, zero meets all.
+ * @now: current time in nanos.
+ * @this_cpu: waker CPU for the cursor plus the self skip.
+ *
+ * Runs the SSF scan over eight peers from the cursor plus the disjoint
+ * BSF fallback over the next four past the SSF window from cursor plus
+ * 9, so twelve unique peers hold with no overlap on large hosts. The
+ * shared cursor with steal advances by two on success with best effort
+ * races, so passes spread with no hotspot. Outlined with noinline to
+ * keep verifier headroom on the select path with no order change.
+ *
+ * Returns: peer id or 0xffffffffU when no peer meets.
+ */
+static __noinline u32 flow_select_best(const struct task_struct *p,
+	u64 deadline, u64 now, u32 this_cpu)
+{
+	u64 nr = nr_cpu_ids;
+	struct flow_cpu_state *wst = flow_cpu(this_cpu);
+	u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
+	u32 best;
+	u32 bsf;
+	u32 n;
+	bool pow2;
+	u32 start;
+	u32 next;
+	if (nr <= 1 || nr > (u64)FLOW_MAX_CPUS)
+		return 0xffffffffU;
+	n = (u32)nr;
+	pow2 = flow_is_pow2((u64)n);
+	if (pow2) {
+		start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+		next = (u32)(((u64)start + 1ULL) & ((u64)n - 1ULL));
+	} else {
+		start = (u32)(((u64)cursor + 1ULL) % (u64)n);
+		next = (u32)(((u64)start + 1ULL) % (u64)n);
+	}
+	(void)start;
+	best = flow_ssf_pick(p, deadline, now, this_cpu, cursor, nr);
+	if (best != 0xffffffffU) {
+		if (wst)
+			__sync_lock_test_and_set(&wst->cursor, next);
+		return best;
+	}
+	bsf = flow_bsf_pick(p, deadline, now, this_cpu, cursor, nr);
+	if (bsf != 0xffffffffU) {
+		if (wst)
+			__sync_lock_test_and_set(&wst->cursor, next);
+		return bsf;
+	}
+	return 0xffffffffU;
+}
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	s32 prev_cpu, u64 wake_flags)
 {
@@ -71,49 +125,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* so the common stay keeps one drain check with no peer walk. */
 	{
 		u64 now = flow_now();
+		u32 best;
 		if (flow_cpu_ok(p, prev_cpu)) {
 			if (flow_cpu_meets((u32)prev_cpu, deadline, now))
 				return prev_cpu;
 		}
-		/* Shared SSF scan in O(VISIT) with VISIT at most eight plus */
-		/* the disjoint BSF fallback in the next four with no topology */
-		/* signal. The shared cursor with steal advances by two with */
-		/* best effort races, so passes spread with no hotspot. Pow2 */
-		/* hosts mask with no divide, others modulo. */
-		{
-			u64 nr = nr_cpu_ids;
-			struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
-			u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
-			u32 best;
-			u32 bsf;
-			if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
-				u32 n = (u32)nr;
-				u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
-				u32 next = flow_wrap_idx((u64)start + 1ULL, n);
-				best = flow_ssf_pick(p, deadline, now,
-				    (u32)this_cpu, cursor, nr);
-				if (best != 0xffffffffU) {
-					if (wst)
-						__sync_lock_test_and_set(&wst->cursor,
-						    next);
-					return (s32)best;
-				}
-				/* BSF fallback over the next four past SSF with the */
-				/* smallest drain and no topology walk, so symmetric */
-				/* hosts still spread over twelve unique peers on */
-				/* large hosts with at least twelve CPUs. */
-				/* Capped at FLOW_BSF_MAX_PEERS, so the fallback */
-				/* extends coverage with the same order. */
-				bsf = flow_bsf_pick(p, deadline, now,
-				    (u32)this_cpu, cursor, nr);
-				if (bsf != 0xffffffffU) {
-					if (wst)
-						__sync_lock_test_and_set(&wst->cursor,
-						    next);
-					return (s32)bsf;
-				}
-			}
-		}
+		/* Shared SSF plus disjoint BSF in one outlined call with no */
+		/* topology signal, so select keeps twelve peer coverage. */
+		best = flow_select_best(p, deadline, now, (u32)this_cpu);
+		if (best != 0xffffffffU)
+			return (s32)best;
 	}
 	if (flow_cpu_ok(p, prev_cpu))
 		return prev_cpu;

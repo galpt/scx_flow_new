@@ -54,12 +54,45 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
 /* first allowed live CPU. Kicks only when the target runs nothing, with */
 /* the idle flag cleared first so the kick sticks. Never sends a preempt */
 /* kick, so tier waits stay idle only. */
+/* Factored per target probe keeps one copy with no triple growth. */
+/**
+ * flow_kick_one_if_idle - kick one CPU when idle plus eligible.
+ * @p: task waiting for the kick.
+ * @cpu: candidate CPU, negative fails closed.
+ * @vr: arrival vruntime for the eligibility gate.
+ * @lag: arrival lag bound for the eligibility gate.
+ * @has_ctx: true when @vr plus @lag hold valid state.
+ *
+ * Outlined with noinline to keep verifier headroom: the three probes
+ * share one eligibility plus kick copy with no inline growth.
+ *
+ * Returns: true when the kick took or an ineligible hold counted, so
+ * the caller stops, else false to try the next candidate.
+ */
+static __noinline bool flow_kick_one_if_idle(
+	const struct task_struct *p, s32 cpu, u64 vr, s32 lag, bool has_ctx)
+{
+	struct flow_cpu_state *st;
+	if (!flow_cpu_ok(p, cpu))
+		return false;
+	st = flow_cpu((u32)cpu);
+	if (!st || READ_ONCE(st->running_pid) != 0)
+		return false;
+	if (has_ctx &&
+	    !flow_eligible(vr, READ_ONCE(st->min_vruntime), lag)) {
+		flow_count_preempt_skip();
+		return true;
+	}
+	scx_bpf_test_and_clear_cpu_idle(cpu);
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	flow_count_kick();
+	return true;
+}
 static __noinline void flow_kick_idle_allowed(
 	const struct task_struct *p, s32 sel)
 {
 	s32 idle;
 	s32 first;
-	struct flow_cpu_state *st;
 	struct flow_task_ctx *tctx;
 	u64 vr = 0;
 	s32 lag = 0;
@@ -70,55 +103,11 @@ static __noinline void flow_kick_idle_allowed(
 		lag = READ_ONCE(tctx->vlag);
 		has_ctx = true;
 	}
-	if (flow_cpu_ok(p, sel)) {
-		st = flow_cpu((u32)sel);
-		if (st &&
-		    READ_ONCE(st->running_pid) == 0) {
-			if (has_ctx &&
-			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
-			        lag)) {
-				flow_count_preempt_skip();
-				return;
-			}
-			scx_bpf_test_and_clear_cpu_idle(sel);
-			scx_bpf_kick_cpu(sel, SCX_KICK_IDLE);
-			flow_count_kick();
-			return;
-		}
-	}
+	if (flow_kick_one_if_idle(p, sel, vr, lag, has_ctx))
+		return;
 	idle = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (idle >= 0 && flow_cpu_ok(p, idle)) {
-		st = flow_cpu((u32)idle);
-		if (st &&
-		    READ_ONCE(st->running_pid) == 0) {
-			if (has_ctx &&
-			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
-			        lag)) {
-				flow_count_preempt_skip();
-				return;
-			}
-			scx_bpf_test_and_clear_cpu_idle(
-			    (s32)idle);
-			scx_bpf_kick_cpu((s32)idle,
-			    SCX_KICK_IDLE);
-			flow_count_kick();
-			return;
-		}
-	}
+	if (flow_kick_one_if_idle(p, idle, vr, lag, has_ctx))
+		return;
 	first = (s32)bpf_cpumask_first(p->cpus_ptr);
-	if (first >= 0 && flow_cpu_ok(p, first)) {
-		st = flow_cpu((u32)first);
-		if (st &&
-		    READ_ONCE(st->running_pid) == 0) {
-			if (has_ctx &&
-			    !flow_eligible(vr, READ_ONCE(st->min_vruntime),
-			        lag)) {
-				flow_count_preempt_skip();
-				return;
-			}
-			scx_bpf_test_and_clear_cpu_idle(first);
-			scx_bpf_kick_cpu(first, SCX_KICK_IDLE);
-			flow_count_kick();
-		}
-	}
+	flow_kick_one_if_idle(p, first, vr, lag, has_ctx);
 }

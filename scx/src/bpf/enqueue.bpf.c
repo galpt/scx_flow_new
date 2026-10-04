@@ -116,6 +116,62 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 	}
 	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
+/**
+ * flow_make_fair - fair time from task state plus deadline plus hint.
+ * @tctx: task state with vruntime plus weight plus slice.
+ * @deadline: absolute EDF deadline in nanos.
+ * @hint_w: hint share with base for neutral.
+ *
+ * Reads vruntime plus weight plus slice once and stacks the effective
+ * share of task times hint over 128, so pinned plus miss plus open
+ * paths share one divide copy with the same order.
+ *
+ * Returns: fair time as the earlier of deadline plus virtual deadline.
+ *
+ * Outlined with noinline to keep verifier headroom: pinned plus miss
+ * plus open paths share one divide copy with no inline growth.
+ */
+static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
+	u64 deadline, u32 hint_w)
+{
+	u64 vr = READ_ONCE(tctx->vruntime);
+	u32 sl = READ_ONCE(tctx->slice_ns);
+	u32 task_w = READ_ONCE(tctx->weight);
+	u32 eff;
+	u64 vd;
+	if (task_w == 0)
+		task_w = (u32)FLOW_WEIGHT_BASE;
+	eff = flow_task_effective_weight(task_w, hint_w);
+	if (sl == 0)
+		sl = (u32)FLOW_QUANTUM_NS;
+	vd = flow_virt_deadline(vr, (u64)sl, eff);
+	return flow_fair_vtime(deadline, vd);
+}
+/**
+ * flow_clamp_to_min - clamp vruntime within the lag bound of a CPU.
+ * @tctx: task state with vruntime to fold forward.
+ * @cpu: target CPU whose minimum bounds the boost.
+ *
+ * Folds a vruntime more than 2ms behind the minimum forward to minimum
+ * minus 2ms with saturation at zero, so long sleepers wake only slightly
+ * early with no huge boost. Uses a compare and swap, so a concurrent
+ * charge win keeps the winner with no regression.
+ *
+ * Outlined with noinline to keep verifier headroom: pinned plus open
+ * paths share one clamp copy with no inline growth.
+ */
+static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
+	u32 cpu)
+{
+	u64 min = flow_cpu_min(cpu);
+	u64 cur = READ_ONCE(tctx->vruntime);
+	u64 bound = (u64)FLOW_VLAG_MAX_NS;
+	u64 floor = 0;
+	if (min > bound)
+		floor = min - bound;
+	if (min > bound && cur < floor)
+		__sync_val_compare_and_swap(&tctx->vruntime, cur, floor);
+}
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 enq_flags)
@@ -129,8 +185,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 vtime;
 	u32 hint;
 	u32 hint_w = (u32)FLOW_WEIGHT_BASE;
-	u32 task_w = (u32)FLOW_WEIGHT_BASE;
-	u32 eff_w = (u32)FLOW_WEIGHT_BASE;
 	u64 avg = 0;
 	u64 dev = 0;
 	bool is_reenq = false;
@@ -231,11 +285,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 pavg;
 		u64 pdev;
 		u64 pdl;
-		u64 pvr;
-		u32 ptask_w;
-		u32 peff;
-		u32 ps;
-		u64 pvd;
 		u64 pvt;
 		if (is_reenq) {
 			ph = READ_ONCE(tctx->hint_us);
@@ -248,20 +297,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		tctx->hint_us = ph;
 		tctx->hint_w = phint_w;
-		/* Clamp vruntime within the lag bound of the pinned target. */
-		/* Matches the open path, so a long sleeper wakes only slightly */
-		/* early with no huge boost. A missing target skips with no poll. */
-		if (pc >= 0 && flow_cpu_ok(p, pc)) {
-			u64 pmin = flow_cpu_min((u32)pc);
-			u64 pcur = READ_ONCE(tctx->vruntime);
-			u64 pbound = (u64)FLOW_VLAG_MAX_NS;
-			u64 pfloor = 0;
-			if (pmin > pbound)
-				pfloor = pmin - pbound;
-			if (pmin > pbound && pcur < pfloor)
-				__sync_val_compare_and_swap(&tctx->vruntime,
-				    pcur, pfloor);
-		}
+		/* Clamp vruntime within the lag bound of the pinned target */
+		/* through the shared helper with no order change. */
+		if (pc >= 0 && flow_cpu_ok(p, pc))
+			flow_clamp_to_min(tctx, (u32)pc);
 		/* A past deadline counts one miss before the fresh deadline, */
 		/* so pinned overload tracks like open tasks with no loss. */
 		if (READ_ONCE(tctx->deadline) &&
@@ -276,16 +315,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		pdl = flow_pred_deadline(now, pavg, pdev, ph);
 		__sync_lock_test_and_set(&tctx->deadline, pdl);
 		tctx->wait_at = now;
-		pvr = READ_ONCE(tctx->vruntime);
-		ptask_w = READ_ONCE(tctx->weight);
-		ps = READ_ONCE(tctx->slice_ns);
-		if (ptask_w == 0)
-			ptask_w = (u32)FLOW_WEIGHT_BASE;
-		if (ps == 0)
-			ps = (u32)FLOW_QUANTUM_NS;
-		peff = flow_task_effective_weight(ptask_w, phint_w);
-		pvd = flow_virt_deadline(pvr, (u64)ps, peff);
-		pvt = flow_fair_vtime(pdl, pvd);
+		pvt = flow_make_fair(tctx, pdl, phint_w);
 		if (flow_cpu_ok(p, pc))
 			flow_tier_insert(p, pc, pvt, now);
 		else
@@ -338,46 +368,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	dev = (u64)READ_ONCE(tctx->dev_ns);
 	tctx->hint_us = hint;
 	tctx->hint_w = hint_w;
-	/* Clamp vruntime within the lag bound of the target minimum. */
-	/* A vruntime more than 2ms behind the minimum folds forward to */
-	/* minimum minus 2ms with saturation at zero, so a long sleeper */
-	/* wakes only slightly early with no huge boost. The claim uses a */
-	/* compare and swap, so a concurrent charge win keeps the winner */
-	/* with no regression. */
-	{
-		u64 min = flow_cpu_min((u32)cpu);
-		u64 cur = READ_ONCE(tctx->vruntime);
-		u64 bound = (u64)FLOW_VLAG_MAX_NS;
-		u64 floor = 0;
-		if (min > bound)
-			floor = min - bound;
-		if (min > bound && cur < floor)
-			__sync_val_compare_and_swap(&tctx->vruntime,
-			    cur, floor);
-	}
+	/* Clamp vruntime within the lag bound of the target minimum */
+	/* through the shared helper with no order change. */
+	flow_clamp_to_min(tctx, (u32)cpu);
 	if (READ_ONCE(tctx->deadline) &&
 	    flow_missed(READ_ONCE(tctx->deadline), now)) {
 		u64 ndl;
-		u64 nvr;
-		u32 ntask_w;
-		u32 neff;
-		u32 ns;
-		u64 nvd;
 		u64 nvt;
 		flow_count_miss(tctx);
 		tctx->wait_at = now;
 		ndl = flow_pred_deadline(now, avg, dev, hint);
 		__sync_lock_test_and_set(&tctx->deadline, ndl);
-		nvr = READ_ONCE(tctx->vruntime);
-		ntask_w = READ_ONCE(tctx->weight);
-		ns = READ_ONCE(tctx->slice_ns);
-		if (ntask_w == 0)
-			ntask_w = (u32)FLOW_WEIGHT_BASE;
-		if (ns == 0)
-			ns = (u32)FLOW_QUANTUM_NS;
-		neff = flow_task_effective_weight(ntask_w, hint_w);
-		nvd = flow_virt_deadline(nvr, (u64)ns, neff);
-		nvt = flow_fair_vtime(ndl, nvd);
+		nvt = flow_make_fair(tctx, ndl, hint_w);
 		flow_tier_insert(p, cpu, nvt, now);
 		flow_kick_idle_allowed(p, sel);
 		return;
@@ -391,19 +393,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* with latency still capped by the deadline. The effective share */
 	/* stacks task times hint over 128, so cgroup plus task weights */
 	/* shape fairness together. */
-	{
-		u64 vr = READ_ONCE(tctx->vruntime);
-		u32 sl = READ_ONCE(tctx->slice_ns);
-		u64 vd;
-		task_w = READ_ONCE(tctx->weight);
-		if (task_w == 0)
-			task_w = (u32)FLOW_WEIGHT_BASE;
-		eff_w = flow_task_effective_weight(task_w, hint_w);
-		if (sl == 0)
-			sl = (u32)FLOW_QUANTUM_NS;
-		vd = flow_virt_deadline(vr, (u64)sl, eff_w);
-		vtime = flow_fair_vtime(deadline, vd);
-	}
+	vtime = flow_make_fair(tctx, deadline, hint_w);
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while tier queues hold misses plus pins. */
 	flow_count_admit();
