@@ -3,10 +3,10 @@
  * Shared constants and helpers for the flow scheduler.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
- * per node plus one shared queue per machine with no overflow tail.
+ * per node plus one shared queue per machine plus one overflow FIFO.
  * Homeless work waits in the machine queue with all other shared work.
  * Idle CPUs steal one task from peer locals as the fourth tier with
- * a bounded window of 8 to 16 peers proportional to remaining visits.
+ * a bounded window of 4 to 8 peers proportional to remaining visits.
  * Every task earns an absolute deadline from now plus a period, and
  * each queue orders by the fair time through the kernel priority
  * queue. The fair time holds the earlier of deadline plus virtual
@@ -382,7 +382,7 @@ static __always_inline u64 flow_scaled_delta(u64 delta,
  * @weight: scheduling share, clamped to range.
  *
  * Adds the scaled service to the base, so heavy tasks advance slowly
- * while light tasks advance quickly with no divide. A wrap clamps to
+ * while light tasks advance quickly with one divide. A wrap clamps to
  * max, so a huge vruntime never falls to the front.
  *
  * Returns: advanced vruntime in nanos.
@@ -446,7 +446,7 @@ static __always_inline bool flow_eligible(u64 vruntime,
  *
  * Adds the scaled request to the eligible base with saturation, so a
  * heavy task earns a near deadline while a light task earns a far one
- * with no divide. A wrap clamps to max, so a huge sum never jumps to
+ * with one divide. A wrap clamps to max, so a huge sum never jumps to
  * the front.
  *
  * Returns: virtual deadline in nanos.

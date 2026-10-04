@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the knob-free slice plus weight bounds plus the no divide
+//! Holds the knob-free slice plus weight bounds plus the one divide
 //! scaler shared by BPF and userspace. Order keys on the fair time of
 //! deadline plus virtual deadline, so no nice table is needed here.
 

@@ -5,7 +5,7 @@
 
 //! Holds the period plus deadline plus miss plus predictor plus vruntime
 //! models shared by BPF and userspace tests. The BPF deadline plus
-//! fairness live in intf.h with the drain checks in main/deadline.bpf.c,
+//! fairness live in intf.h with the deadline checks in edf.bpf.c,
 //! and this file mirrors the math with no map use. Every task joins a
 //! tier queue with no admission bound, so the predictor shapes the EDF
 //! deadline while vruntime shapes the fair time. Fair order via kernel

@@ -104,7 +104,7 @@ pub fn steal_backlog(local: u64, node: u64, machine: u64) -> u64 {
 
 /// True when the steal tier skips its peer scan for this pass.
 /// Mirrors BPF dispatch saturated early-out, so a globally busy pass
-/// with any tier backlog skips up to sixteen peer scans cheaply.
+/// with any tier backlog skips up to eight peer scans cheaply.
 #[cfg(test)]
 pub fn steal_should_skip(local: u64, node: u64, machine: u64) -> bool {
     steal_backlog(local, node, machine) != 0

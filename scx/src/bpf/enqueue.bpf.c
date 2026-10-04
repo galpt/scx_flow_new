@@ -17,7 +17,7 @@
  * counter. The predictor average plus deviation shape later deadlines
  * with shift updates from stopping, so short bursts earn tight
  * deadlines with no table walk. Vruntime advances by scaled service
- * with no divide, and the CPU minimum folds forward on every charge,
+ * with one divide, and the CPU minimum folds forward on every charge,
  * so fairness tracks service with no table. Every tier join counts one
  * admit with no reject, so the counters track joins with no bound. The
  * exiting plus idle direct plus helper plus direct block form the four
@@ -29,9 +29,8 @@
  * here. See intf.h for the deadline plus fairness helpers and
  * dispatch.bpf.c for the tier scans.
  *
- * The op splits across enqueue/target, insert, and kick files with
- * the enqueue body here. Each helper stays inline except the kick,
- * which stays noinline with scalar input, so the verifier stays small.
+ * The op holds the target plus insert plus kick helpers inline here
+ * with the kick noinline on scalar input, so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -353,7 +352,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	tctx->wait_at = now;
 	/* Fair time from the virtual deadline plus the EDF deadline. */
 	/* Heavy tasks earn a near virtual time while light tasks earn a */
-	/* far one with no divide, so the earlier of the two paces order */
+	/* far one with one divide, so the earlier of the two paces order */
 	/* with latency still capped by the deadline. The effective share */
 	/* stacks task times hint over 128, so cgroup plus task weights */
 	/* shape fairness together. */
