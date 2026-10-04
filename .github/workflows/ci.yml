@@ -4,8 +4,9 @@ name: ci
 #
 # The scheduler in scx/ is a drop-in for scheds/experimental/scx_flow/
 # in an upstream sched-ext/scx checkout (path deps use ../../../rust),
-# so every job first assembles that workspace and then runs the usual
-# package-scoped checks inside it. No live scheduler run: GitHub
+# so every job first assembles that workspace, syncs the overlay
+# lock entry, and then runs the usual package-scoped checks inside
+# it. No live scheduler run: GitHub
 # runners do not provide a sched_ext-enabled kernel, so only unit
 # tests plus a --version smoke check run here.
 
@@ -58,6 +59,9 @@ jobs:
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
+      - name: Sync overlay lockfile
+        working-directory: /tmp/opencode/scx
+        run: cargo update -p scx_flow
       - name: Format
         working-directory: /tmp/opencode/scx
         run: cargo fmt -p scx_flow --check
@@ -104,6 +108,9 @@ jobs:
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
+      - name: Sync overlay lockfile
+        working-directory: /tmp/opencode/scx
+        run: cargo update -p scx_flow
       - name: Install veristat tools
         run: |
           git clone --depth 1 --recurse-submodules \
