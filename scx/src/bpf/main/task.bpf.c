@@ -83,8 +83,9 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 /* Flat weight hint for one id with base on miss. */
 /* Id zero scopes to the neutral share with no row, so a missing */
 /* hierarchy stays neutral. A missing row means no hint, so the neutral */
-/* share applies with no cgroup use. Values already clamp once at write */
-/* with single weighting, so reads need no clamp. */
+/* share applies with no cgroup use. Values clamp once at write with */
+/* single weighting, and reads clamp defensively with the same helper, */
+/* so a stale row never escapes range. */
 static __always_inline u32 flow_hint_weight(u64 cgid)
 {
 	struct flow_hint *h;

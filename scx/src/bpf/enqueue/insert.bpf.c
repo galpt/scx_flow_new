@@ -46,17 +46,14 @@ static __always_inline void flow_machine_insert(
 /* The tier tests the fair key of deadline plus virtual deadline while */
 /* placement tests the EDF deadline, so the slowest sufficient CPU still */
 /* wins with fair drain order. Homeless tasks with no live CPU wait in */
-/* the machine queue with mask wins on drain. The deadline plus the fair */
-/* time already hold from the predictor plus the virtual deadline, so */
-/* order stays correct with no extra wait. */
+/* the machine queue with mask wins on drain. The fair time already holds */
+/* from the predictor plus the virtual deadline, so order stays correct */
+/* with no extra wait. The EDF deadline stays for the miss check at the */
+/* caller with no tier use. */
 static __always_inline void flow_tier_insert(
-	struct task_struct *p, s32 cpu, u64 deadline, u64 vtime, u64 now)
+	struct task_struct *p, s32 cpu, u64 vtime, u64 now)
 {
 	u32 node;
-	/* Fair key tier gates local on the fair time with combined drain. */
-	/* The EDF deadline stays for the miss check with no tier use, so */
-	/* urgent plus fair order share one key with no extra poll. */
-	(void)deadline;
 	if (cpu >= 0 && flow_cpu_meets_fair((u32)cpu, vtime, now)) {
 		flow_local_insert(p, cpu, vtime);
 		return;

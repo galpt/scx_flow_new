@@ -12,7 +12,9 @@
  * fair time wins with the 2ms lag bound. Each tier
  * skips unmatching heads uniformly through the shared move, so one
  * foreign task never stalls its tier for that pass. The steal tier scans
- * peer locals within 8 to 16 peers proportional to remaining visits.
+ * peer locals within 8 to 16 peers proportional to remaining visits,
+ * with a saturated early out when local plus node plus machine still
+ * hold queued work, so busy passes skip the peer scan cheaply.
  * Visits cap at sixty four per pass shared regardless of moves with
  * leftover work resuming
  * next pass, so one pass never holds RCU across the whole queue on
@@ -114,17 +116,40 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* Steal tier last with a bounded 8 to 16 peer window. The window */
 	/* spans proportional to remaining visits, so a fresh pass scans */
 	/* sixteen peers while a spent pass scans eight peers with no */
-	/* hotspot. Stolen work counts in the local bucket with no new */
-	/* counter, so stats stay at 120B with mask wins on drain. */
+	/* hotspot. A saturated early out skips the peer scan when local */
+	/* plus node plus machine still hold queued work, so a globally busy */
+	/* pass pays three depth polls with no RCU instead of up to sixteen */
+	/* peer scans. The sum saturates, so a huge depth clamps instead of */
+	/* wrapping to idle. Visits stay shared across tiers with resume next */
+	/* pass. Stolen work counts in the local bucket with no new counter, */
+	/* so stats stay at 120B with mask wins on drain. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		u32 steal_moved;
-		struct flow_cpu_state *cst = flow_cpu((u32)cpu);
-		u32 cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
-		steal_moved = flow_steal_one(cpu, &visits, cursor);
-		if (steal_moved > left)
-			steal_moved = left;
-		left -= steal_moved;
-		local_moved += steal_moved;
+		u32 steal_moved = 0;
+		struct flow_cpu_state *cst;
+		u32 cursor;
+		s32 lq;
+		s32 nq;
+		s32 mq;
+		u64 backlog = 0;
+		lq = scx_bpf_dsq_nr_queued(own_local);
+		nq = scx_bpf_dsq_nr_queued(node_dsq);
+		mq = scx_bpf_dsq_nr_queued(machine_dsq);
+		if (lq > 0)
+			backlog = flow_sat_add(backlog, (u64)lq);
+		if (nq > 0)
+			backlog = flow_sat_add(backlog, (u64)nq);
+		if (mq > 0)
+			backlog = flow_sat_add(backlog, (u64)mq);
+		/* Only steal when tiers drained, so busy passes skip cheap. */
+		if (backlog == 0) {
+			cst = flow_cpu((u32)cpu);
+			cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
+			steal_moved = flow_steal_one(cpu, &visits, cursor);
+			if (steal_moved > left)
+				steal_moved = left;
+			left -= steal_moved;
+			local_moved += steal_moved;
+		}
 	}
 	flow_account_local(local_moved);
 	flow_account_node(node_moved);

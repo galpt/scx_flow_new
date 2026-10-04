@@ -61,8 +61,8 @@ struct {
 /* seen hierarchy id per task with a cap at 2048, so the hot enqueue */
 /* pays one hash lookup with no acquire on hit. Full tables fail closed */
 /* to the acquire path with no eviction. Entries clear on migrate plus */
-/* enable plus task exit for ABA safety, so a reused pid never reads */
-/* a stale id. */
+/* move plus enable plus disable plus task exit for ABA safety, so a */
+/* reused pid never reads a stale id. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 2048);

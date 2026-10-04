@@ -2,8 +2,8 @@
 /*
  * Task lifecycle ops.
  *
- * Running claims the segment start from zero with a compare and swap
- * plus the pid with a compare and swap and no BPF gauge.
+ * Running claims the segment start from zero with an unconditional
+ * pid store and no BPF gauge.
  * The snapshot counts live pids for the on CPU gauge. Stopping claims
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
@@ -55,12 +55,15 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		return;
 	st = flow_cpu((u32)cpu);
 	if (likely(st)) {
-		/* Claim the pid with a compare and swap from the observed */
-		/* owner, so a concurrent clear plus run keeps the winner with */
-		/* no torn write and no stale overwrite. A lost race keeps the */
-		/* winner with no retry, since the next running folds again. */
-		u32 cur = READ_ONCE(st->running_pid);
-		__sync_val_compare_and_swap(&st->running_pid, cur,
+		/* Claim the pid with an unconditional store, so a concurrent */
+		/* clear plus run keeps the running task with no lost update. */
+		/* The clear only clears when it still owns the pid, so the */
+		/* store always wins over a stale clear with no torn write. A */
+		/* compare and swap from the observed owner loses here: when */
+		/* the clear wins the race to zero first, the swap fails and */
+		/* leaves zero while this task still runs. The next running */
+		/* would fold again, but the live view stays wrong until then. */
+		__sync_lock_test_and_set(&st->running_pid,
 		    (u32)p->pid);
 	}
 }

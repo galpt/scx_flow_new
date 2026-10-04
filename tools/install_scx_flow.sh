@@ -58,13 +58,22 @@ case "${WS}" in
         ;;
 esac
 # Canonicalize for symlink plus dotdot safety with no require-existing,
-# so /tmp/scx-foo/../opencode still refuses as /tmp/opencode.
+# so /tmp/scx-foo/../opencode still refuses as /tmp/opencode. The -m
+# form canonicalizes by string only with no symlink resolve, so a
+# symlink at the workspace root still needs an explicit refuse below.
 if command -v realpath >/dev/null 2>&1; then
     WS="$(realpath -m "${WS}")"
 elif command -v readlink >/dev/null 2>&1; then
     WS="$(readlink -m "${WS}")"
 else
     echo "refusing without canonical tool" >&2
+    exit 1
+fi
+# Refuse a symlink workspace root, since realpath -m plus readlink -m
+# never resolve symlinks and an allowlisted /tmp/scx-* link could point
+# outside the allowlist with no dotdot text.
+if [ -L "${WS}" ]; then
+    echo "refusing a symlinked workspace path" >&2
     exit 1
 fi
 DEST="${WS}/scheds/experimental/scx_flow"
@@ -123,8 +132,8 @@ case "${WS}" in
         ;;
 esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
-rm -rf "${WS}"
-mkdir -p "${WS}"
+rm -rf -- "${WS}"
+mkdir -p -- "${WS}"
 # Fetch the pinned upstream ref by SHA and checkout the result.
 git init -q "${WS}"
 git -C "${WS}" remote add origin "${UPSTREAM}"

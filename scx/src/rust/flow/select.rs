@@ -34,7 +34,9 @@ pub fn drain_combined(local: u64, node: u64) -> u64 {
 
 /// True when one CPU can finish its drain before a deadline.
 /// A zero deadline means no order yet, so every CPU meets. BPF sums
-/// local plus node via drain_combined for the tier plus bypass checks.
+/// local plus node via drain_combined for the tier plus bypass checks,
+/// while this single-depth helper serves placement unit tests. Use
+/// cpu_meets_combined for tier plus bypass mirrors.
 #[cfg(test)]
 pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
     if deadline == 0 {
@@ -44,15 +46,41 @@ pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
     ready <= deadline
 }
 
+/// True when one CPU can finish its combined drain before a deadline.
+/// Mirrors BPF flow_cpu_meets with local plus node saturation, so a
+/// busy node holds the tier with no wait. A zero deadline meets all.
+#[cfg(test)]
+pub fn cpu_meets_combined(local: u64, node: u64, deadline: u64, now: u64) -> bool {
+    if deadline == 0 {
+        return true;
+    }
+    let ready = now.saturating_add(drain_combined(local, node));
+    ready <= deadline
+}
+
 /// True when one CPU can finish its drain before a fair time.
 /// Mirrors the deadline check for the fair key. BPF sums local plus
-/// node via drain_combined for the fair-key tier plus bypass checks.
+/// node via drain_combined for the fair-key tier plus bypass checks,
+/// while this single-depth helper serves placement unit tests. Use
+/// cpu_meets_fair_combined for tier plus bypass mirrors.
 #[cfg(test)]
 pub fn cpu_meets_fair(depth: u64, vtime: u64, now: u64) -> bool {
     if vtime == 0 {
         return true;
     }
     let ready = now.saturating_add(drain_ns(depth));
+    ready <= vtime
+}
+
+/// True when one CPU can finish its combined drain before a fair time.
+/// Mirrors BPF flow_cpu_meets_fair with local plus node saturation.
+/// A zero fair time means no fair order yet, so the check passes.
+#[cfg(test)]
+pub fn cpu_meets_fair_combined(local: u64, node: u64, vtime: u64, now: u64) -> bool {
+    if vtime == 0 {
+        return true;
+    }
+    let ready = now.saturating_add(drain_combined(local, node));
     ready <= vtime
 }
 
@@ -66,6 +94,22 @@ pub fn steal_window(visits: u32) -> u32 {
     window.clamp(8, 16)
 }
 
+/// Saturated backlog of tier queues as local plus node plus machine.
+/// Mirrors BPF dispatch steal early-out counts with saturation, so a
+/// huge depth clamps instead of wrapping to idle. Visits stay shared.
+#[cfg(test)]
+pub fn steal_backlog(local: u64, node: u64, machine: u64) -> u64 {
+    local.saturating_add(node).saturating_add(machine)
+}
+
+/// True when the steal tier skips its peer scan for this pass.
+/// Mirrors BPF dispatch saturated early-out, so a globally busy pass
+/// with any tier backlog skips up to sixteen peer scans cheaply.
+#[cfg(test)]
+pub fn steal_should_skip(local: u64, node: u64, machine: u64) -> bool {
+    steal_backlog(local, node, machine) != 0
+}
+
 /// Placement pick among idle plus previous plus shared with fair tiebreak.
 /// Idle wins first, then the previous CPU when it drains before the
 /// deadline, then the slowest sufficient shared CPU with near minimum
@@ -76,9 +120,9 @@ pub fn steal_window(visits: u32) -> u32 {
 /// mirror walks the same bounded window from the passed cursor with
 /// the same skip. Minimum order uses the wrap safe signed diff like
 /// BPF, so the tiebreak holds across the u64 wrap. Callers pass
-/// host-sized slices within the 512 CPU bound with units plus
+/// host-sized slices within the 1024 CPU bound with units plus
 /// minimums parallel to live. Returns minus one when no allowed CPU
-/// is live. Perf stays bounded at eight peers with no extra walk.
+/// is live. Perf stays bounded at sixteen peers with no extra walk.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -113,7 +157,7 @@ pub fn place(
     let mut best_units: u32 = u32::MAX;
     let mut best_min: u64 = u64::MAX;
     let n = live.len();
-    if n > 1 && n <= 512 {
+    if n > 1 && n <= 1024 {
         let start = ((cursor.wrapping_add(1)) % n as u32) as usize;
         for off in 0..SHARED_SCAN_BOUND as usize {
             if off >= n {
@@ -371,10 +415,16 @@ mod tests {
         assert_eq!(drain_combined(0, 0), 0);
         assert_eq!(drain_combined(1, 1), 2_000_000);
         // Fair-key tier gates local on the fair time with combined drain,
-        // so a busy node holds the tier with no wait.
-        assert!(!cpu_meets(drain_combined(9, 9), 5, 0));
-        assert!(!cpu_meets_fair(drain_combined(9, 9), 5, 0));
-        assert!(cpu_meets(drain_combined(0, 0), 100, 0));
+        // so a busy node holds the tier with no wait. Combined helpers
+        // mirror BPF flow_cpu_drain with saturation and no double scale.
+        assert!(!cpu_meets_combined(9, 9, 5, 0));
+        assert!(!cpu_meets_fair_combined(9, 9, 5, 0));
+        assert!(cpu_meets_combined(0, 0, 100, 0));
+        assert!(cpu_meets_fair_combined(0, 0, 100, 0));
+        // Single-depth helpers still serve placement unit checks.
+        assert!(!cpu_meets(9, 5, 0));
+        assert!(!cpu_meets_fair(9, 5, 0));
+        assert!(cpu_meets(0, 100, 0));
     }
 
     #[test]
@@ -384,5 +434,16 @@ mod tests {
         assert_eq!(steal_window(32), 12);
         assert!(steal_window(0) <= SHARED_SCAN_BOUND);
         assert!(steal_window(64) >= 8);
+    }
+
+    #[test]
+    fn steal_skips_when_tiers_busy() {
+        // Saturated early-out mirrors BPF dispatch with shared visits.
+        assert!(!steal_should_skip(0, 0, 0));
+        assert!(steal_should_skip(1, 0, 0));
+        assert!(steal_should_skip(0, 1, 0));
+        assert!(steal_should_skip(0, 0, 1));
+        assert_eq!(steal_backlog(u64::MAX, 1, 1), u64::MAX);
+        assert!(steal_should_skip(u64::MAX, 0, 0));
     }
 }

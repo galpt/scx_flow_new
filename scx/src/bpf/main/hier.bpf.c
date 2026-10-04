@@ -34,9 +34,9 @@ static __always_inline u64 flow_cgrp_id(
 	return id;
 }
 /* Clear one cached hierarchy id for a pid with no fail. */
-/* Runs on migrate plus enable plus task exit for ABA safety, so a */
-/* reused pid never reads a stale id. A zero pid never caches, so it */
-/* needs no clear. */
+/* Runs on migrate plus move plus enable plus disable plus task exit */
+/* for ABA safety, so a reused pid never reads a stale id. A zero pid */
+/* never caches, so it needs no clear. */
 static __always_inline void flow_cgrp_cache_invalidate(u32 pid)
 {
 	if (!pid)

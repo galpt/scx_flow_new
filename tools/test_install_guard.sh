@@ -30,28 +30,44 @@ grep -q "^TAB=\$'\\\\t'$" "${INST}" || fail "TAB guard form bad"
 # Shared CI tree stays protected with no clean.
 grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 
-# Canonical plus allowlist guards stay present.
+# Canonical plus allowlist guards stay present. The -m forms stay for
+# string canonicalization plus a symlink refuse covers the resolve gap.
 grep -q "realpath -m" "${INST}" || fail "realpath guard missing"
 grep -q "readlink -m" "${INST}" || fail "readlink fallback missing"
+grep -q '\[ -L "${WS}" \]' "${INST}" || fail "symlink guard missing"
+grep -q 'rm -rf --' "${INST}" || fail "rm dash guard missing"
 grep -q "/tmp/scx-" "${INST}" || fail "allowlist guard missing"
 grep -q "/home | /home" "${INST}" || fail "home guard missing"
 grep -q "/usr | /usr" "${INST}" || fail "usr guard missing"
 grep -q "/var | /var" "${INST}" || fail "var guard missing"
 
 # Each bad workspace path fails closed before any fetch with a refusing
-# note on stderr, so silent drops never pass.
+# note on stderr and no refusing text on stdout, so silent drops plus
+# stdout leaks never pass. Stderr plus stdout stay split, so a script
+# that prints refusing to stdout still fails the stderr assert.
 check_refuse() {
     local path="$1"
     local label="$2"
     local err
-    if err="$(bash "${INST}" "${path}" 2>&1 >/dev/null)"; then
+    local out
+    local err_file
+    err_file="$(mktemp)"
+    if out="$(bash "${INST}" "${path}" 2>"${err_file}")"; then
+        rm -f "${err_file}"
         fail "accepted bad path ${label}"
     fi
+    err="$(cat "${err_file}")"
+    rm -f "${err_file}"
     case "${err}" in
         *refusing*)
             ;;
         *)
-            fail "missing refusing text for ${label}: ${err}"
+            fail "missing refusing text on stderr for ${label}: ${err}"
+            ;;
+    esac
+    case "${out}" in
+        *refusing*)
+            fail "refusing text leaked to stdout for ${label}: ${out}"
             ;;
     esac
 }

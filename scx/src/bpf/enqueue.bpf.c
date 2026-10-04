@@ -123,7 +123,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u32 mh = flow_task_hint(p);
 		u64 mdl = flow_fallback_deadline(now, mh);
 		if (flow_cpu_ok(p, mc))
-			flow_tier_insert(p, mc, mdl, mdl, now);
+			flow_tier_insert(p, mc, mdl, now);
 		else
 			flow_machine_insert(p, mdl);
 		flow_kick_idle_allowed(p, sel);
@@ -147,7 +147,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* on drain, so a pinned task still meets only its allowed CPU. */
 	/* Queue order uses the fair time of deadline plus virtual deadline. */
 	/* The effective share stacks task times hint over 128 with the hint */
-	/* weight stored alongside the task base. */
+	/* weight stored alongside the task base. Vruntime clamps to the */
+	/* target minimum minus 2ms like open tasks, and a past deadline */
+	/* counts one miss before the fresh deadline, so pins track lag */
+	/* plus overload with no stale reuse. */
 	if (unlikely(pinned)) {
 		s32 pc = flow_pick_target(p, sel);
 		u32 ph;
@@ -172,6 +175,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		tctx->hint_us = ph;
 		tctx->hint_w = phint_w;
+		/* Clamp vruntime within the lag bound of the pinned target. */
+		/* Matches the open path, so a long sleeper wakes only slightly */
+		/* early with no huge boost. A missing target skips with no poll. */
+		if (pc >= 0 && flow_cpu_ok(p, pc)) {
+			u64 pmin = flow_cpu_min((u32)pc);
+			u64 pcur = READ_ONCE(tctx->vruntime);
+			u64 pbound = (u64)FLOW_VLAG_MAX_NS;
+			u64 pfloor = 0;
+			if (pmin > pbound)
+				pfloor = pmin - pbound;
+			if (pmin > pbound && pcur < pfloor)
+				__sync_val_compare_and_swap(&tctx->vruntime,
+				    pcur, pfloor);
+		}
+		/* A past deadline counts one miss before the fresh deadline, */
+		/* so pinned overload tracks like open tasks with no loss. */
+		if (READ_ONCE(tctx->deadline) &&
+		    flow_missed(READ_ONCE(tctx->deadline), now))
+			flow_count_miss(tctx);
 		/* Pinned tasks recompute the deadline from the predictor */
 		/* plus hint with no stale reuse, so a pinned requeue tracks */
 		/* recent bursts like open tasks with no order break. A zero */
@@ -192,7 +214,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		pvd = flow_virt_deadline(pvr, (u64)ps, peff);
 		pvt = flow_fair_vtime(pdl, pvd);
 		if (flow_cpu_ok(p, pc))
-			flow_tier_insert(p, pc, pdl, pvt, now);
+			flow_tier_insert(p, pc, pvt, now);
 		else
 			flow_machine_insert(p, pvt);
 		flow_kick_idle_allowed(p, sel);
@@ -200,18 +222,49 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	cpu = flow_pick_target(p, sel);
 	/* No live CPU waits in the machine tier with an idle kick. */
-	/* The fallback deadline carries the fair time with no virtual use. */
+	/* The predictor shapes the deadline when history exists else the */
+	/* hint period, and the fair time paces order like tiered tasks, so */
+	/* homeless work keeps fair order with no global queue use. */
 	if (!flow_cpu_ok(p, cpu)) {
 		u32 nh;
+		u32 nh_w = (u32)FLOW_WEIGHT_BASE;
+		u64 havg;
+		u64 hdev;
 		u64 ndl;
+		u64 hvr;
+		u32 htask_w;
+		u32 heff;
+		u32 hsl;
+		u64 hvd;
+		u64 hvt;
 		flow_gate_reject();
 		tctx->wait_at = now;
-		if (is_reenq)
+		if (is_reenq) {
 			nh = READ_ONCE(tctx->hint_us);
-		else
-			nh = flow_task_hint(p);
-		ndl = flow_fallback_deadline(now, nh);
-		flow_machine_insert(p, ndl);
+			nh_w = READ_ONCE(tctx->hint_w);
+		} else {
+			flow_task_hint_weight(p, &nh, &nh_w);
+		}
+		if (READ_ONCE(tctx->deadline) &&
+		    flow_missed(READ_ONCE(tctx->deadline), now))
+			flow_count_miss(tctx);
+		havg = (u64)READ_ONCE(tctx->avg_ns);
+		hdev = (u64)READ_ONCE(tctx->dev_ns);
+		ndl = flow_pred_deadline(now, havg, hdev, nh);
+		__sync_lock_test_and_set(&tctx->deadline, ndl);
+		tctx->hint_us = nh;
+		tctx->hint_w = nh_w;
+		hvr = READ_ONCE(tctx->vruntime);
+		htask_w = READ_ONCE(tctx->weight);
+		hsl = READ_ONCE(tctx->slice_ns);
+		if (htask_w == 0)
+			htask_w = (u32)FLOW_WEIGHT_BASE;
+		if (hsl == 0)
+			hsl = (u32)FLOW_QUANTUM_NS;
+		heff = flow_task_effective_weight(htask_w, nh_w);
+		hvd = flow_virt_deadline(hvr, (u64)hsl, heff);
+		hvt = flow_fair_vtime(ndl, hvd);
+		flow_machine_insert(p, hvt);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -288,7 +341,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		neff = flow_task_effective_weight(ntask_w, hint_w);
 		nvd = flow_virt_deadline(nvr, (u64)ns, neff);
 		nvt = flow_fair_vtime(ndl, nvd);
-		flow_tier_insert(p, cpu, ndl, nvt, now);
+		flow_tier_insert(p, cpu, nvt, now);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -365,12 +418,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 	}
 	/* Tier join through the shared insert with fair order. */
-	/* The local queue takes the task when the target drains before */
-	/* the deadline, else the node queue when live, else the machine */
-	/* queue, so no task waits for a busy CPU while shared room stays */
-	/* open. Queue order uses the fair time while placement tests the */
-	/* deadline, so the slowest sufficient CPU still wins. */
-	flow_tier_insert(p, cpu, deadline, vtime, now);
+	/* The local queue takes the task when the target drains local plus */
+	/* node before the fair key, else the node queue when live, else the */
+	/* machine queue, so no task waits for a busy CPU while shared room */
+	/* stays open. Queue order plus tier choice use the fair time while */
+	/* placement tests the deadline, so the slowest sufficient CPU wins. */
+	flow_tier_insert(p, cpu, vtime, now);
 	/* Idle targets kick at once with strict one kick per wait and no rate */
 	/* window. The idle flag clears first so the kick sticks. The pid read */
 	/* uses a relaxed load to match the running stores. The direct block */
@@ -416,17 +469,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			return;
 		}
 		/* Requeues pace at slice expiry with no occupant preempt, */
-		/* so the task_from_pid plus cgroup plus 8 peer cost stays */
+		/* so the task_from_pid plus cgroup plus 16 peer cost stays */
 		/* out of the hot rotation path. */
 		if (is_reenq)
 			return;
 		/* The running pid names the occupant with no curr read. */
 		/* A trusted lookup carries the occupant deadline, and a */
-		/* missing occupant fails closed with no kick and no count. */
-		/* The occupant CPU validates before the compare, so a */
-		/* migrated occupant never kicks the wrong CPU. A zero */
-		/* occupant deadline means no order yet, so the arrival */
-		/* paces with no kick. */
+		/* missing occupant fails closed with no kick and no skipped */
+		/* count, since no urgency holds to track. The occupant CPU */
+		/* validates before the compare, so a migrated occupant never */
+		/* kicks the wrong CPU with no count. A zero occupant deadline */
+		/* means no order yet, so the arrival paces with no kick and */
+		/* no skipped count. Only margin plus tail plus eligibility */
+		/* plus fair order holds count as skipped below. */
 		occ_pid = READ_ONCE(st->running_pid);
 		if (occ_pid == 0 || occ_pid == (u32)p->pid)
 			return;

@@ -83,8 +83,8 @@ static __always_inline void flow_clear_running_if_owner(
 /* Fold one CPU minimum forward to at least the given vruntime. */
 /* Takes the max best effort with a bounded compare and swap retry, so a */
 /* lost race retries with no torn write and the next charge folds again */
-/* with no stall. A zero vruntime never moves the minimum with dead clamp, */
-/* so no history holds zero. A vruntime at max clamps with no wrap. */
+/* with no stall. A zero vruntime never moves the minimum, so no history */
+/* holds zero. A vruntime at max clamps with no wrap. */
 static __always_inline void flow_min_advance(s32 cpu,
 	u64 vruntime)
 {

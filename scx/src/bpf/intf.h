@@ -122,16 +122,10 @@ enum flow_consts {
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine plus steal drain in fair order through the kernel priority */
 /* queue with no overflow tail. Every pass follows this order with no */
-/* load based swap, so the verifier sees one fixed path. Dead enum with */
-/* no code use, kept doc only since dispatch calls the tier moves */
-/* directly with no index switch. The steal tier scans peer locals */
-/* within the bounded window with mask wins. */
-enum flow_tier {
-	FLOW_TIER_LOCAL = 0,
-	FLOW_TIER_NODE = 1,
-	FLOW_TIER_MACHINE = 2,
-	FLOW_TIER_STEAL = 3,
-};
+/* load based swap, so the verifier sees one fixed path. Dispatch calls */
+/* the tier moves directly with no index switch, so no tier index needs */
+/* storage. The steal tier scans peer locals within the bounded window */
+/* with mask wins. */
 /* Per task state at 64B with vruntime plus deadline plus stamps plus */
 /* predictor plus lag plus weight plus slice plus hint plus hint weight */
 /* plus misses. */
@@ -424,9 +418,8 @@ static __always_inline u64 flow_vruntime_advance(u64 vruntime,
  * flow_lag_clamp - clamp lag within the allowed bound.
  * @lag: raw lag in nanos as a signed bound.
  *
- * Values past plus or minus 2ms fold to the nearer bound with dead clamp,
- * so a stale lag never grants a huge boost with no storm. A dead max folds
- * to the bound with no wrap.
+ * Values past plus or minus 2ms fold to the nearer bound with
+ * saturation, so a stale lag never grants a huge boost with no storm.
  *
  * Returns: clamped lag from minus 2ms to 2ms.
  */
@@ -449,7 +442,7 @@ static __always_inline s32 flow_lag_clamp(s32 lag)
  * the minimum, so lagging tasks wait while leading tasks pace. A negative
  * lag clamps to zero with no boost, so a negative bound never grants slack.
  * The signed diff keeps order across the u64 wrap with no branch, and a
- * saturated minimum plus lag never wraps to the front with dead clamp.
+ * saturated minimum plus lag never wraps to the front.
  *
  * Returns: true when eligible, else false.
  */

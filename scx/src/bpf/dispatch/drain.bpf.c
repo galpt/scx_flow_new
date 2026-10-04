@@ -63,11 +63,13 @@ static __noinline u32 flow_move_one(u64 dsq, s32 cpu, u32 *visits)
 /* Scans at least 8 peers and at most 16 peers proportional to remaining */
 /* visits, so the steal stays bounded with no hotspot. Each peer shares */
 /* the per pass visit cap through the shared move, so a miss heavy peer */
-/* never holds RCU across the whole queue. The first matching fair time */
-/* moves with mask wins on drain and no BPF sort. Stolen work counts in */
-/* the local bucket with no new counter, so stats stay at 120B. Runs under */
-/* the caller with no lock and a bounded bpf_for window, so the verifier */
-/* sees one fixed path with no unrolled caller tree. */
+/* never holds RCU across the whole queue. The peer index adds in 64 bits */
+/* with saturation at the caller, so a stale cursor never wraps to the */
+/* wrong peer. The first matching fair time moves with mask wins on drain */
+/* and no BPF sort. Stolen work counts in the local bucket with no new */
+/* counter, so stats stay at 120B. Runs under the caller with no lock and */
+/* a bounded bpf_for window, so the verifier sees one fixed path with no */
+/* unrolled caller tree. */
 static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 {
 	u32 moved = 0;
@@ -99,13 +101,19 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 		u32 peer;
 		u64 peer_dsq;
 		u32 got;
+		u64 base;
 		if ((u64)off >= (u64)window)
 			break;
 		if (unlikely(moved))
 			break;
 		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 			break;
-		peer = (u32)(((u64)(cursor + 1U + off)) % nr);
+		/* Add in 64 bits with saturation, so a stale cursor at max */
+		/* never wraps the u32 sum to the wrong peer. The modulo folds */
+		/* the saturated base back into range with no hotspot. */
+		base = flow_sat_add(flow_sat_add((u64)cursor, 1ULL),
+		    (u64)off);
+		peer = (u32)(base % nr);
 		if (peer == (u32)cpu)
 			continue;
 		if (unlikely(!flow_cpu_live(peer)))

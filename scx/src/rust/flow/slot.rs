@@ -6,7 +6,8 @@
 //! One local queue per CPU plus one shared queue per node plus one
 //! machine queue with no overflow tail. Every queue uses the kernel
 //! priority queue in fair order, so no queue mixes orders. Steal reuses
-//! Homeless tasks wait in the machine queue with all other shared
+//! peer locals with no new queue, so the count stays local plus node
+//! plus one. Homeless tasks wait in the machine queue with all other
 //! work, so no queue id names the kernel global queue. Dispatch
 //! drains local plus node plus machine plus steal in fair order with at
 //! most one move per tier bounded by remaining slots and visits
