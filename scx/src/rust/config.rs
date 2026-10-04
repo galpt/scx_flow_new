@@ -50,6 +50,7 @@ impl Config {
     /// needs 100us margin plus 100us tail strictly with a floor at 100us
     /// and one kick per wait gated on eligibility. Fairness bounds lag
     /// at 2ms with vruntime plus virtual deadline pacing queue order.
+    /// Stats hold 15 counters at 120B with preempt kicks plus skipped.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -80,6 +81,9 @@ impl Config {
         }
         if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64 != 521 {
             bail!("dsq count bad");
+        }
+        if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 120 {
+            bail!("stats size bad");
         }
         Ok(())
     }

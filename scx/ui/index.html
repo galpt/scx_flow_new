@@ -358,6 +358,14 @@
           Gate rejects:</span>
           <span class="stat-value" id="gate-rejects">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt kicks:</span>
+          <span class="stat-value" id="preempt-kicks">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          Preempt skipped:</span>
+          <span class="stat-value" id="preempt-skipped">0</span>
+        </div>
       </div>
     </div>
 
@@ -488,6 +496,8 @@
       var rej = s.rejects || 0;
       var miss = s.misses || 0;
       var gate = s.gate_rejects || 0;
+      var pkick = s.preempt_kicks || 0;
+      var pskip = s.preempt_skipped || 0;
       var placed = ins + req;
       var shared = node + machine;
       var tldr, explanation;
@@ -506,7 +516,9 @@
           '. Admits cover ' + fmt(adm) +
           ' with rejects ' + fmt(rej) +
           ' and misses ' + fmt(miss) +
-          ' and gate rejects ' + fmt(gate) + '.';
+          ' and gate rejects ' + fmt(gate) +
+          ' and preempt kicks ' + fmt(pkick) +
+          ' with skipped ' + fmt(pskip) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -518,7 +530,9 @@
           '. Admits cover ' + fmt(adm) +
           ' with rejects ' + fmt(rej) +
           ' and misses ' + fmt(miss) +
-          ' and gate rejects ' + fmt(gate) + '.';
+          ' and gate rejects ' + fmt(gate) +
+          ' and preempt kicks ' + fmt(pkick) +
+          ' with skipped ' + fmt(pskip) + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -586,6 +600,10 @@
         fmt(s.misses || 0);
       el('gate-rejects').textContent =
         fmt(s.gate_rejects || 0);
+      el('preempt-kicks').textContent =
+        fmt(s.preempt_kicks || 0);
+      el('preempt-skipped').textContent =
+        fmt(s.preempt_skipped || 0);
 
       renderCoreCards(data);
     }

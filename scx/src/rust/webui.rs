@@ -177,6 +177,8 @@ mod tests {
         assert_eq!(m.stats.on_cpu, 1);
         assert_eq!(m.stats.local_moves, 0);
         assert_eq!(m.stats.gate_rejects, 0);
+        assert_eq!(m.stats.preempt_kicks, 0);
+        assert_eq!(m.stats.preempt_skipped, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "4.7.0");
         assert_eq!(m.timestamp_ns, 0);
@@ -212,6 +214,8 @@ mod tests {
                 rejects: 1,
                 misses: 2,
                 gate_rejects: 0,
+                preempt_kicks: 1,
+                preempt_skipped: 2,
             },
             per_cpu: vec![
                 crate::stats::PerCpuMetrics {
@@ -241,6 +245,8 @@ mod tests {
         assert!(txt.contains("misses"));
         assert!(!txt.contains("\"parks\""));
         assert!(txt.contains("gate_rejects"));
+        assert!(txt.contains("preempt_kicks"));
+        assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -255,8 +261,6 @@ mod tests {
         assert!(!txt.contains("bw_moves"));
         assert!(!txt.contains("park_moves"));
         assert!(!txt.contains("enq_no_tctx"));
-        assert!(!txt.contains("preempt_kicks"));
-        assert!(!txt.contains("preempt_skipped"));
         assert!(!txt.contains("freq_khz"));
         assert!(!txt.contains("cur_freq"));
         assert!(!txt.contains("llc_id"));
@@ -270,6 +274,8 @@ mod tests {
         assert_eq!(back.stats.rejects, 1);
         assert_eq!(back.stats.misses, 2);
         assert_eq!(back.stats.gate_rejects, 0);
+        assert_eq!(back.stats.preempt_kicks, 1);
+        assert_eq!(back.stats.preempt_skipped, 2);
         assert_eq!(back.per_cpu.len(), 2);
         assert!(!back.per_cpu[0].smt);
         assert!(back.per_cpu[1].smt);
@@ -306,7 +312,7 @@ mod tests {
         assert!(html.contains("/api/snapshot"));
     }
 
-    /* Dashboard shows the thirteen live counters plus uptime. */
+    /* Dashboard shows the fifteen live counters plus uptime. */
     #[test]
     fn dashboard_shows_live_counters() {
         let html = include_str!("../../ui/index.html");
@@ -324,6 +330,8 @@ mod tests {
         assert!(html.contains("id=\"rejects\""));
         assert!(html.contains("id=\"misses\""));
         assert!(html.contains("id=\"gate-rejects\""));
+        assert!(html.contains("id=\"preempt-kicks\""));
+        assert!(html.contains("id=\"preempt-skipped\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
@@ -331,6 +339,8 @@ mod tests {
         assert!(html.contains("node_moves"));
         assert!(html.contains("machine_moves"));
         assert!(html.contains("gate_rejects"));
+        assert!(html.contains("preempt_kicks"));
+        assert!(html.contains("preempt_skipped"));
         assert!(!html.contains("over_moves"));
         assert!(!html.contains("over-moves"));
         assert!(!html.contains("\"parks\""));
@@ -354,8 +364,6 @@ mod tests {
         assert!(!html.contains("\"parks\""));
         assert!(!html.contains("id=\"parks\""));
         assert!(!html.contains("enq_no_tctx"));
-        assert!(!html.contains("preempt_kicks"));
-        assert!(!html.contains("preempt_skipped"));
         assert!(!html.contains("freq_khz"));
         assert!(!html.contains("cur_freq"));
         assert!(!html.contains("llc_id"));

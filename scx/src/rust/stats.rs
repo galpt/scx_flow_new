@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 13 counters, Rust adds display-only uptime for 14.
+/// BPF holds 15 counters, Rust adds display-only uptime for 16.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -72,6 +72,12 @@ pub struct Metrics {
     #[stat(desc = "Closed gate rejects on stale CPUs plus tasks")]
     #[serde(default)]
     pub gate_rejects: u64,
+    #[stat(desc = "Busy preempts sent with margin plus tail")]
+    #[serde(default)]
+    pub preempt_kicks: u64,
+    #[stat(desc = "Preempts held by margin plus tail plus eligibility")]
+    #[serde(default)]
+    pub preempt_skipped: u64,
 }
 
 /// One card of the per CPU grid.
@@ -155,7 +161,7 @@ impl Metrics {
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
              local={} node={} machine={} kick={} adm={} rej={} \
-             miss={} gate={}",
+             miss={} gate={} pkick={} pskip={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -171,6 +177,8 @@ impl Metrics {
             self.rejects,
             self.misses,
             self.gate_rejects,
+            self.preempt_kicks,
+            self.preempt_skipped,
         )?;
         Ok(())
     }
@@ -193,6 +201,8 @@ impl Metrics {
             rejects: self.rejects.wrapping_sub(rhs.rejects),
             misses: self.misses.wrapping_sub(rhs.misses),
             gate_rejects: self.gate_rejects.wrapping_sub(rhs.gate_rejects),
+            preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
+            preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
         }
     }
 }

@@ -52,6 +52,8 @@ impl<'a> Scheduler<'a> {
             rejects: s.rejects,
             misses: s.misses,
             gate_rejects: s.gate_rejects,
+            preempt_kicks: s.preempt_kicks,
+            preempt_skipped: s.preempt_skipped,
         }
     }
 
