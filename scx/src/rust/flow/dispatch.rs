@@ -4,12 +4,13 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Mirrors BPF dispatch.bpf.c with the fixed five-tier order plus the
-//! shared visit cap plus the saturated steal early-out. Tier order is
-//! local plus node plus machine plus overflow plus steal with at most
-//! one move per tier bounded by remaining slots. Visits cap at eight
-//! per pass shared across tiers with resume next pass. Steal scans
-//! four to eight peers proportional to remaining visits and only when
-//! all four queued tiers hold no backlog. Test-only with no map use.
+//! shared visit cap plus the saturated steal early-out plus the Q1
+//! only fast path. Tier order is local plus node plus machine plus
+//! overflow plus steal with at most one move per tier bounded by
+//! remaining slots. Visits cap at eight per pass shared across tiers
+//! with resume next pass. Steal scans four to eight peers proportional
+//! to remaining visits and only when all four queued tiers hold no
+//! backlog. Test-only with no map use.
 
 /// Visit cap per pass shared across the five tiers.
 #[cfg(test)]
@@ -24,6 +25,14 @@ pub const TIER_ORDER: [&str; 5] = ["local", "node", "machine", "overflow", "stea
 #[cfg(test)]
 pub fn visit_ok(visits: u32) -> bool {
     visits < VISIT_MAX
+}
+
+/// True when only the local tier holds queued work.
+/// Mirrors BPF dispatch Q1 only fast path, so the common single
+/// queue pass drains local alone with no other tier move.
+#[cfg(test)]
+pub fn q1_only(local: u64, node: u64, machine: u64, overflow: u64) -> bool {
+    local > 0 && node == 0 && machine == 0 && overflow == 0
 }
 
 /// True when the steal tier scans peers on this pass.
@@ -70,5 +79,18 @@ mod tests {
         // Window stays four to eight with no hotspot.
         assert_eq!(crate::flow::select::steal_window(0), 8);
         assert_eq!(crate::flow::select::steal_window(8), 4);
+    }
+
+    #[test]
+    fn q1_only_drains_local_alone() {
+        assert!(q1_only(1, 0, 0, 0));
+        assert!(!q1_only(0, 0, 0, 0));
+        assert!(!q1_only(1, 1, 0, 0));
+        assert!(!q1_only(1, 0, 1, 0));
+        assert!(!q1_only(1, 0, 0, 1));
+        assert!(!q1_only(0, 1, 0, 0));
+        // Q1 still needs visit room like other tiers.
+        assert!(visit_ok(0));
+        assert!(!visit_ok(8));
     }
 }

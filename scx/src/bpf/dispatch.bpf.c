@@ -7,10 +7,15 @@
  * slots and visits capped at eight per pass shared across tiers. The
  * overflow tier holds FIFO bursts with mask wins, so overload still
  * drains with no priority inversion. The steal tier scans four to
- * eight peers proportional to remaining visits with a saturated early
- * out when tiers still hold work. Fail open moves through the shared
- * mask gate, so one foreign head never stalls its tier. The level
- * follows after all moves with the same CPU only.
+ * eight peers proportional to remaining visits with queue runnable
+ * hints plus a saturated early out when tiers still hold work. A Q1
+ * only fast path drains the local tier alone when peers hold no work,
+ * so the common single queue pass skips three empty moves plus the
+ * steal polls. The best candidate cache advances the cursor on a
+ * successful steal, so the next pass starts past the drained peer with
+ * no hotspot. Fail open moves through the shared mask gate, so one
+ * foreign head never stalls its tier. The level follows after all
+ * moves with the same CPU only and stays transition only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -120,65 +125,102 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	machine_dsq = flow_machine_dsq();
 	overflow_dsq = flow_overflow_dsq();
 	left = budget;
-	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		local_moved = flow_move_one(own_local, cpu, &visits);
-		if (local_moved > left)
-			local_moved = left;
-		left -= local_moved;
-	}
-	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		node_moved = flow_move_one(node_dsq, cpu, &visits);
-		if (node_moved > left)
-			node_moved = left;
-		left -= node_moved;
-	}
-	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		machine_moved = flow_move_one(machine_dsq, cpu, &visits);
-		if (machine_moved > left)
-			machine_moved = left;
-		left -= machine_moved;
-	}
-	/* Overflow FIFO tier with the same visit cap and mask wins. */
-	/* Bursts past tier order drain here in arrival order. */
-	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		overflow_moved = flow_move_one(overflow_dsq, cpu, &visits);
-		if (overflow_moved > left)
-			overflow_moved = left;
-		left -= overflow_moved;
-	}
-	/* Steal tier last with a bounded 4 to 8 peer window. Only steals */
-	/* when tiers drained, so busy passes skip cheap with three polls. */
-	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-		u32 steal_moved = 0;
-		struct flow_cpu_state *cst;
-		u32 cursor;
-		s32 lq;
-		s32 nq;
-		s32 mq;
-		s32 oq;
-		u64 backlog = 0;
-		lq = scx_bpf_dsq_nr_queued(own_local);
-		nq = scx_bpf_dsq_nr_queued(node_dsq);
-		mq = scx_bpf_dsq_nr_queued(machine_dsq);
-		oq = scx_bpf_dsq_nr_queued(overflow_dsq);
-		if (lq > 0)
-			backlog = flow_sat_add(backlog, (u64)lq);
-		if (nq > 0)
-			backlog = flow_sat_add(backlog, (u64)nq);
-		if (mq > 0)
-			backlog = flow_sat_add(backlog, (u64)mq);
-		if (oq > 0)
-			backlog = flow_sat_add(backlog, (u64)oq);
-		if (backlog == 0) {
-			cst = flow_cpu((u32)cpu);
-			cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
-			steal_moved = flow_steal_one(cpu, &visits, cursor);
-			if (steal_moved > left)
-				steal_moved = left;
-			left -= steal_moved;
-			local_moved += steal_moved;
+	/* Queue runnable hints hoist the four tier depths once. Each tier */
+	/* move runs only when its hint shows queued work, so empty tiers */
+	/* skip the RCU scan with no visit cost. The same hints feed the */
+	/* steal early out with no second poll, so the pass pays four */
+	/* queue reads total with no duplicate. */
+	{
+		s32 lq0 = scx_bpf_dsq_nr_queued(own_local);
+		s32 nq0 = scx_bpf_dsq_nr_queued(node_dsq);
+		s32 mq0 = scx_bpf_dsq_nr_queued(machine_dsq);
+		s32 oq0 = scx_bpf_dsq_nr_queued(overflow_dsq);
+		bool q1_only = lq0 > 0 && nq0 <= 0 && mq0 <= 0 && oq0 <= 0;
+		/* Q1 only fast path drains the local tier alone. The common */
+		/* single queue pass skips three empty moves plus the steal */
+		/* backlog with the same order plus the same counts. */
+		if (q1_only && likely(left) &&
+		    likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			local_moved = flow_move_one(own_local, cpu, &visits);
+			if (local_moved > left)
+				local_moved = left;
+			left -= local_moved;
+			goto account;
+		}
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if (lq0 > 0) {
+				local_moved = flow_move_one(own_local, cpu, &visits);
+				if (local_moved > left)
+					local_moved = left;
+				left -= local_moved;
+			}
+		}
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if (nq0 > 0) {
+				node_moved = flow_move_one(node_dsq, cpu, &visits);
+				if (node_moved > left)
+					node_moved = left;
+				left -= node_moved;
+			}
+		}
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if (mq0 > 0) {
+				machine_moved = flow_move_one(machine_dsq, cpu, &visits);
+				if (machine_moved > left)
+					machine_moved = left;
+				left -= machine_moved;
+			}
+		}
+		/* Overflow FIFO tier with the same visit cap and mask wins. */
+		/* Bursts past tier order drain here in arrival order. */
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if (oq0 > 0) {
+				overflow_moved = flow_move_one(overflow_dsq, cpu, &visits);
+				if (overflow_moved > left)
+					overflow_moved = left;
+				left -= overflow_moved;
+			}
+		}
+		/* Steal tier last with a bounded 4 to 8 peer window. Only */
+		/* steals when tiers drained, so busy passes skip cheap with */
+		/* the hoisted hints and no second poll. Narrow means empty */
+		/* peers skip with no RCU through the per peer hint in the */
+		/* shared steal, so the effective scan stays small. */
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			u32 steal_moved = 0;
+			struct flow_cpu_state *cst;
+			u32 cursor;
+			u64 backlog = 0;
+			if (lq0 > 0)
+				backlog = flow_sat_add(backlog, (u64)lq0);
+			if (nq0 > 0)
+				backlog = flow_sat_add(backlog, (u64)nq0);
+			if (mq0 > 0)
+				backlog = flow_sat_add(backlog, (u64)mq0);
+			if (oq0 > 0)
+				backlog = flow_sat_add(backlog, (u64)oq0);
+			if (backlog == 0) {
+				u64 nr = nr_cpu_ids;
+				cst = flow_cpu((u32)cpu);
+				cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
+				steal_moved = flow_steal_one(cpu, &visits, cursor);
+				if (steal_moved > left)
+					steal_moved = left;
+				left -= steal_moved;
+				local_moved += steal_moved;
+				/* Best candidate cache advances past the drained */
+				/* peer on success, so the next steal starts */
+				/* fresh with no hotspot and no extra scan. */
+				if (steal_moved && cst && nr > 1 &&
+				    nr <= (u64)FLOW_MAX_CPUS) {
+					u32 n = (u32)nr;
+					u32 next = flow_wrap_idx((u64)cursor + 1ULL, n);
+					__sync_lock_test_and_set(&cst->cursor, next);
+				}
+			}
 		}
 	}
+account:
 	flow_account_local(local_moved + overflow_moved);
 	flow_account_node(node_moved);
 	flow_account_machine(machine_moved);

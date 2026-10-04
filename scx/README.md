@@ -44,7 +44,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Changes live in `CHANGELOG.md` with the `4.8.0` shape.
+- Changes live in `CHANGELOG.md` with the `4.8.1` shape.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/cgroup.bpf.c`, `src/bpf/weight.bpf.c`, `src/bpf/vtime.bpf.c`, `src/bpf/edf.bpf.c`, `src/bpf/task_placement.bpf.c`, `src/bpf/select_cpu.bpf.c`, `src/bpf/enqueue.bpf.c`, `src/bpf/preempt.bpf.c`, `src/bpf/dispatch.bpf.c`, `src/bpf/lifecycle.bpf.c`, `src/bpf/stats.bpf.c` and `src/bpf/timer.bpf.c`. No `fair.c` helper is used and the queue order stays in kernel priority queues.
 - Order lives in kernel priority queues with test-only math mirrors in `src/rust/flow/edf.rs`, `src/rust/flow/slot.rs`, `src/rust/flow/select.rs`, `src/rust/flow/preempt.rs`, `src/rust/flow/slice.rs`, `src/rust/flow/weight.rs`, `src/rust/flow/vtime.rs`, `src/rust/flow/dispatch.rs`, `src/rust/flow/lifecycle.rs`, `src/rust/flow/timer.rs`, `src/rust/flow/property.rs` and `src/rust/flow/cgrp.rs`. The mirrors check fair order plus vruntime plus saturation with no map use, since no kernel test setup runs here.
 - Deadline plus fair checks live in `src/bpf/edf.bpf.c` with a mirror in `src/rust/flow/edf.rs` for tests only. The mirror keeps the same hint plus predictor plus vruntime math with no effect on order.
@@ -61,7 +61,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 - Priority queues never mix orders, since the kernel keeps one fair key per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match through the shared move.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline with near minimum tiebreak on minima, so light work never takes a fast CPU that other work needs.
-- The best sufficient fallback spreads symmetric hosts with no topology walk. Both scans stay bounded at 8 peers from the cursor with plus two advance.
+- The best sufficient fallback spreads symmetric hosts with no topology walk. SSF scans at most 8 peers plus BSF at most 4 from the cursor with plus two advance.
 - Flood and affinity stress skip forward with mask wins, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Overload past saturation runs best effort at `100%` utilization with miss cascade expected, so late work still drains in fair order plus overflow FIFO with no admission drop while misses track the overload.
 - Preempt sends at most one kick per wait when arrival is eligible and leads by `100us` with over `100us` left on owner, so urgent gaps preempt with no storm while ties pace. Kicks count in preempt_kicks, held kicks in preempt_skipped, and eligibility lag holds count as skipped.

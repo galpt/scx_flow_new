@@ -100,6 +100,11 @@ enum flow_consts {
 	/* hotspot while large hosts still find work. */
 	FLOW_STEAL_MIN_PEERS = 4ULL,
 	FLOW_STEAL_MAX_PEERS = 8ULL,
+	/* BSF fallback bound of 4 peers with no knob. Halves the fallback */
+	/* cost versus the 8 peer SSF scan, so select pays at most 12 peer */
+	/* checks per pass with no topology walk. Stays within the 8 peer */
+	/* visit cap, so docs keep eight as the bound. */
+	FLOW_BSF_MAX_PEERS = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
@@ -766,5 +771,39 @@ static __always_inline bool flow_dsq_valid(u64 dsq)
 	if (dsq == (u64)FLOW_OVERFLOW)
 		return true;
 	return false;
+}
+/**
+ * flow_is_pow2 - test power of two with no divide.
+ * @n: value to test.
+ *
+ * Zero never counts as a power of two, so the mask path never
+ * runs on an empty host with no divide by zero.
+ *
+ * Returns: true when @n holds exactly one bit, else false.
+ */
+static __always_inline bool flow_is_pow2(u64 n)
+{
+	return n != 0 && (n & (n - 1ULL)) == 0;
+}
+/**
+ * flow_wrap_idx - wrap base into 0 to n minus 1 with pow2 fast path.
+ * @base: unwrapped index stock plus offset.
+ * @n: host count above one and within the 1024 bound.
+ *
+ * Powers of two mask with base and n minus 1, so the hot
+ * 16 CPU path skips the modulo divide with the same order.
+ * Other hosts fall back to modulo with the same result and
+ * no extra branch past the power check. Callers guard n above
+ * one, so a zero or one host never divides by zero here.
+ *
+ * Returns: wrapped index below @n.
+ */
+static __always_inline u32 flow_wrap_idx(u64 base, u32 n)
+{
+	if (n == 0)
+		return 0;
+	if (flow_is_pow2((u64)n))
+		return (u32)(base & ((u64)n - 1ULL));
+	return (u32)(base % (u64)n);
 }
 #endif

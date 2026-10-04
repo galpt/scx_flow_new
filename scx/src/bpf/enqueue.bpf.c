@@ -103,6 +103,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	u64 avg = 0;
 	u64 dev = 0;
 	bool is_reenq = false;
+	u64 hoist_vr = 0;
+	s32 hoist_lag = 0;
+	u64 hoist_min = 0;
+	bool hoist_elig = false;
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
 	/* the occupant preempt lookup, so slice rotation stays cheap. The */
 	/* stored hint plus hint weight in the task state carry the period */
@@ -372,6 +376,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while tier queues hold misses plus pins. */
 	flow_count_admit();
+	/* Eligibility hoist reads vruntime plus lag plus minimum once per */
+	/* wait with no second minimum poll. The bypass plus the kick share */
+	/* this one gate, so hogs pace with one minimum read and no storm. */
+	/* Dropped polls keep the same order with no behavior change. */
+	hoist_vr = READ_ONCE(tctx->vruntime);
+	hoist_lag = READ_ONCE(tctx->vlag);
+	hoist_min = flow_cpu_min((u32)cpu);
+	hoist_elig = flow_eligible(hoist_vr, hoist_min, hoist_lag);
 	/* Idle direct bypass only when tiers hold no earlier fair key. An idle */
 	/* target takes the task straight to its local queue with one idle kick */
 	/* per wait and no preempt, so wakeups skip the tier plus dispatch hop. */
@@ -392,7 +404,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			bool node_valid = false;
 			u64 node_dsq = 0;
 			bool tiers_empty = false;
-			u64 bmin;
 			if (node < (u32)FLOW_MAX_NODES &&
 			    (u64)node < nr_node_ids) {
 				node_dsq = flow_node_dsq(node);
@@ -404,11 +415,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    (!node_valid ||
 			     scx_bpf_dsq_nr_queued(node_dsq) <= 0))
 				tiers_empty = true;
-			bmin = READ_ONCE(dst->min_vruntime);
 			if ((tiers_empty ||
 			    flow_cpu_meets_fair((u32)cpu, vtime, now)) &&
-			    flow_eligible(READ_ONCE(tctx->vruntime), bmin,
-			        READ_ONCE(tctx->vlag))) {
+			    hoist_elig) {
 				scx_bpf_dsq_insert(p,
 				    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
 				    (u64)FLOW_QUANTUM_NS, enq_flags);
@@ -444,20 +453,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		struct flow_task_ctx *octx;
 		u64 occ_deadline;
 		u64 occ_start;
-		u64 avr;
-		s32 avlag;
-		u64 cmin;
 		if (!st)
 			return;
-		/* Idle kicks gate on eligibility as well, so hogs pace */
+		/* Idle kicks gate on the hoisted eligibility, so hogs pace */
 		/* through tiers with no idle jump while lagging tasks still */
 		/* wake at once. The gate stays with one minimum read per */
 		/* wait, and the ineligible corner paces in tiers with no */
 		/* kick and one skipped preempt with no storm. */
-		avr = READ_ONCE(tctx->vruntime);
-		avlag = READ_ONCE(tctx->vlag);
-		cmin = flow_cpu_min((u32)cpu);
-		if (!flow_eligible(avr, cmin, avlag)) {
+		if (!hoist_elig) {
 			flow_count_preempt_skip();
 			return;
 		}

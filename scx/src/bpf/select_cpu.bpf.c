@@ -2,11 +2,13 @@
 /*
  * Select CPU thin wrapper over the SSF placement.
  *
- * Takes idle first, then the previous CPU when it meets the deadline,
- * then the slowest sufficient fit in O(VISIT) with VISIT at most eight
- * peers, then the best sufficient fallback with no topology signal.
- * Pinned tasks stay where the mask allows with no scan. An empty mask
- * falls through to the machine tier at enqueue.
+ * Takes idle first with no state cost, then the previous CPU when it
+ * meets the deadline, then the slowest sufficient fit in O(VISIT) with
+ * VISIT at most eight peers, then the best sufficient fallback in at
+ * most four peers with no topology signal. Pinned tasks stay where the
+ * mask allows with no scan. An empty mask falls through to the machine
+ * tier at enqueue. One ktime read serves the previous plus SSF plus BSF
+ * checks, and pow2 hosts mask with no divide.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -59,41 +61,49 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		deadline = READ_ONCE(tctx->deadline);
 	if (unlikely(deadline == 0) && likely(flow_cpu_ok(p, prev_cpu)))
 		return prev_cpu;
-	if (flow_cpu_ok(p, prev_cpu)) {
-		u64 now = flow_now();
-		if (flow_cpu_meets((u32)prev_cpu, deadline, now))
-			return prev_cpu;
-	}
-	/* Shared SSF scan in O(VISIT) with VISIT at most eight plus the */
-	/* BSF fallback with no topology signal. The cursor spreads passes */
-	/* with no hotspot and races best effort. */
+	/* One ktime serves previous plus SSF plus BSF with no second read. */
+	/* Early exit on the previous CPU avoids both scans when it meets, */
+	/* so the common stay keeps one drain check with no peer walk. */
 	{
-		u64 nr = nr_cpu_ids;
-		struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
-		u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
 		u64 now = flow_now();
-		u32 best;
-		u32 bsf;
-		if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
-			u32 n = (u32)nr;
-			u32 start = (cursor + 1U) % n;
-			best = flow_ssf_pick(p, deadline, now,
-			    (u32)this_cpu, cursor, nr);
-			if (best != 0xffffffffU) {
-				if (wst)
-					__sync_lock_test_and_set(&wst->cursor,
-					    (start + 1U) % n);
-				return (s32)best;
-			}
-			/* BSF fallback with the smallest drain and no */
-			/* topology walk, so symmetric hosts still spread. */
-			bsf = flow_bsf_pick(p, deadline, now,
-			    (u32)this_cpu, cursor, nr);
-			if (bsf != 0xffffffffU) {
-				if (wst)
-					__sync_lock_test_and_set(&wst->cursor,
-					    (start + 1U) % n);
-				return (s32)bsf;
+		if (flow_cpu_ok(p, prev_cpu)) {
+			if (flow_cpu_meets((u32)prev_cpu, deadline, now))
+				return prev_cpu;
+		}
+		/* Shared SSF scan in O(VISIT) with VISIT at most eight plus */
+		/* the BSF fallback in at most four with no topology signal. */
+		/* The cursor spreads passes with no hotspot and races best */
+		/* effort. Pow2 hosts mask with no divide, others modulo. */
+		{
+			u64 nr = nr_cpu_ids;
+			struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
+			u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
+			u32 best;
+			u32 bsf;
+			if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
+				u32 n = (u32)nr;
+				u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
+				u32 next = flow_wrap_idx((u64)start + 1ULL, n);
+				best = flow_ssf_pick(p, deadline, now,
+				    (u32)this_cpu, cursor, nr);
+				if (best != 0xffffffffU) {
+					if (wst)
+						__sync_lock_test_and_set(&wst->cursor,
+						    next);
+					return (s32)best;
+				}
+				/* BSF fallback with the smallest drain and no */
+				/* topology walk, so symmetric hosts still spread. */
+				/* Capped at four peers, so the fallback halves */
+				/* the scan cost with the same order. */
+				bsf = flow_bsf_pick(p, deadline, now,
+				    (u32)this_cpu, cursor, nr);
+				if (bsf != 0xffffffffU) {
+					if (wst)
+						__sync_lock_test_and_set(&wst->cursor,
+						    next);
+					return (s32)bsf;
+				}
 			}
 		}
 	}

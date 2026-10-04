@@ -116,12 +116,21 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 			break;
 		base = flow_sat_add(flow_sat_add((u64)cursor, 1ULL),
 		    (u64)off);
-		peer = (u32)(base % nr);
+		/* Pow2 hosts mask with no divide, others modulo same order. */
+		if (nr <= (u64)0xffffffffULL)
+			peer = flow_wrap_idx(base, (u32)nr);
+		else
+			peer = (u32)(base % nr);
 		if (peer == (u32)cpu)
 			continue;
 		if (unlikely(!flow_cpu_live(peer)))
 			continue;
 		peer_dsq = flow_local_dsq(peer);
+		/* Queue runnable hint skips empty peers with no RCU hold. */
+		/* The shared move rechecks under the same cap, so a race */
+		/* only delays the steal to the next pass with no loss. */
+		if (scx_bpf_dsq_nr_queued(peer_dsq) <= 0)
+			continue;
 		got = flow_move_one(peer_dsq, cpu, visits);
 		if (got)
 			moved += got;
@@ -145,14 +154,14 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 		return best;
 	{
 		u32 n = (u32)nr;
-		u32 start = (cursor + 1U) % n;
+		u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
 		bpf_for(off, 0, 8) {
 			u32 peer;
 			u32 units;
 			u64 pmin;
 			if ((u64)off >= (u64)n)
 				break;
-			peer = (start + off) % n;
+			peer = flow_wrap_idx((u64)start + (u64)off, n);
 			if (peer == this_cpu)
 				continue;
 			if (!flow_cpu_ok(p, (s32)peer))
@@ -190,9 +199,11 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 	return best;
 }
 /* Best sufficient fallback with the smallest drain and no topology. */
-/* Scans at most eight peers from the cursor for the smallest combined */
+/* Scans at most four peers from the cursor for the smallest combined */
 /* drain that still meets the deadline, so symmetric hosts spread work */
-/* with no capacity signal. Returns the peer id or 0xffffffffU. */
+/* with no capacity signal. Halves the fallback cost versus SSF with */
+/* the same order, so select pays at most 12 peers per pass. Returns */
+/* the peer id or 0xffffffffU. */
 static __always_inline u32 flow_bsf_pick(const struct task_struct *p,
 	u64 deadline, u64 now, u32 this_cpu, u32 cursor, u64 nr)
 {
@@ -203,13 +214,13 @@ static __always_inline u32 flow_bsf_pick(const struct task_struct *p,
 		return best;
 	{
 		u32 n = (u32)nr;
-		u32 start = (cursor + 1U) % n;
-		bpf_for(off, 0, 8) {
+		u32 start = flow_wrap_idx((u64)cursor + 1ULL, n);
+		bpf_for(off, 0, 4) {
 			u32 peer;
 			u64 drain;
 			if ((u64)off >= (u64)n)
 				break;
-			peer = (start + off) % n;
+			peer = flow_wrap_idx((u64)start + (u64)off, n);
 			if (peer == this_cpu)
 				continue;
 			if (!flow_cpu_ok(p, (s32)peer))

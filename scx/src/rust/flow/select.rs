@@ -12,10 +12,36 @@
 /// Steal scans 4 to 8 peers proportional to remaining visits.
 #[cfg(test)]
 pub const SHARED_SCAN_BOUND: u32 = 8;
+/// Bound of the BSF fallback at 4 peers. Halves the fallback cost
+/// versus SSF with the same order, so select pays at most 12 peers.
+#[cfg(test)]
+pub const BSF_SCAN_BOUND: u32 = 4;
 /// Near minimum window in capacity units at 64. Peers within this
 /// distance of the best defer to the smallest minimum.
 #[cfg(test)]
 pub const NEAR_MIN_WINDOW: u32 = 64;
+
+/// True when one value holds exactly one bit with no divide.
+/// Zero never counts, so the mask path never runs on empty hosts.
+#[cfg(test)]
+pub fn is_pow2(n: u64) -> bool {
+    n != 0 && (n & (n.wrapping_sub(1))) == 0
+}
+
+/// Wrap base into 0 to n minus 1 with a pow2 fast path.
+/// Powers of two mask with no divide, others modulo same order.
+/// Mirrors BPF flow_wrap_idx, so cursor math stays cheap on 16 CPUs.
+#[cfg(test)]
+pub fn wrap_idx(base: u64, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    if is_pow2(n as u64) {
+        (base & (n as u64).wrapping_sub(1)) as u32
+    } else {
+        (base % n as u64) as u32
+    }
+}
 
 /// Drain nanos of one queue depth as slices times the quantum.
 /// Saturates on wrap, so a huge depth clamps instead of wrapping to
@@ -118,6 +144,7 @@ pub fn steal_should_skip(local: u64, node: u64, machine: u64, overflow: u64) -> 
 /// Next placement cursor after one successful pick.
 /// Mirrors BPF select advance of start plus one where start is cursor
 /// plus one, so the cursor moves by two per pick with no hotspot.
+/// Pow2 hosts mask with no divide through wrap_idx.
 /// Returns zero on an empty host with no divide.
 #[cfg(test)]
 pub fn cursor_next(cursor: u32, n: usize) -> u32 {
@@ -125,13 +152,13 @@ pub fn cursor_next(cursor: u32, n: usize) -> u32 {
         return 0;
     }
     let n = n as u32;
-    let start = cursor.wrapping_add(1) % n;
-    (start.wrapping_add(1)) % n
+    let start = wrap_idx(cursor.wrapping_add(1) as u64, n);
+    wrap_idx(start.wrapping_add(1) as u64, n)
 }
 
 /// Best sufficient fallback with the smallest combined drain.
 /// Mirrors BPF flow_bsf_pick with no topology signal: scans at most
-/// eight peers from the cursor, skips the busy waker, keeps only peers
+/// four peers from the cursor, skips the busy waker, keeps only peers
 /// that meet the deadline via combined local plus node drain, then
 /// takes the smallest combined drain. Ties keep the first peer in
 /// scan order. Returns minus one when no allowed peer meets.
@@ -151,14 +178,14 @@ pub fn bsf_pick(
     if n <= 1 || n > 1024 {
         return -1;
     }
-    let start = ((cursor.wrapping_add(1)) % n as u32) as usize;
+    let start = wrap_idx(cursor.wrapping_add(1) as u64, n as u32) as usize;
     let mut best: i32 = -1;
     let mut best_drain: u64 = u64::MAX;
-    for off in 0..SHARED_SCAN_BOUND as usize {
+    for off in 0..BSF_SCAN_BOUND as usize {
         if off >= n {
             break;
         }
-        let idx = (start + off) % n;
+        let idx = wrap_idx(start as u64 + off as u64, n as u32) as usize;
         let cpu = live[idx];
         if cpu == this_cpu {
             continue;
@@ -231,12 +258,12 @@ pub fn place(
     let mut best_min: u64 = u64::MAX;
     let n = live.len();
     if n > 1 && n <= 1024 {
-        let start = ((cursor.wrapping_add(1)) % n as u32) as usize;
+        let start = wrap_idx(cursor.wrapping_add(1) as u64, n as u32) as usize;
         for off in 0..SHARED_SCAN_BOUND as usize {
             if off >= n {
                 break;
             }
-            let idx = (start + off) % n;
+            let idx = wrap_idx(start as u64 + off as u64, n as u32) as usize;
             let cpu = live[idx];
             // The busy waker stays out like BPF, since an idle waker
             // already returned above and a busy waker would only stack.
@@ -525,6 +552,11 @@ mod tests {
     #[test]
     fn bsf_takes_smallest_combined_drain() {
         // Symmetric hosts spread via the smallest combined drain.
+        assert_eq!(BSF_SCAN_BOUND, 4);
+        assert_eq!(
+            BSF_SCAN_BOUND,
+            crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u32
+        );
         let got = bsf_pick(
             &[1, 2, 3],
             &[1, 2, 3],
@@ -543,6 +575,25 @@ mod tests {
         let skip = bsf_pick(&[1, 2, 3], &[1, 2, 3], &[0, 0, 0], &[0, 0, 0], 100, 0, 1, 2);
         assert_ne!(skip, 1);
         assert!(skip == 2 || skip == 3);
+    }
+
+    #[test]
+    fn wrap_idx_masks_pow2_and_mods_rest() {
+        assert_eq!(wrap_idx(0, 0), 0);
+        assert!(is_pow2(16));
+        assert!(!is_pow2(0));
+        assert!(!is_pow2(12));
+        assert!(!is_pow2(1000));
+        // Pow2 hosts mask with the same order as modulo.
+        assert_eq!(wrap_idx(17, 16), 1);
+        assert_eq!(wrap_idx(32, 16), 0);
+        assert_eq!(wrap_idx(18, 16), 18 % 16);
+        // Non pow2 hosts modulo with the same result.
+        assert_eq!(wrap_idx(17, 12), 17 % 12);
+        assert_eq!(wrap_idx(100, 6), 100 % 6);
+        // Cursor math stays identical through the helper.
+        assert_eq!(cursor_next(0, 16), 2);
+        assert_eq!(wrap_idx(1, 16), 1);
     }
 
     #[test]

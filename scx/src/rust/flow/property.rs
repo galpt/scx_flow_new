@@ -68,6 +68,7 @@ mod tests {
     fn ssf_picks_slowest_sufficient_within_visit() {
         // Eight peer bound holds with the lagging minimum winning ties.
         assert_eq!(crate::flow::select::SHARED_SCAN_BOUND, 8);
+        assert_eq!(crate::flow::select::BSF_SCAN_BOUND, 4);
         let got = crate::flow::select::place(
             &[],
             9,
@@ -85,6 +86,9 @@ mod tests {
         // Window stays four to eight with no hotspot.
         assert_eq!(crate::flow::select::steal_window(0), 8);
         assert_eq!(crate::flow::select::steal_window(8), 4);
+        // Pow2 masking matches modulo with no divide on 16 CPUs.
+        assert_eq!(crate::flow::select::wrap_idx(17, 16), 1);
+        assert_eq!(crate::flow::select::wrap_idx(17, 12), 17 % 12);
     }
 
     #[test]
@@ -145,6 +149,10 @@ mod tests {
         assert_eq!(crate::flow::dispatch::VISIT_MAX, 8);
         assert_eq!(crate::flow::select::steal_window(0), 8);
         assert_eq!(crate::flow::select::cursor_next(0, 4), 2);
+        // Q1 fast path drains local alone with no other backlog.
+        assert!(crate::flow::dispatch::q1_only(1, 0, 0, 0));
+        assert!(!crate::flow::dispatch::q1_only(1, 1, 0, 0));
+        assert!(!crate::flow::dispatch::q1_only(0, 0, 0, 0));
     }
 
     #[test]
