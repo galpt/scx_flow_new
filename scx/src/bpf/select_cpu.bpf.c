@@ -7,7 +7,8 @@
  * VISIT at most eight peers in two node-local phases, then the best
  * sufficient fallback over the next four peers past the SSF window from
  * cursor plus 9 with drain plus minimum plus id tiebreak. The two scans
- * cover twelve unique peers with no overlap, so the fallback extends
+ * cover twelve unique peers with no overlap when the host holds at
+ * least twelve CPUs, else the windows wrap, so the fallback extends
  * coverage instead of rescanning. The shared cursor with dispatch steal
  * advances by two with best effort races and no atomic order. Pinned
  * tasks stay where the mask allows with no scan. An empty mask falls
@@ -99,7 +100,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				}
 				/* BSF fallback over the next four past SSF with the */
 				/* smallest drain and no topology walk, so symmetric */
-				/* hosts still spread over twelve unique peers. */
+				/* hosts still spread over twelve unique peers on */
+				/* large hosts with at least twelve CPUs. */
 				/* Capped at FLOW_BSF_MAX_PEERS, so the fallback */
 				/* extends coverage with the same order. */
 				bsf = flow_bsf_pick(p, deadline, now,

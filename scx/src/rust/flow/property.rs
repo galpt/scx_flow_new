@@ -67,6 +67,7 @@ mod tests {
     #[test]
     fn ssf_picks_slowest_sufficient_within_visit() {
         // Eight peer bound holds with the lagging minimum winning ties.
+        // SSF tests combined local plus node drain like BPF flow_cpu_meets.
         assert_eq!(crate::flow::select::SHARED_SCAN_BOUND, 8);
         assert_eq!(crate::flow::select::BSF_SCAN_BOUND, 4);
         let got = crate::flow::select::place(
@@ -74,6 +75,7 @@ mod tests {
             9,
             &[1, 2, 3],
             &[1, 2, 3],
+            &[0, 0, 0],
             &[0, 0, 0],
             &[1024, 1024, 1024],
             &[300, 100, 200],
@@ -83,9 +85,26 @@ mod tests {
             2,
         );
         assert_eq!(got, 2);
-        // Window stays four to eight with no hotspot.
+        // Node-busy peer misses via combined drain with no single-depth pass.
+        let busy = crate::flow::select::place(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[9, 0],
+            &[1024, 1024],
+            &[0, 0],
+            5,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(busy, 2);
+        // Window stays four to eight with no hotspot and saturates.
         assert_eq!(crate::flow::select::steal_window(0), 8);
         assert_eq!(crate::flow::select::steal_window(8), 4);
+        assert_eq!(crate::flow::select::steal_window(u32::MAX), 4);
         // Pow2 masking matches modulo with no divide on 16 CPUs.
         assert_eq!(crate::flow::select::wrap_idx(17, 16), 1);
         assert_eq!(crate::flow::select::wrap_idx(17, 12), 17 % 12);
@@ -155,12 +174,15 @@ mod tests {
             2,
         );
         assert_eq!(tie, 2);
-        // Node-local SSF prefers the close peer with no extra scan.
+        // Node-local SSF prefers the close peer with no extra scan and
+        // tests combined drain like BPF, so a busy node holds with no wait.
+        // Twelve unique peers need at least twelve CPUs, else windows wrap.
         let local = crate::flow::select::place_nodelocal(
             &[],
             9,
             &[1, 2],
             &[1, 2],
+            &[0, 0],
             &[0, 0],
             &[1024, 512],
             &[100, 900],
@@ -172,6 +194,24 @@ mod tests {
             0,
         );
         assert_eq!(local, 2);
+        // Node-busy local misses via combined drain, so the remote wins.
+        let node_busy = crate::flow::select::place_nodelocal(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[9, 0],
+            &[1024, 1024],
+            &[0, 0],
+            &[0, 1],
+            0,
+            5,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(node_busy, 2);
         // Hint moves plus fused perf plus hoisted drain share one read.
         assert!(crate::flow::dispatch::move_hint_ok(1, 0));
         assert!(!crate::flow::dispatch::move_hint_ok(0, 0));

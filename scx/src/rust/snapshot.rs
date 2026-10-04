@@ -76,6 +76,8 @@ impl<'a> Scheduler<'a> {
             machine_moves,
             kicks,
             admits,
+            // Dead compat: rejects stays zero with no BPF writer for wire
+            // compat only; readers must use gate_rejects for drops.
             rejects: 0,
             misses,
             gate_rejects,

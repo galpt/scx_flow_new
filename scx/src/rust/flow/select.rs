@@ -8,13 +8,14 @@
 //! userspace tests. The BPF placement lives in select_cpu.bpf.c, and
 //! this file mirrors the order with no map use. SSF scans eight peers
 //! from cursor plus one in two node-local phases with the same slowest
-//! sufficient rule, so close peers win with no extra scan while BSF
-//! scans the next four past SSF from cursor plus nine with drain plus
-//! minimum plus id tiebreak, so the two cover twelve unique peers with
-//! no overlap. The cursor is shared with dispatch steal at stride two
-//! with best effort races, and queue hints gate RCU with a benign TOCTOU
-//! that only delays work to the next pass. Hoisted depths feed drain
-//! plus bypass plus tier escalation with no second poll.
+//! sufficient plus combined drain rule, so close peers win with no extra
+//! scan while BSF scans the next four past SSF from cursor plus nine with
+//! drain plus minimum plus id tiebreak, so the two cover twelve unique
+//! peers with no overlap when the host holds at least twelve CPUs. The
+//! cursor is shared with dispatch steal at stride two with best effort
+//! races, and queue hints gate RCU with a benign TOCTOU that only delays
+//! work to the next pass. Hoisted depths feed combined drain plus bypass
+//! plus tier escalation with no second poll.
 
 //! Clippy stays clean on stable 1.91 with `-Dwarnings`; the
 //! `too_many_arguments` allow keeps the test-only place plus bsf mirrors
@@ -27,7 +28,8 @@
 pub const SHARED_SCAN_BOUND: u32 = 8;
 /// Bound of the BSF fallback at 4 peers over the disjoint window past SSF.
 /// Mirrors `FLOW_BSF_MAX_PEERS` with no literal, so select covers twelve
-/// unique peers per pass with no overlap.
+/// unique peers per pass with no overlap when the host holds at least
+/// twelve CPUs, else the windows wrap and overlap.
 #[cfg(test)]
 pub const BSF_SCAN_BOUND: u32 = 4;
 /// Least steal peers per pass. Mirrors `FLOW_STEAL_MIN_PEERS`.
@@ -179,9 +181,11 @@ pub fn tier_takes_local(local_q: i32, node_q: i32, vtime: u64, now: u64) -> bool
 }
 
 /// Steal window in peers from remaining visits with 4 to 8 bounds.
-/// Mirrors BPF flow_steal_one proportional window, so a fresh pass scans
-/// eight peers while a spent pass scans four peers with no hotspot.
-/// Bounds use the shared steal plus visit constants with no literal.
+/// Mirrors BPF flow_steal_one proportional window with saturation, so a
+/// fresh pass scans eight peers while a spent pass scans four peers with
+/// no hotspot. Overspent visits saturate to zero remain with no wrap, so
+/// the window holds four. Bounds use the shared steal plus visit
+/// constants with no literal.
 #[cfg(test)]
 pub fn steal_window(visits: u32) -> u32 {
     let remain = SHARED_SCAN_BOUND.saturating_sub(visits);
@@ -233,9 +237,11 @@ pub fn cursor_next(cursor: u32, n: usize) -> u32 {
 /// keeps only peers that meet the deadline via combined local plus node
 /// drain, then takes the smallest combined drain with minimum plus id
 /// tiebreak. Equal drains break toward the smallest minimum with wrap
-/// safe order, then the smallest peer id. The disjoint window keeps
-/// twelve unique peers with SSF and no overlap, so the fallback extends
-/// coverage instead of rescanning. Returns minus one when no peer meets.
+/// safe order, then the smallest peer id. The disjoint window keeps twelve
+/// unique peers with SSF and no overlap when the host holds at least
+/// twelve CPUs, else the windows wrap and overlap, so the fallback
+/// extends coverage instead of rescanning on large hosts. Returns minus
+/// one when no peer meets.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn bsf_pick(
@@ -299,24 +305,27 @@ pub fn bsf_pick(
 }
 
 /// Placement pick among idle plus previous plus shared with fair tiebreak.
-/// Idle wins first, then the previous CPU when it drains before the
-/// deadline, then the slowest sufficient shared CPU with near minimum
-/// tiebreak on the smallest minimum vruntime. Peers within 64 capacity
-/// units of the best count as tied, so lagging CPUs take work first.
-/// Test-only SSF mirror with no map use where the BPF pass scans at
-/// most eight peers from the cursor and skips the busy waker, and this
-/// mirror walks the same bounded window from the passed cursor with
-/// the same skip. BPF tries SSF then the disjoint bsf_pick fallback over
-/// the next four peers with drain plus minimum plus id tiebreak, so
-/// callers try place then bsf_pick in the same order with twelve unique
-/// peers. Minimum order uses the wrap safe signed diff like BPF,
-/// so the tiebreak holds across the u64 wrap. This entry treats all
-/// peers as node-local and delegates to place_nodelocal, so old callers
-/// keep the slowest sufficient order with no node split. Callers pass
-/// host-sized slices within the 1024 CPU bound with units plus minimums
-/// parallel to live. Returns minus one when no allowed CPU is live. Perf
-/// stays bounded at eight peers with no extra walk. Cursor advance uses
-/// cursor_next with plus two per pick.
+/// Idle wins first, then the previous CPU when its combined drain finishes
+/// before the deadline, then the slowest sufficient shared CPU with near
+/// minimum tiebreak on the smallest minimum vruntime. Peers within 64
+/// capacity units of the best count as tied, so lagging CPUs take work
+/// first. Test-only SSF mirror with no map use where the BPF pass scans
+/// at most eight peers from the cursor and skips the busy waker, and this
+/// mirror walks the same bounded window from the passed cursor with the
+/// same skip. Each peer tests combined local plus node drain via
+/// cpu_meets_combined like BPF flow_cpu_meets, so a busy node holds with
+/// no wait. BPF tries SSF then the disjoint bsf_pick fallback over the
+/// next four peers with drain plus minimum plus id tiebreak, so callers
+/// try place then bsf_pick in the same order with twelve unique peers
+/// when the host holds at least twelve CPUs. Minimum order uses the wrap
+/// safe signed diff like BPF, so the tiebreak holds across the u64 wrap.
+/// This entry treats all peers as node-local and delegates to
+/// place_nodelocal, so old callers keep the slowest sufficient order with
+/// no node split. Callers pass host-sized slices within the 1024 CPU
+/// bound with local plus node plus units plus minimums parallel to live.
+/// Returns minus one when no allowed CPU is live. Perf stays bounded at
+/// eight peers with no extra walk. Cursor advance uses cursor_next with
+/// plus two per pick.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -324,7 +333,8 @@ pub fn place(
     prev: i32,
     allowed: &[i32],
     live: &[i32],
-    depths: &[u64],
+    local: &[u64],
+    node: &[u64],
     units: &[u32],
     mins: &[u64],
     deadline: u64,
@@ -335,16 +345,20 @@ pub fn place(
     let n = live.len();
     let nodes = vec![0u32; n];
     place_nodelocal(
-        idle, prev, allowed, live, depths, units, mins, &nodes, 0, deadline, now, this_cpu, cursor,
+        idle, prev, allowed, live, local, node, units, mins, &nodes, 0, deadline, now, this_cpu,
+        cursor,
     )
 }
 
 /// Node-local two-phase placement pick in O(VISIT) with no extra scan.
-/// Mirrors BPF flow_ssf_pick: one eight peer pass keeps a single best
-/// plus a locality flag with the same slowest sufficient plus near
-/// minimum rule, then local wins ties in the window. Same node means the
-/// peer node equals this_node. The flag keeps one pass with no extra
-/// visits, so the twelve peer budget with BSF holds with no extra walk.
+/// Mirrors BPF flow_ssf_pick with combined local plus node drain: one
+/// eight peer pass keeps a single best plus a locality flag with the same
+/// slowest sufficient plus near minimum rule, then local wins ties in the
+/// window. Same node means the peer node equals this_node. Each peer
+/// tests cpu_meets_combined like BPF flow_cpu_meets, so a busy node holds
+/// with no wait. The flag keeps one pass with no extra visits, so the
+/// twelve peer budget with BSF holds with no extra walk when the host
+/// holds at least twelve CPUs, else the windows wrap and overlap.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place_nodelocal(
@@ -352,7 +366,8 @@ pub fn place_nodelocal(
     prev: i32,
     allowed: &[i32],
     live: &[i32],
-    depths: &[u64],
+    local: &[u64],
+    node: &[u64],
     units: &[u32],
     mins: &[u64],
     nodes: &[u32],
@@ -368,12 +383,10 @@ pub fn place_nodelocal(
         }
     }
     if allowed.contains(&prev) && live.contains(&prev) {
-        let depth = live
-            .iter()
-            .position(|c| *c == prev)
-            .and_then(|i| depths.get(i).copied())
-            .unwrap_or(0);
-        if cpu_meets(depth, deadline, now) {
+        let idx = live.iter().position(|c| *c == prev);
+        let ld = idx.and_then(|i| local.get(i).copied()).unwrap_or(0);
+        let nd = idx.and_then(|i| node.get(i).copied()).unwrap_or(0);
+        if cpu_meets_combined(ld, nd, deadline, now) {
             return prev;
         }
     }
@@ -401,8 +414,9 @@ pub fn place_nodelocal(
             if idle.contains(&cpu) {
                 continue;
             }
-            let depth = depths.get(idx).copied().unwrap_or(0);
-            if !cpu_meets(depth, deadline, now) {
+            let ld = local.get(idx).copied().unwrap_or(0);
+            let nd = node.get(idx).copied().unwrap_or(0);
+            if !cpu_meets_combined(ld, nd, deadline, now) {
                 continue;
             }
             let unit = units.get(idx).copied().unwrap_or(1024);
@@ -483,6 +497,7 @@ mod tests {
                 &[0, 1],
                 &[0, 1],
                 &[0, 0],
+                &[0, 0],
                 &units(2),
                 &mins(2),
                 100,
@@ -503,6 +518,7 @@ mod tests {
                 &[0, 1],
                 &[0, 1],
                 &[0, 9],
+                &[0, 0],
                 &units(2),
                 &mins(2),
                 100,
@@ -522,6 +538,7 @@ mod tests {
             &[0, 1],
             &[0, 1],
             &[9, 0],
+            &[0, 0],
             &units(2),
             &mins(2),
             5,
@@ -539,6 +556,7 @@ mod tests {
             9,
             &[1, 2, 3],
             &[1, 2, 3],
+            &[0, 0, 0],
             &[0, 0, 0],
             &units(3),
             &mins(3),
@@ -558,6 +576,7 @@ mod tests {
             &[1, 2, 3],
             &[1, 2, 3],
             &[0, 0, 0],
+            &[0, 0, 0],
             &[1024, 1024, 1024],
             &[300, 100, 200],
             100,
@@ -575,6 +594,7 @@ mod tests {
             9,
             &[1, 2],
             &[1, 2],
+            &[0, 0],
             &[0, 0],
             &[512, 1024],
             &[900, 100],
@@ -594,6 +614,7 @@ mod tests {
                 0,
                 &[],
                 &[0, 1],
+                &[0, 0],
                 &[0, 0],
                 &units(2),
                 &mins(2),
@@ -621,6 +642,7 @@ mod tests {
             &[1, 2, 3],
             &[1, 2, 3],
             &[0, 0, 0],
+            &[0, 0, 0],
             &[1024, 1024, 1024],
             &[300, 100, 200],
             100,
@@ -636,6 +658,7 @@ mod tests {
             9,
             &[1, 2, 3],
             &[1, 2, 3],
+            &[0, 0, 0],
             &[0, 0, 0],
             &units(3),
             &mins(3),
@@ -690,6 +713,7 @@ mod tests {
             &[1, 2],
             &[1, 2],
             &[0, 0],
+            &[0, 0],
             &[1024, 512],
             &[100, 900],
             &[0, 1],
@@ -707,6 +731,7 @@ mod tests {
             &[1, 2],
             &[1, 2],
             &[9, 0],
+            &[0, 0],
             &[1024, 1024],
             &[0, 0],
             &[0, 1],
@@ -717,6 +742,42 @@ mod tests {
             0,
         );
         assert_eq!(remote_fill, 2);
+        // Combined drain holds the node-busy peer: local empty plus node
+        // busy misses the deadline like BPF flow_cpu_meets, so the idle
+        // peer wins with no stale single-depth pass.
+        let node_busy = place_nodelocal(
+            &[],
+            9,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[9, 0],
+            &[1024, 1024],
+            &[0, 0],
+            &[0, 1],
+            0,
+            5,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(node_busy, 2);
+        // Previous with a busy node also misses via combined drain.
+        let prev_busy = place(
+            &[],
+            1,
+            &[1, 2],
+            &[1, 2],
+            &[0, 0],
+            &[9, 0],
+            &units(2),
+            &mins(2),
+            5,
+            0,
+            99,
+            0,
+        );
+        assert_eq!(prev_busy, 2);
     }
 
     #[test]
@@ -726,6 +787,10 @@ mod tests {
         assert_eq!(steal_window(4), 6);
         assert!(steal_window(0) <= SHARED_SCAN_BOUND);
         assert!(steal_window(8) >= 4);
+        // Overspent visits saturate with no wrap, so the window holds
+        // four like BPF flow_steal_one with saturated remain.
+        assert_eq!(steal_window(9), 4);
+        assert_eq!(steal_window(u32::MAX), 4);
     }
 
     #[test]
@@ -810,6 +875,30 @@ mod tests {
             2,
         );
         assert_eq!(tie, 2);
+        // Twelve unique peers need at least twelve CPUs: with sixteen
+        // the SSF eight plus BSF four stay disjoint, while with eight
+        // the windows wrap and overlap.
+        {
+            let n16 = 16u32;
+            let start16 = wrap_idx(1, n16);
+            let bsf16 = wrap_idx(start16 as u64 + SHARED_SCAN_BOUND as u64, n16);
+            let mut seen = [false; 16];
+            for off in 0..SHARED_SCAN_BOUND {
+                seen[wrap_idx(start16 as u64 + off as u64, n16) as usize] = true;
+            }
+            let mut unique16 = 8;
+            for off in 0..BSF_SCAN_BOUND {
+                let idx = wrap_idx(bsf16 as u64 + off as u64, n16) as usize;
+                assert!(!seen[idx]);
+                seen[idx] = true;
+                unique16 += 1;
+            }
+            assert_eq!(unique16, 12);
+            let n8 = 8u32;
+            let start8 = wrap_idx(1, n8);
+            let bsf8 = wrap_idx(start8 as u64 + SHARED_SCAN_BOUND as u64, n8);
+            assert_eq!(start8, bsf8);
+        }
     }
 
     #[test]

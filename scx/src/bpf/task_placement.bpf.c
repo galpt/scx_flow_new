@@ -10,8 +10,9 @@
  * The BSF fallback takes the best sufficient CPU with the smallest
  * combined drain plus minimum plus id tiebreak over the next four
  * peers past the SSF window from cursor plus 9, so the two
- * scans cover twelve unique peers with no overlap and symmetric hosts
- * still spread work with no topology walk. SSF runs in O(VISIT) with
+ * scans cover twelve unique peers with no overlap when the host holds
+ * at least twelve CPUs, else the windows wrap and overlap, and symmetric
+ * hosts still spread work with no topology walk. SSF runs in O(VISIT) with
  * VISIT at most eight peers from the cursor with no hotspot, and BSF
  * adds at most four more from the disjoint window. The steal window
  * spans four to eight peers proportional to remaining visits from the
@@ -120,12 +121,16 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 	nr = nr_cpu_ids;
 	if (nr <= 1 || nr > (u64)FLOW_MAX_CPUS)
 		return 0;
-	/* Proportional window spans 4 to 8 peers from remaining visits. */
-	/* A fresh pass with full visits scans eight peers, while a spent */
-	/* pass with few visits left scans four peers. Bounds use the shared */
-	/* steal plus visit constants with no literal. */
-	window = (u32)FLOW_STEAL_MIN_PEERS +
-	    (((u32)FLOW_DISPATCH_MAX_VISIT - *visits) >> 1);
+	/* Proportional window spans 4 to 8 peers from remaining visits with */
+	/* saturation, so overspent visits hold four with no wrap. A fresh */
+	/* pass with full visits scans eight peers, while a spent pass with */
+	/* few visits left scans four peers. Bounds use the shared steal plus */
+	/* visit constants with no literal, matching the Rust steal_window. */
+	{
+		u32 remain = *visits >= (u32)FLOW_DISPATCH_MAX_VISIT ? 0 :
+		    (u32)FLOW_DISPATCH_MAX_VISIT - *visits;
+		window = (u32)FLOW_STEAL_MIN_PEERS + (remain >> 1);
+	}
 	if (window < (u32)FLOW_STEAL_MIN_PEERS)
 		window = (u32)FLOW_STEAL_MIN_PEERS;
 	if (window > (u32)FLOW_STEAL_MAX_PEERS)
@@ -176,7 +181,8 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 /* scan and no topology walk. A local candidate beats a remote best in */
 /* the window, while a clearly slower peer still wins across phases with */
 /* wrap safe adds. The single best plus a locality flag keeps one pass */
-/* with no extra visits, so the twelve peer budget with BSF holds. Peers */
+/* with no extra visits, so the twelve peer budget with BSF holds when */
+/* the host holds at least twelve CPUs, else the windows wrap. Peers */
 /* within 64 units of the best count as near minimum, and the smallest */
 /* minimum wins those ties with wrap safe order, so lagging CPUs take */
 /* work first. */
@@ -258,11 +264,12 @@ static __always_inline u32 flow_ssf_pick(const struct task_struct *p,
 /* Best sufficient fallback with the smallest drain plus tiebreak. */
 /* Scans the next four peers past the SSF window from cursor plus 9 for */
 /* the smallest combined drain that still meets, so symmetric hosts */
-/* spread work with no capacity signal and no overlap with SSF. Equal */
-/* drains break toward the smallest minimum with wrap safe order, then */
-/* the smallest peer id, so ties spread with no hotspot. Covers twelve */
-/* unique peers with SSF at the same order, so select pays at most 12 */
-/* checks per pass. Returns the peer id or 0xffffffffU. */
+/* spread work with no capacity signal and no overlap with SSF when the */
+/* host holds at least twelve CPUs, else the windows wrap. Equal drains */
+/* break toward the smallest minimum with wrap safe order, then the */
+/* smallest peer id, so ties spread with no hotspot. Covers twelve unique */
+/* peers with SSF at the same order on large hosts, so select pays at */
+/* most 12 checks per pass. Returns the peer id or 0xffffffffU. */
 static __always_inline u32 flow_bsf_pick(const struct task_struct *p,
 	u64 deadline, u64 now, u32 this_cpu, u32 cursor, u64 nr)
 {

@@ -19,7 +19,9 @@
  * foreign head never stalls its tier. The TOCTOU between hoisted hints
  * and moves only repeats or skips a pass with no loss. The level
  * follows after all moves through the fused hint probe with no kfunc
- * and stays transition only.
+ * and stays transition only. The fused scope is per CPU own local plus
+ * local on plus node plus running only with no machine plus overflow
+ * plus steal, so a busy shared tier never forces max on an idle CPU.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -37,6 +39,11 @@
  * @local_q: hoisted own local depth, non-positive means empty.
  * @local_on_q: hoisted local on depth, non-positive means empty.
  * @node_q: hoisted node depth, non-positive means empty.
+ *
+ * Scope is per CPU own local plus local on plus node plus running only
+ * with no machine plus overflow plus steal, and the caller gates on live
+ * with the same check inside, so an idle CPU with only shared backlog
+ * still rests at half with no order effect.
  *
  * Returns: true when busy, else false with no kfunc.
  */
@@ -62,8 +69,9 @@ static __noinline bool flow_perf_busy_hint(s32 cpu, s32 local_q,
 /* Depth probe with own plus local plus node plus running. */
 /* Polls once then threads the hints through the shared hint probe, so */
 /* callers without hoisted depths pay the same reads with no double poll. */
-/* Kept for compat with no dispatch use; dispatch fuses via the hint form. */
-static __noinline bool flow_perf_busy(s32 cpu)
+/* Dead compat with no dispatch use; dispatch fuses via the hint form with */
+/* no kfunc on the probe, so this polling form stays only for compat. */
+__attribute__((unused)) static __noinline bool flow_perf_busy(s32 cpu)
 {
 	s32 local_q;
 	s32 local_on_q;
@@ -116,7 +124,9 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 	__sync_lock_test_and_set(last, want);
 	scx_bpf_cpuperf_set(cpu, want);
 }
-static __always_inline void flow_perf_update(s32 cpu)
+/* Dead compat polling update with no dispatch use; dispatch fuses via the */
+/* hint form, so this stays only for compat with no caller. */
+__attribute__((unused)) static __always_inline void flow_perf_update(s32 cpu)
 {
 	if (flow_perf_busy(cpu))
 		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_MAX);
@@ -238,10 +248,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				left -= overflow_moved;
 			}
 		}
-		/* Steal tier last with a bounded 4 to 8 peer window. Only */
-		/* steals when tiers drained, so busy passes skip cheap with */
-		/* the hoisted hints and no second poll. Narrow means empty */
-		/* peers skip with no RCU through the per peer hint in the */
+		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
+		/* Only steals when tiers drained, so busy passes skip cheap with */
+		/* the hoisted hints and no second poll. Backlog sums the four */
+		/* queued tiers with saturation like the Rust steal_backlog, so a */
+		/* huge depth clamps instead of wrapping to idle. Narrow means */
+		/* empty peers skip with no RCU through the per peer hint in the */
 		/* shared steal, so the effective scan stays small. */
 		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 			u32 steal_moved = 0;

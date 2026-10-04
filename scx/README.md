@@ -61,7 +61,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 - Priority queues never mix orders, since the kernel keeps one fair key per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match through the shared move.
 - Placement keeps the slowest sufficient CPU in two node-local phases with near minimum tiebreak on minima, so light work never takes a fast CPU while close peers win first.
-- The best sufficient fallback spreads symmetric hosts with drain plus minimum plus id tiebreak. SSF scans 8 peers from cursor plus one plus BSF scans the next 4 from cursor plus 9 with shared plus two advance.
+- The best sufficient fallback spreads symmetric hosts with drain plus minimum plus id tiebreak. SSF scans 8 peers from cursor plus one plus BSF scans the next 4 from cursor plus 9 with shared plus two advance. Needs 12 CPUs for 12 unique else overlap.
 - The shared cursor serves select plus steal with stride two and best effort races, so passes spread with no hotspot.
 - Idle CPUs hold a stale minimum bounded by 2ms lag plus eligibility, so rejoins keep one slice boost with no decay timer.
 - Queue hints race moves with benign TOCTOU, so a stale hint only delays work to the next pass with no loss. Hint moves thread hoisted depths with no second poll.

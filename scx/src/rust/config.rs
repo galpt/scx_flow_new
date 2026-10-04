@@ -45,9 +45,9 @@ impl Config {
     /// by remaining slots with visits capped at 8 per pass shared across
     /// five tiers plus five hoisted hints plus fused perf with no kfunc
     /// plus no batch plus no flood plus no step plus steal window 4 to 8
-    /// plus BSF four disjoint past SSF eight for twelve unique peers
-    /// with node-local phases plus drain plus minimum plus id tiebreak,
-    /// and joins carry no admission
+    /// with saturation plus BSF four disjoint past SSF eight for twelve
+    /// unique peers on hosts with at least twelve CPUs with node-local
+    /// phases plus drain plus minimum plus id tiebreak, and joins carry no admission
     /// bound with base capacity 1024. Queues hold 1024 local plus 16 node
     /// plus machine plus overflow with ids in the 0x5100 region. Hints hold 8192
     /// flat rows with period plus weight and no timer wait. Preempt

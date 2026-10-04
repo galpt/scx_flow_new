@@ -10,13 +10,16 @@
 //! one hint move per tier bounded by remaining slots. Five depths hoist
 //! once, so tiers plus steal plus perf share the same reads with no
 //! second poll. Visits cap at eight per pass shared across tiers with
-//! resume next pass. Steal scans four to eight peers proportional to
-//! remaining visits and only when all four queued tiers hold no backlog
-//! with per peer hints threaded into the shared hint move. Perf reuses
-//! the hoisted local plus local on plus node hints with no kfunc. The
-//! shared cursor with select advances by two on success with best effort
-//! races, and the TOCTOU between hoisted hints and moves only repeats or
-//! skips a pass with no loss. Test-only with no map use.
+//! resume next pass. Steal scans four to eight peers with saturation
+//! proportional to remaining visits and only when all four queued tiers
+//! hold no backlog with per peer hints threaded into the shared hint
+//! move. Perf reuses the hoisted local plus local on plus node hints with
+//! no kfunc in per CPU scope only with no machine plus overflow plus
+//! steal, so shared backlog never forces max on an idle CPU. BPF gates
+//! the probe on live while this mirror is test-only with no live check.
+//! The shared cursor with select advances by two on success with best
+//! effort races, and the TOCTOU between hoisted hints and moves only
+//! repeats or skips a pass with no loss. Test-only with no map use.
 
 //! Clippy stays clean on stable 1.91 with `-Dwarnings`.
 
@@ -60,8 +63,11 @@ pub fn move_hint_ok(hint: i32, visits: u32) -> bool {
 }
 
 /// True when the fused perf probe sees busy from hoisted hints.
-/// Mirrors BPF flow_perf_busy_hint with no kfunc: any positive hint or
-/// a running pid means busy with signed hints.
+/// Mirrors BPF flow_perf_busy_hint with no kfunc in per CPU scope only:
+/// any positive local plus local on plus node hint or a running pid means
+/// busy with signed hints, while machine plus overflow plus steal never
+/// set perf. BPF gates on live while this mirror is test-only with no
+/// live check, so an idle CPU with only shared backlog still rests.
 #[cfg(test)]
 pub fn perf_busy_hint(local_q: i32, local_on_q: i32, node_q: i32, running: bool) -> bool {
     local_q > 0 || local_on_q > 0 || node_q > 0 || running
