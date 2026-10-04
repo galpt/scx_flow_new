@@ -100,10 +100,10 @@ enum flow_consts {
 	/* hotspot while large hosts still find work. */
 	FLOW_STEAL_MIN_PEERS = 4ULL,
 	FLOW_STEAL_MAX_PEERS = 8ULL,
-	/* BSF fallback bound of 4 peers with no knob. Halves the fallback */
-	/* cost versus the 8 peer SSF scan, so select pays at most 12 peer */
-	/* checks per pass with no topology walk. Stays within the 8 peer */
-	/* visit cap, so docs keep eight as the bound. */
+	/* BSF fallback bound of 4 peers with no knob. Scans the next four */
+	/* past the 8 peer SSF window from cursor plus 9, so select covers */
+	/* twelve unique peers per pass with no topology walk and no overlap. */
+	/* Keeps the fallback cheap while extending coverage with the same order. */
 	FLOW_BSF_MAX_PEERS = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
@@ -187,11 +187,14 @@ struct flow_task_ctx {
 /* Per CPU state at 16B with running pid plus placement cursor plus */
 /* minimum vruntime. Pid holds the task now on the CPU else zero. */
 /* Owner clears use a compare and swap, so a stale exit never clears a */
-/* new owner. Cursor spreads the placement scans with no hotspot. The */
-/* cursor races best effort with no atomic order. Min vruntime tracks */
-/* the smallest served vruntime on the CPU with zero for no history, */
-/* so newly woken tasks clamp without gaining past the lag bound. */
-/* Dispatch uses a fixed tier order with no cursor use. */
+/* new owner. Cursor is shared by select SSF plus BSF and dispatch */
+/* steal with stride two and best effort races plus no atomic order. */
+/* A success advances past the picked peer, so the next pass starts */
+/* fresh with no hotspot. Min vruntime tracks the smallest served */
+/* vruntime on the CPU with zero for no history, so newly woken tasks */
+/* clamp without gaining past the lag bound. The minimum folds forward */
+/* only and holds stale on idle with the lag bound capping the boost, */
+/* so no decay timer runs and rejoins stay bounded with no storm. */
 struct flow_cpu_state {
 	u32 running_pid;
 	u32 cursor;

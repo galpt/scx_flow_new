@@ -5,8 +5,10 @@
 
 //! Mirrors BPF timer.bpf.c with the disabled stale minimum decay.
 //! Tier waits wake by direct kick on insert with no timer, so no timer
-//! callback runs in the default shape. The decay helper is an
-//! intentional no-op kept for veristat plus a future operator wire.
+//! callback runs in the default shape. A stale minimum holds until the
+//! next charge and stays bounded by the 2ms lag clamp plus eligibility,
+//! so no decay is needed. The decay helper is an intentional no-op kept
+//! for veristat plus a future operator wire.
 //! Test-only with no map use and no cost.
 
 /// No-op decay of one CPU minimum toward the sample.

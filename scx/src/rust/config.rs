@@ -43,7 +43,8 @@ impl Config {
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
     /// Dispatch moves at most one per tier bounded by remaining slots
     /// with visits capped at 8 per pass shared across five tiers plus
-    /// no batch plus no flood plus no step plus steal window 4 to 8,
+    /// no batch plus no flood plus no step plus steal window 4 to 8 plus
+    /// BSF four disjoint past SSF eight for twelve unique peers,
     /// and joins carry no admission
     /// bound with base capacity 1024. Queues hold 1024 local plus 16 node
     /// plus machine plus overflow with ids in the 0x5100 region. Hints hold 8192
@@ -90,6 +91,14 @@ impl Config {
             || crate::bpf_intf::flow_consts_FLOW_STEAL_MAX_PEERS as u64 != 8
         {
             bail!("steal window bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64 != 4 {
+            bail!("bsf bound bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64
+            > crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT as u64
+        {
+            bail!("bsf over visit bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64 != 0x5A01 {
             bail!("overflow id bad");
@@ -182,6 +191,7 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT as u64,
             8
         );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64, 4);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_LOCAL_BASE as u64, 0x5100);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
         assert_eq!(

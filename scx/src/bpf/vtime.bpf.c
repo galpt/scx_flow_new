@@ -7,8 +7,11 @@
  * by the fair delta with saturation, so heavy tasks move slowly while
  * light tasks move quickly with no divide beyond the scaler. The CPU
  * minimum folds forward best effort with bounded retry, so newly woken
- * tasks clamp without gaining past the lag bound. Runs inline with no
- * walk, so the verifier stays small.
+ * tasks clamp without gaining past the lag bound. A stale minimum on
+ * an idle CPU holds until the next charge and stays bounded by the 2ms
+ * lag clamp plus eligibility, so no decay timer runs and rejoins keep
+ * at most one slice of boost with no storm. Runs inline with no walk,
+ * so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -87,6 +90,9 @@ static __always_inline u64 flow_ledger_advance(u64 vruntime,
 }
 /* Minimum vruntime of one CPU with zero on miss. */
 /* A missing row means no history, so zero keeps new tasks eligible. */
+/* A stale minimum on an idle CPU holds until the next charge, but the */
+/* 2ms lag clamp plus eligibility bound the sleeper boost to one slice */
+/* with no storm, so no decay is needed. */
 static __always_inline u64 flow_cpu_min(u32 cpu)
 {
 	struct flow_cpu_state *st = flow_cpu(cpu);
@@ -98,7 +104,9 @@ static __always_inline u64 flow_cpu_min(u32 cpu)
 /* Takes the max best effort with a bounded compare and swap retry, so a */
 /* lost race retries with no torn write and the next charge folds again */
 /* with no stall. A zero vruntime never moves the minimum, so no history */
-/* holds zero. A vruntime at max clamps with no wrap. */
+/* holds zero. A vruntime at max clamps with no wrap. A stale minimum */
+/* never moves backward here, so idle CPUs rejoin through the lag clamp */
+/* with at most one slice of boost and no timer. */
 static __always_inline void flow_min_advance(s32 cpu,
 	u64 vruntime)
 {

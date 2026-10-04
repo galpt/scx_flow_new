@@ -6,16 +6,33 @@
 //! Holds the idle plus previous plus shared placement model with the
 //! slowest sufficient pick plus near minimum tiebreak shared by BPF and
 //! userspace tests. The BPF placement lives in select_cpu.bpf.c, and
-//! this file mirrors the order with no map use.
+//! this file mirrors the order with no map use. SSF scans eight peers
+//! from cursor plus one while BSF scans the next four past SSF from
+//! cursor plus nine, so the two cover twelve unique peers with no
+//! overlap. The cursor is shared with dispatch steal at stride two with
+//! best effort races, and queue hints gate RCU with a benign TOCTOU that
+//! only delays work to the next pass.
+
+//! Clippy stays clean on stable 1.91 with `-Dwarnings`; the
+//! `too_many_arguments` allow keeps the test-only place plus bsf mirrors
+//! readable with no behavior change.
 
 /// Bound of the shared scan at 8 peers. Fixed with no knob.
+/// Mirrors `FLOW_DISPATCH_MAX_VISIT` with no literal.
 /// Steal scans 4 to 8 peers proportional to remaining visits.
 #[cfg(test)]
 pub const SHARED_SCAN_BOUND: u32 = 8;
-/// Bound of the BSF fallback at 4 peers. Halves the fallback cost
-/// versus SSF with the same order, so select pays at most 12 peers.
+/// Bound of the BSF fallback at 4 peers over the disjoint window past SSF.
+/// Mirrors `FLOW_BSF_MAX_PEERS` with no literal, so select covers twelve
+/// unique peers per pass with no overlap.
 #[cfg(test)]
 pub const BSF_SCAN_BOUND: u32 = 4;
+/// Least steal peers per pass. Mirrors `FLOW_STEAL_MIN_PEERS`.
+#[cfg(test)]
+pub const STEAL_MIN_PEERS: u32 = 4;
+/// Most steal peers per pass. Mirrors `FLOW_STEAL_MAX_PEERS`.
+#[cfg(test)]
+pub const STEAL_MAX_PEERS: u32 = 8;
 /// Near minimum window in capacity units at 64. Peers within this
 /// distance of the best defer to the smallest minimum.
 #[cfg(test)]
@@ -113,11 +130,12 @@ pub fn cpu_meets_fair_combined(local: u64, node: u64, vtime: u64, now: u64) -> b
 /// Steal window in peers from remaining visits with 4 to 8 bounds.
 /// Mirrors BPF flow_steal_one proportional window, so a fresh pass scans
 /// eight peers while a spent pass scans four peers with no hotspot.
+/// Bounds use the shared steal plus visit constants with no literal.
 #[cfg(test)]
 pub fn steal_window(visits: u32) -> u32 {
-    let remain = 8u32.saturating_sub(visits);
-    let window = 4u32.saturating_add(remain >> 1);
-    window.clamp(4, 8)
+    let remain = SHARED_SCAN_BOUND.saturating_sub(visits);
+    let window = STEAL_MIN_PEERS.saturating_add(remain >> 1);
+    window.clamp(STEAL_MIN_PEERS, STEAL_MAX_PEERS)
 }
 
 /// Saturated backlog of tier queues as local plus node plus machine
@@ -142,9 +160,11 @@ pub fn steal_should_skip(local: u64, node: u64, machine: u64, overflow: u64) -> 
 }
 
 /// Next placement cursor after one successful pick.
-/// Mirrors BPF select advance of start plus one where start is cursor
-/// plus one, so the cursor moves by two per pick with no hotspot.
-/// Pow2 hosts mask with no divide through wrap_idx.
+/// Mirrors BPF select plus steal advance of start plus one where start is
+/// cursor plus one, so the shared cursor moves by two per pick with no
+/// hotspot. Both SSF plus BSF and steal share this stride with best
+/// effort races and no atomic order. Pow2 hosts mask with no divide
+/// through wrap_idx.
 /// Returns zero on an empty host with no divide.
 #[cfg(test)]
 pub fn cursor_next(cursor: u32, n: usize) -> u32 {
@@ -157,10 +177,12 @@ pub fn cursor_next(cursor: u32, n: usize) -> u32 {
 }
 
 /// Best sufficient fallback with the smallest combined drain.
-/// Mirrors BPF flow_bsf_pick with no topology signal: scans at most
-/// four peers from the cursor, skips the busy waker, keeps only peers
-/// that meet the deadline via combined local plus node drain, then
-/// takes the smallest combined drain. Ties keep the first peer in
+/// Mirrors BPF flow_bsf_pick with no topology signal: scans the next four
+/// peers past the SSF window from cursor plus nine, skips the busy waker,
+/// keeps only peers that meet the deadline via combined local plus node
+/// drain, then takes the smallest combined drain. The disjoint window
+/// keeps twelve unique peers with SSF and no overlap, so the fallback
+/// extends coverage instead of rescanning. Ties keep the first peer in
 /// scan order. Returns minus one when no allowed peer meets.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
@@ -179,13 +201,14 @@ pub fn bsf_pick(
         return -1;
     }
     let start = wrap_idx(cursor.wrapping_add(1) as u64, n as u32) as usize;
+    let bsf_start = wrap_idx(start as u64 + SHARED_SCAN_BOUND as u64, n as u32) as usize;
     let mut best: i32 = -1;
     let mut best_drain: u64 = u64::MAX;
     for off in 0..BSF_SCAN_BOUND as usize {
         if off >= n {
             break;
         }
-        let idx = wrap_idx(start as u64 + off as u64, n as u32) as usize;
+        let idx = wrap_idx(bsf_start as u64 + off as u64, n as u32) as usize;
         let cpu = live[idx];
         if cpu == this_cpu {
             continue;
@@ -215,9 +238,9 @@ pub fn bsf_pick(
 /// Test-only SSF mirror with no map use where the BPF pass scans at
 /// most eight peers from the cursor and skips the busy waker, and this
 /// mirror walks the same bounded window from the passed cursor with
-/// the same skip. BPF tries SSF then the bsf_pick fallback with the
-/// smallest combined drain, so callers try place then bsf_pick in the
-/// same order. Minimum order uses the wrap safe signed diff like BPF,
+/// the same skip. BPF tries SSF then the disjoint bsf_pick fallback over
+/// the next four peers with the smallest combined drain, so callers try
+/// place then bsf_pick in the same order with twelve unique peers. Minimum order uses the wrap safe signed diff like BPF,
 /// so the tiebreak holds across the u64 wrap. Callers pass host-sized
 /// slices within the 1024 CPU bound with units plus minimums parallel
 /// to live. Returns minus one when no allowed CPU is live. Perf stays
@@ -557,6 +580,11 @@ mod tests {
             BSF_SCAN_BOUND,
             crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u32
         );
+        assert_eq!(SHARED_SCAN_BOUND, 8);
+        assert_eq!(
+            SHARED_SCAN_BOUND,
+            crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT as u32
+        );
         let got = bsf_pick(
             &[1, 2, 3],
             &[1, 2, 3],
@@ -575,6 +603,19 @@ mod tests {
         let skip = bsf_pick(&[1, 2, 3], &[1, 2, 3], &[0, 0, 0], &[0, 0, 0], 100, 0, 1, 2);
         assert_ne!(skip, 1);
         assert!(skip == 2 || skip == 3);
+        // Disjoint window extends past SSF: with sixteen live CPUs the
+        // SSF window covers cursor plus one to plus eight while BSF
+        // covers plus nine to plus twelve, so a peer only in the second
+        // window is found by BSF alone.
+        let live: Vec<i32> = (0..16).collect();
+        let allowed: Vec<i32> = (0..16).collect();
+        let mut local = vec![9u64; 16];
+        let mut node = vec![9u64; 16];
+        // Only peer twelve meets the deadline with an empty drain.
+        local[12] = 0;
+        node[12] = 0;
+        let disjoint = bsf_pick(&allowed, &live, &local, &node, 100, 0, 99, 0);
+        assert_eq!(disjoint, 12);
     }
 
     #[test]

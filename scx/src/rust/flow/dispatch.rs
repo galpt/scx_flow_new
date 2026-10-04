@@ -10,7 +10,12 @@
 //! remaining slots. Visits cap at eight per pass shared across tiers
 //! with resume next pass. Steal scans four to eight peers proportional
 //! to remaining visits and only when all four queued tiers hold no
-//! backlog. Test-only with no map use.
+//! backlog. The shared cursor with select advances by two on success
+//! with best effort races, and the TOCTOU between hoisted hints and
+//! moves only repeats or skips a pass with no loss. Test-only with no
+//! map use.
+
+//! Clippy stays clean on stable 1.91 with `-Dwarnings`.
 
 /// Visit cap per pass shared across the five tiers.
 #[cfg(test)]

@@ -396,6 +396,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* bypass count with no loss while dispatch moves still count each tier. */
 	/* Strict fair order gates the bypass with eligibility plus drain, so hogs */
 	/* pace through tiers with no direct jump and one kick per wait stays. */
+	/* The TOCTOU between the empty hints and the direct insert only */
+	/* races a concurrent tier join with no loss, since dispatch still */
+	/* drains in fair order with mask wins on the next pass. */
 	{
 		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
 		if (dst && READ_ONCE(dst->running_pid) == 0) {

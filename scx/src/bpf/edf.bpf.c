@@ -43,7 +43,9 @@ static __always_inline u64 flow_drain_ns(u64 dsq)
 /* Combined drain of one CPU as local plus node with saturation. */
 /* Sums both depths, so a busy node holds the local tier with no wait. */
 /* A missing node reads zero with no boost. Sparse nodes fold to zero. */
-static __always_inline u64 flow_cpu_drain(u32 cpu)
+/* Outlined with noinline to keep verifier headroom: callers in meets */
+/* plus fair plus BSF share one copy with no inline growth. */
+static __noinline u64 flow_cpu_drain(u32 cpu)
 {
 	u64 local = flow_drain_ns(flow_local_dsq(cpu));
 	u32 node = flow_cpu_node((u32)cpu);

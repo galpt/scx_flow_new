@@ -4,11 +4,15 @@
  *
  * Takes idle first with no state cost, then the previous CPU when it
  * meets the deadline, then the slowest sufficient fit in O(VISIT) with
- * VISIT at most eight peers, then the best sufficient fallback in at
- * most four peers with no topology signal. Pinned tasks stay where the
- * mask allows with no scan. An empty mask falls through to the machine
- * tier at enqueue. One ktime read serves the previous plus SSF plus BSF
- * checks, and pow2 hosts mask with no divide.
+ * VISIT at most eight peers, then the best sufficient fallback over the
+ * next four peers past the SSF window from cursor plus 9 with no
+ * topology signal. The two scans cover twelve unique peers with no
+ * overlap, so the fallback extends coverage instead of rescanning. The
+ * shared cursor with dispatch steal advances by two with best effort
+ * races and no atomic order. Pinned tasks stay where the mask allows
+ * with no scan. An empty mask falls through to the machine tier at
+ * enqueue. One ktime read serves the previous plus SSF plus BSF checks,
+ * and pow2 hosts mask with no divide.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -71,9 +75,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 				return prev_cpu;
 		}
 		/* Shared SSF scan in O(VISIT) with VISIT at most eight plus */
-		/* the BSF fallback in at most four with no topology signal. */
-		/* The cursor spreads passes with no hotspot and races best */
-		/* effort. Pow2 hosts mask with no divide, others modulo. */
+		/* the disjoint BSF fallback in the next four with no topology */
+		/* signal. The shared cursor with steal advances by two with */
+		/* best effort races, so passes spread with no hotspot. Pow2 */
+		/* hosts mask with no divide, others modulo. */
 		{
 			u64 nr = nr_cpu_ids;
 			struct flow_cpu_state *wst = flow_cpu((u32)this_cpu);
@@ -92,10 +97,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 						    next);
 					return (s32)best;
 				}
-				/* BSF fallback with the smallest drain and no */
-				/* topology walk, so symmetric hosts still spread. */
-				/* Capped at four peers, so the fallback halves */
-				/* the scan cost with the same order. */
+				/* BSF fallback over the next four past SSF with the */
+				/* smallest drain and no topology walk, so symmetric */
+				/* hosts still spread over twelve unique peers. */
+				/* Capped at FLOW_BSF_MAX_PEERS, so the fallback */
+				/* extends coverage with the same order. */
 				bsf = flow_bsf_pick(p, deadline, now,
 				    (u32)this_cpu, cursor, nr);
 				if (bsf != 0xffffffffU) {

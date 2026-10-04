@@ -6,7 +6,10 @@
 //! Mirrors BPF vtime.bpf.c with the ledger advance plus the minimum
 //! fold. The ledger adds the fair delta with saturation, so heavy tasks
 //! move slowly while light tasks move quickly. The minimum folds
-//! forward best effort with no regression.
+//! forward best effort with no regression. A stale minimum on an idle
+//! CPU holds until the next charge and stays bounded by the 2ms lag
+//! clamp plus eligibility, so rejoins keep at most one slice of boost
+//! with no storm and no decay timer.
 
 /// Advance vruntime by one delta at one weight with saturation.
 #[cfg(test)]
@@ -15,7 +18,9 @@ pub fn ledger_advance(vruntime: u64, delta: u64, weight: u32) -> u64 {
 }
 
 /// Fold one CPU minimum forward to at least the given vruntime.
-/// Takes the max with no regression and no move on zero.
+/// Takes the max with no regression and no move on zero. A stale minimum
+/// never moves backward, so idle CPUs rejoin through the lag clamp with
+/// at most one slice of boost and no timer.
 #[cfg(test)]
 pub fn min_advance(cur: u64, vruntime: u64) -> u64 {
     if vruntime == 0 {

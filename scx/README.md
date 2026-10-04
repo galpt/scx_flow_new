@@ -61,7 +61,11 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 - Priority queues never mix orders, since the kernel keeps one fair key per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match through the shared move.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline with near minimum tiebreak on minima, so light work never takes a fast CPU that other work needs.
-- The best sufficient fallback spreads symmetric hosts with no topology walk. SSF scans at most 8 peers plus BSF at most 4 from the cursor with plus two advance.
+- The best sufficient fallback spreads symmetric hosts with no topology walk. SSF scans 8 peers from cursor plus one plus BSF scans the next 4 from cursor plus 9 with shared plus two advance.
+- The shared cursor serves select plus steal with stride two and best effort races, so passes spread with no hotspot.
+- Idle CPUs hold a stale minimum bounded by 2ms lag plus eligibility, so rejoins keep one slice boost with no decay timer.
+- Queue hints race moves with benign TOCTOU, so a stale hint only delays work to the next pass with no loss.
+- Toolchain stays on stable `1.91` with `clippy -Dwarnings`, so checks stay repeatable with no extra allow.
 - Flood and affinity stress skip forward with mask wins, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Overload past saturation runs best effort at `100%` utilization with miss cascade expected, so late work still drains in fair order plus overflow FIFO with no admission drop while misses track the overload.
 - Preempt sends at most one kick per wait when arrival is eligible and leads by `100us` with over `100us` left on owner, so urgent gaps preempt with no storm while ties pace. Kicks count in preempt_kicks, held kicks in preempt_skipped, and eligibility lag holds count as skipped.

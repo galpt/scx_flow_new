@@ -11,45 +11,45 @@
  * hints plus a saturated early out when tiers still hold work. A Q1
  * only fast path drains the local tier alone when peers hold no work,
  * so the common single queue pass skips three empty moves plus the
- * steal polls. The best candidate cache advances the cursor on a
- * successful steal, so the next pass starts past the drained peer with
- * no hotspot. Fail open moves through the shared mask gate, so one
- * foreign head never stalls its tier. The level follows after all
- * moves with the same CPU only and stays transition only.
+ * steal polls. The shared cursor advances by two on a successful steal
+ * to match select, so the next pass starts past the drained peer with
+ * no hotspot and no extra scan. Fail open moves through the shared
+ * mask gate, so one foreign head never stalls its tier. The TOCTOU
+ * between hoisted hints and moves only repeats or skips a pass with no
+ * loss. The level follows after all moves with the same CPU only and
+ * stays transition only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /* Depth probe with own plus local plus node plus running. */
+/* Fused early out keeps one poll on the busy path: the first queued */
+/* depth or running pid returns busy at once with no further kfunc cost. */
+/* The TOCTOU with dispatch moves only shifts the perf level by one pass */
+/* with no order effect, since the next pass re-probes with no latch. */
 static __noinline bool flow_perf_busy(s32 cpu)
 {
-	s32 own;
-	s32 local;
-	u64 depth = 0;
 	struct flow_cpu_state *st;
 	if (cpu < 0)
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
-	own = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
-	if (own > 0)
-		depth += (u64)own;
-	local = scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
-	    (u64)(u32)cpu);
-	if (local > 0)
-		depth += (u64)local;
+	if (scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu)) > 0)
+		return true;
+	if (scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
+	    (u64)(u32)cpu) > 0)
+		return true;
 	{
 		u32 node = flow_cpu_node((u32)cpu);
 		if (node < (u32)FLOW_MAX_NODES &&
 		    (u64)node < nr_node_ids) {
-			s32 shared = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
-			if (shared > 0)
-				depth += (u64)shared;
+			if (scx_bpf_dsq_nr_queued(flow_node_dsq(node)) > 0)
+				return true;
 		}
 	}
 	st = flow_cpu((u32)cpu);
 	if (st && READ_ONCE(st->running_pid) != 0)
-		depth += 1;
-	return depth > 0;
+		return true;
+	return false;
 }
 /* Core perf set with transition only store. */
 static __noinline void flow_perf_set(s32 cpu, u32 want)
@@ -129,7 +129,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	/* move runs only when its hint shows queued work, so empty tiers */
 	/* skip the RCU scan with no visit cost. The same hints feed the */
 	/* steal early out with no second poll, so the pass pays four */
-	/* queue reads total with no duplicate. */
+	/* queue reads total with no duplicate. The TOCTOU between a hint */
+	/* and its move only repeats or skips a pass with no loss, since the */
+	/* shared move rechecks under RCU with the same visit cap. */
 	{
 		s32 lq0 = scx_bpf_dsq_nr_queued(own_local);
 		s32 nq0 = scx_bpf_dsq_nr_queued(node_dsq);
@@ -208,13 +210,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 					steal_moved = left;
 				left -= steal_moved;
 				local_moved += steal_moved;
-				/* Best candidate cache advances past the drained */
-				/* peer on success, so the next steal starts */
-				/* fresh with no hotspot and no extra scan. */
+				/* Shared cursor advances by two on success to match */
+				/* select, so the next steal starts fresh with no */
+				/* hotspot and no extra scan. Best effort races */
+				/* keep no atomic order beyond the single store. */
 				if (steal_moved && cst && nr > 1 &&
 				    nr <= (u64)FLOW_MAX_CPUS) {
 					u32 n = (u32)nr;
-					u32 next = flow_wrap_idx((u64)cursor + 1ULL, n);
+					u32 next = flow_wrap_idx((u64)cursor + 2ULL, n);
 					__sync_lock_test_and_set(&cst->cursor, next);
 				}
 			}
