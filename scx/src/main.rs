@@ -364,7 +364,7 @@ mod tests {
             crate::flow::slot::SLOT_MAX_DSQS,
             crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
         );
-        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 521);
+        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 1041);
     }
 
     #[test]

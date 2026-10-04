@@ -4,13 +4,16 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Holds the flat period plus weight table shared by BPF and userspace
-//! tests. The flat view tunes the period plus the weight only, and no
-//! group or pool shapes order. The BPF hints live in cgroup.bpf.c with
-//! rows in hint_stor, and this file mirrors the table with no map use.
-//! Full tables miss to defaults with no eviction.
+//! tests. The flat view tunes the period plus the weight only with single
+//! weighting through one band helper, and no group or pool shapes order.
+//! Id zero scopes to defaults with no row. A zero cached id is the stale
+//! sentinel with miss to the acquire path. The BPF hints live in
+//! cgroup.bpf.c with rows in hint_stor, and this file mirrors the table
+//! with no map use. Full tables miss to defaults with no eviction. Moves
+//! invalidate the cached id like disable plus enable plus exit.
 
 /// Max hint rows bound shared with the BPF header.
-pub const HINT_MAX: u64 = 4096;
+pub const HINT_MAX: u64 = 8192;
 
 /// Period hint in micros for one weight with fixed bands.
 /// Light shares map to long periods and heavy shares map to short
@@ -72,5 +75,16 @@ mod tests {
         assert_eq!(hint_weight(1000), 1024);
         assert_eq!(hint_weight(0), 32);
         assert_eq!(hint_weight(99_999), 1024);
+    }
+
+    #[test]
+    fn zero_scopes_to_single_band_with_sentinel() {
+        // Id zero scopes to defaults with no row, and a zero cached id
+        // is the stale sentinel with miss to the acquire path.
+        assert_eq!(hint_period_us(0), 32_000);
+        assert_eq!(hint_weight(0), 32);
+        // Single weighting keeps one clamp plus one band with no double.
+        assert_eq!(hint_period_us(128), 8_000);
+        assert_eq!(hint_weight(128), 256);
     }
 }

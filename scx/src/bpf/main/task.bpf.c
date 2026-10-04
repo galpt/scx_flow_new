@@ -68,6 +68,8 @@ static __always_inline u32 flow_cpu_node(u32 cpu)
 	return READ_ONCE(tp->node);
 }
 /* Flat period hint in micros for one id with zero for no hint. */
+/* Id zero scopes to defaults with no row, so a missing hierarchy */
+/* stays neutral with no stall. */
 static __always_inline u32 flow_hint_us(u64 cgid)
 {
 	struct flow_hint *h;
@@ -79,8 +81,10 @@ static __always_inline u32 flow_hint_us(u64 cgid)
 	return READ_ONCE(h->period_us);
 }
 /* Flat weight hint for one id with base on miss. */
-/* A missing row means no hint, so the neutral share applies with no */
-/* cgroup use. Values already clamp at write, so reads need no clamp. */
+/* Id zero scopes to the neutral share with no row, so a missing */
+/* hierarchy stays neutral. A missing row means no hint, so the neutral */
+/* share applies with no cgroup use. Values already clamp once at write */
+/* with single weighting, so reads need no clamp. */
 static __always_inline u32 flow_hint_weight(u64 cgid)
 {
 	struct flow_hint *h;

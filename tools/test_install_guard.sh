@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "4.7.5" ] || fail "version not at 4.7.5"
+[ "${want}" = "4.7.6" ] || fail "version not at 4.7.6"
 
 # Newline plus tab use ANSI-C quoting with no command substitution.
 grep -q "^NL=\$'\\\\n'$" "${INST}" || fail "NL guard form bad"

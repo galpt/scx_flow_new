@@ -55,7 +55,9 @@ static __noinline void flow_charge_leftover(struct task_struct *p,
 		u32 hint_w = READ_ONCE(tctx->hint_w);
 		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
-		u64 n_dev = flow_pred_dev(dev, avg, delta);
+		/* Deviation trains from the new average, so a fresh mean */
+		/* shapes the margin at once with no lagging bound. */
+		u64 n_dev = flow_pred_dev(dev, n_avg, delta);
 		u64 vrun = READ_ONCE(tctx->vruntime);
 		u64 n_vrun;
 		if (task_w == 0)

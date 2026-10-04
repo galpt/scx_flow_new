@@ -5,10 +5,10 @@
 
 //! Reads the host CPU lists plus the node rows for the BPF seed.
 //! Node reads use the kernel NUMA view with zero on fault and a cap
-//! at eight, so large hosts fold to the machine queue with no panic.
+//! at sixteen, so large hosts fold to the machine queue with no panic.
 
 /// CPU ids past this bound never seed, mirroring FLOW_MAX_CPUS.
-const CPU_BOUND: u32 = 512;
+const CPU_BOUND: u32 = 1024;
 
 /// Online CPU ids in rank order with empty on read fault.
 pub fn online_cpus() -> Vec<u32> {
@@ -17,14 +17,14 @@ pub fn online_cpus() -> Vec<u32> {
 
 /// One topology row per CPU with sibling plus node.
 /// Sibling reads the thread list with all ones on fault, and node
-/// reads the NUMA view with zero on fault and a cap at eight.
+/// reads the NUMA view with zero on fault and a cap at sixteen.
 pub fn topo_rows() -> Vec<(u32, u32, u32)> {
     let online = online_cpus();
     let mut rows = Vec::new();
     for cpu in online {
         let sib = thread_sibling(cpu).unwrap_or(u32::MAX);
         let node = cpu_node(cpu).unwrap_or(0);
-        let node = if node < 8 { node } else { 0 };
+        let node = if node < 16 { node } else { 0 };
         rows.push((cpu, sib, node));
     }
     rows
@@ -138,19 +138,19 @@ mod tests {
 
     #[test]
     fn rows_cap_large_nodes() {
-        let node = 12u32;
-        let capped = if node < 8 { node } else { 0 };
+        let node = 20u32;
+        let capped = if node < 16 { node } else { 0 };
         assert_eq!(capped, 0);
     }
 
     #[test]
     fn clamps_ranges_and_ids_to_cpu_bound() {
-        let wide = parse_cpu_list("0-600");
-        assert_eq!(wide.len(), 512);
-        assert!(wide.iter().all(|c| *c < 512));
-        assert_eq!(parse_cpu_list("511-600"), vec![511]);
-        assert_eq!(parse_cpu_list("600"), Vec::<u32>::new());
-        assert_eq!(parse_cpu_list("600-700"), Vec::<u32>::new());
+        let wide = parse_cpu_list("0-1100");
+        assert_eq!(wide.len(), 1024);
+        assert!(wide.iter().all(|c| *c < 1024));
+        assert_eq!(parse_cpu_list("1023-1100"), vec![1023]);
+        assert_eq!(parse_cpu_list("1100"), Vec::<u32>::new());
+        assert_eq!(parse_cpu_list("1100-1200"), Vec::<u32>::new());
     }
 
     #[test]

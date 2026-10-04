@@ -5,6 +5,8 @@
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine with no overflow tail.
  * Homeless work waits in the machine queue with all other shared work.
+ * Idle CPUs steal one task from peer locals as the fourth tier with
+ * a bounded window of 8 to 16 peers proportional to remaining visits.
  * Every task earns an absolute deadline from now plus a period, and
  * each queue orders by the fair time through the kernel priority
  * queue. The fair time holds the earlier of deadline plus virtual
@@ -62,33 +64,39 @@ enum flow_consts {
 	FLOW_WEIGHT_MIN = 1ULL,
 	FLOW_WEIGHT_BASE = 128ULL,
 	FLOW_WEIGHT_MAX = 16384ULL,
-	/* CPU bound of 512 rows with no knob. Covers the largest test */
-	/* host with wide margin while halving array memory. */
-	FLOW_MAX_CPUS = 512ULL,
-	/* Node bound of 8 rows with no knob. Covers the largest test */
-	/* host with wide margin while keeping the node scan small. */
-	FLOW_MAX_NODES = 8ULL,
-	/* Hint bound of 4096 rows with no knob. Keys are hierarchy ids */
+	/* CPU bound of 1024 rows with no knob. Covers the largest test */
+	/* host with wide margin while keeping array memory bounded. */
+	FLOW_MAX_CPUS = 1024ULL,
+	/* Node bound of 16 rows with no knob. Covers the largest test */
+	/* host with wide margin while keeping the node scan bounded. */
+	FLOW_MAX_NODES = 16ULL,
+	/* Hint bound of 8192 rows with no knob. Keys are hierarchy ids */
 	/* with no dense use, so the table holds large hosts with room */
 	/* for churn. Full tables fail closed to the default period */
 	/* with no eviction and no stall. */
-	FLOW_HINT_MAX = 4096ULL,
-	/* Local queue region base. Holds 512 ids, one per CPU. */
+	FLOW_HINT_MAX = 8192ULL,
+	/* Local queue region base. Holds 1024 ids, one per CPU. */
 	FLOW_LOCAL_BASE = 0x5100ULL,
-	/* Node queue region base. Holds 8 ids, one per node. */
+	/* Node queue region base. Holds 16 ids, one per node. */
 	FLOW_NODE_BASE = 0x5900ULL,
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
-	/* Queue count of 521. Holds 512 local plus 8 node plus one */
+	/* Queue count of 1041. Holds 1024 local plus 16 node plus one */
 	/* machine with no overflow. */
-	FLOW_MAX_DSQS = 521ULL,
+	FLOW_MAX_DSQS = 1041ULL,
 	/* Dispatch visit cap of 64 entries per pass with no knob. Caps */
-	/* visited entries per pass regardless of moves, so one pass never */
-	/* holds RCU across the whole queue on mask misses. Moves take at */
-	/* most one per tier per pass bounded by remaining dispatch slots, */
-	/* and leftover work resumes next pass, so the pass stays work */
-	/* conserving across passes. */
+	/* visited entries per pass shared across four tiers regardless of */
+	/* moves, so one pass never holds RCU across the whole queue on */
+	/* mask misses. Moves take at most one per tier per pass bounded */
+	/* by remaining dispatch slots, and leftover work resumes next pass, */
+	/* so the pass stays work conserving across passes. The steal window */
+	/* spans 8 to 16 peers proportional to remaining visits. */
 	FLOW_DISPATCH_MAX_VISIT = 64ULL,
+	/* Steal peer window with no knob. Scans at least 8 peers and at */
+	/* most 16 peers per pass, so the steal stays bounded with no */
+	/* hotspot while large hosts still find work. */
+	FLOW_STEAL_MIN_PEERS = 8ULL,
+	FLOW_STEAL_MAX_PEERS = 16ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
@@ -112,15 +120,17 @@ enum flow_consts {
 	FLOW_VLAG_MAX_NS = 2000000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
-/* machine drain in fair order through the kernel priority queue */
-/* with no overflow tail. Every pass follows this order with no load */
-/* based swap, so the verifier sees one fixed path. Dead enum with no */
-/* code use, kept doc only since dispatch calls the tier moves */
-/* directly with no index switch. */
+/* machine plus steal drain in fair order through the kernel priority */
+/* queue with no overflow tail. Every pass follows this order with no */
+/* load based swap, so the verifier sees one fixed path. Dead enum with */
+/* no code use, kept doc only since dispatch calls the tier moves */
+/* directly with no index switch. The steal tier scans peer locals */
+/* within the bounded window with mask wins. */
 enum flow_tier {
 	FLOW_TIER_LOCAL = 0,
 	FLOW_TIER_NODE = 1,
 	FLOW_TIER_MACHINE = 2,
+	FLOW_TIER_STEAL = 3,
 };
 /* Per task state at 64B with vruntime plus deadline plus stamps plus */
 /* predictor plus lag plus weight plus slice plus hint plus hint weight */
@@ -243,6 +253,7 @@ _Static_assert(sizeof(struct flow_topo) == 8,
 _Static_assert(sizeof(struct flow_sched_stats) == 120,
 	"stats stay at 120B");
 /* Queue count holds local plus node plus machine with no overflow. */
+/* Steal reuses peer locals with no new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 1,
 	"dsq count stays local plus node plus one");
@@ -413,8 +424,9 @@ static __always_inline u64 flow_vruntime_advance(u64 vruntime,
  * flow_lag_clamp - clamp lag within the allowed bound.
  * @lag: raw lag in nanos as a signed bound.
  *
- * Values past plus or minus 2ms fold to the nearer bound, so a stale
- * lag never grants a huge boost with no storm.
+ * Values past plus or minus 2ms fold to the nearer bound with dead clamp,
+ * so a stale lag never grants a huge boost with no storm. A dead max folds
+ * to the bound with no wrap.
  *
  * Returns: clamped lag from minus 2ms to 2ms.
  */
@@ -434,9 +446,10 @@ static __always_inline s32 flow_lag_clamp(s32 lag)
  * @vlag: allowed lag in nanos as a signed bound.
  *
  * Eligible means the vruntime falls no more than the allowed lag past
- * the minimum, so lagging tasks wait while leading tasks pace. The
- * signed diff keeps order across the u64 wrap with no branch, and a
- * saturated minimum plus lag never wraps to the front.
+ * the minimum, so lagging tasks wait while leading tasks pace. A negative
+ * lag clamps to zero with no boost, so a negative bound never grants slack.
+ * The signed diff keeps order across the u64 wrap with no branch, and a
+ * saturated minimum plus lag never wraps to the front with dead clamp.
  *
  * Returns: true when eligible, else false.
  */
@@ -581,15 +594,16 @@ static __always_inline u64 flow_pred_avg(u64 avg,
 /**
  * flow_pred_dev - updated burst deviation with shift 2.
  * @dev: old deviation in nanos, zero for no history.
- * @avg: old average in nanos, zero for no history.
+ * @avg: new average in nanos from flow_pred_avg, zero for no history.
  * @delta: new sample in nanos.
  *
- * Tracks the absolute error between delta and average with one
- * quarter steps, so a stable burst keeps a small margin while a
- * ragged burst widens the deadline with no jump. A zero deviation
- * means no history, so the first value takes the max of error and
- * average quarter as the floor. The result clamps the same way with
- * no divide and shifts stay at 2.
+ * Tracks the absolute error between delta and the new average with
+ * one quarter steps, so a stable burst keeps a small margin while a
+ * ragged burst widens the deadline with no jump. Callers pass the new
+ * average from flow_pred_avg, so the margin tracks the fresh mean. A
+ * zero deviation means no history, so the first value takes the max of
+ * error and new average quarter as the floor. The result clamps the
+ * same way with no divide and shifts stay at 2.
  *
  * Returns: updated deviation in nanos.
  */
@@ -711,7 +725,7 @@ static __always_inline bool flow_missed(u64 deadline,
 }
 /**
  * flow_local_dsq - local queue id of one CPU.
- * @cpu: CPU id below the 512 bound.
+ * @cpu: CPU id below the 1024 bound.
  *
  * One ordered queue per CPU keeps fair order local.
  *
@@ -723,7 +737,7 @@ static __always_inline u64 flow_local_dsq(u32 cpu)
 }
 /**
  * flow_node_dsq - shared queue id of one node.
- * @node: node id below the 8 bound.
+ * @node: node id below the 16 bound.
  *
  * One ordered queue per node shares work inside the node.
  *
@@ -749,7 +763,9 @@ static __always_inline u64 flow_machine_dsq(void)
  * @dsq: queue id to test.
  *
  * Local plus node plus machine pass, and all other ids fail, so a
- * stale id never moves work.
+ * stale id never moves work. Sparse nodes fold to machine at the caller
+ * with no panic, so holes in the node view stay safe. The kernel global
+ * queue never passes for wire compat with homeless work in machine.
  *
  * Returns: true when live, else false.
  */

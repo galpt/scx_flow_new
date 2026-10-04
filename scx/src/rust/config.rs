@@ -42,10 +42,11 @@ impl Config {
     /// The slice stays fixed at 1ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
     /// Dispatch moves at most one per tier bounded by remaining slots
-    /// with visits capped at 64 per pass plus no batch plus no flood
-    /// plus no step plus no tier probes, and joins carry no admission
-    /// bound with base capacity 1024. Queues hold 512 local plus 8 node
-    /// plus machine with ids in the 0x5100 region and no overflow. Hints hold 4096
+    /// with visits capped at 64 per pass shared across four tiers plus
+    /// no batch plus no flood plus no step plus steal window 8 to 16,
+    /// and joins carry no admission
+    /// bound with base capacity 1024. Queues hold 1024 local plus 16 node
+    /// plus machine with ids in the 0x5100 region and no overflow. Hints hold 8192
     /// flat rows with period plus weight and no timer wait. Preempt
     /// needs 100us margin plus 100us tail strictly with a floor at 100us
     /// and one kick per wait gated on eligibility. Fairness bounds lag
@@ -67,7 +68,7 @@ impl Config {
         if CAP_BASE != 1024 {
             bail!("capacity base bad");
         }
-        if HINT_MAX != 4096 {
+        if HINT_MAX != 8192 {
             bail!("hint bound bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 100_000 {
@@ -79,7 +80,7 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64 != 2_000_000 {
             bail!("lag bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64 != 521 {
+        if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64 != 1041 {
             bail!("dsq count bad");
         }
         if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 120 {
@@ -159,7 +160,7 @@ mod tests {
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 521);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1041);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64,
             2_000_000

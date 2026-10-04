@@ -82,14 +82,14 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* A missing state means no order yet, so every live CPU meets. */
 	/* The read waits until the idle paths miss, so idle hits pay no */
 	/* state cost. A zero deadline meets everywhere with no drain poll, */
-	/* so the previous CPU wins at once with no 8 peer scan. */
+	/* so the previous CPU wins at once with no 16 peer scan. */
 	tctx = flow_lookup(p);
 	if (likely(tctx))
 		deadline = READ_ONCE(tctx->deadline);
 	if (unlikely(deadline == 0) && likely(flow_cpu_ok(p, prev_cpu)))
 		return prev_cpu;
 	/* The previous CPU wins when it can drain before the deadline. */
-	/* Warmth stays free, and a miss falls to the shared home. The 8 */
+	/* Warmth stays free, and a miss falls to the shared home. The 16 */
 	/* peer scan stays out when the previous CPU already meets, so */
 	/* requeues keep warmth with no extra walk. */
 	if (flow_cpu_ok(p, prev_cpu)) {
@@ -107,7 +107,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 	/* symmetric on test hosts, so the first sufficient id usually */
 	/* wins with no extra pass. The cursor spreads passes with no */
 	/* hotspot, and it races best effort with no atomic order. At most */
-	/* eight peers run with at most one drain poll plus two map reads */
+	/* sixteen peers run with at most one drain poll plus two map reads */
 	/* each, so the pass stays bounded with no extra walk. */
 	{
 		u64 nr = nr_cpu_ids;
@@ -121,7 +121,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p,
 		if (nr > 1 && nr <= (u64)FLOW_MAX_CPUS) {
 			u32 n = (u32)nr;
 			u32 start = (cursor + 1U) % n;
-			bpf_for(off, 0, 8) {
+			bpf_for(off, 0, 16) {
 				u32 peer;
 				u32 units;
 				u64 pmin;

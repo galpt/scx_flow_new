@@ -81,14 +81,15 @@ static __always_inline void flow_clear_running_if_owner(
 	__sync_val_compare_and_swap(&st->running_pid, pid, 0);
 }
 /* Fold one CPU minimum forward to at least the given vruntime. */
-/* Takes the max best effort with one compare and swap, so a lost race */
-/* keeps the winner with no torn write and the next charge folds again */
-/* with no stall. A zero vruntime never moves the minimum. */
+/* Takes the max best effort with a bounded compare and swap retry, so a */
+/* lost race retries with no torn write and the next charge folds again */
+/* with no stall. A zero vruntime never moves the minimum with dead clamp, */
+/* so no history holds zero. A vruntime at max clamps with no wrap. */
 static __always_inline void flow_min_advance(s32 cpu,
 	u64 vruntime)
 {
 	struct flow_cpu_state *st;
-	u64 cur;
+	s32 i;
 	if (cpu < 0)
 		return;
 	if (vruntime == 0)
@@ -98,12 +99,18 @@ static __always_inline void flow_min_advance(s32 cpu,
 	st = flow_cpu((u32)cpu);
 	if (!st)
 		return;
-	cur = READ_ONCE(st->min_vruntime);
-	if (cur == vruntime)
-		return;
-	if (!flow_time_before(cur, vruntime))
-		return;
-	__sync_val_compare_and_swap(&st->min_vruntime, cur, vruntime);
+	bpf_for(i, 0, 4) {
+		u64 cur = READ_ONCE(st->min_vruntime);
+		u64 old;
+		if (cur == vruntime)
+			break;
+		if (!flow_time_before(cur, vruntime))
+			break;
+		old = __sync_val_compare_and_swap(&st->min_vruntime,
+			    cur, vruntime);
+		if (old == cur)
+			break;
+	}
 }
 /* True when one task may enter an op on the given CPU. */
 /* Checks the CPU live view plus the task mask plus the queue id, so */

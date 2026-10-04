@@ -3,8 +3,9 @@
  * Performance level helper for the dispatch pass.
  *
  * Holds the per CPU depth check plus the transition only set with no
- * knob and no extra walk. Any own plus local plus running picks max
- * else half, and a steady level makes no call. Boost and idle stay
+ * knob and no extra walk. Any own plus local plus node plus running picks
+ * max else half, and a steady level makes no call. Sparse nodes fold to
+ * zero with no poll. Boost and idle stay
  * paired through one apply entry, so a busy CPU takes max and an idle
  * CPU returns to half with no forgotten deboost. Dispatch reaches the
  * helper through one exit label, so every pass covers the level with
@@ -25,11 +26,11 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } cpu_perf_last SEC(".maps");
-/* Depth probe with own plus local plus running and no shared use. */
+/* Depth probe with own plus local plus node plus running. */
 /* Pure read with no set, so a bad read drops with no boost and a */
-/* missing queue stays idle. Guards live here as well as in the set */
-/* core, so a stale CPU reads idle even when called apart. An invalid */
-/* CPU reads idle at once with no queue poll. */
+/* missing queue stays idle. Sparse nodes read zero with no poll. Guards */
+/* live here as well as in the set core, so a stale CPU reads idle even */
+/* when called apart. An invalid CPU reads idle at once with no poll. */
 static __noinline bool flow_perf_busy(s32 cpu)
 {
 	s32 own;
@@ -41,9 +42,10 @@ static __noinline bool flow_perf_busy(s32 cpu)
 		return false;
 	if (!flow_cpu_live((u32)cpu))
 		return false;
-	/* Own plus local shape the depth with two polls only and no tier */
-	/* pre scan, so the pass pays no shared walk. A bad read drops */
-	/* with no boost, so a missing queue stays idle. */
+	/* Own plus local plus node shape the depth with three polls only and */
+	/* no tier prescan, so the pass pays no machine walk. A bad read drops */
+	/* with no boost, so a missing queue stays idle. Sparse nodes fold to */
+	/* zero with no poll. */
 	own = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
 	if (own > 0)
 		depth += (u64)own;
@@ -51,6 +53,17 @@ static __noinline bool flow_perf_busy(s32 cpu)
 	    (u64)(u32)cpu);
 	if (local > 0)
 		depth += (u64)local;
+	/* The node queue adds shared work, so a node busy CPU holds max. */
+	/* Sparse nodes read zero with no boost and no machine poll. */
+	{
+		u32 node = flow_cpu_node((u32)cpu);
+		if (node < (u32)FLOW_MAX_NODES &&
+		    (u64)node < nr_node_ids) {
+			s32 shared = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
+			if (shared > 0)
+				depth += (u64)shared;
+		}
+	}
 	/* The running view adds one, so a busy CPU counts its task. */
 	st = flow_cpu((u32)cpu);
 	if (st && READ_ONCE(st->running_pid) != 0)

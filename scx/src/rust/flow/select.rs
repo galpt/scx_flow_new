@@ -8,9 +8,10 @@
 //! userspace tests. The BPF placement lives in select_cpu.bpf.c, and
 //! this file mirrors the order with no map use.
 
-/// Bound of the shared scan at 8 peers. Fixed with no knob.
+/// Bound of the shared scan at 16 peers. Fixed with no knob.
+/// Steal scans 8 to 16 peers proportional to remaining visits.
 #[cfg(test)]
-pub const SHARED_SCAN_BOUND: u32 = 8;
+pub const SHARED_SCAN_BOUND: u32 = 16;
 /// Near minimum window in capacity units at 64. Peers within this
 /// distance of the best defer to the smallest minimum.
 #[cfg(test)]
@@ -24,8 +25,16 @@ pub fn drain_ns(depth: u64) -> u64 {
     depth.saturating_mul(crate::flow::slice::QUANTUM_NS)
 }
 
+/// Combined drain nanos of local plus node depths with saturation.
+/// Mirrors BPF flow_cpu_drain, so a busy node holds the local tier.
+#[cfg(test)]
+pub fn drain_combined(local: u64, node: u64) -> u64 {
+    drain_ns(local).saturating_add(drain_ns(node))
+}
+
 /// True when one CPU can finish its drain before a deadline.
-/// A zero deadline means no order yet, so every CPU meets.
+/// A zero deadline means no order yet, so every CPU meets. BPF sums
+/// local plus node via drain_combined for the tier plus bypass checks.
 #[cfg(test)]
 pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
     if deadline == 0 {
@@ -36,7 +45,8 @@ pub fn cpu_meets(depth: u64, deadline: u64, now: u64) -> bool {
 }
 
 /// True when one CPU can finish its drain before a fair time.
-/// Mirrors the deadline check for the fair key.
+/// Mirrors the deadline check for the fair key. BPF sums local plus
+/// node via drain_combined for the fair-key tier plus bypass checks.
 #[cfg(test)]
 pub fn cpu_meets_fair(depth: u64, vtime: u64, now: u64) -> bool {
     if vtime == 0 {
@@ -46,13 +56,23 @@ pub fn cpu_meets_fair(depth: u64, vtime: u64, now: u64) -> bool {
     ready <= vtime
 }
 
+/// Steal window in peers from remaining visits with 8 to 16 bounds.
+/// Mirrors BPF flow_steal_one proportional window, so a fresh pass scans
+/// sixteen peers while a spent pass scans eight peers with no hotspot.
+#[cfg(test)]
+pub fn steal_window(visits: u32) -> u32 {
+    let remain = 64u32.saturating_sub(visits);
+    let window = 8u32.saturating_add(remain >> 3);
+    window.clamp(8, 16)
+}
+
 /// Placement pick among idle plus previous plus shared with fair tiebreak.
 /// Idle wins first, then the previous CPU when it drains before the
 /// deadline, then the slowest sufficient shared CPU with near minimum
 /// tiebreak on the smallest minimum vruntime. Peers within 64 capacity
 /// units of the best count as tied, so lagging CPUs take work first.
 /// Test-only mirror with no map use where the BPF pass scans at most
-/// eight peers from the cursor and skips the busy waker, and this
+/// sixteen peers from the cursor and skips the busy waker, and this
 /// mirror walks the same bounded window from the passed cursor with
 /// the same skip. Minimum order uses the wrap safe signed diff like
 /// BPF, so the tiebreak holds across the u64 wrap. Callers pass
@@ -301,13 +321,13 @@ mod tests {
 
     #[test]
     fn shared_scan_stays_bounded() {
-        assert_eq!(SHARED_SCAN_BOUND, 8);
+        assert_eq!(SHARED_SCAN_BOUND, 16);
         assert_eq!(NEAR_MIN_WINDOW, 64);
         // Wrap safe minimum order holds across the u64 wrap.
         assert!(crate::flow::edf::time_before(u64::MAX, 10));
         assert!(!crate::flow::edf::time_before(10, u64::MAX - 10));
         // Busy waker stays out while the cursor window still finds
-        // the lagging peer within eight.
+        // the lagging peer within sixteen.
         let got = place(
             &[],
             9,
@@ -323,7 +343,7 @@ mod tests {
         );
         assert_eq!(got, 2);
         // Cursor rotation still visits all peers when the host holds
-        // fewer than eight CPUs.
+        // fewer than sixteen CPUs.
         let again = place(
             &[],
             9,
@@ -344,5 +364,25 @@ mod tests {
     fn fair_meets_mirrors_deadline() {
         assert!(cpu_meets_fair(0, 100, 0));
         assert!(!cpu_meets_fair(9, 5, 0));
+    }
+
+    #[test]
+    fn combined_drain_holds_node_busy() {
+        assert_eq!(drain_combined(0, 0), 0);
+        assert_eq!(drain_combined(1, 1), 2_000_000);
+        // Fair-key tier gates local on the fair time with combined drain,
+        // so a busy node holds the tier with no wait.
+        assert!(!cpu_meets(drain_combined(9, 9), 5, 0));
+        assert!(!cpu_meets_fair(drain_combined(9, 9), 5, 0));
+        assert!(cpu_meets(drain_combined(0, 0), 100, 0));
+    }
+
+    #[test]
+    fn steal_window_spans_8_to_16() {
+        assert_eq!(steal_window(0), 16);
+        assert_eq!(steal_window(64), 8);
+        assert_eq!(steal_window(32), 12);
+        assert!(steal_window(0) <= SHARED_SCAN_BOUND);
+        assert!(steal_window(64) >= 8);
     }
 }

@@ -11,7 +11,8 @@
  * tiers through the same move with the fair time as the queue key,
  * so one foreign task never stalls live work. Visits cap at sixty four per pass with resume next pass, so
  * a miss heavy queue never holds RCU across the whole queue while
- * moved progress stays work conserving across passes. Runs inline for
+ * moved progress stays work conserving across passes. The steal tier
+ * reuses this move with peer locals, so every tier shares one gate. Runs inline for
  * the probe plus move, so the verifier stays small with no unrolled
  * caller tree and no rescan per move. No fair.c helper is used and
  * the queue order stays in kernel priority queues.

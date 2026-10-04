@@ -2,7 +2,8 @@
 /*
  * Task lifecycle ops.
  *
- * Running claims the segment start from zero with no BPF gauge.
+ * Running claims the segment start from zero with a compare and swap
+ * plus the pid with a compare and swap and no BPF gauge.
  * The snapshot counts live pids for the on CPU gauge. Stopping claims
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
@@ -13,7 +14,8 @@
  * clears vruntime plus deadline plus stamps plus predictor plus lag
  * plus weight plus slice plus hint plus hint weight plus misses, and
  * disable plus exit charge a leftover segment at most once when stopping never ran with
- * the same advance plus minimum fold. A closed gate still counts one
+ * the same advance plus minimum fold. Disable clears the cached hierarchy
+ * id like move plus enable plus exit, so a reused pid never reads stale. A closed gate still counts one
  * reject with no charge. Release clears a stale running view with no
  * charge. The gate runs first in every op except the exiting paths, so
  * a stale CPU fails closed with one counter. See intf.h for the shared
@@ -52,9 +54,15 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	if (unlikely(!flow_cpu_live((u32)cpu)))
 		return;
 	st = flow_cpu((u32)cpu);
-	if (likely(st))
-		__sync_lock_test_and_set(&st->running_pid,
+	if (likely(st)) {
+		/* Claim the pid with a compare and swap from the observed */
+		/* owner, so a concurrent clear plus run keeps the winner with */
+		/* no torn write and no stale overwrite. A lost race keeps the */
+		/* winner with no retry, since the next running folds again. */
+		u32 cur = READ_ONCE(st->running_pid);
+		__sync_val_compare_and_swap(&st->running_pid, cur,
 		    (u32)p->pid);
+	}
 }
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	u64 deq_flags)
@@ -116,7 +124,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		u32 hint_w = READ_ONCE(tctx->hint_w);
 		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
-		u64 n_dev = flow_pred_dev(dev, avg, delta);
+		/* Deviation trains from the new average, so a fresh mean */
+		/* shapes the margin at once with no lagging bound. */
+		u64 n_dev = flow_pred_dev(dev, n_avg, delta);
 		u64 vrun = READ_ONCE(tctx->vruntime);
 		u64 n_vrun;
 		if (task_w == 0)
@@ -181,6 +191,10 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 		flow_gate_reject();
 		return;
 	}
+	/* Clear the cached hierarchy id for ABA safety, so a later pid */
+	/* reuse never reads a stale hierarchy like move plus enable plus */
+	/* exit. A zero pid needs no clear with the zero sentinel. */
+	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx = flow_lookup(p);
 	/* Charge a running segment stopping never saw at most once. */
 	/* The advance plus the minimum fold match stopping, so a leftover */

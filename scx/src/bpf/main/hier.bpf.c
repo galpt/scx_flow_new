@@ -3,10 +3,12 @@
  * Flat hint helpers for the core.
  *
  * Holds the id plus level plus ancestor helpers for the flat hint
- * view. The flat view tunes the period plus the weight only, and no
- * group or pool shapes order. The pid cache stays ABA safe via clear
- * on migrate plus enable plus exit, so a reused pid never reads a
- * stale id. The cache caps at 1024 entries with fail to the acquire
+ * view. The flat view tunes the period plus the weight only with single
+ * weighting, and no group or pool shapes order. Id zero scopes to
+ * defaults with no row. A zero cached id is the stale sentinel with miss
+ * to the acquire path. The pid cache stays ABA safe via clear on migrate
+ * plus enable plus disable plus exit, so a reused pid never reads a
+ * stale id. The cache caps at 2048 entries with fail to the acquire
  * path and no eviction. Runs inline with no walk past one ancestor
  * step, so the verifier stays small.
  *
@@ -44,7 +46,7 @@ static __always_inline void flow_cgrp_cache_invalidate(u32 pid)
 /* Hint of one task from its hierarchy with paired release. */
 /* Reads the cached id first with one hash lookup and no acquire, so */
 /* the hot path pays no hierarchy cost on hit. The pid cache caps at */
-/* 1024 entries with fail to the acquire path and no eviction, so a */
+/* 2048 entries with fail to the acquire path and no eviction, so a */
 /* full table still reads fresh with no stall. A miss takes the */
 /* acquire path once and fills the cache best effort, so later joins */
 /* hit with no walk. The flat row still reads fresh each time, so a */

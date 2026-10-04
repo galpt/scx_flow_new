@@ -3,10 +3,11 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Holds the kick rule plus the eligibility gate shared by BPF and
-//! userspace tests. Idle plus busy targets kick only for eligible
-//! arrivals, and busy targets also need an urgent earlier fair time
-//! with margin plus tail.
+//! Holds the strict kick rule plus the eligibility gate shared by BPF and
+//! userspace tests. Idle plus busy targets kick strict once per wait only
+//! for eligible arrivals, and busy targets also need a strict earlier fair
+//! time with margin plus tail. Every hold counts in preempt_skipped with no
+//! missing fill, and the idle direct bypass shares the same strict gate.
 
 /// Preempt margin in nanos at 100us. Near ties never bounce.
 #[cfg(test)]
@@ -49,7 +50,7 @@ pub fn eligible(vruntime: u64, min_vruntime: u64, vlag: i32) -> bool {
     crate::flow::edf::eligible(vruntime, min_vruntime, vlag)
 }
 
-/// True when one arrival preempts with eligibility plus margin plus tail.
+/// True when one arrival strictly preempts with eligibility plus margin plus tail.
 /// The arrival must be eligible against the target minimum, then lead
 /// the occupant strictly with the margin also strictly before, so near
 /// ties never bounce. The owner must have started with remaining slice
@@ -158,6 +159,15 @@ mod tests {
         assert!(!idle_kick_wants(5_000_000, 1_000_000, 0));
         assert!(eligible(1_000, 1_000, 0));
         assert!(!eligible(1_001, 1_000, 0));
+    }
+
+    #[test]
+    fn strict_holds_count_as_skipped() {
+        // Strict one kick per wait with every hold counted and no storm.
+        assert!(!preempt_wants(20, 20, 2_000_000, 1, 0, 0, 0));
+        assert!(!preempt_wants(10, 20, 100_000, 1, 0, 0, 0));
+        assert!(!idle_kick_wants(5_000_000, 1_000_000, 0));
+        assert!(idle_kick_wants(500, 1_000, 0));
     }
 
     #[test]

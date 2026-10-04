@@ -22,7 +22,7 @@ Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor e
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine hold tasks across 521 queues. Each pass drains local plus node plus machine in fair order with one move per tier capped by slots and 64 visits with resume. No queue waits with no scan. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+One local queue per CPU plus one per node plus machine hold tasks across 1041 queues. Each pass drains local plus node plus machine plus steal fairly with one move per tier capped by slots and 64 visits with resume. Steal scans 8 to 16 peers. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Keys
 
@@ -43,7 +43,7 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Changes live in `CHANGELOG.md` with the `4.7.5` shape.
+- Changes live in `CHANGELOG.md` with the `4.7.6` shape.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/cgroup.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`. No `fair.c` helper is used and the queue order stays in kernel priority queues.
 - Order lives in kernel priority queues with mirrors in `src/rust/flow/edf.rs`, `src/rust/flow/slot.rs`, `src/rust/flow/select.rs`, `src/rust/flow/preempt.rs`, `src/rust/flow/slice.rs` and `src/rust/flow/cgrp.rs` for tests only. The mirrors check fair order plus vruntime plus saturation against the kernel logic, since no kernel test harness runs here.
 - Deadline plus fair checks live in `src/bpf/main/deadline.bpf.c` with a mirror in `src/rust/flow/edf.rs` for tests only. The mirror keeps the same hint plus predictor plus vruntime math with no effect on order.

@@ -2,13 +2,17 @@
 /*
  * Flat hierarchy ops.
  *
- * The flat view holds one period plus weight hint per id, and no group
- * or pool shapes order. The table holds 4096 rows with no eviction, so
- * a full table misses to the default period plus neutral weight with
- * no stall. Init runs sleepable with map create, the rest run without
- * sleep with lookup only. Moves carry vruntime plus deadline with no
- * hint carry, so the next enqueue reads the new hint plus weight.
- * Weight sets the hint from fixed share bands with no divide. See
+ * The flat view holds one period plus weight hint per id with single
+ * weighting through one shared band helper, and no group or pool shapes
+ * order. The table holds 8192 rows with no eviction, so a full table
+ * misses to the default period plus neutral weight with no stall. Id zero
+ * scopes to defaults with no row, so a missing hierarchy stays neutral.
+ * A zero cached id is the stale sentinel with miss to the acquire path.
+ * Init runs sleepable with map create, the rest run without sleep with
+ * lookup only. Moves carry vruntime plus deadline with no hint carry, so
+ * the next enqueue reads the new hint plus weight after the move
+ * invalidate clears the cached id. Weight sets the hint from fixed share
+ * bands with no divide. See
  * intf.h for the hint helpers and enqueue.bpf.c for the hint plus
  * weight use.
  *
@@ -79,8 +83,9 @@ void BPF_STRUCT_OPS(flow_cgroup_cancel_move, struct task_struct *p,
 	(void)from;
 	(void)to;
 }
-/* Shared share band for cgroup plus task paths. */
-/* Maps one clamped share to period plus weight bands with no divide. */
+/* Shared single share band for cgroup plus task paths. */
+/* Maps one clamped share once to period plus weight bands with no divide. */
+/* Single weighting keeps one clamp plus one band with no double count. */
 /* Light shares map to long periods plus small weights and heavy shares */
 /* map to short periods plus large weights, so the hint tunes the */
 /* deadline period while the weight tunes vruntime speed. Bands sit on */

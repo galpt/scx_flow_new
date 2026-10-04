@@ -4,9 +4,10 @@
  *
  * Holds the deadline plus fair time plus drain readiness checks with
  * saturating math. Every task joins a tier queue with no bound, and
- * queue order uses the fair time while placement tests the deadline.
- * The CPU minimum read stays best effort with zero on miss. Runs under
- * the caller with no lock.
+ * queue order plus tier choice use the fair key while placement tests
+ * the deadline. Drain sums local plus node with saturation, so a busy
+ * node holds the local tier with no wait. The CPU minimum read stays
+ * best effort with zero on miss. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -47,9 +48,22 @@ static __always_inline u64 flow_drain_ns(u64 dsq)
 		return (u64)~0ULL;
 	return depth * (u64)FLOW_QUANTUM_NS;
 }
-/* True when one CPU can finish its local drain before a deadline. */
-/* Adds now plus drain with saturation, so a huge drain fails closed */
-/* with no wrap to an early view. */
+/* Combined drain of one CPU as local plus node with saturation. */
+/* Sums both depths, so a busy node holds the local tier with no wait. */
+/* A missing node reads zero with no boost. Sparse nodes fold to zero. */
+static __always_inline u64 flow_cpu_drain(u32 cpu)
+{
+	u64 local = flow_drain_ns(flow_local_dsq(cpu));
+	u32 node = flow_cpu_node(cpu);
+	u64 shared = 0;
+	if (node < (u32)FLOW_MAX_NODES &&
+	    (u64)node < nr_node_ids)
+		shared = flow_drain_ns(flow_node_dsq(node));
+	return flow_sat_add(local, shared);
+}
+/* True when one CPU can finish its local plus node drain before a deadline. */
+/* Adds now plus combined drain with saturation, so a huge drain fails */
+/* closed with no wrap to an early view. */
 static __always_inline bool flow_cpu_meets(u32 cpu,
 	u64 deadline, u64 now)
 {
@@ -57,7 +71,7 @@ static __always_inline bool flow_cpu_meets(u32 cpu,
 	u64 ready;
 	if (deadline == 0)
 		return true;
-	drain = flow_drain_ns(flow_local_dsq(cpu));
+	drain = flow_cpu_drain(cpu);
 	ready = flow_sat_add(now, drain);
 	if (ready == (u64)~0ULL)
 		return false;
@@ -67,10 +81,10 @@ static __always_inline bool flow_cpu_meets(u32 cpu,
 		return true;
 	return false;
 }
-/* True when one CPU can finish its local drain before a fair time. */
-/* Mirrors the deadline check for the fair key, so the bypass tests */
-/* fair order while tier placement tests the deadline. A zero fair time */
-/* means no fair order yet, so the check passes with no gate. */
+/* True when one CPU can finish its local plus node drain before a fair time. */
+/* Mirrors the deadline check for the fair key, so the bypass plus the tier */
+/* choice test fair order while placement tests the deadline. A zero fair */
+/* time means no fair order yet, so the check passes with no gate. */
 static __always_inline bool flow_cpu_meets_fair(u32 cpu,
 	u64 vtime, u64 now)
 {
@@ -78,7 +92,7 @@ static __always_inline bool flow_cpu_meets_fair(u32 cpu,
 	u64 ready;
 	if (vtime == 0)
 		return true;
-	drain = flow_drain_ns(flow_local_dsq(cpu));
+	drain = flow_cpu_drain(cpu);
 	ready = flow_sat_add(now, drain);
 	if (ready == (u64)~0ULL)
 		return false;

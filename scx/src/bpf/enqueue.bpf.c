@@ -152,6 +152,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		s32 pc = flow_pick_target(p, sel);
 		u32 ph;
 		u32 phint_w = (u32)FLOW_WEIGHT_BASE;
+		u64 pavg;
+		u64 pdev;
 		u64 pdl;
 		u64 pvr;
 		u32 ptask_w;
@@ -170,11 +172,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		}
 		tctx->hint_us = ph;
 		tctx->hint_w = phint_w;
-		pdl = flow_fallback_deadline(now, ph);
+		/* Pinned tasks recompute the deadline from the predictor */
+		/* plus hint with no stale reuse, so a pinned requeue tracks */
+		/* recent bursts like open tasks with no order break. A zero */
+		/* average means no history, so the hint period applies. */
+		pavg = (u64)READ_ONCE(tctx->avg_ns);
+		pdev = (u64)READ_ONCE(tctx->dev_ns);
+		pdl = flow_pred_deadline(now, pavg, pdev, ph);
+		__sync_lock_test_and_set(&tctx->deadline, pdl);
 		tctx->wait_at = now;
-		if (READ_ONCE(tctx->deadline) == 0)
-			__sync_lock_test_and_set(&tctx->deadline, pdl);
-		pdl = READ_ONCE(tctx->deadline);
 		pvr = READ_ONCE(tctx->vruntime);
 		ptask_w = READ_ONCE(tctx->weight);
 		ps = READ_ONCE(tctx->slice_ns);
@@ -311,18 +317,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while tier queues hold misses plus pins. */
 	__sync_fetch_and_add(&flow_stats.admits, 1);
-	/* Idle direct bypass only when tiers hold no earlier work. An idle */
-	/* target takes the task straight to its local queue with one idle */
-	/* kick, so wakeups skip the tier plus dispatch hop. The bypass runs */
-	/* only when the local plus node plus machine tiers hold no queued */
-	/* work or the target still drains before the fair time, so an */
-	/* earlier fair time never waits behind this arrival in a tier */
-	/* queue. The deadline plus admit already hold, so order plus */
-	/* counters stay correct with no extra wait. The bypass inserts */
-	/* straight to local with no tier move count, so admits vs moves */
-	/* drift by the bypass count with no loss while dispatch moves still */
-	/* count each tier. Eligible arrivals only bypass, so hogs pace */
-	/* through tiers with no direct jump. */
+	/* Idle direct bypass only when tiers hold no earlier fair key. An idle */
+	/* target takes the task straight to its local queue with one idle kick */
+	/* per wait and no preempt, so wakeups skip the tier plus dispatch hop. */
+	/* The bypass runs only when the local plus node plus machine tiers hold */
+	/* no queued work or the target still drains local plus node before the */
+	/* fair time, so an earlier fair time never waits behind this arrival in */
+	/* a tier queue. The deadline plus admit already hold, so order plus */
+	/* counters stay correct with no extra wait. The bypass inserts straight */
+	/* to local with no tier move count, so admits vs moves drift by the */
+	/* bypass count with no loss while dispatch moves still count each tier. */
+	/* Strict fair order gates the bypass with eligibility plus drain, so hogs */
+	/* pace through tiers with no direct jump and one kick per wait stays. */
 	{
 		struct flow_cpu_state *dst = flow_cpu((u32)cpu);
 		if (dst && READ_ONCE(dst->running_pid) == 0) {
@@ -365,16 +371,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* open. Queue order uses the fair time while placement tests the */
 	/* deadline, so the slowest sufficient CPU still wins. */
 	flow_tier_insert(p, cpu, deadline, vtime, now);
-	/* Idle targets kick at once with no rate window. */
-	/* The idle flag clears first so the kick sticks. The pid read */
-	/* uses a relaxed load to match the running stores. The direct */
-	/* block holds both the idle plus the preempt kick with the idle */
-	/* direct bypass as its mate, so all four points keep one kick per */
-	/* wait with no storm. Requeues skip the occupant lookup with no */
-	/* task_from_pid cost, so slice rotation paces at expiry with no */
-	/* extra kick. Busy preempts count in preempt_kicks on success and */
-	/* in preempt_skipped when margin plus tail plus eligibility hold */
-	/* the kick, so the two counters track urgency with no extra kick. */
+	/* Idle targets kick at once with strict one kick per wait and no rate */
+	/* window. The idle flag clears first so the kick sticks. The pid read */
+	/* uses a relaxed load to match the running stores. The direct block */
+	/* holds both the idle plus the preempt kick with the idle direct bypass */
+	/* as its mate, so all four points keep one kick per wait with no storm. */
+	/* Requeues skip the occupant lookup with no task_from_pid cost, so slice */
+	/* rotation paces at expiry with no extra kick. Busy preempts count in */
+	/* preempt_kicks on success and in preempt_skipped on every hold by strict */
+	/* margin plus tail plus eligibility with no missing fill, so the two */
+	/* counters track urgency with no extra kick. Strict order uses wrap safe */
+	/* time before throughout, so equal arrivals pace with no bounce. */
 	{
 		struct flow_cpu_state *st = flow_cpu((u32)cpu);
 		u32 occ_pid;
@@ -479,6 +486,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		if (occ_start == 0) {
 			bpf_task_release(trusted);
 			bpf_rcu_read_unlock();
+			__sync_fetch_and_add(&flow_stats.preempt_skipped, 1);
 			return;
 		}
 		occ_end = flow_sat_add(occ_start,

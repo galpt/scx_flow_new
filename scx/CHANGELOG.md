@@ -1,5 +1,12 @@
 # Changelog
 
+## 4.7.6
+
+- Scale to `1024` CPUs plus `16` nodes plus `8192` hints plus `2048` cache with `1041` queues. Dispatch drains local plus node plus machine plus steal in fair order with one move per tier capped by slots and `64` shared visits with resume. Steal scans `8` to `16` peers proportional to remaining visits with mask wins and local counting, so stats stay at `120B`. Placement scans `16` peers with the same bound.
+- Keep single weighting through one shared band with `0` scoping to defaults and zero sentinel to acquire. Moves plus disable plus enable plus exit invalidate the cached id, so reused pids never read stale with no double count.
+- Tier takes the fair key with local plus node drain, so busy nodes hold local with no wait. Pinned tasks recompute the deadline from predictor plus hint with no stale reuse. Deviation trains from the new average, so margins track the fresh mean with no lagging bound.
+- Preempt keeps strict one kick per wait with every hold counted in skipped and bypass gated on fair plus eligibility with no storm. Running claims the pid with compare and swap, minimum folds with bounded retry, negative lag maps to zero, sparse nodes fold safe, and perf polls node with no machine walk. Docs plus mirrors plus UI track the new shape with 50 word subsections, 1041 queue checks, and fifteen counters with preempt cards. No `dhq.h` plus no `fair.c` helper is used and the queue order stays in kernel priority queues.
+
 ## 4.7.5
 
 - Add per task weight via set weight with clamped base plus stacked effective share of task times hint over 128. Enqueue plus stopping plus leftover charge use the effective share for scaled delta plus virtual deadline with no extra store, and the shared band helper serves cgroup plus task paths on powers of two.

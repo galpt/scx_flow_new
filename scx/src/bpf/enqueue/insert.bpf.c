@@ -40,20 +40,24 @@ static __always_inline void flow_machine_insert(
 	    (u64)FLOW_QUANTUM_NS, vtime, 0);
 }
 /* Insert one task into the best tier for one CPU with fair order. */
-/* Takes the local queue when the CPU drains before the deadline, else */
-/* the node queue when the node is live, else the machine queue, so no */
-/* task waits for a busy CPU while shared room stays open. Placement */
-/* tests the EDF deadline while queue order uses the fair vtime, so */
-/* the slowest sufficient CPU still wins with fair drain order. */
-/* Homeless tasks with no live CPU wait in the machine queue with mask */
-/* wins on drain. The deadline plus the fair time already hold from */
-/* the predictor plus the virtual deadline, so order stays correct */
-/* with no extra wait. */
+/* Takes the local queue when the CPU drains local plus node before the */
+/* fair key, else the node queue when the node is live, else the machine */
+/* queue, so no task waits for a busy CPU while shared room stays open. */
+/* The tier tests the fair key of deadline plus virtual deadline while */
+/* placement tests the EDF deadline, so the slowest sufficient CPU still */
+/* wins with fair drain order. Homeless tasks with no live CPU wait in */
+/* the machine queue with mask wins on drain. The deadline plus the fair */
+/* time already hold from the predictor plus the virtual deadline, so */
+/* order stays correct with no extra wait. */
 static __always_inline void flow_tier_insert(
 	struct task_struct *p, s32 cpu, u64 deadline, u64 vtime, u64 now)
 {
 	u32 node;
-	if (cpu >= 0 && flow_cpu_meets((u32)cpu, deadline, now)) {
+	/* Fair key tier gates local on the fair time with combined drain. */
+	/* The EDF deadline stays for the miss check with no tier use, so */
+	/* urgent plus fair order share one key with no extra poll. */
+	(void)deadline;
+	if (cpu >= 0 && flow_cpu_meets_fair((u32)cpu, vtime, now)) {
 		flow_local_insert(p, cpu, vtime);
 		return;
 	}

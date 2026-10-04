@@ -49,7 +49,7 @@ struct {
 	__type(value, struct flow_cpu_cap);
 } cap_stor SEC(".maps");
 /* Flat period hint by id with miss default. Keys are hierarchy ids */
-/* with a bound at 4096, so large hosts hold churn with no stall. */
+/* with a bound at 8192, so large hosts hold churn with no stall. */
 /* Full tables fail closed to the default period with no eviction. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -58,14 +58,14 @@ struct {
 	__type(value, struct flow_hint);
 } hint_stor SEC(".maps");
 /* Task to hierarchy cache with pid key plus id value. Holds the last */
-/* seen hierarchy id per task with a cap at 1024, so the hot enqueue */
+/* seen hierarchy id per task with a cap at 2048, so the hot enqueue */
 /* pays one hash lookup with no acquire on hit. Full tables fail closed */
 /* to the acquire path with no eviction. Entries clear on migrate plus */
 /* enable plus task exit for ABA safety, so a reused pid never reads */
 /* a stale id. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 1024);
+	__uint(max_entries, 2048);
 	__type(key, u32);
 	__type(value, u64);
 } cgrp_cache_stor SEC(".maps");
@@ -110,7 +110,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	nr_cpu_ids = n;
 	/* Node count derives from the seeded NUMA view with a cap */
-	/* at eight. Seeded rows arrive before attach, so the scan */
+	/* at sixteen. Seeded rows arrive before attach, so the scan */
 	/* sees the host view. Unseeded rows read as zero, so the */
 	/* fallback stays at one with no panic on large hosts. */
 	{
@@ -170,7 +170,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	/* One local queue per CPU plus one shared queue per node plus */
 	/* one machine queue with no overflow tail. Local ids cover */
 	/* 0x5100 plus id and node ids cover 0x5900 plus id. The node */
-	/* loop covers the derived count with a cap at eight. */
+	/* loop covers the derived count with a cap at sixteen. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 local;
 		if (cpu < 0)
@@ -189,7 +189,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 	}
 	/* One shared queue per node from the derived count. */
-	/* The bound stays at eight, so large hosts fold to machine. */
+	/* The bound stays at sixteen, so large hosts fold to machine. */
 	{
 		u32 node;
 		u64 nn = nr_node_ids;

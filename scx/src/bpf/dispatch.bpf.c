@@ -2,25 +2,27 @@
 /*
  * Dispatch op.
  *
- * Each pass drains local plus node plus machine in fair order
- * with at most one move per tier bounded by remaining dispatch
- * slots and visits capped at sixty four per pass. The kernel keeps
+ * Each pass drains local plus node plus machine plus steal in fair
+ * order with at most one move per tier bounded by remaining dispatch
+ * slots and visits capped at sixty four per pass shared across tiers. The kernel keeps
  * each priority queue list in fair order, so each tier takes the
  * earliest matching fair time with mask wins on drain and no BPF
  * sort. Fair order via kernel priority queue: the vtime key holds
  * the earlier of deadline plus virtual deadline, so the earliest
  * fair time wins with the 2ms lag bound. Each tier
  * skips unmatching heads uniformly through the shared move, so one
- * foreign task never stalls its tier for that pass. Visits cap at
- * sixty four per pass regardless of moves with leftover work resuming
+ * foreign task never stalls its tier for that pass. The steal tier scans
+ * peer locals within 8 to 16 peers proportional to remaining visits.
+ * Visits cap at sixty four per pass shared regardless of moves with
+ * leftover work resuming
  * next pass, so one pass never holds RCU across the whole queue on
  * mask misses while staying work conserving across passes.
  * The gate runs first for the CPU, then the remaining dispatch slots
  * bound the moves with no clamp, so every tier shares one exact move
  * bound with no overfill. The queue depth leaves at once per tier with
  * no RCU hold through the shared move, so idle tiers stay cheap. Static
- * tier order is local plus node plus machine with no reorder, so the
- * pass follows one fixed path. Per tier moves count once with no lock
+ * tier order is local plus node plus machine plus steal with no
+ * reorder, so the pass follows one fixed path. Per tier moves count once with no lock
  * through one exit, and the level follows after all moves with the
  * same CPU only, so idle cannot be skipped. No consumable slots leaves
  * at once with no scan, so idle stays cheap.
@@ -86,8 +88,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	left = budget;
 	/* Local tier first with no scan on empty. The kernel holds */
 	/* fair order plus mask wins, so the earliest matching fair time */
-	/* moves at once within the per pass visit cap with at most one */
-	/* move for this tier. The likely busy tiers run first in static */
+	/* moves at once within the shared per pass visit cap with at most */
+	/* one move for this tier. The likely busy tiers run first in static */
 	/* order with no reorder. */
 	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
 		local_moved = flow_move_one(own_local, cpu, &visits);
@@ -108,6 +110,21 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		if (machine_moved > left)
 			machine_moved = left;
 		left -= machine_moved;
+	}
+	/* Steal tier last with a bounded 8 to 16 peer window. The window */
+	/* spans proportional to remaining visits, so a fresh pass scans */
+	/* sixteen peers while a spent pass scans eight peers with no */
+	/* hotspot. Stolen work counts in the local bucket with no new */
+	/* counter, so stats stay at 120B with mask wins on drain. */
+	if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+		u32 steal_moved;
+		struct flow_cpu_state *cst = flow_cpu((u32)cpu);
+		u32 cursor = cst ? READ_ONCE(cst->cursor) : (u32)cpu;
+		steal_moved = flow_steal_one(cpu, &visits, cursor);
+		if (steal_moved > left)
+			steal_moved = left;
+		left -= steal_moved;
+		local_moved += steal_moved;
 	}
 	flow_account_local(local_moved);
 	flow_account_node(node_moved);

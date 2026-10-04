@@ -98,9 +98,10 @@ pub fn pred_avg(avg: u64, delta: u64) -> u64 {
 }
 
 /// Updated burst deviation with shift 2 and saturation.
-/// Tracks the absolute error with one quarter steps, so stable bursts
-/// keep a small margin while ragged bursts widen with no jump. A zero
-/// deviation takes the max of error and average quarter as the floor
+/// Tracks the absolute error against the new average with one quarter
+/// steps, so stable bursts keep a small margin while ragged bursts widen
+/// with no jump. Callers pass the new average from pred_avg. A zero
+/// deviation takes the max of error and new average quarter as the floor
 /// with shifts plus clamp kept.
 #[cfg(test)]
 pub fn pred_dev(dev: u64, avg: u64, delta: u64) -> u64 {
@@ -124,6 +125,16 @@ pub fn pred_dev(dev: u64, avg: u64, delta: u64) -> u64 {
         }
         pred_clamp(dev - diff)
     }
+}
+
+/// Train average plus deviation from one sample with the new average.
+/// Mirrors BPF stopping plus leftover order, so the deviation tracks the
+/// fresh mean with no lagging bound.
+#[cfg(test)]
+pub fn pred_train(avg: u64, dev: u64, delta: u64) -> (u64, u64) {
+    let n_avg = pred_avg(avg, delta);
+    let n_dev = pred_dev(dev, n_avg, delta);
+    (n_avg, n_dev)
 }
 
 /// Predicted period from average plus deviation with fallback.
@@ -320,6 +331,15 @@ mod tests {
         let wide = pred_dev(1, 2_000_000, 4_000_000);
         assert!(wide > 1);
         assert_eq!(pred_dev(100, 1_000, 1_000), 76);
+    }
+
+    #[test]
+    fn pred_train_uses_new_avg() {
+        let (n_avg, n_dev) = pred_train(8_000_000, 1_000_000, 16_000_000);
+        assert_eq!(n_avg, pred_avg(8_000_000, 16_000_000));
+        assert_eq!(n_dev, pred_dev(1_000_000, n_avg, 16_000_000));
+        // Pinned recompute uses the predictor plus hint like open tasks.
+        assert_eq!(pred_deadline(1_000, 0, 0, 8000), 8_001_000);
     }
 
     #[test]
