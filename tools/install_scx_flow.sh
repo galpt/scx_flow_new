@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="4.7.4"
+VER="4.7.5"
 # Pinned upstream ref, same as repo CI.
 SCX_REF="6752d59a4297d8918e8fd4d7237b50e2fceb1d14"
 UPSTREAM="https://github.com/sched-ext/scx"
@@ -49,11 +49,19 @@ case "${WS}" in
         exit 1
         ;;
 esac
-TAB="$(printf '\t')"
-NL="$(printf '\n')"
+TAB=$'\t'
+NL=$'\n'
 case "${WS}" in
     *"${TAB}"* | *"${NL}"*)
         echo "refusing a workspace path with whitespace" >&2
+        exit 1
+        ;;
+esac
+# Never clean the shared CI tree at /tmp/opencode, so local runs keep
+# the pinned workspace plus caches intact with no accidental remove.
+case "${WS}" in
+    /tmp/opencode | /tmp/opencode/*)
+        echo "refusing to clean /tmp/opencode" >&2
         exit 1
         ;;
 esac

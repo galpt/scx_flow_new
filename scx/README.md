@@ -30,7 +30,7 @@ Each fair time orders as priority value with vruntime pacing via lag bounds. Pre
 
 ### Admission
 
-Tasks carry weight with default 128 and every join counts one admit with no reject. Hint period plus weight bands shape deadline while predictor shapes deadlines only. Rejects stay zero for wire compat with rejects in gate_rejects. Misses count due on blocking ends with effort drain. See `src/bpf/enqueue.bpf.c` and `src/rust/flow/edf.rs`.
+Tasks carry base weight 128 and every join counts one admit with no reject. Effective stacks task times hint over 128 with clamp while bands shape deadline plus predictor shapes deadlines only. Rejects stay zero for wire compat in gate_rejects. Misses count on blocking ends here. See `src/bpf/enqueue.bpf.c` and `src/rust/flow/slice.rs`.
 
 ### Gates
 
@@ -38,28 +38,28 @@ A gate runs first at each step so tasks and CPUs wait safely. Exiting work runs 
 
 ### Reporting
 
-Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page at `50005`. Page keeps local, node, machine, kicks apart with no overflow. Snapshots share one moment for review with times plus minima. Dashboard shows thirteen counters plus uptime with per CPU cards. See `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`.
+Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page at `50005`. Page keeps local, node, machine, kicks plus preempt apart with no overflow. Snapshots share one moment for review with times now. Dashboard shows fifteen counters plus uptime with CPU cards. See `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`.
 
 ## Code map
 
 - Rules live in `src/bpf/intf.h`.
-- Changes live in `CHANGELOG.md` with the `4.7.4` shape.
+- Changes live in `CHANGELOG.md` with the `4.7.5` shape.
 - Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/main/`, `src/bpf/dispatch.bpf.c`, `src/bpf/dispatch/`, `src/bpf/enqueue.bpf.c`, `src/bpf/enqueue/`, `src/bpf/lifecycle.bpf.c`, `src/bpf/cgroup.bpf.c`, `src/bpf/select_cpu.bpf.c` and `src/bpf/helpers/`. No `fair.c` helper is used and the queue order stays in kernel priority queues.
 - Order lives in kernel priority queues with mirrors in `src/rust/flow/edf.rs`, `src/rust/flow/slot.rs`, `src/rust/flow/select.rs`, `src/rust/flow/preempt.rs`, `src/rust/flow/slice.rs` and `src/rust/flow/cgrp.rs` for tests only. The mirrors check fair order plus vruntime plus saturation against the kernel logic, since no kernel test harness runs here.
 - Deadline plus fair checks live in `src/bpf/main/deadline.bpf.c` with a mirror in `src/rust/flow/edf.rs` for tests only. The mirror keeps the same hint plus predictor plus vruntime math with no effect on order.
-- Task vruntime bookkeeping lives in `src/rust/flow/edf.rs` with the slice plus scaler in `src/rust/flow/slice.rs` plus placement in `src/rust/flow/select.rs` plus kicks in `src/rust/flow/preempt.rs` plus checks in `src/rust/config.rs`.
+- Task vruntime bookkeeping lives in `src/rust/flow/edf.rs` with the slice plus scaler plus effective share in `src/rust/flow/slice.rs` plus placement in `src/rust/flow/select.rs` plus kicks in `src/rust/flow/preempt.rs` plus checks in `src/rust/config.rs`.
 - Speed levels live in `src/bpf/dispatch/perf.bpf.c` and run once per dispatch pass.
-- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses as source of truth.
+- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses, preempt kicks plus skipped as source of truth.
 
 ## Limitations
 
 - Hotplug needs a restart.
 - Releases need a restart.
-- State is `64B`, `16B`, `8B`, `104B`.
+- State is `64B`, `16B`, `8B`, `120B`.
 - Needs kernels, `7.2` series and up.
 - Priority queues never mix orders, since the kernel keeps one fair key per queue and a mix fails closed with an error.
 - Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match through the shared move.
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline with near minimum tiebreak on minima, so light work never takes a fast CPU that other work needs.
 - Flood and affinity stress skip forward with mask wins, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Overload past saturation runs best effort at `100%` utilization with miss cascade expected, so late work still drains in fair order with no admission drop while misses track the overload.
-- Preempt sends at most one kick per wait when the arrival is eligible and leads by `100us` with more than `100us` still left on the owner, so urgent gaps preempt with no storm while near ties pace.
+- Preempt sends at most one kick per wait when the arrival is eligible and leads by `100us` with more than `100us` still left on the owner, so urgent gaps preempt with no storm while near ties pace. Busy preempts count in preempt_kicks with held kicks in preempt_skipped.

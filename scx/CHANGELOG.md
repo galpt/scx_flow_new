@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.7.5
+
+- Add per task weight via set weight with clamped base plus stacked effective share of task times hint over 128. Enqueue plus stopping plus leftover charge use the effective share for scaled delta plus virtual deadline with no extra store, and the shared band helper serves cgroup plus task paths on powers of two.
+- Add busy preempt counters with preempt kicks on sent preempts plus preempt skipped on margin plus tail plus eligibility holds. Stats grow from `104B` to `120B` with 15 counters, and all four kick points keep one kick per wait with no storm.
+- Docs plus mirrors plus UI track the new shape with 50 word subsections, 521 queue checks, share combine plus effective tests, and fifteen counters with preempt cards. No `fair.c` helper text is copied and the queue order stays in kernel priority queues.
+
 ## 4.7.4
 
 - Drop the overflow tail for 521 queues with local plus node plus machine only. Every wait rejoins a tier queue in fair order with a fallback deadline plus a tier insert, dispatch drops the overflow scan plus its account, and stats fall from `120B` to `104B` with 13 counters and no parks.
