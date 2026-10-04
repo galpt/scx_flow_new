@@ -30,7 +30,7 @@ Each fair time orders as priority value with vruntime pacing via lag bounds. Pre
 
 ### Admission
 
-Tasks carry base weight 128 with zero mapping to one and every join counts one admit with no reject. Effective stacks task times hint over 128 with clamp while bands shape deadline plus predictor shapes deadlines only. Rejects stay zero for wire compat in gate_rejects. Misses count on blocking ends here. See `src/bpf/enqueue.bpf.c` and `src/rust/flow/slice.rs`.
+Tasks carry base weight 128, zero mapped to one, each join admits once with no reject. Effective stacks times hint over 128 with clamp while bands shape deadline and predictor shapes deadlines only. Rejects stay zero for wire compat in gate_rejects. Misses count on blocking ends. See `src/bpf/enqueue.bpf.c` and `src/rust/flow/slice.rs`.
 
 ### Gates
 
@@ -62,4 +62,4 @@ Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page
 - Placement keeps the slowest sufficient CPU among allowed peers that can meet the deadline with near minimum tiebreak on minima, so light work never takes a fast CPU that other work needs.
 - Flood and affinity stress skip forward with mask wins, so keep pinned work narrow and test with mixed masks before trusting tail latency.
 - Overload past saturation runs best effort at `100%` utilization with miss cascade expected, so late work still drains in fair order with no admission drop while misses track the overload.
-- Preempt sends at most one kick per wait when the arrival is eligible and leads by `100us` with more than `100us` still left on the owner, so urgent gaps preempt with no storm while near ties pace. Busy preempts count in preempt_kicks with held kicks in preempt_skipped, and lag workloads held by eligibility also count as skipped with no extra kick.
+- Preempt sends at most one kick per wait when arrival is eligible and leads by `100us` with over `100us` left on owner, so urgent gaps preempt with no storm while ties pace. Kicks count in preempt_kicks, held kicks in preempt_skipped, and eligibility lag holds count as skipped.
