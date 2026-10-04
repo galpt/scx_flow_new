@@ -8,10 +8,10 @@
 //! userspace tests. The BPF placement lives in select_cpu.bpf.c, and
 //! this file mirrors the order with no map use.
 
-/// Bound of the shared scan at 16 peers. Fixed with no knob.
-/// Steal scans 8 to 16 peers proportional to remaining visits.
+/// Bound of the shared scan at 8 peers. Fixed with no knob.
+/// Steal scans 4 to 8 peers proportional to remaining visits.
 #[cfg(test)]
-pub const SHARED_SCAN_BOUND: u32 = 16;
+pub const SHARED_SCAN_BOUND: u32 = 8;
 /// Near minimum window in capacity units at 64. Peers within this
 /// distance of the best defer to the smallest minimum.
 #[cfg(test)]
@@ -84,14 +84,14 @@ pub fn cpu_meets_fair_combined(local: u64, node: u64, vtime: u64, now: u64) -> b
     ready <= vtime
 }
 
-/// Steal window in peers from remaining visits with 8 to 16 bounds.
+/// Steal window in peers from remaining visits with 4 to 8 bounds.
 /// Mirrors BPF flow_steal_one proportional window, so a fresh pass scans
-/// sixteen peers while a spent pass scans eight peers with no hotspot.
+/// eight peers while a spent pass scans four peers with no hotspot.
 #[cfg(test)]
 pub fn steal_window(visits: u32) -> u32 {
-    let remain = 64u32.saturating_sub(visits);
-    let window = 8u32.saturating_add(remain >> 3);
-    window.clamp(8, 16)
+    let remain = 8u32.saturating_sub(visits);
+    let window = 4u32.saturating_add(remain >> 1);
+    window.clamp(4, 8)
 }
 
 /// Saturated backlog of tier queues as local plus node plus machine.
@@ -116,13 +116,13 @@ pub fn steal_should_skip(local: u64, node: u64, machine: u64) -> bool {
 /// tiebreak on the smallest minimum vruntime. Peers within 64 capacity
 /// units of the best count as tied, so lagging CPUs take work first.
 /// Test-only mirror with no map use where the BPF pass scans at most
-/// sixteen peers from the cursor and skips the busy waker, and this
+/// eight peers from the cursor and skips the busy waker, and this
 /// mirror walks the same bounded window from the passed cursor with
 /// the same skip. Minimum order uses the wrap safe signed diff like
 /// BPF, so the tiebreak holds across the u64 wrap. Callers pass
 /// host-sized slices within the 1024 CPU bound with units plus
 /// minimums parallel to live. Returns minus one when no allowed CPU
-/// is live. Perf stays bounded at sixteen peers with no extra walk.
+/// is live. Perf stays bounded at eight peers with no extra walk.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn place(
@@ -365,13 +365,13 @@ mod tests {
 
     #[test]
     fn shared_scan_stays_bounded() {
-        assert_eq!(SHARED_SCAN_BOUND, 16);
+        assert_eq!(SHARED_SCAN_BOUND, 8);
         assert_eq!(NEAR_MIN_WINDOW, 64);
         // Wrap safe minimum order holds across the u64 wrap.
         assert!(crate::flow::edf::time_before(u64::MAX, 10));
         assert!(!crate::flow::edf::time_before(10, u64::MAX - 10));
         // Busy waker stays out while the cursor window still finds
-        // the lagging peer within sixteen.
+        // the lagging peer within eight.
         let got = place(
             &[],
             9,
@@ -387,7 +387,7 @@ mod tests {
         );
         assert_eq!(got, 2);
         // Cursor rotation still visits all peers when the host holds
-        // fewer than sixteen CPUs.
+        // fewer than eight CPUs.
         let again = place(
             &[],
             9,
@@ -428,12 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn steal_window_spans_8_to_16() {
-        assert_eq!(steal_window(0), 16);
-        assert_eq!(steal_window(64), 8);
-        assert_eq!(steal_window(32), 12);
+    fn steal_window_spans_4_to_8() {
+        assert_eq!(steal_window(0), 8);
+        assert_eq!(steal_window(8), 4);
+        assert_eq!(steal_window(4), 6);
         assert!(steal_window(0) <= SHARED_SCAN_BOUND);
-        assert!(steal_window(64) >= 8);
+        assert!(steal_window(8) >= 4);
     }
 
     #[test]

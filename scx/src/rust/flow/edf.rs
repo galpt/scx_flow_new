@@ -170,56 +170,26 @@ pub fn weight_clamp(w: u32) -> u32 {
     )
 }
 
-/// Scaled service for one delta at one weight with no divide.
+/// Scaled service for one delta at one weight with one divide.
 /// The neutral weight of 128 keeps the delta unchanged, lighter tasks
-/// shift left while heavier tasks shift right with saturation.
+/// grow while heavier tasks shrink with saturation and a floor of one.
+/// Mirrors BPF flow_scaled_delta plus weight calc_delta_fair.
 #[cfg(test)]
 pub fn scaled_delta(delta: u64, weight: u32) -> u64 {
     let w = weight_clamp(weight);
-    if w < 16 {
-        if delta > (u64::MAX >> 4) {
-            return u64::MAX;
-        }
-        return delta << 4;
+    if delta == 0 {
+        return 0;
     }
-    if w < 32 {
-        if delta > (u64::MAX >> 3) {
-            return u64::MAX;
-        }
-        return delta << 3;
+    let w = if w == 0 {
+        crate::flow::slice::WEIGHT_MIN
+    } else {
+        w
+    };
+    if delta > u64::MAX / crate::flow::slice::WEIGHT_BASE as u64 {
+        return u64::MAX;
     }
-    if w < 64 {
-        if delta > (u64::MAX >> 2) {
-            return u64::MAX;
-        }
-        return delta << 2;
-    }
-    if w < 96 {
-        if delta > (u64::MAX >> 1) {
-            return u64::MAX;
-        }
-        return delta << 1;
-    }
-    if w < 192 {
-        return delta;
-    }
-    if w < 384 {
-        return delta >> 1;
-    }
-    if w < 768 {
-        return delta >> 2;
-    }
-    if w < 1536 {
-        return delta >> 3;
-    }
-    if w < 3072 {
-        return delta >> 4;
-    }
-    if w < 6144 {
-        return delta >> 5;
-    }
-    let out = delta >> 6;
-    if out == 0 && delta != 0 {
+    let out = delta * crate::flow::slice::WEIGHT_BASE as u64 / w as u64;
+    if out == 0 {
         return 1;
     }
     out

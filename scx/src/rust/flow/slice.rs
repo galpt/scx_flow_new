@@ -43,8 +43,8 @@ pub fn task_effective_weight(task_w: u32, hint_w: u32) -> u32 {
     share_combine(t, h)
 }
 
-/// Scaled service for one delta at one weight with banded shifts.
-/// Mirrors BPF flow_scaled_delta with no divide and saturation.
+/// Scaled service for one delta at one weight with one divide.
+/// Mirrors BPF flow_scaled_delta plus calc_delta_fair with saturation.
 #[cfg(test)]
 pub fn scaled_delta(delta: u64, weight: u32) -> u64 {
     crate::flow::edf::scaled_delta(delta, weight)
@@ -67,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn scaler_uses_bands_without_divide() {
+    fn scaler_uses_divide_without_bands() {
         assert_eq!(scaled_delta(1_000_000, 128), 1_000_000);
         assert_eq!(scaled_delta(1_000_000, 16), 8_000_000);
         assert_eq!(scaled_delta(1_000_000, 32), 4_000_000);
