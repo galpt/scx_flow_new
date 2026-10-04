@@ -70,11 +70,19 @@ static __always_inline u64 flow_cpu_drain_hint(s32 local_q, s32 node_q)
 	return flow_sat_add(flow_drain_from_q(local_q),
 	    flow_drain_from_q(node_q));
 }
-/* Combined drain of one CPU as local plus node with saturation. */
-/* Sums both depths, so a busy node holds the local tier with no wait. */
-/* A missing node reads zero with no boost. Sparse nodes fold to zero. */
-/* Outlined with noinline to keep verifier headroom: callers in meets */
-/* plus fair plus BSF share one copy with no inline growth. */
+/**
+ * flow_cpu_drain - combined drain of one CPU as local plus node.
+ * @cpu: CPU id below the 1024 bound.
+ *
+ * Sums both depths with saturation, so a busy node holds the local
+ * tier with no wait. A missing node reads zero with no boost, and
+ * sparse nodes fold to zero.
+ *
+ * Outlined with noinline to keep verifier headroom: callers in meets
+ * plus fair plus BSF share one copy with no inline growth.
+ *
+ * Returns: combined drain in nanos.
+ */
 static __noinline u64 flow_cpu_drain(u32 cpu)
 {
 	u64 local = flow_drain_ns(flow_local_dsq(cpu));
@@ -84,6 +92,29 @@ static __noinline u64 flow_cpu_drain(u32 cpu)
 	    (u64)node < nr_node_ids)
 		shared = flow_drain_ns(flow_node_dsq(node));
 	return flow_sat_add(local, shared);
+}
+/**
+ * flow_ready_before - test ready time against deadline with wrap safety.
+ * @ready: ready time in nanos, max fails closed.
+ * @deadline: absolute deadline in nanos.
+ *
+ * Fails closed on saturated ready, else wrap safe before plus equal,
+ * so a huge drain never reads as early with no wrap to the front.
+ *
+ * Outlined with noinline to share one compare copy across drain plus
+ * deadline checks with no inline growth and no order change.
+ *
+ * Returns: true when @ready falls before or on @deadline.
+ */
+static __noinline bool flow_ready_before(u64 ready, u64 deadline)
+{
+	if (ready == (u64)~0ULL)
+		return false;
+	if (flow_time_before(ready, deadline))
+		return true;
+	if (ready == deadline)
+		return true;
+	return false;
 }
 /**
  * flow_cpu_meets_hint - test deadline against hoisted combined drain.
@@ -107,18 +138,25 @@ static __always_inline bool flow_cpu_meets_hint(s32 local_q, s32 node_q,
 		return true;
 	drain = flow_cpu_drain_hint(local_q, node_q);
 	ready = flow_sat_add(now, drain);
-	if (ready == (u64)~0ULL)
-		return false;
-	if (flow_time_before(ready, deadline))
-		return true;
-	if (ready == deadline)
-		return true;
-	return false;
+	return flow_ready_before(ready, deadline);
 }
-/* True when one CPU can finish its local plus node drain before a deadline. */
-/* Adds now plus combined drain with saturation, so a huge drain fails */
-/* closed with no wrap to an early view. */
-static __always_inline bool flow_cpu_meets(u32 cpu,
+/**
+ * flow_cpu_meets - test deadline against one CPU drain.
+ * @cpu: CPU id below the 1024 bound.
+ * @deadline: absolute deadline, zero meets all.
+ * @now: current time in nanos.
+ *
+ * Adds now plus the combined local plus node drain with saturation,
+ * so a huge drain fails closed with no wrap to an early view. The
+ * drain poll plus the compare split across two noinline calls, so the
+ * SSF plus BSF loops share one copy each with no inline growth.
+ *
+ * Outlined with noinline to keep verifier headroom on the select path
+ * with no order change.
+ *
+ * Returns: true when the drain finishes before @deadline.
+ */
+static __noinline bool flow_cpu_meets(u32 cpu,
 	u64 deadline, u64 now)
 {
 	u64 drain;
@@ -127,19 +165,25 @@ static __always_inline bool flow_cpu_meets(u32 cpu,
 		return true;
 	drain = flow_cpu_drain(cpu);
 	ready = flow_sat_add(now, drain);
-	if (ready == (u64)~0ULL)
-		return false;
-	if (flow_time_before(ready, deadline))
-		return true;
-	if (ready == deadline)
-		return true;
-	return false;
+	return flow_ready_before(ready, deadline);
 }
-/* True when one CPU can finish its local plus node drain before a fair time. */
-/* Mirrors the deadline check for the fair key, so the bypass plus the tier */
-/* choice test fair order while placement tests the deadline. A zero fair */
-/* time means no fair order yet, so the check passes with no gate. */
-static __always_inline bool flow_cpu_meets_fair(u32 cpu,
+/**
+ * flow_cpu_meets_fair - test fair time against one CPU drain.
+ * @cpu: CPU id below the 1024 bound.
+ * @vtime: fair time, zero meets all.
+ * @now: current time in nanos.
+ *
+ * Mirrors the deadline check for the fair key, so the bypass plus the
+ * tier choice test fair order while placement tests the deadline. A
+ * zero fair time means no fair order yet, so the check passes. The
+ * drain poll plus the compare split across two noinline calls, so the
+ * loops share one copy each with no inline growth.
+ *
+ * Outlined with noinline to keep verifier headroom with no order change.
+ *
+ * Returns: true when the drain finishes before @vtime.
+ */
+__attribute__((unused)) static __noinline bool flow_cpu_meets_fair(u32 cpu,
 	u64 vtime, u64 now)
 {
 	u64 drain;
@@ -148,13 +192,7 @@ static __always_inline bool flow_cpu_meets_fair(u32 cpu,
 		return true;
 	drain = flow_cpu_drain(cpu);
 	ready = flow_sat_add(now, drain);
-	if (ready == (u64)~0ULL)
-		return false;
-	if (flow_time_before(ready, vtime))
-		return true;
-	if (ready == vtime)
-		return true;
-	return false;
+	return flow_ready_before(ready, vtime);
 }
 /**
  * flow_cpu_meets_fair_hint - test fair time against hoisted drain.
@@ -178,11 +216,5 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
 		return true;
 	drain = flow_cpu_drain_hint(local_q, node_q);
 	ready = flow_sat_add(now, drain);
-	if (ready == (u64)~0ULL)
-		return false;
-	if (flow_time_before(ready, vtime))
-		return true;
-	if (ready == vtime)
-		return true;
-	return false;
+	return flow_ready_before(ready, vtime);
 }

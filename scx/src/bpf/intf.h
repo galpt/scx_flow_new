@@ -270,9 +270,12 @@ _Static_assert(FLOW_MAX_DSQS ==
  *
  * The signed diff keeps order across the u64 wrap with no branch.
  *
+ * Outlined with noinline to keep verifier headroom on the select plus
+ * drain paths with no order change, so SSF plus BSF share one copy.
+ *
  * Returns: true when @a falls before @b, else false.
  */
-static __always_inline bool flow_time_before(u64 a,
+static __noinline bool flow_time_before(u64 a,
 	u64 b)
 {
 	return (s64)(a - b) < 0;
