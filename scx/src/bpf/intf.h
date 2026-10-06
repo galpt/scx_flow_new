@@ -16,7 +16,8 @@
  * remaining time clamped to 10us at the floor plus 1ms at the ceiling,
  * so near deadlines pace tightly while far deadlines still rotate each
  * millisecond. A miss holds the stored slice else floors it to 10us
- * with a fresh deadline plus a same-tier rejoin plus skip aging, and a
+ * with a fresh deadline plus a tier rejoin re-derived via the same
+ * escalation plus skip aging, and a
  * zero slice inherits the 1ms quantum. The overflow drains after the
  * tiers in FIFO order with one bounded extra move when the head waited
  * past 2ms else missed 8 times, so aged bursts drain without starving
@@ -184,7 +185,9 @@ enum flow_consts {
 /* hint in micros for the deadline. A zero hint means no hint, so the */
 /* default period applies. Misses holds the count of deadline misses */
 /* for the life of the task with saturating adds, so a huge miss count */
-/* clamps instead of wrapping. Stamps stay per task owned with no */
+/* clamps instead of wrapping. Lifetime by design, so promotion latches */
+/* once 8 holds with the same one-move bound; a windowed decay stays a */
+/* noted alternative with no knob here. Stamps stay per task owned with no */
 /* atomics except the run claim, only counters use atomics. Cursor and */
 /* miss scans stay best effort with no atomic order. */
 struct flow_task_ctx {
@@ -493,7 +496,9 @@ static __always_inline u64 flow_virt_deadline(u64 ve,
  * The EDF deadline caps latency while the virtual deadline paces
  * fairness, so urgent tasks still win while hogs fall behind. A zero
  * deadline means no EDF order yet, so the virtual deadline rules. The
- * signed diff picks the earlier time with wrap safety.
+ * signed diff picks the earlier time with wrap safety. Kept alongside
+ * flow_edf_key as the same strict key by design: this name serves fair
+ * voice while the alias serves EDF voice with one shared copy.
  *
  * Returns: earlier of @deadline plus @vd in nanos.
  */
@@ -514,8 +519,10 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
  * @vd: virtual deadline in nanos, zero for no order.
  *
  * The strict key is the earlier of the two times with wrap safety,
- * so the closest deadline always wins with no band jump. Shares the
- * single fair copy with no extra verifier cost.
+ * so the closest deadline always wins with no band jump. Intentional
+ * alias of flow_fair_vtime kept for EDF voice with one shared copy
+ * plus no extra verifier cost: sort-key callers use this name while
+ * fair-time callers use the other with the same result.
  *
  * Returns: earlier of @deadline plus @vd in nanos.
  */
@@ -588,8 +595,9 @@ static __always_inline u32 flow_slice_inherit(u32 cur)
  *
  * A miss never recomputes the dynamic slice, so the miss path holds
  * the stored charge else floors it to 10us with no zero slice and no
- * knob. The fresh deadline plus the same-tier rejoin carry the urgency
- * with skip aging in the miss count.
+ * knob. The fresh deadline plus the re-derived tier rejoin carry the
+ * urgency with skip aging in the miss count. Pinned plus open miss
+ * paths share this helper, so the two holds never skew.
  *
  * Returns: held slice else the 10us floor.
  */
@@ -611,7 +619,12 @@ static __always_inline u32 flow_slice_miss_hold(u32 cur)
  * bounded extra move while fresh bursts keep FIFO order. Reuses the
  * lag plus visit constants with no new knob plus no new map. A zero
  * wait means no wait yet, so the check fails closed, and a backward
- * clock never promotes.
+ * clock never promotes. Stateless test with no latch: each pass
+ * re-evaluates the same inputs, so the extra move never sticks past
+ * the pass. Misses stay lifetime by design with saturating adds, so
+ * promotion latches once 8 holds with the same one-move bound; a
+ * windowed decay is the noted alternative with no knob taken here to
+ * keep the starvation bound stable.
  *
  * Returns: true when the wait earns one bounded promotion.
  */

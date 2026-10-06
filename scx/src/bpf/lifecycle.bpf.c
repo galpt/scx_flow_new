@@ -182,8 +182,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	/* A wall completion past the deadline counts one miss with no */
 	/* wait and no kick, since the task already left the CPU. The miss */
-	/* count doubles as skip aging for the same-tier rejoin plus the */
-	/* overflow promotion, so stopping records only with no order write. */
+	/* count doubles as skip aging for the re-derived tier rejoin plus */
+	/* the overflow promotion, so stopping records only with no order */
+	/* write. Misses stay lifetime by design with the same one-move */
+	/* bound; on-time completions keep the count with no reset here. */
 	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
 	if (runnable) {

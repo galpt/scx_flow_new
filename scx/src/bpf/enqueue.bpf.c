@@ -9,7 +9,8 @@
  * times, so urgent tasks still win while hogs fall behind with lag
  * bounds. Fresh waits earn a dynamic slice from the saturated remaining
  * time clamped to 10us plus 1ms, while misses hold else floor only and
- * rejoin the same tier with a fresh deadline plus skip aging. Tasks join
+ * rejoin via the same tier escalation re-derived with a fresh deadline
+ * plus skip aging. Tasks join
  * direct when the target can drain before the shared home, so no task
  * waits for a busy CPU while shared room stays open. Missed tasks
  * rejoin a tier queue with a fresh deadline plus a miss count and one
@@ -212,9 +213,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		ndl = flow_pred_deadline(now, avg, dev, hint);
 		__sync_lock_test_and_set(&tctx->deadline, ndl);
 		/* A miss holds the stored slice else floors it to 10us */
-		/* with no dynamic recompute, then rejoins the same tier */
-		/* with the fresh deadline plus skip aging in the miss */
-		/* count, so urgency returns at once with no starvation. */
+		/* with no dynamic recompute via the shared miss helper, then */
+		/* rejoins via the same tier escalation re-derived with the */
+		/* fresh deadline plus skip aging in the miss count, so */
+		/* urgency returns at once with no starvation. */
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		nvt = flow_make_fair(tctx, ndl, hint_w);

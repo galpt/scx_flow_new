@@ -154,6 +154,8 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
  * its wait aged past 2ms else its misses reach 8, reusing the lag plus
  * visit bounds with no new knob plus no new map. A missing state fails
  * closed with no promotion, so the FIFO order holds for fresh bursts.
+ * Stateless with no latch plus no per queue state: each pass re-peeks
+ * the head, so promotion never sticks past the one bounded extra move.
  *
  * Returns: true when the head earns one bounded extra move.
  *
@@ -290,7 +292,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		/* TOCTOU between the hoisted hint and the extra move only */
 		/* repeats or skips a pass with no loss. */
 		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-			if ((u32)oq0 > overflow_moved) {
+			/* Signed guard first, so a negative hint never wraps */
+			/* through the unsigned compare below. */
+			if (oq0 > 0 && (u32)oq0 > overflow_moved) {
 				u64 now = flow_now();
 				if (flow_overflow_head_aged(overflow_dsq, now)) {
 					u32 extra = flow_move_one_hint(overflow_dsq,

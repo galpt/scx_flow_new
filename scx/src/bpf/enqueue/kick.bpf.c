@@ -45,7 +45,9 @@ struct flow_enqueue_tail {
  * The bypass runs only when the local plus node plus machine tiers hold
  * no queued work or the target still drains local plus node before the
  * strict key, so an earlier key never waits behind this arrival in
- * a tier queue. Local plus node depths hoist once here, so the empty
+ * a tier queue. The overflow FIFO stays out of scope here by design
+ * with dispatch draining it after the tiers, so FIFO bursts never block
+ * the bypass. Local plus node depths hoist once here, so the empty
  * gate plus the drain gate share the same reads with no second poll.
  * The bypass inserts straight to local with no tier move count, so
  * admits vs moves drift by the bypass count with no loss while dispatch
@@ -92,6 +94,9 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 		/* Hoist local plus node plus machine once with signed */
 		/* hints, so the empty gate plus the drain gate plus the */
 		/* tier escalation below share one read with no repoll. */
+		/* Overflow FIFO stays out of scope for tiers_empty by design: */
+		/* FIFO bursts drain via the dispatch overflow tier with the */
+		/* aged extra, so they never block this idle direct bypass. */
 		lq = scx_bpf_dsq_nr_queued(own);
 		mq = scx_bpf_dsq_nr_queued(flow_machine_dsq());
 		if (node_valid)

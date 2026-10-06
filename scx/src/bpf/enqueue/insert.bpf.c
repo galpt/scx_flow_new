@@ -232,9 +232,10 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		flow_clamp_to_min(tctx, (u32)pc);
 	/* A past deadline counts one miss before the fresh deadline, */
 	/* so pinned overload tracks like open tasks with no loss. The */
-	/* miss holds the stored slice else floors it to 10us, and a fresh */
-	/* wait earns the dynamic remaining clamp, so the key stays strict */
-	/* with skip aging in the miss count. */
+	/* miss holds the stored slice else floors it to 10us via the */
+	/* shared miss helper, and a fresh wait earns the dynamic */
+	/* remaining clamp, so the key stays strict with skip aging in */
+	/* the miss count. */
 	if (READ_ONCE(tctx->deadline) &&
 	    flow_missed(READ_ONCE(tctx->deadline), now)) {
 		flow_count_miss(tctx);
@@ -250,9 +251,10 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	__sync_lock_test_and_set(&tctx->deadline, pdl);
 	tctx->wait_at = now;
 	/* Strict slice on the pinned join with no stale reuse. A miss */
-	/* holds else floors only, a slice rotation inherits a zero slice, */
-	/* and a fresh wait earns the dynamic remaining clamp, so the */
-	/* virtual deadline tracks the same charge the key sorts. */
+	/* holds else floors only via the shared miss helper with the open */
+	/* path, a slice rotation inherits a zero slice, and a fresh wait */
+	/* earns the dynamic remaining clamp, so the virtual deadline */
+	/* tracks the same charge the key sorts. */
 	if (pmiss)
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
