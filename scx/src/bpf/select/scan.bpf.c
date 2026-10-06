@@ -7,8 +7,10 @@
  * sufficient CPU in two node-local phases with a near minimum tiebreak
  * on the CPU minima through a single best plus a locality flag, so
  * light work never takes a fast CPU and close peers win ties with no
- * extra scan. The BSF fallback takes the best sufficient CPU with the
- * smallest combined drain plus minimum plus id tiebreak over the next
+ * extra scan. Tied minima on the previous CPU win even past the lower
+ * id with no extra scan, so cache stays warm sticky. The BSF fallback
+ * takes the best sufficient CPU with the smallest combined drain plus
+ * minimum plus prev plus id tiebreak over the next four peers past the
  * four peers past the SSF window from cursor plus 9, so the two scans
  * cover twelve unique peers with no overlap when the host holds at
  * least twelve CPUs, else the windows wrap and overlap, and symmetric
@@ -31,6 +33,7 @@
  * @now: current time in nanos.
  * @this_cpu: waker CPU skipped as the busy waker.
  * @this_node: waker node for the locality gate.
+ * @prev_cpu: previous CPU for the sticky tie preference.
  * @start: scan start below the host count.
  * @n: host count above one and within the bound.
  * @best: best peer id or 0xffffffffU when none meets.
@@ -45,6 +48,7 @@ struct flow_ssf_iter {
 	u64 now;
 	u32 this_cpu;
 	u32 this_node;
+	s32 prev_cpu;
 	u32 start;
 	u32 n;
 	u32 best;
@@ -59,6 +63,7 @@ struct flow_ssf_iter {
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
  * @this_cpu: waker CPU skipped as the busy waker.
+ * @prev_cpu: previous CPU for the sticky tie preference.
  * @start: disjoint start past the SSF window.
  * @n: host count above one and within the bound.
  * @best: best peer id or 0xffffffffU when none meets.
@@ -71,6 +76,7 @@ struct flow_bsf_iter {
 	u64 deadline;
 	u64 now;
 	u32 this_cpu;
+	s32 prev_cpu;
 	u32 start;
 	u32 n;
 	u32 best;
@@ -135,8 +141,19 @@ static int flow_ssf_step(u32 idx, void *ctx_)
 			return 0;
 		if (!flow_time_before(pmin, c->best_min) && pmin != c->best_min)
 			return 0;
-		if (pmin == c->best_min && peer >= c->best)
-			return 0;
+		/* Sticky prev-CPU tie preference with no extra scan. */
+		/* A tied minimum on the previous CPU wins even past the */
+		/* lower id, so cache stays warm with no hotspot. */
+		if (pmin == c->best_min) {
+			bool peer_prev = ((s32)peer == c->prev_cpu);
+			bool best_prev = ((s32)c->best == c->prev_cpu);
+			if (peer_prev && !best_prev) {
+			} else if (!peer_prev && best_prev) {
+				return 0;
+			} else if (peer >= c->best) {
+				return 0;
+			}
+		}
 		c->best_units = units < c->best_units ? units : c->best_units;
 		c->best_min = pmin;
 		c->best = peer;
@@ -201,8 +218,19 @@ static int flow_bsf_step(u32 idx, void *ctx_)
 	pmin = flow_cpu_min(peer);
 	if (pmin != c->best_min && !flow_time_before(pmin, c->best_min))
 		return 0;
-	if (pmin == c->best_min && peer >= c->best)
-		return 0;
+	/* Sticky prev-CPU tie preference with no extra scan. */
+	/* A tied drain plus minimum on the previous CPU wins even past */
+	/* the lower id, so cache stays warm with no hotspot. */
+	if (pmin == c->best_min) {
+		bool peer_prev = ((s32)peer == c->prev_cpu);
+		bool best_prev = ((s32)c->best == c->prev_cpu);
+		if (peer_prev && !best_prev) {
+		} else if (!peer_prev && best_prev) {
+			return 0;
+		} else if (peer >= c->best) {
+			return 0;
+		}
+	}
 	c->best_min = pmin;
 	c->best = peer;
 	return 0;
@@ -214,16 +242,19 @@ static int flow_bsf_step(u32 idx, void *ctx_)
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
  * @this_cpu: waker CPU skipped as the busy waker.
+ * @prev_cpu: previous CPU for the sticky tie preference.
  * @cursor: shared cursor for the scan start.
  *
  * Scans at most eight peers from the cursor via a bpf_loop callback
  * with no unrolled depth, so the verifier checks the body once with
  * gated pow2 plus node-local paths. Node-local peers win in the
  * 64-unit window with the same slowest plus near minimum rule, so
- * cache stays close with no extra scan. A local candidate beats a
- * remote best in the window, while a clearly slower peer still wins
- * across phases with wrap safe adds. Peers within 64 units count as
- * near minimum with wrap safe order, so lagging CPUs win ties.
+ * cache stays close with no extra scan. A tied minimum on the previous
+ * CPU wins even past the lower id, so cache stays warm with no extra
+ * scan. A local candidate beats a remote best in the window, while a
+ * clearly slower peer still wins across phases with wrap safe adds.
+ * Peers within 64 units count as near minimum with wrap safe order,
+ * so lagging CPUs win ties.
  *
  * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
@@ -231,7 +262,7 @@ static int flow_bsf_step(u32 idx, void *ctx_)
  * Returns: peer id or 0xffffffffU when no peer meets.
  */
 static __noinline u32 flow_ssf_pick(const struct task_struct *p,
-	u64 deadline, u64 now, u32 this_cpu, u32 cursor)
+	u64 deadline, u64 now, u32 this_cpu, s32 prev_cpu, u32 cursor)
 {
 	struct flow_ssf_iter it = {
 		.p = p,
@@ -239,6 +270,7 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
 		.now = now,
 		.this_cpu = this_cpu,
 		.this_node = 0,
+		.prev_cpu = 0,
 		.start = 0,
 		.n = 0,
 		.best = 0xffffffffU,
@@ -254,6 +286,7 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
 	n = (u32)nr;
 	it.n = n;
 	it.this_node = flow_cpu_node(this_cpu);
+	it.prev_cpu = prev_cpu;
 	it.pow2 = flow_is_pow2((u64)n);
 	if (it.pow2)
 		it.start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
@@ -268,14 +301,16 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
  * @this_cpu: waker CPU skipped as the busy waker.
+ * @prev_cpu: previous CPU for the sticky tie preference.
  * @cursor: shared cursor for the disjoint start.
  *
  * Scans the next four peers past the SSF window from cursor plus 9 via
  * a bpf_loop callback with no unrolled depth, so the verifier checks
  * the body once with gated pow2 plus minimum paths. Equal drains break
- * toward the smallest minimum with wrap safe order, then the smallest
- * peer id, so ties spread with no hotspot. Covers twelve unique peers
- * with SSF on large hosts, so select pays at most 12 checks per pass.
+ * toward the smallest minimum with wrap safe order, then the previous
+ * CPU on ties, then the smallest peer id, so ties stay sticky with no
+ * hotspot. Covers twelve unique peers with SSF on large hosts, so
+ * select pays at most 12 checks per pass.
  *
  * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
@@ -283,13 +318,14 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
  * Returns: peer id or 0xffffffffU when no peer meets.
  */
 static __noinline u32 flow_bsf_pick(const struct task_struct *p,
-	u64 deadline, u64 now, u32 this_cpu, u32 cursor)
+	u64 deadline, u64 now, u32 this_cpu, s32 prev_cpu, u32 cursor)
 {
 	struct flow_bsf_iter it = {
 		.p = p,
 		.deadline = deadline,
 		.now = now,
 		.this_cpu = this_cpu,
+		.prev_cpu = 0,
 		.start = 0,
 		.n = 0,
 		.best = 0xffffffffU,
@@ -304,6 +340,7 @@ static __noinline u32 flow_bsf_pick(const struct task_struct *p,
 		return it.best;
 	n = (u32)nr;
 	it.n = n;
+	it.prev_cpu = prev_cpu;
 	it.pow2 = flow_is_pow2((u64)n);
 	if (it.pow2) {
 		start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
@@ -323,18 +360,21 @@ static __noinline u32 flow_bsf_pick(const struct task_struct *p,
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
  * @this_cpu: waker CPU for the cursor plus the self skip.
+ * @prev_cpu: previous CPU for the sticky tie preference.
  *
  * Runs the SSF scan over eight peers from the cursor plus the disjoint
  * BSF fallback over the next four past the SSF window from cursor plus
- * 9, so twelve unique peers hold with no overlap on large hosts. The
- * shared cursor with steal advances by two on success with best effort
- * races, so passes spread with no hotspot. Outlined with noinline to
- * keep verifier headroom on the select path with no order change.
+ * 9, so twelve unique peers hold with no overlap on large hosts. Tied
+ * minima on the previous CPU win in both scans with no extra walk, so
+ * cache stays warm. The shared cursor with steal advances by two on
+ * success with best effort races, so passes spread with no hotspot.
+ * Outlined with noinline to keep verifier headroom on the select path
+ * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
  */
 static __noinline u32 flow_select_best(const struct task_struct *p,
-	u64 deadline, u64 now, u32 this_cpu)
+	u64 deadline, u64 now, u32 this_cpu, s32 prev_cpu)
 {
 	u64 nr = nr_cpu_ids;
 	struct flow_cpu_state *wst = flow_cpu(this_cpu);
@@ -357,13 +397,13 @@ static __noinline u32 flow_select_best(const struct task_struct *p,
 		next = (u32)(((u64)start + 1ULL) % (u64)n);
 	}
 	(void)start;
-	best = flow_ssf_pick(p, deadline, now, this_cpu, cursor);
+	best = flow_ssf_pick(p, deadline, now, this_cpu, prev_cpu, cursor);
 	if (best != 0xffffffffU) {
 		if (wst)
 			__sync_lock_test_and_set(&wst->cursor, next);
 		return best;
 	}
-	bsf = flow_bsf_pick(p, deadline, now, this_cpu, cursor);
+	bsf = flow_bsf_pick(p, deadline, now, this_cpu, prev_cpu, cursor);
 	if (bsf != 0xffffffffU) {
 		if (wst)
 			__sync_lock_test_and_set(&wst->cursor, next);
@@ -404,9 +444,10 @@ static __noinline s32 flow_select_scan(const struct task_struct *p,
 		if (flow_cpu_meets((u32)prev_cpu, deadline, now))
 			return prev_cpu;
 	}
-	/* Shared SSF plus disjoint BSF in one outlined call with no */
-	/* topology signal, so select keeps twelve peer coverage. */
-	best = flow_select_best(p, deadline, now, this_cpu);
+	/* Shared SSF plus disjoint BSF in one outlined call with sticky */
+	/* prev-CPU ties, so select keeps twelve peer coverage with warm */
+	/* cache. */
+	best = flow_select_best(p, deadline, now, this_cpu, prev_cpu);
 	if (best != 0xffffffffU)
 		return (s32)best;
 	if (flow_cpu_ok(p, prev_cpu))

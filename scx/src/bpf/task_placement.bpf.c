@@ -2,15 +2,20 @@
 /*
  * Task placement steal plus hint moves for the core.
  *
- * Holds the steal window plus the hint threaded moves. The steal window
- * spans four to eight peers proportional to remaining visits from the
- * same shared cursor with stride two and mask wins on drain. Hint
- * threaded moves thread hoisted depths with no second poll, and queue
- * runnable hints gate every RCU walk with a benign TOCTOU that only
- * delays work to the next pass with no loss. The SSF scan plus the BSF
- * fallback live in select/scan.bpf.c with the same order, so select
- * keeps twelve unique peers with no overlap on large hosts. Runs under
- * the caller with no lock.
+ * Holds the sticky bounded steal plus the hint threaded moves. The
+ * steal window spans four to eight peers proportional to remaining
+ * visits from the same shared cursor with stride two and mask wins
+ * on drain. Sticky node-local peers win first within the window with
+ * idle affinity on the thief, so cache stays warm with no hotspot.
+ * Contention backs off on gate plus miss pressure through the overflow
+ * backlog gate at the caller plus a busy thief hold at four peers,
+ * so loaded passes keep the minimum scan with no loss. Hint threaded
+ * moves thread hoisted depths with no second poll, and queue runnable
+ * hints gate every RCU walk with a benign TOCTOU that only delays work
+ * to the next pass with no loss. The SSF scan plus the BSF fallback
+ * live in select/scan.bpf.c with the same order plus prev-CPU ties, so
+ * select keeps twelve unique peers with no overlap on large hosts.
+ * Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -83,23 +88,36 @@ static __noinline u32 flow_move_one_hint(u64 dsq, s32 cpu, u32 *visits,
 	bpf_rcu_read_unlock();
 	return moved;
 }
-/* Steal one queued task from peer locals with a bounded window. */
+/* Sticky bounded steal with idle affinity plus node-local first. */
 /* Scans four to eight peers proportional to remaining visits, so the */
-/* steal stays bounded with no hotspot. Each peer shares the per pass */
-/* visit cap at eight through the shared move, so a miss heavy peer */
-/* never holds RCU across the whole queue. Stolen work counts in the */
-/* local bucket with no new counter, so stats stay at 120B. The start */
-/* hoists once outside the loop with pow2 masking, so peers step from */
-/* start plus offset with no per peer add chain. The TOCTOU between the */
-/* per peer empty hint and the shared move only delays the steal to the */
+/* steal stays bounded with no hotspot. A busy thief holds four peers */
+/* while an idle thief scans the full proportional window, so */
+/* contention backs off with no extra counter. Node-local peers win */
+/* first within the window with one pass tracking the first local plus */
+/* the first remote, then a single hint move from the local peer else */
+/* the remote peer, so cache stays warm with one RCU walk. Each move */
+/* shares the per pass visit cap at eight, so a miss heavy peer never */
+/* holds RCU across the whole queue. Stolen work counts in the local */
+/* bucket with no new counter, so stats stay at 120B. The start hoists */
+/* once outside the loop with pow2 masking, so peers step from start */
+/* plus offset with no per peer add chain. The TOCTOU between the per */
+/* peer empty hint and the shared move only delays the steal to the */
 /* next pass with no loss. The cursor is shared with select at stride */
-/* two with best effort races and no atomic order. */
+/* two with best effort races and no atomic order. Gate plus miss */
+/* pressure backs off through the overflow backlog gate at the caller, */
+/* so tier waits skip the steal with no second poll. */
 static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 {
-	u32 moved = 0;
 	u32 window;
 	u32 off;
 	u64 nr;
+	u32 my_node;
+	u32 local_peer = 0xffffffffU;
+	u32 remote_peer = 0xffffffffU;
+	u64 local_dsq = 0;
+	u64 remote_dsq = 0;
+	s32 local_q = 0;
+	s32 remote_q = 0;
 	if (unlikely(cpu < 0))
 		return 0;
 	if (unlikely(!visits))
@@ -125,6 +143,16 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 		window = (u32)FLOW_STEAL_MIN_PEERS;
 	if (window > (u32)FLOW_STEAL_MAX_PEERS)
 		window = (u32)FLOW_STEAL_MAX_PEERS;
+	/* Idle affinity holds the full window for an idle thief plus four */
+	/* peers for a busy thief, so contention backs off with no counter. */
+	/* A busy thief still steals node-local work when tiers drain, but */
+	/* pays the minimum scan with no hotspot. */
+	{
+		struct flow_cpu_state *self = flow_cpu((u32)cpu);
+		if (!self || READ_ONCE(self->running_pid) != 0)
+			window = (u32)FLOW_STEAL_MIN_PEERS;
+	}
+	my_node = flow_cpu_node((u32)cpu);
 	{
 		u32 n = (u32)nr;
 		bool pow2 = flow_is_pow2((u64)n);
@@ -138,14 +166,14 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 		bpf_for(off, 0, FLOW_STEAL_MAX_PEERS) {
 			u32 peer;
 			u64 peer_dsq;
-			u32 got;
+			u32 pnode;
 			/* Start hoists once with pow2 masking, so peers step */
 			/* from start plus offset with no per peer add chain. */
 			if ((u64)off >= (u64)window)
 				break;
-			if (unlikely(moved))
-				break;
 			if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
+				break;
+			if (local_peer != 0xffffffffU && remote_peer != 0xffffffffU)
 				break;
 			if (pow2)
 				peer = (u32)(((u64)start + (u64)off) &
@@ -157,20 +185,34 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 			if (unlikely(!flow_cpu_live(peer)))
 				continue;
 			peer_dsq = flow_local_dsq(peer);
-			/* Queue runnable hint threads once into the shared hint */
-			/* move with no second poll, so each peer pays one queue */
-			/* read total. The hint move rechecks under RCU with the */
-			/* same visit cap, so a race only delays the steal to the */
-			/* next pass with no loss. */
+			/* Queue runnable hint threads once per peer with no */
+			/* second poll, so each peer pays one queue read total. */
+			/* A race only delays the steal to the next pass. */
 			{
 				s32 pq = scx_bpf_dsq_nr_queued(peer_dsq);
 				if (pq <= 0)
 					continue;
-				got = flow_move_one_hint(peer_dsq, cpu, visits, pq);
+				pnode = flow_cpu_node(peer);
+				if (pnode == my_node) {
+					if (local_peer == 0xffffffffU) {
+						local_peer = peer;
+						local_dsq = peer_dsq;
+						local_q = pq;
+					}
+				} else if (remote_peer == 0xffffffffU) {
+					remote_peer = peer;
+					remote_dsq = peer_dsq;
+					remote_q = pq;
+				}
 			}
-			if (got)
-				moved += got;
 		}
 	}
-	return moved;
+	/* Node-local first moves from the first local peer else the first */
+	/* remote peer with one hint move total, so the pass pays one RCU */
+	/* walk with the same visit cap and mask wins on drain. */
+	if (local_peer != 0xffffffffU)
+		return flow_move_one_hint(local_dsq, cpu, visits, local_q);
+	if (remote_peer != 0xffffffffU)
+		return flow_move_one_hint(remote_dsq, cpu, visits, remote_q);
+	return 0;
 }

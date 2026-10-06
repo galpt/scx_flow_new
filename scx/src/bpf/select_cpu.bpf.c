@@ -6,8 +6,8 @@
  * meets the deadline, then the slowest sufficient fit in O(VISIT) with
  * VISIT at most eight peers in two node-local phases, then the best
  * sufficient fallback over the next four peers past the SSF window from
- * cursor plus 9 with drain plus minimum plus id tiebreak. The two scans
- * cover twelve unique peers with no overlap when the host holds at
+ * cursor plus 9 with drain plus minimum plus prev plus id tiebreak. The
+ * two scans cover twelve unique peers with no overlap when the host holds at
  * least twelve CPUs, else the windows wrap, so the fallback extends
  * coverage instead of rescanning. The shared cursor with dispatch steal
  * advances by two with best effort races and no atomic order. Pinned

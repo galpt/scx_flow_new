@@ -8,10 +8,10 @@
  * tiers. Five depths hoist once, so tiers plus steal plus perf share the
  * same reads with no second poll. The overflow tier holds FIFO bursts
  * with mask wins, so overload still drains with no priority inversion.
- * The steal tier scans four to eight peers proportional to remaining
- * visits with per peer hints threaded into the shared hint move plus a
- * saturated early out when tiers still hold work. A Q1 only fast path
- * drains the local tier alone when peers hold no work, so the common
+ * The steal tier scans four to eight peers sticky with node-local
+ * first plus idle affinity plus backoff on gate plus miss pressure,
+ * with per peer hints threaded into one hint move plus a saturated
+ * early out when tiers still hold work. A Q1 only fast path drains the
  * single queue pass skips three empty moves plus the steal polls. The
  * shared cursor advances by two on a successful steal to match select,
  * so the next pass starts past the drained peer with no hotspot and no
