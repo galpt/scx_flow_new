@@ -8,6 +8,8 @@
  * tiers. Five depths hoist once, so tiers plus steal plus perf share the
  * same reads with no second poll. The overflow tier holds FIFO bursts
  * with mask wins, so overload still drains with no priority inversion.
+ * An aged overflow head past 2ms else 8 misses earns one bounded extra
+ * move, so starving bursts drain without starving the tiers.
  * The steal tier scans four to eight peers sticky with node-local
  * first plus idle affinity plus backoff on gate plus miss pressure,
  * with per peer hints threaded into one hint move plus a saturated
@@ -142,6 +144,37 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
 	else
 		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
 }
+/**
+ * flow_overflow_head_aged - test the overflow head for skip promotion.
+ * @dsq: overflow FIFO queue id to peek.
+ * @now: current time in nanos.
+ *
+ * Peeks only the FIFO head with one RCU walk and no visit cost, so the
+ * check stays cheap with no full scan. The head earns promotion when
+ * its wait aged past 2ms else its misses reach 8, reusing the lag plus
+ * visit bounds with no new knob plus no new map. A missing state fails
+ * closed with no promotion, so the FIFO order holds for fresh bursts.
+ *
+ * Returns: true when the head earns one bounded extra move.
+ *
+ * Outlined with noinline to keep verifier headroom on the dispatch
+ * path with no order change.
+ */
+static __noinline bool flow_overflow_head_aged(u64 dsq, u64 now)
+{
+	struct task_struct *p;
+	bool aged = false;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, dsq, 0) {
+		struct flow_task_ctx *tctx = flow_lookup(p);
+		if (tctx && flow_skip_promote(READ_ONCE(tctx->wait_at),
+		    now, READ_ONCE(tctx->misses)))
+			aged = true;
+		break;
+	}
+	bpf_rcu_read_unlock();
+	return aged;
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
@@ -248,9 +281,33 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				left -= overflow_moved;
 			}
 		}
+		/* Aged overflow extra drain with one bounded move after tiers. */
+		/* When the FIFO move leaves work and the head waited past 2ms */
+		/* else missed 8 times, one extra move drains the aged burst */
+		/* with the same visit cap plus mask wins, so starving work */
+		/* waits at most one more move per pass with no tier reorder. */
+		/* The clock reads only here with no hot path cost, and the */
+		/* TOCTOU between the hoisted hint and the extra move only */
+		/* repeats or skips a pass with no loss. */
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if ((u32)oq0 > overflow_moved) {
+				u64 now = flow_now();
+				if (flow_overflow_head_aged(overflow_dsq, now)) {
+					u32 extra = flow_move_one_hint(overflow_dsq,
+					    cpu, &visits, oq0);
+					if (extra > left)
+						extra = left;
+					left -= extra;
+					overflow_moved += extra;
+				}
+			}
+		}
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
 		/* Only steals when tiers drained, so busy passes skip cheap with */
-		/* the hoisted hints and no second poll. Backlog sums the four */
+		/* the hoisted hints and no second poll. Starvation stays bounded */
+		/* here: the window caps each pass while overflow skip aging plus */
+		/* miss counts pace every tier, so the lowest tier still turns. */
+		/* Backlog sums the four */
 		/* queued tiers with saturation, so a huge depth clamps instead */
 		/* of wrapping to idle. Narrow means */
 		/* empty peers skip with no RCU through the per peer hint in the */
