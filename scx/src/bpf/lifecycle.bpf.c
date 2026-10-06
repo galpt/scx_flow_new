@@ -8,8 +8,11 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then counts one requeue per runnable stop else one
- * completion. A wall completion past the deadline counts one miss with
+ * with shifts, then carries the latency-critical slice up to one
+ * quantum, then counts one requeue per runnable stop else one
+ * completion. A runnable yield before one quantum keeps the unused
+ * remainder when predictor slack holds critical, else resets to one
+ * quantum. A wall completion past the deadline counts one miss with
  * no wait and no kick, since the task already left the CPU. Enable
  * clears vruntime plus deadline plus stamps plus predictor plus lag
  * plus weight plus slice plus hint plus hint weight plus misses, and
@@ -81,6 +84,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 now;
 	u64 delta;
 	u64 start;
+	u64 n_avg_keep = 0;
+	u64 n_dev_keep = 0;
+	bool have_pred = false;
 	cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
@@ -140,6 +146,34 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->dev_ns, (u32)n_dev);
 		__sync_lock_test_and_set(&tctx->vruntime, n_vrun);
 		flow_min_advance(cpu, n_vrun);
+		n_avg_keep = n_avg;
+		n_dev_keep = n_dev;
+		have_pred = true;
+	}
+	/* Latency-critical slice carryover up to the quantum with no knob. */
+	/* A runnable task that yields before one quantum keeps the unused */
+	/* remainder as the next slice when the predictor slack still holds */
+	/* critical, so short bursts earn a nearer virtual deadline with no */
+	/* extra slice. A full quantum plus a batch burst resets to one */
+	/* quantum, so the carry never pasts one quantum with no new map. */
+	/* Exiting plus completion paths skip here with no carry, so only */
+	/* runnable waits carry with one kick per wait at enqueue. */
+	if (runnable) {
+		if (have_pred && delta > 0 &&
+		    delta < (u64)FLOW_QUANTUM_NS &&
+		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
+			u32 carry =
+			    (u32)((u64)FLOW_QUANTUM_NS - delta);
+			if (carry < 1)
+				carry = 1;
+			if (carry > (u32)FLOW_QUANTUM_NS)
+				carry = (u32)FLOW_QUANTUM_NS;
+			__sync_lock_test_and_set(&tctx->slice_ns, carry);
+		} else if (delta >= (u64)FLOW_QUANTUM_NS ||
+		    !flow_lat_crit(n_avg_keep, n_dev_keep)) {
+			__sync_lock_test_and_set(&tctx->slice_ns,
+			    (u32)FLOW_QUANTUM_NS);
+		}
 	}
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */

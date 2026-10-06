@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the flow scheduler at 4.8.7.
+ * Shared constants and helpers for the flow scheduler at 4.8.8.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one overflow FIFO.
@@ -668,6 +668,30 @@ static __always_inline u64 flow_pred_deadline(u64 now,
 	else
 		period = flow_pred_period(avg, dev);
 	return flow_deadline_at(now, period);
+}
+/**
+ * flow_lat_crit - test latency-critical from predictor slack.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ *
+ * A zero average means no history, so the task counts as latency
+ * critical with no stall. Later tasks add average plus deviation with
+ * saturation, so a short predicted burst within one quantum stays
+ * critical while a long burst paces at slice expiry. Uses the quantum
+ * with no new map plus no new queue plus no knob.
+ *
+ * Returns: true when latency-critical, else false.
+ */
+static __always_inline bool flow_lat_crit(u64 avg,
+	u64 dev)
+{
+	u64 pred;
+	if (avg == 0)
+		return true;
+	pred = flow_sat_add(avg, dev);
+	if (pred == (u64)~0ULL)
+		return false;
+	return pred <= (u64)FLOW_QUANTUM_NS;
 }
 /**
  * flow_fallback_deadline - fallback deadline from now plus hint.

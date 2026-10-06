@@ -22,11 +22,12 @@
  * admit with no reject, so the counters track joins with no bound. The
  * exiting plus idle direct plus helper plus direct block form the four
  * kick points, so every wait meets at most one kick with no storm. A
- * direct preempt needs an eligible arrival plus a 100us margin lead
- * with more than 100us still left on the owner, so near ties plus
- * nearly done owners never bounce while one kick per wait stays.
- * Slice expiry paces the rest, so no slice write and no stamp run
- * here. Local plus node depths hoist once, so the drain gated bypass
+ * direct preempt needs predictor slack plus an eligible arrival plus a
+ * 100us margin lead with more than 100us still left on the owner, so
+ * near ties plus nearly done owners never bounce while one kick per
+ * wait stays. Latency-critical slice carryover keeps the unused
+ * remainder up to one quantum, so short bursts earn nearer keys. Slice
+ * expiry paces the rest, so no slice write and no stamp run here. Local plus node depths hoist once, so the drain gated bypass
  * plus the combined drain tier escalation share one read with no second
  * poll. See intf.h for the deadline plus fairness helpers and
  * dispatch.bpf.c for the tier scans.

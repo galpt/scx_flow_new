@@ -11,10 +11,11 @@
  * earlier fair time never waits behind this arrival in a tier queue.
  * Strict fair order gates the bypass with eligibility plus drain, so
  * hogs pace through tiers with no direct jump and one kick per wait
- * stays. A direct preempt needs an eligible arrival plus a 100us margin
- * lead with more than 100us still left on the owner, so near ties plus
- * nearly done owners never bounce while one kick per wait stays with
- * no storm. Runs under the caller with no lock.
+ * stays. A direct preempt needs predictor slack plus an eligible
+ * arrival plus a 100us margin lead with more than 100us still left on
+ * the owner, so near ties plus nearly done owners never bounce while
+ * one kick per wait stays with no storm. Exiting tasks stay exempt
+ * with no queue wait and no gate. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -152,16 +153,17 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
  * skipped count, since no urgency holds to track. The occupant CPU
  * validates before the compare, so a migrated occupant never kicks the
  * wrong CPU with no count. A zero occupant deadline means no order yet,
- * so the arrival paces with no kick and no skipped count. Only margin
- * plus tail plus eligibility plus fair order holds count as skipped.
- * An urgent arrival leads by 100us with more than 100us left on the
- * owner, so near ties plus nearly done owners never bounce. The shared
- * preempt helper holds the margin plus tail with wrap safe order, so
- * only a truly earlier arrival with work left preempts at once with one
- * kick per wait. Equal or later arrivals pace at slice expiry with one
- * skipped preempt. The fair time leads here, so fairness plus urgency
- * gate the kick. Eligibility already passed above, so the helper checks
- * lead plus tail only.
+ * so the arrival paces with no kick and no skipped count. Only predictor
+ * slack plus margin plus tail plus eligibility plus fair order holds
+ * count as skipped. An urgent latency-critical arrival leads by 100us
+ * with more than 100us left on the owner, so near ties plus nearly
+ * done owners never bounce. The shared preempt helper holds the margin
+ * plus tail with wrap safe order, so only a truly earlier arrival with
+ * work left preempts at once with one kick per wait. Equal or later
+ * arrivals pace at slice expiry with one skipped preempt. The fair time
+ * leads here, so fairness plus urgency gate the kick. Eligibility
+ * already passed above, so the helper checks lead plus tail only with
+ * predictor slack gated before it.
  *
  * Outlined with noinline to keep verifier headroom: the RCU occupant
  * walk leaves the bypass plus tier join with no inline growth and the
@@ -237,15 +239,33 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 		bpf_rcu_read_unlock();
 		return;
 	}
-	/* An urgent arrival leads by 100us with more than 100us left */
-	/* on the owner, so near ties plus nearly done owners never */
-	/* bounce. The shared preempt helper holds the margin plus */
-	/* tail with wrap safe order, so only a truly earlier arrival */
-	/* with work left preempts at once with one kick per wait. */
-	/* Equal or later arrivals pace at slice expiry with one */
-	/* skipped preempt. The fair time leads here, so fairness */
-	/* plus urgency gate the kick. Eligibility already passed */
-	/* above, so the helper checks lead plus tail only. */
+	/* Predictor slack gates the busy preempt with no new knob. */
+	/* A batch arrival with a long predicted burst paces at slice */
+	/* expiry with one skipped preempt, so only latency-critical work */
+	/* with slack within one quantum preempts at once. Eligibility */
+	/* already passed above, so this plus lead plus tail gate the kick. */
+	{
+		struct flow_task_ctx *actx = flow_lookup(p);
+		if (actx) {
+			u64 a_avg = (u64)READ_ONCE(actx->avg_ns);
+			u64 a_dev = (u64)READ_ONCE(actx->dev_ns);
+			if (!flow_lat_crit(a_avg, a_dev)) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
+				flow_count_preempt_skip();
+				return;
+			}
+		}
+	}
+	/* An urgent latency-critical arrival leads by 100us with more than */
+	/* 100us left on the owner, so near ties plus nearly done owners */
+	/* never bounce. The shared preempt helper holds the margin plus */
+	/* tail with wrap safe order, so only a truly earlier arrival with */
+	/* work left preempts at once with one kick per wait. Equal or */
+	/* later arrivals pace at slice expiry with one skipped preempt. */
+	/* The fair time leads here, so fairness plus urgency gate the kick. */
+	/* Eligibility already passed above, so the helper checks lead plus */
+	/* tail only with slack gated just before it. */
 	if (!flow_preempt_wants(vtime, occ_deadline, now,
 	    occ_start)) {
 		bpf_task_release(trusted);

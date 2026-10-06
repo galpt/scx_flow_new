@@ -2,10 +2,11 @@
 /*
  * Preempt plus idle kick for the enqueue pass.
  *
- * Holds the strict one kick per wait rule with lead plus tail plus
- * eligibility. An eligible arrival leads the occupant by the margin
- * with more than the tail left on the owner, so near ties plus nearly
- * done owners never bounce while one kick per wait stays with no storm.
+ * Holds the strict one kick per wait rule with predictor slack plus
+ * lead plus tail plus eligibility. A latency-critical arrival with
+ * slack within one quantum leads the occupant by the margin with more
+ * than the tail left on the owner, so near ties plus nearly done
+ * owners never bounce while one kick per wait stays with no storm.
  * Every hold counts in preempt skipped with no missing fill. The four
  * kick points share this gate with no extra sender. Runs under the
  * caller with no lock.
