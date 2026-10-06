@@ -37,7 +37,7 @@ A gate runs first at each step so tasks and CPUs wait safely. Exiting work runs 
 
 ### Reporting
 
-Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page at `50005`. Page keeps local, node, machine, overflow, kicks plus preempt apart with no loss. Snapshots share one moment for review with times now. Dashboard shows fifteen counters plus uptime with CPU cards. See `src/rust/stats.rs`.
+Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at `50005`. Page keeps local, node, machine, overflow, kicks plus preempt with no loss. Snapshots share one moment with times. Dashboard shows fifteen counters plus uptime with CPU cards. Log shows cpus seeded primary plus llcs. See `src/rust/stats.rs`.
 
 ### Fairness
 
@@ -49,7 +49,7 @@ Weight tunes period bands plus fair share. Shares map to 32ms, 16ms, 8ms, and 4m
 
 ### Locality
 
-Locality stays simple with per-CPU plus per-node queues. Select takes prev idle, then waker and sibling idle, before the global pick, so pairs share cache without a scan. Placement keeps the slowest sufficient CPU with near minimum tiebreak. Kicks clear idle with test and clear. See `src/bpf/select_cpu.bpf.c`.
+Locality stays with per-CPU plus per-node queues. Select takes prev idle, then waker and sibling idle, before the pick, so pairs share cache without scan. Placement keeps the slowest sufficient CPU with near minimum tiebreak. Kicks clear idle with test and clear. Two-way SMT assumed. Span equals online. See `src/bpf/select_cpu.bpf.c`.
 
 ### Contention
 
@@ -73,4 +73,4 @@ Rules live in `src/bpf/intf.h`. Core lives in cgroup, weight, vtime, edf, placem
 
 ## Limitations
 
-Hotplug and releases need a restart. State is `64B`, `16B`, `8B`, `120B`. Needs kernel `7.2` or later. Mask wins on drain. One kick per wait with `100us` margin and tail. Governor performance with half and max.
+Hotplug and releases need a restart. State is `64B`, `16B`, `8B`, `120B`. Needs kernel `7.2` or later. Mask wins on drain. One kick per wait with `100us` margin and tail. Governor performance with half and max. Equal ties keep lower id with no extra kick. Extra threads stay single.

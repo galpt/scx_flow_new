@@ -115,7 +115,7 @@ static __noinline u32 flow_steal_one(s32 cpu, u32 *visits, u32 cursor)
 	/* saturation, so overspent visits hold four with no wrap. A fresh */
 	/* pass with full visits scans eight peers, while a spent pass with */
 	/* few visits left scans four peers. Bounds use the shared steal plus */
-	/* visit constants with no literal, matching the Rust steal_window. */
+	/* visit constants with no literal and no mirror. */
 	{
 		u32 remain = *visits >= (u32)FLOW_DISPATCH_MAX_VISIT ? 0 :
 		    (u32)FLOW_DISPATCH_MAX_VISIT - *visits;

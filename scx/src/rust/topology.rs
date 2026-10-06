@@ -8,6 +8,9 @@
 //! Phase one writes the primary rows with sibling plus node, and phase
 //! two refreshes the LLC bitmaps for the start log. Either phase keeps
 //! the BPF defaults on fault with no trap and no hot-path use.
+//! Sibling assumes two-way SMT as in sibling_cpus, so a third thread
+//! stays single with all ones. Span holds online CPUs at init, so the
+//! seed matches the sysfs online list with no hotplug use.
 
 use scx_utils::Topology;
 
@@ -28,7 +31,11 @@ pub fn topo_rows() -> Vec<(u32, u32, u32)> {
 /// Build the seeded rows from the shared Topology view.
 /// Uses scx_utils::Topology as the source of truth with a sysfs
 /// fallback on fault, so large hosts fold to the machine queue with
-/// no panic and no extra scan on the hot paths.
+/// no panic and no extra scan on the hot paths. Span equals the online
+/// list at construction, sorted in rank order with the CPU plus node
+/// bounds, so the seed matches sysfs online with no extra view. Sibling
+/// follows sibling_cpus with two-way assumed, so extra threads on wider
+/// cores stay single with no extra scan.
 pub fn init_topology() -> Vec<(u32, u32, u32)> {
     if let Ok(topo) = Topology::new() {
         let sibs = topo.sibling_cpus();
@@ -96,6 +103,9 @@ pub fn write_llc_bitmaps() -> Vec<String> {
 }
 
 /// Short topology line for the start log.
+/// Shows cpus seeded with primary plus llcs counts, so the 4.8.7 start
+/// log carries primary plus llcs past the old cpus seeded line with no
+/// hot-path use.
 pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
     let primary = write_primary_bitmap(rows);
     let llcs = write_llc_bitmaps();
@@ -114,7 +124,9 @@ pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
 /// True when the CPU is the second thread of one core.
 /// Sibling holds all ones on single thread, so single thread stays
 /// false with no panic. A lower sibling marks the second thread, so
-/// only one card per core shows SMT with no extra sysfs use.
+/// only one card per core shows SMT with no extra sysfs use. Two-way
+/// assumed as in sibling_cpus, so a third thread on wider cores stays
+/// single by design with no extra kick and no non-x86 walk.
 pub fn is_smt_thread(cpu: u32, sib: u32) -> bool {
     sib != u32::MAX && sib < cpu
 }

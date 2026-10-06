@@ -251,8 +251,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
 		/* Only steals when tiers drained, so busy passes skip cheap with */
 		/* the hoisted hints and no second poll. Backlog sums the four */
-		/* queued tiers with saturation like the Rust steal_backlog, so a */
-		/* huge depth clamps instead of wrapping to idle. Narrow means */
+		/* queued tiers with saturation, so a huge depth clamps instead */
+		/* of wrapping to idle. Narrow means */
 		/* empty peers skip with no RCU through the per peer hint in the */
 		/* shared steal, so the effective scan stays small. */
 		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
