@@ -21,7 +21,30 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "4.8.2" ] || fail "version not at 4.8.2"
+[ "${want}" = "4.8.7" ] || fail "version not at 4.8.7"
+
+# Deleted Rust mirrors stay deleted with no reappearance.
+# The flow facade plus its helpers left in 4.8.7 with constants in
+# config.rs, so any return fails closed here before any build.
+for gone in \
+    "src/rust/flow/mod.rs" \
+    "src/rust/flow/cgrp.rs" \
+    "src/rust/flow/dispatch.rs" \
+    "src/rust/flow/edf.rs" \
+    "src/rust/flow/lifecycle.rs" \
+    "src/rust/flow/preempt.rs" \
+    "src/rust/flow/property.rs" \
+    "src/rust/flow/select.rs" \
+    "src/rust/flow/slice.rs" \
+    "src/rust/flow/slot.rs" \
+    "src/rust/flow/timer.rs" \
+    "src/rust/flow/vtime.rs" \
+    "src/rust/flow/weight.rs"; do
+    [ ! -e "${SRC_DIR}/${gone}" ] || fail "mirror reappeared ${gone}"
+done
+
+# Deleted property harness stays deleted with no reappearance.
+[ ! -e "${REPO_DIR}/tools/edf_harness/property.sh" ] || fail "property.sh reappeared"
 
 # Newline plus tab use ANSI-C quoting with no command substitution.
 grep -q "^NL=\$'\\\\n'$" "${INST}" || fail "NL guard form bad"

@@ -2,21 +2,19 @@
 
 ### What is it?
 
-scx_flow runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice for steady pacing under load today. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow 4.8.7 runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
-The goal is to test fair order with prediction in the kernel and see if short bursts reach a CPU sooner. Finding the earliest fair time without a full scan matters when order decides who runs next. Direct queue order keeps the test fair and repeatable. See `src/bpf/intf.h` and `src/bpf/enqueue.bpf.c`.
+The goal is to test fair order with prediction in the kernel and see if short bursts reach a CPU sooner. Like fair.c, earliest fair time runs first, unlike rt.c, no fixed priority holds. Direct queue order keeps the test fair and repeatable. See `src/bpf/intf.h`.
 
 ### How it works?
 
-Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus slice over weight. Each CPU takes the earliest fair time it may run. Teardown charges plus advances vruntime with predictor update always. See `src/bpf/enqueue.bpf.c`, `src/bpf/dispatch.bpf.c` and `src/rust/flow/edf.rs`.
+Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus slice over weight. Each CPU takes the earliest fair time it may run. Teardown charges plus advances vruntime with predictor update always. See `src/bpf/enqueue.bpf.c` and `src/bpf/dispatch.bpf.c`.
 
 ## Typical Use Cases
 
-- Latency sensitive apps. Tasks with the earliest fair time run first, so short arrivals never wait behind long work and stay responsive under load.
-- Desktop use. A `1ms` slice keeps interaction smooth while background work continues, so typing stays fluid with no extra tuning.
-- Mixed batch work. Fair order keeps overload feasible, so heavy jobs still finish while urgent tasks move ahead in turn.
+Latency apps run urgent fair time first, so short arrivals skip long work. Desktop keeps `1ms` slices smooth with no tuning. Batch work drains best effort with misses tracked.
 
 ## More details
 
@@ -31,7 +29,7 @@ Each fair time orders as priority value with vruntime pacing via lag bounds. Pre
 
 ### Admission
 
-Tasks carry base weight 128, zero mapped to one, each join admits once with no reject. Effective stacks times hint over 128 with clamp while bands shape deadline and predictor shapes deadlines only. Rejects stay zero for wire compat in gate_rejects. Misses count on blocking ends. See `src/bpf/enqueue.bpf.c` and `src/rust/flow/slice.rs`.
+Tasks carry base weight 128, zero mapped to one, each join admits once with no reject. Effective stacks times hint over 128 with clamp while bands shape deadline and predictor shapes deadlines only. Rejects stay zero for wire compat in gate_rejects. Misses count on blocking ends. See `src/bpf/enqueue.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
@@ -41,32 +39,38 @@ A gate runs first at each step so tasks and CPUs wait safely. Exiting work runs 
 
 Flags `--stats`, `--monitor` and `--no-webui` show counters as text or on a page at `50005`. Page keeps local, node, machine, overflow, kicks plus preempt apart with no loss. Snapshots share one moment for review with times now. Dashboard shows fifteen counters plus uptime with CPU cards. See `src/rust/stats.rs`.
 
+### Fairness
+
+Fair order holds the earlier of deadline plus virtual deadline in each queue. Vruntime advances by slice over weight with lag clamped at 2ms. Sleepers gain at most one slice of boost with no storm. Hierarchy stays flat with no share accounting past weight. See `src/bpf/intf.h`.
+
+### Weights
+
+Weight tunes period bands plus fair share. Shares map to 32ms, 16ms, 8ms, and 4ms periods with shares 32, 64, 256, and 1024. Effective share stacks task times hint over 128. Heavy tasks earn near keys, light tasks earn far keys. See `src/bpf/cgroup.bpf.c`.
+
+### Locality
+
+Locality stays simple with per-CPU plus per-node queues. Select takes prev idle, then waker and sibling idle, before the global pick, so pairs share cache without a scan. Placement keeps the slowest sufficient CPU with near minimum tiebreak. Kicks clear idle with test and clear. See `src/bpf/select_cpu.bpf.c`.
+
+### Contention
+
+Contention stays bounded with visits for tier moves. Base is 8 per pass shared across five tiers plus steal. Each tier moves at most one task bounded by slots before the next pick. Leftover work resumes next pass with no loss. Stats use per-CPU rows. See `src/bpf/dispatch.bpf.c`.
+
+### Inversion
+
+Mask wins bound inversion with fail open. Each move checks the CPU mask and picks earliest fair time first, so foreign heads skip to the next task and tier, with blocked tiers local only. Overflow drains last in arrival order. Homeless work waits there with no stall. See `src/bpf/dispatch.bpf.c`.
+
+### Staleness
+
+Staleness heals with predictor retrain plus minimum fold forward. Each stop feeds average plus deviation with shift updates. Idle minima hold bounded by lag plus eligibility, so rejoins keep one slice boost. Hints race moves benignly to the next pass. See `src/bpf/lifecycle.bpf.c`.
+
+### Verification
+
+Fmt, clippy, build, and test stay clean. Veristat holds 20 programs below one million steps. Guard holds version plus mirrors gone with no property return. See `src/bpf/main.bpf.c`.
+
 ## Code map
 
-- Rules live in `src/bpf/intf.h`.
-- Changes live in `CHANGELOG.md` with the `4.8.2` shape.
-- Live kernel logic lives in `src/bpf/main.bpf.c` with parts in `src/bpf/cgroup.bpf.c`, `src/bpf/weight.bpf.c`, `src/bpf/vtime.bpf.c`, `src/bpf/edf.bpf.c`, `src/bpf/task_placement.bpf.c`, `src/bpf/select_cpu.bpf.c` plus `src/bpf/select/idle.bpf.c` and `src/bpf/select/scan.bpf.c`, `src/bpf/enqueue.bpf.c` plus `src/bpf/enqueue/target.bpf.c`, `src/bpf/enqueue/insert.bpf.c` and `src/bpf/enqueue/kick.bpf.c`, `src/bpf/preempt.bpf.c`, `src/bpf/dispatch.bpf.c`, `src/bpf/lifecycle.bpf.c`, `src/bpf/stats.bpf.c` and `src/bpf/timer.bpf.c`. No `fair.c` helper is used and the queue order stays in kernel priority queues.
-- Order lives in kernel priority queues with test-only math mirrors in `src/rust/flow/edf.rs`, `src/rust/flow/slot.rs`, `src/rust/flow/select.rs`, `src/rust/flow/preempt.rs`, `src/rust/flow/slice.rs`, `src/rust/flow/weight.rs`, `src/rust/flow/vtime.rs`, `src/rust/flow/dispatch.rs`, `src/rust/flow/lifecycle.rs`, `src/rust/flow/timer.rs`, `src/rust/flow/property.rs` and `src/rust/flow/cgrp.rs`. The mirrors check fair order plus vruntime plus saturation with no map use, since no kernel test setup runs here.
-- Deadline plus fair checks live in `src/bpf/edf.bpf.c` with a mirror in `src/rust/flow/edf.rs` for tests only. The mirror keeps the same hint plus predictor plus vruntime math with no effect on order.
-- Task vruntime bookkeeping lives in `src/rust/flow/vtime.rs` with the slice plus scaler plus effective share in `src/rust/flow/slice.rs` plus placement in `src/rust/flow/select.rs` plus kicks in `src/rust/flow/preempt.rs` plus checks in `src/rust/config.rs`.
-- Speed levels live in `src/bpf/dispatch.bpf.c` and run once per dispatch pass.
-- Dashboard lives in `src/rust/snapshot.rs`, `src/rust/topology.rs`, `src/rust/stats.rs`, `src/rust/webui.rs` and `ui/index.html`. Snapshots merge core admits, rejects, misses, preempt kicks plus skipped as source of truth.
+Rules live in `src/bpf/intf.h`. Core lives in cgroup, weight, vtime, edf, placement, select, enqueue, preempt, dispatch, lifecycle, stats, and timer, with select plus enqueue split. Init lives in main plus topology. Dashboard lives in snapshot, stats, topology, webui, and ui.
 
 ## Limitations
 
-- Hotplug needs a restart.
-- Releases need a restart.
-- State is `64B`, `16B`, `8B`, `120B`.
-- Needs kernels, `7.2` series and up.
-- Priority queues never mix orders, since the kernel keeps one fair key per queue and a mix fails closed with an error.
-- Mask wins on drain, since affinity gates every move with priority tiers skipping to the next match through the shared move.
-- Placement keeps the slowest sufficient CPU in two node-local phases with near minimum tiebreak on minima, so light work never takes a fast CPU while close peers win first.
-- The best sufficient fallback spreads symmetric hosts with drain plus minimum plus id tiebreak. SSF scans 8 peers from cursor plus one plus BSF scans the next 4 from cursor plus 9 with shared plus two advance. Needs 12 CPUs for 12 unique else overlap.
-- The shared cursor serves select plus steal with stride two and best effort races, so passes spread with no hotspot.
-- Idle CPUs hold a stale minimum bounded by 2ms lag plus eligibility, so rejoins keep one slice boost with no decay timer.
-- Queue hints race moves with benign TOCTOU, so a stale hint only delays work to the next pass with no loss. Hint moves thread hoisted depths with no second poll.
-- Toolchain stays on stable `1.91` with `clippy -Dwarnings`, so checks stay repeatable with no extra allow.
-- Flood and affinity stress skip forward with mask wins, so keep pinned work narrow and test with mixed masks before trusting tail latency.
-- Overload past saturation runs best effort at `100%` utilization with miss cascade expected, so late work still drains in fair order plus overflow FIFO with no admission drop while misses track the overload.
-- Preempt sends at most one kick per wait when arrival is eligible and leads by `100us` with over `100us` left on owner, so urgent gaps preempt with no storm while ties pace. Kicks count in preempt_kicks, held kicks in preempt_skipped, and eligibility lag holds count as skipped.
-- No latency or throughput targets are claimed. Completion plus probe delay are the only bench signals with no per-op latency histogram, so report topology plus variance with each run.
+Hotplug and releases need a restart. State is `64B`, `16B`, `8B`, `120B`. Needs kernel `7.2` or later. Mask wins on drain. One kick per wait with `100us` margin and tail. Governor performance with half and max.
