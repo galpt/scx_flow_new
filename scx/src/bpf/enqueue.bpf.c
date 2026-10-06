@@ -27,7 +27,8 @@
  * near ties plus nearly done owners never bounce while one kick per
  * wait stays. Latency-critical slice carryover keeps the unused
  * remainder up to one quantum, so short bursts earn nearer keys. Slice
- * expiry paces the rest, so no slice write and no stamp run here. Local plus node depths hoist once, so the drain gated bypass
+ * expiry paces the rest, so no slice write and no stamp run here.
+ * Local plus node depths hoist once, so the drain gated bypass
  * plus the combined drain tier escalation share one read with no second
  * poll. See intf.h for the deadline plus fairness helpers and
  * dispatch.bpf.c for the tier scans.

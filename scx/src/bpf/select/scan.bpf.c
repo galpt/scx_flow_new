@@ -11,7 +11,7 @@
  * id with no extra scan, so cache stays warm sticky. The BSF fallback
  * takes the best sufficient CPU with the smallest combined drain plus
  * minimum plus prev plus id tiebreak over the next four peers past the
- * four peers past the SSF window from cursor plus 9, so the two scans
+ * SSF window from cursor plus 9, so the two scans
  * cover twelve unique peers with no overlap when the host holds at
  * least twelve CPUs, else the windows wrap and overlap, and symmetric
  * hosts still spread work with no topology walk. SSF runs in O(VISIT)
@@ -237,13 +237,31 @@ static int flow_bsf_step(u32 idx, void *ctx_)
 }
 
 /**
- * flow_ssf_pick - slowest sufficient pick among allowed peers.
- * @p: task to place.
+ * struct flow_scan_tail - scan args for the outlined SSF plus BSF picks.
+ * @p: task to place, typed for the mask gate.
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
  * @this_cpu: waker CPU skipped as the busy waker.
  * @prev_cpu: previous CPU for the sticky tie preference.
  * @cursor: shared cursor for the scan start.
+ *
+ * Bundles the live task plus the deadline plus the poll time plus the
+ * waker plus the previous CPU plus the shared cursor, so each outlined
+ * pick takes one pointer with no stack args and the two scans share
+ * the same single reads.
+ */
+struct flow_scan_tail {
+	const struct task_struct *p;
+	u64 deadline;
+	u64 now;
+	u32 this_cpu;
+	s32 prev_cpu;
+	u32 cursor;
+};
+/**
+ * flow_ssf_pick - slowest sufficient pick among allowed peers.
+ * @t: scan tail with task plus deadline plus time plus waker plus
+ * previous plus cursor, hoisted once by the caller with no second poll.
  *
  * Scans at most eight peers from the cursor via a bpf_loop callback
  * with no unrolled depth, so the verifier checks the body once with
@@ -261,14 +279,13 @@ static int flow_bsf_step(u32 idx, void *ctx_)
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
  */
-static __noinline u32 flow_ssf_pick(const struct task_struct *p,
-	u64 deadline, u64 now, u32 this_cpu, s32 prev_cpu, u32 cursor)
+static __noinline u32 flow_ssf_pick(const struct flow_scan_tail *t)
 {
 	struct flow_ssf_iter it = {
-		.p = p,
-		.deadline = deadline,
-		.now = now,
-		.this_cpu = this_cpu,
+		.p = t->p,
+		.deadline = t->deadline,
+		.now = t->now,
+		.this_cpu = t->this_cpu,
 		.this_node = 0,
 		.prev_cpu = 0,
 		.start = 0,
@@ -285,24 +302,20 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
 		return it.best;
 	n = (u32)nr;
 	it.n = n;
-	it.this_node = flow_cpu_node(this_cpu);
-	it.prev_cpu = prev_cpu;
+	it.this_node = flow_cpu_node(t->this_cpu);
+	it.prev_cpu = t->prev_cpu;
 	it.pow2 = flow_is_pow2((u64)n);
 	if (it.pow2)
-		it.start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+		it.start = (u32)(((u64)t->cursor + 1ULL) & ((u64)n - 1ULL));
 	else
-		it.start = (u32)(((u64)cursor + 1ULL) % (u64)n);
+		it.start = (u32)(((u64)t->cursor + 1ULL) % (u64)n);
 	bpf_loop((u32)FLOW_DISPATCH_MAX_VISIT, flow_ssf_step, &it, 0);
 	return it.best;
 }
 /**
  * flow_bsf_pick - best sufficient fallback over the disjoint window.
- * @p: task to place.
- * @deadline: absolute deadline, zero meets all.
- * @now: current time in nanos.
- * @this_cpu: waker CPU skipped as the busy waker.
- * @prev_cpu: previous CPU for the sticky tie preference.
- * @cursor: shared cursor for the disjoint start.
+ * @t: scan tail with task plus deadline plus time plus waker plus
+ * previous plus cursor, hoisted once by the caller with no second poll.
  *
  * Scans the next four peers past the SSF window from cursor plus 9 via
  * a bpf_loop callback with no unrolled depth, so the verifier checks
@@ -317,14 +330,13 @@ static __noinline u32 flow_ssf_pick(const struct task_struct *p,
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
  */
-static __noinline u32 flow_bsf_pick(const struct task_struct *p,
-	u64 deadline, u64 now, u32 this_cpu, s32 prev_cpu, u32 cursor)
+static __noinline u32 flow_bsf_pick(const struct flow_scan_tail *t)
 {
 	struct flow_bsf_iter it = {
-		.p = p,
-		.deadline = deadline,
-		.now = now,
-		.this_cpu = this_cpu,
+		.p = t->p,
+		.deadline = t->deadline,
+		.now = t->now,
+		.this_cpu = t->this_cpu,
 		.prev_cpu = 0,
 		.start = 0,
 		.n = 0,
@@ -340,14 +352,14 @@ static __noinline u32 flow_bsf_pick(const struct task_struct *p,
 		return it.best;
 	n = (u32)nr;
 	it.n = n;
-	it.prev_cpu = prev_cpu;
+	it.prev_cpu = t->prev_cpu;
 	it.pow2 = flow_is_pow2((u64)n);
 	if (it.pow2) {
-		start = (u32)(((u64)cursor + 1ULL) & ((u64)n - 1ULL));
+		start = (u32)(((u64)t->cursor + 1ULL) & ((u64)n - 1ULL));
 		it.start = (u32)(((u64)start +
 		    (u64)FLOW_DISPATCH_MAX_VISIT) & ((u64)n - 1ULL));
 	} else {
-		start = (u32)(((u64)cursor + 1ULL) % (u64)n);
+		start = (u32)(((u64)t->cursor + 1ULL) % (u64)n);
 		it.start = (u32)(((u64)start +
 		    (u64)FLOW_DISPATCH_MAX_VISIT) % (u64)n);
 	}
@@ -379,6 +391,14 @@ static __noinline u32 flow_select_best(const struct task_struct *p,
 	u64 nr = nr_cpu_ids;
 	struct flow_cpu_state *wst = flow_cpu(this_cpu);
 	u32 cursor = wst ? READ_ONCE(wst->cursor) : 0;
+	struct flow_scan_tail tail = {
+		.p = p,
+		.deadline = deadline,
+		.now = now,
+		.this_cpu = this_cpu,
+		.prev_cpu = prev_cpu,
+		.cursor = cursor,
+	};
 	u32 best;
 	u32 bsf;
 	u32 n;
@@ -397,13 +417,13 @@ static __noinline u32 flow_select_best(const struct task_struct *p,
 		next = (u32)(((u64)start + 1ULL) % (u64)n);
 	}
 	(void)start;
-	best = flow_ssf_pick(p, deadline, now, this_cpu, prev_cpu, cursor);
+	best = flow_ssf_pick(&tail);
 	if (best != 0xffffffffU) {
 		if (wst)
 			__sync_lock_test_and_set(&wst->cursor, next);
 		return best;
 	}
-	bsf = flow_bsf_pick(p, deadline, now, this_cpu, prev_cpu, cursor);
+	bsf = flow_bsf_pick(&tail);
 	if (bsf != 0xffffffffU) {
 		if (wst)
 			__sync_lock_test_and_set(&wst->cursor, next);

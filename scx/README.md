@@ -36,7 +36,7 @@ A gate runs first at each step so tasks and CPUs wait safely. Exiting work runs 
 
 ### Reporting
 
-Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at `50005`. Page keeps local, node, machine, overflow, kicks plus preempt with no loss. Snapshots share one moment with times. Dashboard shows fifteen counters plus uptime with CPU cards. Log shows cpus seeded primary plus llcs. See `src/rust/stats.rs`.
+Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at `50005`. Page keeps local, node, machine, overflow, kicks, plus preempt with no loss. Snapshots share one moment with times. Dashboard shows fifteen counters plus uptime with CPU cards. Log shows CPUs seeded primary plus llcs. See `src/rust/stats.rs`.
 
 ### Fairness
 

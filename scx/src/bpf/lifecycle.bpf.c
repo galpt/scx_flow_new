@@ -155,7 +155,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* remainder as the next slice when the predictor slack still holds */
 	/* critical, so short bursts earn a nearer virtual deadline with no */
 	/* extra slice. A full quantum plus a batch burst resets to one */
-	/* quantum, so the carry never pasts one quantum with no new map. */
+	/* quantum, so the carry never passes one quantum with no new map. */
 	/* Exiting plus completion paths skip here with no carry, so only */
 	/* runnable waits carry with one kick per wait at enqueue. */
 	if (runnable) {
