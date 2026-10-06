@@ -21,7 +21,6 @@ Latency apps run urgent fair time first, so short arrivals skip long work. Deskt
 ### Queues
 
 One local queue per CPU plus one per node plus machine plus overflow hold tasks across 1042 queues. Each pass drains tiers plus steal with one hint move capped by slots and 8 visits. Five hints feed tiers plus steal plus perf with 4 to 8 steal peers. See `src/bpf/intf.h`.
-Homeless plus gate misses wait in overflow FIFO with mask wins on drain.
 
 ### Keys
 
