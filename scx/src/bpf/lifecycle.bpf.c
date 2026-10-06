@@ -10,7 +10,9 @@
  * feeds the burst predictor average plus deviation from the same delta
  * with shifts, then carries the latency-critical slice up to one
  * quantum, then counts one requeue per runnable stop else one
- * completion. A runnable yield before one quantum keeps the unused
+ * completion. The carry feeds the held slice on misses plus rotations
+ * while fresh waits earn the dynamic remaining clamp at enqueue, so
+ * stopping records only with no key write here. A runnable yield before one quantum keeps the unused
  * remainder when predictor slack holds critical, else resets to one
  * quantum. A wall completion past the deadline counts one miss with
  * no wait and no kick, since the task already left the CPU. Enable
@@ -179,7 +181,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* The snapshot counts live pids for the on CPU gauge. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	/* A wall completion past the deadline counts one miss with no */
-	/* wait and no kick, since the task already left the CPU. */
+	/* wait and no kick, since the task already left the CPU. The miss */
+	/* count doubles as skip aging for the same-tier rejoin plus the */
+	/* overflow promotion, so stopping records only with no order write. */
 	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
 	if (runnable) {

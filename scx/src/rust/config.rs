@@ -10,6 +10,9 @@ use anyhow::bail;
 
 /// Fixed slice in nanos at 1ms. Every insert uses this slice.
 pub const QUANTUM_NS: u64 = 1_000_000;
+/// Dynamic slice floor in nanos at 10us. Fresh waits clamp the
+/// saturated remaining time to this floor with the quantum ceiling.
+pub const SLICE_MIN_NS: u64 = 10_000;
 /// Default period in nanos at 16ms. Holds sixteen slices.
 pub const PERIOD_NS: u64 = 16_000_000;
 /// Least predictor value in nanos at 1. Clamps short bursts.
@@ -51,6 +54,8 @@ impl Config {
     /// An invalid value is a programming fault, not a runtime state.
     /// The slice stays fixed at 1ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
+    /// Fresh waits clamp remaining time to the 10us floor plus the 1ms
+    /// ceiling with misses holding else flooring only.
     /// Dispatch moves at most one hint threaded move per tier bounded
     /// by remaining slots with visits capped at 8 per pass shared across
     /// five tiers plus steal window 4 to 8 with BSF four disjoint past
@@ -67,6 +72,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
+        }
+        if SLICE_MIN_NS != 10_000 {
+            bail!("slice floor bad");
+        }
+        if SLICE_MIN_NS >= QUANTUM_NS {
+            bail!("slice floor over ceiling bad");
         }
         if WEIGHT_MIN != 1 || WEIGHT_BASE != 128 || WEIGHT_MAX != 16_384 {
             bail!("weight bounds bad");
@@ -85,6 +96,9 @@ impl Config {
         }
         if crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64 != QUANTUM_NS {
             bail!("quantum header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_MIN_NS as u64 != SLICE_MIN_NS {
+            bail!("slice floor header bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64 != PERIOD_NS {
             bail!("period header bad");
@@ -209,6 +223,17 @@ mod tests {
         let s = Config::default().describe();
         assert!(s.contains("quantum=1000us"));
         assert!(!s.contains("batch"));
+    }
+
+    #[test]
+    /// Dynamic slice spans the 10us floor to the 1ms ceiling.
+    fn slice_bounds_match_intf_h() {
+        assert_eq!(SLICE_MIN_NS, 10_000);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_SLICE_MIN_NS as u64,
+            SLICE_MIN_NS
+        );
+        assert!(SLICE_MIN_NS < QUANTUM_NS);
     }
 
     #[test]

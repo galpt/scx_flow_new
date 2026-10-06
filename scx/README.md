@@ -2,15 +2,15 @@
 
 ### What is it?
 
-scx_flow 4.8.8 runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow 4.8.10 runs the earliest strict key first as the earlier of deadline plus virtual time. It keeps order in kernel priority queues with vruntime plus a burst predictor from recent runs. Fresh waits earn a dynamic slice from remaining time clamped to `10us` plus `1ms`. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
-The goal is to test fair order with prediction in the kernel and see if short bursts reach a CPU sooner. Like fair.c, earliest fair time runs first, unlike rt.c, no fixed priority holds. Direct queue order keeps the test fair and repeatable. See `src/bpf/intf.h`.
+The goal is to test strict order with prediction in the kernel and see if short bursts reach a CPU sooner. Like fair.c, earliest strict key runs first, unlike rt.c, no fixed priority holds. Direct queue order keeps the test fair and repeatable. See `src/bpf/intf.h`.
 
 ### How it works?
 
-Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus slice over weight. Each CPU takes the earliest fair time it may run. Teardown charges plus advances vruntime with predictor update always. See `src/bpf/enqueue.bpf.c` and `src/bpf/dispatch.bpf.c`.
+Arrivals always pass a gate first. Tasks earn EDF deadlines from the predictor else the hint period plus virtual deadlines from vruntime plus dynamic slice over weight. Each CPU takes the earliest strict key it may run. Teardown charges plus advances vruntime with predictor update always. See `src/bpf/enqueue.bpf.c` and `src/bpf/dispatch.bpf.c`.
 
 ## Typical Use Cases
 
@@ -20,11 +20,11 @@ Latency apps run urgent fair time first, so short arrivals skip long work. Deskt
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus overflow hold tasks across 1042 queues. Each pass drains tiers plus steal with one hint move capped by slots and 8 visits. Batch moves outward one tier earlier, interactive stays local. See `src/bpf/intf.h`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks across 1042 queues. Each pass drains tiers plus steal with one hint move capped by slots and 8 visits plus one aged overflow extra. Batch moves outward one tier earlier, interactive stays local. See `src/bpf/intf.h`.
 
 ### Keys
 
-Each fair time orders as priority value with vruntime pacing via lag bounds. Predictor average plus deviation shapes deadlines with shift updates plus quarter floor. Virtual deadline adds slice over weight with one divide plus nice table. Fair key holds deadline plus virtual deadline with 2ms clamp. See `src/bpf/intf.h`.
+Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor shapes deadlines with shift updates. Virtual deadline adds dynamic slice over weight with one divide. Strict key holds earlier of deadline plus virtual deadline with 2ms clamp. Remaining feeds slice plus slack only. See `src/bpf/intf.h`.
 
 ### Admission
 
@@ -40,7 +40,7 @@ Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at 
 
 ### Fairness
 
-Fair order holds the earlier of deadline plus virtual deadline in each queue. Vruntime advances by slice over weight with lag clamped at 2ms. Sleepers gain at most one slice of boost with no storm. Hierarchy stays flat with no share accounting past weight. See `src/bpf/intf.h`.
+Strict order holds the earlier of deadline plus virtual deadline in each queue. Vruntime advances by dynamic slice over weight with lag clamped at 2ms. Sleepers gain at most one slice of boost with no storm. Hierarchy stays flat with no share accounting past weight. See `src/bpf/intf.h`.
 
 ### Weights
 
@@ -60,7 +60,7 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with predictor retrain plus minimum fold forward. Each stop feeds average plus deviation with shift updates. Runnable yields keep unused slice up to `1ms` when predictor holds critical. Idle minima hold bounded by lag plus eligibility. Hints race moves benignly to the next pass. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation. Yields keep unused slice up to `1ms` when critical. Misses hold else floor to `10us` with same-tier rejoin plus skip aging. Minima hold bounded by lag. Hints race moves benignly to the next pass. See `src/bpf/lifecycle.bpf.c`.
 
 ### Verification
 
