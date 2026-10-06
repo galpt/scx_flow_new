@@ -8,9 +8,12 @@
  * earlier of the deadline plus the virtual deadline, so urgent tasks
  * still win while hogs fall behind with lag bounds. Tasks join direct
  * when the target can drain before the shared home, so no task waits
- * for a busy CPU while shared room stays open. Every tier join counts
- * one admit with no reject, so the counters track joins with no bound.
- * Runs under the caller with no lock.
+ * for a busy CPU while shared room stays open. An implicit two-layer
+ * bias keeps interactive local-first plus batch outward one tier
+ * earlier under contention with no new map plus no new queue plus no
+ * knob, reusing the tier escalation plus the slowest sufficient pick.
+ * Every tier join counts one admit with no reject, so the counters
+ * track joins with no bound. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,6 +37,23 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
 {
 	scx_bpf_dsq_insert(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, enq_flags);
 }
+/* Implicit two-layer bias from the fair time distance with no knob. */
+/* A near fair time within one quantum means interactive, so the task */
+/* stays local-first. A far fair time past one quantum means batch, so */
+/* the task moves outward one tier earlier under contention to keep */
+/* local room for interactive work. Uses the fair time plus the quantum */
+/* with no new map plus no new queue plus no knob, and reuses the tier */
+/* escalation plus the slowest sufficient pick. */
+static __always_inline bool flow_is_batch_vtime(u64 vtime, u64 now)
+{
+	if (vtime == 0)
+		return false;
+	if (flow_time_before(vtime, now))
+		return false;
+	if (vtime == now)
+		return false;
+	return (vtime - now) > (u64)FLOW_QUANTUM_NS;
+}
 /**
  * flow_tier_insert_hint - tier join from hoisted combined drain.
  * @p: task to join, null is ignored by the insert helpers.
@@ -46,20 +66,42 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
  * Takes the local tier when the hoisted combined drain finishes before
  * the fair time, else the node tier when live, else the machine tier, so
  * a busy node holds local with no wait and no second poll. Escalation
- * follows the combined drain with mask wins on dispatch drain.
+ * follows the combined drain with mask wins on dispatch drain. An
+ * implicit batch bias moves outward one tier earlier under contention:
+ * a batch local win with queued local work holds node instead, and a
+ * batch node win with queued node work holds machine instead, so local
+ * room stays for interactive work with no new queue.
  */
 static __always_inline void flow_tier_insert_hint(struct task_struct *p,
 	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
 {
 	u32 node;
-	if (cpu >= 0 &&
-	    flow_cpu_meets_fair_hint(local_q, node_q, vtime, now)) {
+	bool batch = flow_is_batch_vtime(vtime, now);
+	bool drain_ok = false;
+	if (cpu >= 0)
+		drain_ok = flow_cpu_meets_fair_hint(local_q, node_q, vtime,
+		    now);
+	if (cpu >= 0 && drain_ok) {
+		if (batch && local_q > 0) {
+			node = flow_cpu_node((u32)cpu);
+			if (node < (u32)FLOW_MAX_NODES &&
+			    (u64)node < nr_node_ids) {
+				flow_node_insert(p, node, vtime);
+				return;
+			}
+			flow_machine_insert(p, vtime);
+			return;
+		}
 		flow_local_insert(p, cpu, vtime);
 		return;
 	}
 	if (cpu >= 0) {
 		node = flow_cpu_node((u32)cpu);
 		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids) {
+			if (batch && node_q > 0) {
+				flow_machine_insert(p, vtime);
+				return;
+			}
 			flow_node_insert(p, node, vtime);
 			return;
 		}
