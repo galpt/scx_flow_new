@@ -128,16 +128,18 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
 /**
- * flow_make_fair - fair time from task state plus deadline plus hint.
+ * flow_make_fair - strict EDF key from task state plus deadline plus hint.
  * @tctx: task state with vruntime plus weight plus slice.
  * @deadline: absolute EDF deadline in nanos.
  * @hint_w: hint share with base for neutral.
  *
  * Reads vruntime plus weight plus slice once and stacks the effective
  * share of task times hint over 128, so pinned plus miss plus open
- * paths share one divide copy with the same order.
+ * paths share one divide copy with the same order. The slice holds
+ * the dynamic remaining clamp on fresh waits else the held charge on
+ * misses, so near deadlines earn near virtual times with no band jump.
  *
- * Returns: fair time as the earlier of deadline plus virtual deadline.
+ * Returns: strict key as the earlier of deadline plus virtual deadline.
  *
  * Outlined with noinline to keep verifier headroom: pinned plus miss
  * plus open paths share one divide copy with no inline growth.
@@ -156,7 +158,7 @@ static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
 	if (sl == 0)
 		sl = (u32)FLOW_QUANTUM_NS;
 	vd = flow_virt_deadline(vr, (u64)sl, eff);
-	return flow_fair_vtime(deadline, vd);
+	return flow_edf_key(deadline, vd);
 }
 /**
  * flow_clamp_to_min - clamp vruntime within the lag bound of a CPU.
@@ -212,6 +214,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	u64 pdev;
 	u64 pdl;
 	u64 pvt;
+	bool pmiss = false;
 	if (is_reenq) {
 		ph = READ_ONCE(tctx->hint_us);
 		phint_w = READ_ONCE(tctx->hint_w);
@@ -228,10 +231,15 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	if (pc >= 0 && flow_cpu_ok(p, pc))
 		flow_clamp_to_min(tctx, (u32)pc);
 	/* A past deadline counts one miss before the fresh deadline, */
-	/* so pinned overload tracks like open tasks with no loss. */
+	/* so pinned overload tracks like open tasks with no loss. The */
+	/* miss holds the stored slice else floors it to 10us, and a fresh */
+	/* wait earns the dynamic remaining clamp, so the key stays strict */
+	/* with skip aging in the miss count. */
 	if (READ_ONCE(tctx->deadline) &&
-	    flow_missed(READ_ONCE(tctx->deadline), now))
+	    flow_missed(READ_ONCE(tctx->deadline), now)) {
 		flow_count_miss(tctx);
+		pmiss = true;
+	}
 	/* Pinned tasks recompute the deadline from the predictor */
 	/* plus hint with no stale reuse, so a pinned requeue tracks */
 	/* recent bursts like open tasks with no order break. A zero */
@@ -241,6 +249,19 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	pdl = flow_pred_deadline(now, pavg, pdev, ph);
 	__sync_lock_test_and_set(&tctx->deadline, pdl);
 	tctx->wait_at = now;
+	/* Strict slice on the pinned join with no stale reuse. A miss */
+	/* holds else floors only, a slice rotation inherits a zero slice, */
+	/* and a fresh wait earns the dynamic remaining clamp, so the */
+	/* virtual deadline tracks the same charge the key sorts. */
+	if (pmiss)
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
+	else if (!is_reenq)
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_for(pdl, now));
+	else
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 	pvt = flow_make_fair(tctx, pdl, phint_w);
 	if (flow_cpu_ok(p, pc))
 		flow_tier_insert(p, pc, pvt, now);

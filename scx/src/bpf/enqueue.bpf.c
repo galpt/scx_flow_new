@@ -5,8 +5,11 @@
  * Every wakeup earns one EDF deadline from the burst predictor else
  * the hint period plus one virtual deadline from vruntime plus slice
  * over weight, and every task joins a tier queue with no admission
- * bound. Queue order uses the earlier of the two times, so urgent
- * tasks still win while hogs fall behind with lag bounds. Tasks join
+ * bound. Queue order uses the strict EDF key of the earlier of the two
+ * times, so urgent tasks still win while hogs fall behind with lag
+ * bounds. Fresh waits earn a dynamic slice from the saturated remaining
+ * time clamped to 10us plus 1ms, while misses hold else floor only and
+ * rejoin the same tier with a fresh deadline plus skip aging. Tasks join
  * direct when the target can drain before the shared home, so no task
  * waits for a busy CPU while shared room stays open. Missed tasks
  * rejoin a tier queue with a fresh deadline plus a miss count and one
@@ -25,9 +28,12 @@
  * direct preempt needs predictor slack plus an eligible arrival plus a
  * 100us margin lead with more than 100us still left on the owner, so
  * near ties plus nearly done owners never bounce while one kick per
- * wait stays. Latency-critical slice carryover keeps the unused
- * remainder up to one quantum, so short bursts earn nearer keys. Slice
- * expiry paces the rest, so no slice write and no stamp run here.
+ * wait stays. The owner paces on a fresh 1ms quantum with no dynamic
+ * use. Latency-critical slice carryover keeps the unused
+ * quantum, so short bursts earn nearer keys. Strict slice writes run
+ * here before the key: fresh waits earn the dynamic remaining clamp,
+ * misses hold else floor only, and rotations inherit zero. Slice
+ * expiry paces the rest with no stamp run here.
  * Local plus node depths hoist once, so the drain gated bypass
  * plus the combined drain tier escalation share one read with no second
  * poll. See intf.h for the deadline plus fairness helpers and
@@ -205,6 +211,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		tctx->wait_at = now;
 		ndl = flow_pred_deadline(now, avg, dev, hint);
 		__sync_lock_test_and_set(&tctx->deadline, ndl);
+		/* A miss holds the stored slice else floors it to 10us */
+		/* with no dynamic recompute, then rejoins the same tier */
+		/* with the fresh deadline plus skip aging in the miss */
+		/* count, so urgency returns at once with no starvation. */
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		nvt = flow_make_fair(tctx, ndl, hint_w);
 		flow_tier_insert(p, cpu, nvt, now);
 		flow_kick_idle_allowed(p, sel);
@@ -213,7 +225,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
 	tctx->wait_at = now;
-	/* Fair time from the virtual deadline plus the EDF deadline. */
+	/* Strict slice before the key with no stale reuse. A fresh wait */
+	/* earns the dynamic remaining clamp from 10us to 1ms, while a */
+	/* slice rotation holds the stored charge else inherits the quantum */
+	/* on zero, so the virtual deadline tracks the same charge the key */
+	/* sorts. The remaining time feeds the slice plus slack only with */
+	/* the sort staying the earlier of deadline plus virtual time. */
+	if (!is_reenq)
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_for(deadline, now));
+	else
+		__sync_lock_test_and_set(&tctx->slice_ns,
+		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
+	/* Strict EDF key from the virtual deadline plus the EDF deadline. */
 	/* Heavy tasks earn a near virtual time while light tasks earn a */
 	/* far one with one divide, so the earlier of the two paces order */
 	/* with latency still capped by the deadline. The effective share */
