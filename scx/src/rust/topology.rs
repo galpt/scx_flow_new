@@ -3,36 +3,112 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Reads the host CPU lists plus the node rows for the BPF seed.
-//! Node reads use the kernel NUMA view with zero on fault and a cap
-//! at sixteen, so large hosts fold to the machine queue with no panic.
+//! Delegates host discovery to scx_utils::Topology with a sysfs
+//! fallback, then seeds the BPF view in two best-effort phases.
+//! Phase one writes the primary rows with sibling plus node, and phase
+//! two refreshes the LLC bitmaps for the start log. Either phase keeps
+//! the BPF defaults on fault with no trap and no hot-path use.
+
+use scx_utils::Topology;
 
 /// CPU ids past this bound never seed, mirroring FLOW_MAX_CPUS.
 const CPU_BOUND: u32 = 1024;
 
-/// Online CPU ids in rank order with empty on read fault.
-pub fn online_cpus() -> Vec<u32> {
-    read_cpu_list_file("/sys/devices/system/cpu/online")
-}
+/// Node ids past this bound fold to zero, mirroring FLOW_MAX_NODES.
+const NODE_BOUND: u32 = 16;
 
 /// One topology row per CPU with sibling plus node.
-/// Sibling reads the thread list with all ones on fault, and node
-/// reads the NUMA view with zero on fault and a cap at sixteen.
+/// Sibling comes from the core view with all ones on fault, and node
+/// folds to zero on fault with a cap at sixteen. A Topology failure
+/// falls back to the sysfs lists with the same shape and no panic.
 pub fn topo_rows() -> Vec<(u32, u32, u32)> {
-    let online = online_cpus();
-    let mut rows = Vec::new();
-    for cpu in online {
-        let sib = thread_sibling(cpu).unwrap_or(u32::MAX);
-        let node = cpu_node(cpu).unwrap_or(0);
-        let node = if node < 16 { node } else { 0 };
-        rows.push((cpu, sib, node));
+    init_topology()
+}
+
+/// Build the seeded rows from the shared Topology view.
+/// Uses scx_utils::Topology as the source of truth with a sysfs
+/// fallback on fault, so large hosts fold to the machine queue with
+/// no panic and no extra scan on the hot paths.
+pub fn init_topology() -> Vec<(u32, u32, u32)> {
+    if let Ok(topo) = Topology::new() {
+        let sibs = topo.sibling_cpus();
+        let mut rows = Vec::new();
+        let mut online: Vec<u32> = topo.span.iter().map(|c| c as u32).collect();
+        online.sort_unstable();
+        for cpu in online {
+            if cpu >= CPU_BOUND {
+                continue;
+            }
+            let sib = sibs
+                .get(cpu as usize)
+                .copied()
+                .filter(|s| *s >= 0)
+                .map(|s| s as u32)
+                .filter(|s| *s != cpu)
+                .unwrap_or(u32::MAX);
+            let node = topo
+                .all_cpus
+                .get(&(cpu as usize))
+                .map(|c| c.node_id as u32)
+                .unwrap_or(0);
+            let node = if node < NODE_BOUND { node } else { 0 };
+            rows.push((cpu, sib, node));
+        }
+        if !rows.is_empty() {
+            return rows;
+        }
     }
-    rows
+    fallback_rows()
+}
+
+/// Primary bitmap text for the start log in rank order.
+/// Best effort with empty on fault, so a failed read never traps.
+pub fn write_primary_bitmap(rows: &[(u32, u32, u32)]) -> String {
+    let mut ids: Vec<u32> = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+    ids.sort_unstable();
+    ids.iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// LLC bitmap texts for the start log, one entry per LLC.
+/// Best effort with empty on fault, so hosts without an LLC view log
+/// no bitmap with no trap and no hot-path use.
+pub fn write_llc_bitmaps() -> Vec<String> {
+    let topo = match Topology::new() {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for llc in topo.all_llcs.values() {
+        let mut ids: Vec<usize> = llc.all_cpus.keys().copied().collect();
+        ids.sort_unstable();
+        let text = ids
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        out.push(text);
+    }
+    out.sort();
+    out
 }
 
 /// Short topology line for the start log.
 pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
-    format!("cpus={} seeded", rows.len())
+    let primary = write_primary_bitmap(rows);
+    let llcs = write_llc_bitmaps();
+    if llcs.is_empty() {
+        format!("cpus={} seeded", rows.len())
+    } else {
+        format!(
+            "cpus={} seeded primary=[{}] llcs={}",
+            rows.len(),
+            primary,
+            llcs.len()
+        )
+    }
 }
 
 /// True when the CPU is the second thread of one core.
@@ -80,6 +156,21 @@ pub fn read_cpu_list_file(path: &str) -> Vec<u32> {
     std::fs::read_to_string(path)
         .map(|s| parse_cpu_list(&s))
         .unwrap_or_default()
+}
+
+/// Fallback rows from the sysfs lists with the same shape.
+/// Sibling reads the thread list with all ones on fault, and node
+/// reads the NUMA view with zero on fault and a cap at sixteen.
+fn fallback_rows() -> Vec<(u32, u32, u32)> {
+    let online = read_cpu_list_file("/sys/devices/system/cpu/online");
+    let mut rows = Vec::new();
+    for cpu in online {
+        let sib = thread_sibling(cpu).unwrap_or(u32::MAX);
+        let node = cpu_node(cpu).unwrap_or(0);
+        let node = if node < NODE_BOUND { node } else { 0 };
+        rows.push((cpu, sib, node));
+    }
+    rows
 }
 
 /// Thread sibling of one CPU with None on fault.
@@ -139,7 +230,7 @@ mod tests {
     #[test]
     fn rows_cap_large_nodes() {
         let node = 20u32;
-        let capped = if node < 16 { node } else { 0 };
+        let capped = if node < NODE_BOUND { node } else { 0 };
         assert_eq!(capped, 0);
     }
 
@@ -161,5 +252,26 @@ mod tests {
         assert!(!is_smt_thread(4, 5));
         assert!(is_smt_thread(5, 4));
         assert!(!is_smt_thread(7, u32::MAX));
+    }
+
+    #[test]
+    fn primary_bitmap_joins_rank_order() {
+        let rows = vec![(2, u32::MAX, 0), (0, u32::MAX, 0), (1, 0, 0)];
+        assert_eq!(write_primary_bitmap(&rows), "0,1,2");
+        assert_eq!(write_primary_bitmap(&[]), "");
+    }
+
+    #[test]
+    fn init_topology_rows_stay_in_bounds() {
+        let rows = init_topology();
+        assert_eq!(topo_rows(), rows);
+        assert!(
+            rows.iter()
+                .all(|(c, _, n)| *c < CPU_BOUND && *n < NODE_BOUND)
+        );
+        let mut ids: Vec<u32> = rows.iter().map(|(c, _, _)| *c).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), rows.len());
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.2.
+ * Flow scheduler BPF core at 4.8.7.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
@@ -17,6 +17,7 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include "intf.h"
+#include "topology.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 /* Per task state for the life of the task. */
@@ -134,7 +135,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			if (!tp)
 				continue;
 			nd = READ_ONCE(tp->node);
-			if (nd >= (u32)FLOW_MAX_NODES)
+			if (!flow_topo_node_ok(nd))
 				continue;
 			if (!seen || nd > hi) {
 				hi = nd;
