@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow 4.8.7 runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow 4.8.8 runs the fairest task first by virtual time. It keeps fair order in kernel priority queues with vruntime plus a burst predictor from recent runs. The core joins every waiting task with no bound and a fixed `1ms` slice. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
@@ -20,7 +20,7 @@ Latency apps run urgent fair time first, so short arrivals skip long work. Deskt
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus overflow hold tasks across 1042 queues. Each pass drains tiers plus steal with one hint move capped by slots and 8 visits. Five hints feed tiers plus steal plus perf with 4 to 8 steal peers. See `src/bpf/intf.h`.
+One local queue per CPU plus one per node plus machine plus overflow hold tasks across 1042 queues. Each pass drains tiers plus steal with one hint move capped by slots and 8 visits. Batch moves outward one tier earlier, interactive stays local. See `src/bpf/intf.h`.
 
 ### Keys
 
@@ -48,11 +48,11 @@ Weight tunes period bands plus fair share. Shares map to 32ms, 16ms, 8ms, and 4m
 
 ### Locality
 
-Locality stays with per-CPU plus per-node queues. Select takes prev idle, then waker and sibling idle, before the pick, so pairs share cache without scan. Placement keeps the slowest sufficient CPU with near minimum tiebreak. Kicks clear idle with test and clear. Two-way SMT assumed. Span equals online. See `src/bpf/select_cpu.bpf.c`.
+Locality stays with per-CPU plus per-node queues. Select takes prev idle, then waker and sibling idle, before the pick, so pairs share cache. Placement keeps the slowest sufficient CPU with prev tie plus near minimum. Two-way SMT assumed. Span equals online. See `src/bpf/select_cpu.bpf.c`.
 
 ### Contention
 
-Contention stays bounded with visits for tier moves. Base is 8 per pass shared across five tiers plus steal. Each tier moves at most one task bounded by slots before the next pick. Leftover work resumes next pass with no loss. Stats use per-CPU rows. See `src/bpf/dispatch.bpf.c`.
+Contention stays bounded with 8 visits per pass shared across five tiers plus steal. Each tier moves one task bounded by slots. Steal scans 4 to 8 peers node-local first with idle hold at 4 on gate plus miss pressure. Leftover work resumes next pass. See `src/bpf/dispatch.bpf.c`.
 
 ### Inversion
 
@@ -60,7 +60,7 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with predictor retrain plus minimum fold forward. Each stop feeds average plus deviation with shift updates. Idle minima hold bounded by lag plus eligibility, so rejoins keep one slice boost. Hints race moves benignly to the next pass. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals with predictor retrain plus minimum fold forward. Each stop feeds average plus deviation with shift updates. Runnable yields keep unused slice up to `1ms` when predictor holds critical. Idle minima hold bounded by lag plus eligibility. Hints race moves benignly to the next pass. See `src/bpf/lifecycle.bpf.c`.
 
 ### Verification
 
@@ -72,4 +72,4 @@ Rules live in `src/bpf/intf.h`. Core lives in cgroup, weight, vtime, edf, placem
 
 ## Limitations
 
-Hotplug and releases need a restart. State is `64B`, `16B`, `8B`, `120B`. Needs kernel `7.2` or later. Mask wins on drain. One kick per wait with `100us` margin and tail. Governor performance with half and max. Equal ties keep lower id with no extra kick. Extra threads stay single.
+Hotplug and releases need restart. State is `64B`, `16B`, `8B`, `120B`. Needs kernel `7.2` or later. Mask wins on drain. One kick per wait with predictor slack plus `100us` margin and tail. Governor performance with half and max. Tied minima prefer prev CPU, then lower id. Extra threads stay single.
