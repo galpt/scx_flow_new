@@ -5,17 +5,27 @@
 
 //! Holds the validated constants with defaults that match intf.h.
 
-use crate::flow::CAP_BASE;
-use crate::flow::HINT_MAX;
-use crate::flow::PERIOD_NS;
-use crate::flow::PRED_MAX_NS;
-use crate::flow::PRED_MIN_NS;
-use crate::flow::QUANTUM_NS;
-use crate::flow::WEIGHT_BASE;
-use crate::flow::WEIGHT_MAX;
-use crate::flow::WEIGHT_MIN;
 use anyhow::Result;
 use anyhow::bail;
+
+/// Fixed slice in nanos at 1ms. Every insert uses this slice.
+pub const QUANTUM_NS: u64 = 1_000_000;
+/// Default period in nanos at 16ms. Holds sixteen slices.
+pub const PERIOD_NS: u64 = 16_000_000;
+/// Least predictor value in nanos at 1. Clamps short bursts.
+pub const PRED_MIN_NS: u64 = 1;
+/// Largest predictor value in nanos at 1s. Clamps long bursts.
+pub const PRED_MAX_NS: u64 = 1_000_000_000;
+/// Base capacity in units at 1024. Symmetric hosts share the base.
+pub const CAP_BASE: u32 = 1024;
+/// Base weight with a neutral share.
+pub const WEIGHT_BASE: u32 = 128;
+/// Least weight admitted.
+pub const WEIGHT_MIN: u32 = 1;
+/// Largest weight admitted.
+pub const WEIGHT_MAX: u32 = 16_384;
+/// Max hint rows bound shared with the BPF header.
+pub const HINT_MAX: u64 = 8192;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
@@ -43,18 +53,17 @@ impl Config {
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
     /// Dispatch moves at most one hint threaded move per tier bounded
     /// by remaining slots with visits capped at 8 per pass shared across
-    /// five tiers plus five hoisted hints plus fused perf with no kfunc
-    /// plus no batch plus no flood plus no step plus steal window 4 to 8
-    /// with saturation plus BSF four disjoint past SSF eight for twelve
-    /// unique peers on hosts with at least twelve CPUs with node-local
-    /// phases plus drain plus minimum plus id tiebreak, and joins carry no admission
-    /// bound with base capacity 1024. Queues hold 1024 local plus 16 node
-    /// plus machine plus overflow with ids in the 0x5100 region. Hints hold 8192
-    /// flat rows with period plus weight and no timer wait. Preempt
-    /// needs 100us margin plus 100us tail strictly with a floor at 100us
-    /// and one kick per wait gated on eligibility. Fairness bounds lag
-    /// at 2ms with vruntime plus virtual deadline pacing queue order.
-    /// Stats hold 15 counters at 120B with preempt kicks plus skipped.
+    /// five tiers plus steal window 4 to 8 with BSF four disjoint past
+    /// SSF eight for twelve unique peers on hosts with at least twelve
+    /// CPUs with node-local phases plus drain plus minimum plus id
+    /// tiebreak, and joins carry no admission bound with base capacity
+    /// 1024. Queues hold 1024 local plus 16 node plus machine plus
+    /// overflow with ids in the 0x5100 region. Hints hold 8192 flat rows
+    /// with period plus weight and no timer wait. Preempt needs 100us
+    /// margin plus 100us tail strictly with a floor at 100us and one kick
+    /// per wait gated on eligibility. Fairness bounds lag at 2ms with
+    /// vruntime plus virtual deadline pacing queue order. Stats hold 15
+    /// counters at 120B with preempt kicks plus skipped.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -73,6 +82,33 @@ impl Config {
         }
         if HINT_MAX != 8192 {
             bail!("hint bound bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64 != QUANTUM_NS {
+            bail!("quantum header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64 != PERIOD_NS {
+            bail!("period header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS as u64 != PRED_MIN_NS {
+            bail!("pred floor bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PRED_MAX_NS as u64 != PRED_MAX_NS {
+            bail!("pred ceiling bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MIN as u64 != WEIGHT_MIN as u64 {
+            bail!("weight floor bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE as u64 != WEIGHT_BASE as u64 {
+            bail!("weight base bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX as u64 != WEIGHT_MAX as u64 {
+            bail!("weight top bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_CAP_BASE as u64 != CAP_BASE as u64 {
+            bail!("cap base bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64 != HINT_MAX {
+            bail!("hint header bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 100_000 {
             bail!("margin bad");
@@ -182,6 +218,15 @@ mod tests {
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
+        assert_eq!(QUANTUM_NS, 1_000_000);
+        assert_eq!(PERIOD_NS, 16_000_000);
+        assert_eq!(PRED_MIN_NS, 1);
+        assert_eq!(PRED_MAX_NS, 1_000_000_000);
+        assert_eq!(CAP_BASE, 1024);
+        assert_eq!(WEIGHT_MIN, 1);
+        assert_eq!(WEIGHT_BASE, 128);
+        assert_eq!(WEIGHT_MAX, 16_384);
+        assert_eq!(HINT_MAX, 8192);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64,
@@ -196,10 +241,7 @@ mod tests {
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64, 4);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_LOCAL_BASE as u64, 0x5100);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_NODE_BASE as u64, 0x5900);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64,
-            crate::flow::cgrp::HINT_MAX
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64, HINT_MAX);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS as u64,
             PRED_MIN_NS
@@ -207,6 +249,18 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PRED_MAX_NS as u64,
             PRED_MAX_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_CAP_BASE as u64,
+            CAP_BASE as u64
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE as u64,
+            WEIGHT_BASE as u64
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX as u64,
+            WEIGHT_MAX as u64
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
