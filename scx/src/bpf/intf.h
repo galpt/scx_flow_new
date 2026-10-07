@@ -141,6 +141,27 @@ enum flow_consts {
 	/* within this distance of the CPU minimum, so sleepers gain no */
 	/* more than one extra slice of boost with no storm. */
 	FLOW_VLAG_MAX_NS = 2000000ULL,
+	/* RED bound of 128us with no knob. Caps the maximum exceeding */
+	/* time, so a saved delta at or past this bound reclaims one */
+	/* reject, and a victim cost at or below this bound keeps the */
+	/* newcomer with no swap. Like rt.c, the bound caps lateness, */
+	/* unlike fair.c, no share shapes it. */
+	FLOW_RED_EMAX_NS = 128000ULL,
+	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
+	/* for hard tasks only, so critical tasks keep zero tolerance */
+	/* with no late run. Like rt.c, tolerance aids the guarantee, */
+	/* unlike fair.c, it never shapes queue order. */
+	FLOW_RED_TOL_NS = 64000ULL,
+	/* Adaptive grow step of 64us with no knob. Widens the slice on */
+	/* a miss, so a short burst earns room with no storm. Like */
+	/* fair.c, the step paces service, unlike rt.c, no fixed */
+	/* priority holds. Clamps with the slice floor plus ceiling. */
+	FLOW_ADAPT_GROW_NS = 64000ULL,
+	/* Adaptive shrink step of 128us with no knob. Narrows the slice */
+	/* on a hit, so an idle task returns room with no stall. Like */
+	/* fair.c, the step tracks load, unlike rt.c, no fixed */
+	/* priority holds. Clamps with the slice floor plus ceiling. */
+	FLOW_ADAPT_SHRINK_NS = 128000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine plus overflow plus steal drain in fair order through the */
@@ -149,9 +170,9 @@ enum flow_consts {
 /* path. Dispatch calls the tier moves directly with no index switch, */
 /* so no tier index needs storage. The steal tier scans peer locals */
 /* within the bounded window with mask wins. */
-/* Per task state at 64B with vruntime plus deadline plus stamps plus */
+/* Per task state at 72B with vruntime plus deadline plus stamps plus */
 /* predictor plus lag plus weight plus slice plus hint plus hint weight */
-/* plus misses. */
+/* plus misses plus adapt miss plus adapt sat plus adapt delta. */
 /* Vruntime holds the scaled service in nanos with zero for no history. */
 /* A zero vruntime means no service yet, so the first virtual deadline */
 /* falls near now with no boost past the lag bound. Deadline holds the */
@@ -187,7 +208,17 @@ enum flow_consts {
 /* for the life of the task with saturating adds, so a huge miss count */
 /* clamps instead of wrapping. Lifetime by design, so promotion latches */
 /* once 8 holds with the same one-move bound; a windowed decay stays a */
-/* noted alternative with no knob here. Stamps stay per task owned with no */
+/* noted alternative with no knob here. Adapt miss holds the consecutive */
+/* miss streak for the adaptive slice with saturation at 0xffff, so a */
+/* ragged burst widens step by step with no wrap. Adapt sat holds the */
+/* clamp streak at the slice floor plus ceiling with saturation, so a */
+/* stuck slice shows its bound with no extra map. Adapt delta holds the */
+/* last saved execution in nanos for the reclaim check, so a completion */
+/* with delta at or past 128us reclaims one reject with no scan. Like */
+/* fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
+/* C holds burst else slice else quantum with no knob, and V holds */
+/* weight with zero mapped to 128, so the slice adapts while virtual */
+/* time stays untouched. Stamps stay per task owned with no */
 /* atomics except the run claim, only counters use atomics. Cursor and */
 /* miss scans stay best effort with no atomic order. */
 struct flow_task_ctx {
@@ -203,6 +234,9 @@ struct flow_task_ctx {
 	u32 slice_ns;
 	u32 hint_us;
 	u32 misses;
+	u16 adapt_miss;
+	u16 adapt_sat;
+	u32 adapt_delta;
 };
 /* Per CPU state at 16B with running pid plus placement cursor plus */
 /* minimum vruntime. Pid holds the task now on the CPU else zero. */
@@ -266,9 +300,10 @@ struct flow_sched_stats {
 	u64 preempt_skipped;
 };
 /* Task state holds vruntime plus deadline plus stamps plus predictor */
-/* plus lag plus weight plus slice plus hint plus misses in 64 bytes. */
-_Static_assert(sizeof(struct flow_task_ctx) == 64,
-	"task state stays at 64B");
+/* plus lag plus weight plus slice plus hint plus misses plus adapt */
+/* miss plus sat plus delta in 72 bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 72,
+	"task state stays at 72B");
 /* CPU state holds pid plus cursor plus minimum vruntime in 16 bytes. */
 _Static_assert(sizeof(struct flow_cpu_state) == 16,
 	"CPU state stays at 16B");
@@ -607,6 +642,230 @@ static __always_inline u32 flow_slice_miss_hold(u32 cur)
 	if (s < (u32)FLOW_SLICE_MIN_NS)
 		return (u32)FLOW_SLICE_MIN_NS;
 	return s;
+}
+/**
+ * flow_red_cost - worst cost from burst else slice else quantum.
+ * @avg: burst average in nanos, zero for no history.
+ * @slice: stored slice in nanos, zero for no history.
+ *
+ * Like rt.c, the cost bounds the guarantee, unlike fair.c, no share
+ * shapes it. A burst average wins when present, else the stored slice,
+ * else the 1ms quantum, so C tracks recent runs with no table walk.
+ *
+ * Returns: cost in nanos from 10us to 1ms.
+ */
+static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
+{
+	if (avg) {
+		if (avg < (u64)FLOW_SLICE_MIN_NS)
+			return (u64)FLOW_SLICE_MIN_NS;
+		if (avg > (u64)FLOW_QUANTUM_NS)
+			return (u64)FLOW_QUANTUM_NS;
+		return avg;
+	}
+	if (slice) {
+		if ((u64)slice < (u64)FLOW_SLICE_MIN_NS)
+			return (u64)FLOW_SLICE_MIN_NS;
+		if ((u64)slice > (u64)FLOW_QUANTUM_NS)
+			return (u64)FLOW_QUANTUM_NS;
+		return (u64)slice;
+	}
+	return (u64)FLOW_QUANTUM_NS;
+}
+/**
+ * flow_red_tol - guarantee tolerance for one task.
+ * @is_crit: true when latency critical with no tolerance.
+ *
+ * Like rt.c, tolerance aids the guarantee only, unlike fair.c, it
+ * never shapes queue order. Critical tasks keep zero, hard tasks
+ * keep 64us, so the check stays strict for urgent work.
+ *
+ * Returns: tolerance in nanos, zero for critical.
+ */
+static __always_inline u64 flow_red_tol(bool is_crit)
+{
+	if (is_crit)
+		return 0;
+	return (u64)FLOW_RED_TOL_NS;
+}
+/**
+ * flow_red_residual - residual time from deadline plus cost.
+ * @deadline: absolute deadline in nanos, zero means no order.
+ * @now: current time in nanos.
+ * @cost: remaining worst cost in nanos.
+ *
+ * Like rt.c, the residual tests the guarantee, unlike fair.c, no
+ * vruntime shapes it. A zero deadline means no order, so the check
+ * passes with a large residual. A past deadline yields a negative
+ * residual with wrap safety.
+ *
+ * Returns: signed residual in nanos.
+ */
+static __always_inline s64 flow_red_residual(u64 deadline, u64 now,
+	u64 cost)
+{
+	s64 left;
+	if (deadline == 0)
+		return (s64)FLOW_PRED_MAX_NS;
+	if (flow_time_before(now, deadline))
+		left = (s64)(deadline - now);
+	else if (now == deadline)
+		left = 0;
+	else
+		left = -((s64)(now - deadline));
+	left -= (s64)cost;
+	return left;
+}
+/**
+ * flow_red_exceed - exceeding time from residual plus tolerance.
+ * @resid: signed residual in nanos.
+ * @tol: guarantee tolerance in nanos, zero for critical.
+ *
+ * Like rt.c, the exceed marks lateness, unlike fair.c, no share
+ * shapes it. A residual plus tolerance at or past zero means no
+ * exceed, else the negated sum bounds the needed reclaim.
+ *
+ * Returns: exceeding time in nanos, zero when schedulable.
+ */
+static __always_inline u64 flow_red_exceed(s64 resid, u64 tol)
+{
+	s64 sum = resid + (s64)tol;
+	if (sum >= 0)
+		return 0;
+	return (u64)(-sum);
+}
+/**
+ * flow_red_rho - scaled load from residual plus window.
+ * @resid: signed residual in nanos.
+ * @window: deadline minus arrival in nanos, zero fails closed.
+ *
+ * Like rt.c, the load depicts overload, unlike fair.c, no vruntime
+ * shapes it. Scales by 1024, so 1024 means full, past 1024 means
+ * overload with saturation. A zero window fails closed to full.
+ *
+ * Returns: load scaled by 1024.
+ */
+static __always_inline u64 flow_red_rho(s64 resid, u64 window)
+{
+	u64 used;
+	if (window == 0)
+		return 1024ULL;
+	if (resid >= 0) {
+		u64 r = (u64)resid;
+		if (r >= window)
+			return 0;
+		used = window - r;
+	} else {
+		u64 e = (u64)(-resid);
+		if (e > (u64)~0ULL - window)
+			return (u64)~0ULL;
+		used = window + e;
+	}
+	if (used > (u64)~0ULL / 1024ULL)
+		return (u64)~0ULL;
+	return (used * 1024ULL) / window;
+}
+/**
+ * flow_red_value - admission value from weight plus critical.
+ * @weight: task base share, zero maps to 128.
+ * @is_crit: true marks critical with maximum value.
+ *
+ * Like rt.c, value picks the victim, unlike fair.c, no vruntime
+ * shapes it. Critical tasks hold the top value with no reject, hard
+ * tasks hold the clamped base share, so the least value victim pays
+ * first with no storm.
+ *
+ * Returns: value from 1 to 16384, top for critical.
+ */
+static __always_inline u32 flow_red_value(u32 weight, bool is_crit)
+{
+	if (is_crit)
+		return (u32)FLOW_WEIGHT_MAX;
+	if (weight == 0)
+		weight = (u32)FLOW_WEIGHT_BASE;
+	return flow_weight_clamp(weight);
+}
+/**
+ * flow_red_laxity - laxity from deadline plus cost.
+ * @deadline: absolute deadline in nanos, zero means no order.
+ * @now: current time in nanos.
+ * @cost: remaining worst cost in nanos.
+ *
+ * Like rt.c, laxity gates reclaim, unlike fair.c, no vruntime shapes
+ * it. A zero deadline means no order with zero laxity, a past
+ * deadline means no laxity, else the saturated remainder holds.
+ *
+ * Returns: laxity in nanos, zero when none.
+ */
+static __always_inline u64 flow_red_laxity(u64 deadline, u64 now,
+	u64 cost)
+{
+	u64 rem;
+	if (deadline == 0)
+		return 0;
+	if (!flow_time_before(now, deadline) && now != deadline)
+		return 0;
+	rem = deadline - now;
+	if (rem < cost)
+		return 0;
+	return rem - cost;
+}
+/**
+ * flow_reject_key - reject queue key from value.
+ * @value: admission value from 1 to 16384.
+ *
+ * Orders the reject queue by decreasing value through the kernel
+ * priority queue, so the greatest value drains first on reclaim. A
+ * larger value maps to a smaller key with no wrap.
+ *
+ * Returns: queue key in nanos.
+ */
+static __always_inline u64 flow_reject_key(u32 value)
+{
+	u32 v = flow_weight_clamp(value);
+	return (u64)((u32)FLOW_WEIGHT_MAX - v);
+}
+/**
+ * flow_adapt_up - widen the slice by 64us with clamp.
+ * @cur: stored slice in nanos, zero inherits the quantum.
+ *
+ * Like fair.c, the step paces service, unlike rt.c, no fixed priority
+ * holds. Adds 64us with saturation, then clamps to 10us plus 1ms,
+ * so a miss earns room with no wrap. Virtual time stays untouched.
+ *
+ * Returns: adapted slice in nanos from 10us to 1ms.
+ */
+static __always_inline u32 flow_adapt_up(u32 cur)
+{
+	u64 s = (u64)flow_slice_inherit(cur);
+	s = flow_sat_add(s, (u64)FLOW_ADAPT_GROW_NS);
+	if (s < (u64)FLOW_SLICE_MIN_NS)
+		return (u32)FLOW_SLICE_MIN_NS;
+	if (s > (u64)FLOW_QUANTUM_NS)
+		return (u32)FLOW_QUANTUM_NS;
+	return (u32)s;
+}
+/**
+ * flow_adapt_down - narrow the slice by 128us with clamp.
+ * @cur: stored slice in nanos, zero inherits the quantum.
+ *
+ * Like fair.c, the step tracks load, unlike rt.c, no fixed priority
+ * holds. Subtracts 128us with floor at 10us, then clamps to 1ms, so
+ * a hit returns room with no stall. Virtual time stays untouched.
+ *
+ * Returns: adapted slice in nanos from 10us to 1ms.
+ */
+static __always_inline u32 flow_adapt_down(u32 cur)
+{
+	u64 s = (u64)flow_slice_inherit(cur);
+	if (s <= (u64)FLOW_ADAPT_SHRINK_NS)
+		return (u32)FLOW_SLICE_MIN_NS;
+	s -= (u64)FLOW_ADAPT_SHRINK_NS;
+	if (s < (u64)FLOW_SLICE_MIN_NS)
+		return (u32)FLOW_SLICE_MIN_NS;
+	if (s > (u64)FLOW_QUANTUM_NS)
+		return (u32)FLOW_QUANTUM_NS;
+	return (u32)s;
 }
 /**
  * flow_skip_promote - test bounded skip promotion for aged waits.
