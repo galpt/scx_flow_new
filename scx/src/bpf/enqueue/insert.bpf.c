@@ -157,13 +157,29 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
 		__sync_val_compare_and_swap(&tctx->vruntime, cur, floor);
 }
 /**
- * flow_enqueue_pinned - enqueue one pinned task in tier order.
- * @p: task to enqueue, pinned to one CPU with no scan.
+ * struct flow_pinned_tail - pinned args for the outlined pinned path.
  * @tctx: task state with vruntime plus deadline plus predictor.
  * @sel: selected CPU hint, negative falls back to first allowed.
  * @is_reenq: true reuses the stored hint plus weight with no lookup.
  * @now: current time in nanos.
  * @enq_flags: enqueue flags threaded to the reject insert with no loss.
+ *
+ * Bundles the pinned state plus hint plus time plus flags, so the outlined
+ * pinned path takes one pointer with no stack args like the scan plus
+ * enqueue tails.
+ */
+struct flow_pinned_tail {
+	struct flow_task_ctx *tctx;
+	s32 sel;
+	bool is_reenq;
+	u64 now;
+	u64 enq_flags;
+};
+/**
+ * flow_enqueue_pinned - enqueue one pinned task in tier order.
+ * @p: task to enqueue, pinned to one CPU with no scan.
+ * @t: pinned tail with state plus hint plus time plus flags, hoisted once
+ * by the caller with no second read.
  *
  * Pinned tasks wait in a tier queue with wait set and one idle kick.
  * Homeless pins with no live CPU wait in the value ordered reject queue
@@ -179,9 +195,13 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
  * path leaves the open path with no inline growth and the same order.
  */
 static __noinline void flow_enqueue_pinned(struct task_struct *p,
-	struct flow_task_ctx *tctx, s32 sel, bool is_reenq, u64 now,
-	u64 enq_flags)
+	const struct flow_pinned_tail *t)
 {
+	struct flow_task_ctx *tctx = t->tctx;
+	s32 sel = t->sel;
+	bool is_reenq = t->is_reenq;
+	u64 now = t->now;
+	u64 enq_flags = t->enq_flags;
 	s32 pc = flow_pick_target(p, sel);
 	u32 ph;
 	u32 phint_w = (u32)FLOW_WEIGHT_BASE;

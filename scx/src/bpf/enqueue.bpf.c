@@ -48,8 +48,9 @@
  * helpers and dispatch.bpf.c for the tier scans.
  *
  * The op holds the target plus insert plus kick helpers in enqueue/
- * with the fair plus clamp plus pinned plus place plus kick noinline
- * on scalar input, so the verifier stays small.
+ * with the fair plus clamp noinline on scalar input plus the pinned
+ * plus place plus kick noinline on tail pointers, so the verifier
+ * stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -165,7 +166,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* path keeps verifier headroom with the same fair time plus miss */
 	/* plus clamp plus kick. */
 	if (unlikely(pinned)) {
-		flow_enqueue_pinned(p, tctx, sel, is_reenq, now, enq_flags);
+		struct flow_pinned_tail tail = {
+			.tctx = tctx,
+			.sel = sel,
+			.is_reenq = is_reenq,
+			.now = now,
+			.enq_flags = enq_flags,
+		};
+		flow_enqueue_pinned(p, &tail);
 		return;
 	}
 	cpu = flow_pick_target(p, sel);
