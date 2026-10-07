@@ -41,17 +41,6 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
 	u64 key = flow_reject_key(value);
 	scx_bpf_dsq_insert_vtime(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, key, enq_flags);
 }
-/* Strict PRIQ needs no batch bias with no knob. Queue order uses the */
-/* strict key alone, so interactive plus batch share the same drain */
-/* gate with no outward push. Like fair.c, the earliest key wins, */
-/* unlike rt.c, no fixed priority holds. Kept as a false helper with */
-/* no caller, so the verifier drops it with no cost. */
-static __always_inline bool flow_is_batch_vtime(u64 vtime, u64 now)
-{
-	(void)vtime;
-	(void)now;
-	return false;
-}
 /**
  * flow_tier_insert_hint - tier join from hoisted combined drain.
  * @p: task to join, null is ignored by the insert helpers.
@@ -123,7 +112,7 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
  *
  * Returns: strict key as the earlier of deadline plus virtual deadline.
  *
- * Outlined: with noinline to keep verifier headroom: pinned plus miss
+ * Outlined with noinline to keep verifier headroom and pinned plus miss
  * plus open paths share one divide copy with no inline growth.
  */
 static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
@@ -152,7 +141,7 @@ static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
  * early with no huge boost. Uses a compare and swap, so a concurrent
  * charge win keeps the winner with no regression.
  *
- * Outlined: with noinline to keep verifier headroom: pinned plus open
+ * Outlined with noinline to keep verifier headroom and pinned plus open
  * paths share one clamp copy with no inline growth.
  */
 static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
@@ -177,14 +166,16 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
  * @enq_flags: enqueue flags threaded to the reject insert with no loss.
  *
  * Pinned tasks wait in a tier queue with wait set and one idle kick.
- * Queue order uses the fair time of deadline plus virtual deadline with
+ * Homeless pins with no live CPU wait in the value ordered reject queue
+ * like open tasks with the stored share plus value order, so no pin
+ * parks in the machine tier without a live CPU. Queue order uses the fair
  * the effective share of task times hint over 128. Vruntime clamps to
  * the target minimum minus 2ms like open tasks, and a past deadline
  * counts one miss before the fresh deadline, so pins track lag plus
  * overload with no stale reuse. The tier keeps mask wins on drain, so
  * a pinned task still meets only its allowed CPU.
  *
- * Outlined: with noinline to keep verifier headroom: the cold pinned
+ * Outlined with noinline to keep verifier headroom and the cold pinned
  * path leaves the open path with no inline growth and the same order.
  */
 static __noinline void flow_enqueue_pinned(struct task_struct *p,
@@ -265,11 +256,16 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			u64 pcost = flow_red_cost(pavg, psl);
 			if (!flow_red_victim_ok(pdl, pdl, pcost, pex,
 			    pcrit)) {
-				if (flow_cpu_ok(p, pc))
+				if (flow_cpu_ok(p, pc)) {
 					flow_tier_insert(p, pc, pvt, now);
-				else
-					flow_machine_insert(p, pvt);
-				flow_count_admit();
+					flow_count_admit();
+					flow_kick_idle_allowed(p, sel);
+					return;
+				}
+				flow_gate_reject();
+				tctx->wait_at = now;
+				flow_overflow_insert(p, enq_flags,
+				    flow_red_value(peff, pcrit));
 				flow_kick_idle_allowed(p, sel);
 				return;
 			}
@@ -280,10 +276,20 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			return;
 		}
 	}
-	if (flow_cpu_ok(p, pc))
+	if (flow_cpu_ok(p, pc)) {
 		flow_tier_insert(p, pc, pvt, now);
-	else
-		flow_machine_insert(p, pvt);
-	flow_count_admit();
-	flow_kick_idle_allowed(p, sel);
+		flow_count_admit();
+		flow_kick_idle_allowed(p, sel);
+		return;
+	}
+	{
+		u32 ptw = READ_ONCE(tctx->weight);
+		u32 peff = flow_task_effective_weight(ptw, phint_w);
+		bool pcrit = flow_lat_crit(pavg, pdev);
+		flow_gate_reject();
+		tctx->wait_at = now;
+		flow_overflow_insert(p, enq_flags,
+		    flow_red_value(peff, pcrit));
+		flow_kick_idle_allowed(p, sel);
+	}
 }

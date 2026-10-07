@@ -7,8 +7,9 @@
  * slack within one quantum leads the occupant by the margin with more
  * than the tail left on the owner, so near ties plus nearly done
  * owners never bounce while one kick per wait stays with no storm.
- * Every hold counts in preempt skipped with no missing fill. The four
- * kick points share this gate with no extra sender. Runs under the
+ * Every hold counts in preempt skipped with no missing fill. The exiting
+ * plus bypass plus tier idle plus preempt paths share this gate with no
+ * extra sender. Runs under the
  * caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -65,7 +66,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
  * @lag: arrival lag bound for the eligibility gate.
  * @has_ctx: true when @vr plus @lag hold valid state.
  *
- * Outlined: with noinline to keep verifier headroom: the three probes
+ * Outlined with noinline to keep verifier headroom and the three probes
  * share one eligibility plus kick copy with no inline growth.
  *
  * Returns: true when the kick took or an ineligible hold counted, so

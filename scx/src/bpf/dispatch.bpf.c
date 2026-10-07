@@ -11,8 +11,9 @@
  * earliest key always wins with no load swap. The reject queue stays
  * value ordered outside dispatch with no tier move here, so overload
  * never inverts the PRIQ order. The reject queue holds overload with
- * no drop and reclaims at most one per pass only when tiers hold no
- * work, so PRIQ tiers never starve behind rejects. A reject rejoins a PRIQ tier only on
+ * no drop and reclaims at most one per pass with tiers-empty fallback
+ * plus aged cover past one period, so PRIQ tiers never starve behind
+ * rejects and zero credit never idles queued work. A reject rejoins a PRIQ tier only on
  * reclaim with the same key or a strictly after key, so an earlier key
  * never waits behind a rejoin. The steal tier scans four to eight
  * peers sticky with node-local first plus idle affinity plus backoff
@@ -74,31 +75,6 @@ static __noinline bool flow_perf_busy_hint(s32 cpu, s32 local_q,
 		return true;
 	return false;
 }
-/* Depth probe with own plus local plus node plus running. */
-/* Polls once then threads the hints through the shared hint probe, so */
-/* callers without hoisted depths pay the same reads with no double poll. */
-/* Dead compat with no dispatch use. Dispatch fuses via the hint form with */
-/* no kfunc on the probe, so this polling form stays only for compat. */
-__attribute__((unused)) static __noinline bool flow_perf_busy(s32 cpu)
-{
-	s32 local_q;
-	s32 local_on_q;
-	s32 node_q = 0;
-	if (cpu < 0)
-		return false;
-	if (!flow_cpu_live((u32)cpu))
-		return false;
-	local_q = scx_bpf_dsq_nr_queued(flow_local_dsq((u32)cpu));
-	local_on_q = scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
-	    (u64)(u32)cpu);
-	{
-		u32 node = flow_cpu_node((u32)cpu);
-		if (node < (u32)FLOW_MAX_NODES &&
-		    (u64)node < nr_node_ids)
-			node_q = scx_bpf_dsq_nr_queued(flow_node_dsq(node));
-	}
-	return flow_perf_busy_hint(cpu, local_q, local_on_q, node_q);
-}
 /* Core perf set with transition only store. */
 static __noinline void flow_perf_set(s32 cpu, u32 want)
 {
@@ -132,15 +108,6 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 	__sync_lock_test_and_set(last, want);
 	scx_bpf_cpuperf_set(cpu, want);
 }
-/* Dead compat polling update with no dispatch use. Dispatch fuses via the */
-/* hint form, so this stays only for compat with no caller. */
-__attribute__((unused)) static __always_inline void flow_perf_update(s32 cpu)
-{
-	if (flow_perf_busy(cpu))
-		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_MAX);
-	else
-		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
-}
 /* Fused perf update with hoisted hints and no kfunc on the probe. */
 static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
 	s32 local_on_q, s32 node_q)
@@ -156,32 +123,33 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
  * @visits: per pass visit count shared across tiers.
  * @now: current time in nanos.
  * @queued: hoisted reject depth, non-positive skips with no walk.
+ * @tiers_empty: true when local plus node plus machine hold no work.
  *
  * Scans at most eight value ordered rejects with one RCU walk and no
- * unbounded loop, so the check stays cheap. Reclaims when the global
- * completer credit at or past 128us covers the head exceed with
- * positive laxity plus the same key or a strictly after key plus mask
- * wins, so the bound holds with one bounded move. Non-reclaimable plus
- * stale plus foreign entries skip to the next candidate with no head
- * block, so one bad head never stalls the queue. The credit funds the
- * retry with no head state use. The greatest value still wins among
- * reclaimable entries with no extra sort. Tiers-empty gating at the
- * caller bounds starvation: reclaim runs only when local plus node
- * plus machine hold no work, so PRIQ tiers never wait behind rejects.
+ * unbounded loop, so the check stays cheap. Funded heads reserve credit
+ * before the move with a recheck to the next candidate on a lost race,
+ * while tiers-empty heads with positive laxity fall back without reserve
+ * so zero credit never idles queued work. Aged heads past one period
+ * reclaim even when tiers hold work, so continuous tier load never parks
+ * rejects without bound and the bypass veto never deadlocks. Non
+ * reclaimable plus stale plus foreign entries skip to the next candidate
+ * with no head block, so one bad head never stalls the queue. The credit
+ * funds the retry with no head state use. The greatest value still wins
+ * among reclaimable entries with no extra sort. Tiers-empty gating plus
+ * one move per pass plus the one period age bound keep starvation bounded
+ * and PRIQ tiers never wait behind rejects past the age bound.
  *
  * Returns: one on move else zero with no state.
  *
- * Outlined: with noinline to keep verifier headroom on the dispatch
+ * Outlined with noinline to keep verifier headroom on the dispatch
  * path with no order change.
  */
 static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
-	s32 queued)
+	s32 queued, bool tiers_empty)
 {
 	u64 credit;
 	struct task_struct *q;
 	u32 moved = 0;
-	u64 need = 0;
-	bool found = false;
 	if (unlikely(cpu < 0))
 		return 0;
 	if (unlikely(!visits))
@@ -193,8 +161,6 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	if (likely(queued <= 0))
 		return 0;
 	credit = flow_credit_peek();
-	if (credit < (u64)FLOW_RED_EMAX_NS)
-		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {
 		struct flow_task_ctx *rctx;
@@ -207,9 +173,14 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		u64 rexc;
 		u64 rlax;
 		u64 rvtime;
+		u64 rwait;
 		bool rcrit;
+		bool is_aged = false;
+		bool funded;
 		u32 cur;
 		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
+			break;
+		if (unlikely(moved))
 			break;
 		(*visits)++;
 		rctx = flow_lookup(q);
@@ -224,7 +195,16 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		rres = flow_red_residual(rdl, now, rcost);
 		rexc = flow_red_exceed(rres, rtol);
 		rlax = flow_red_laxity(rdl, now, rcost);
-		if (!flow_red_reclaim_ok(credit, rexc, rlax))
+		if (rlax == 0)
+			continue;
+		rwait = READ_ONCE(rctx->wait_at);
+		if (rwait != 0 && rwait != now &&
+		    !flow_time_before(now, rwait)) {
+			u64 age = now - rwait;
+			if (age > (u64)FLOW_PERIOD_NS)
+				is_aged = true;
+		}
+		if (!tiers_empty && !is_aged)
 			continue;
 		rvtime = flow_edf_key(rdl,
 		    flow_virt_deadline(READ_ONCE(rctx->vruntime),
@@ -235,19 +215,17 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 			continue;
 		if (!flow_mask_ok(cpu, q))
 			continue;
-		cur = flow_move_candidate(BPF_FOR_EACH_ITER, cpu, q);
-		if (cur) {
-			moved = cur;
-			need = rexc;
-			found = true;
+		funded = flow_red_reclaim_ok(credit, rexc, rlax);
+		if (funded) {
+			if (!flow_credit_consume(rexc))
+				continue;
 		}
+		cur = flow_move_candidate(BPF_FOR_EACH_ITER, cpu, q);
+		if (cur)
+			moved = cur;
 		break;
 	}
 	bpf_rcu_read_unlock();
-	if (!found)
-		return 0;
-	if (!flow_credit_consume(need))
-		return moved;
 	return moved;
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
@@ -348,23 +326,25 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		/* key or a strictly after key, so strict order holds with no */
 		/* inversion. Like fair.c, the earliest key wins, unlike */
 		/* rt.c, no fixed priority holds. */
-		/* Reclaim one value ordered reject when tiers hold no work. */
-		/* The clock reads only here with no hot path cost, and the */
-		/* TOCTOU between the hoisted hint and the reclaim move only */
-		/* repeats or skips a pass with no loss. */
+		/* Reclaim one value ordered reject with tiers-empty plus aged cover. */
+		/* Tiers-empty heads fall back without reserve so zero credit */
+		/* never idles queued work, while aged heads past one period */
+		/* reclaim even when tiers hold work so the reject never grows */
+		/* without bound. The clock reads only here with no hot path */
+		/* cost, and the TOCTOU between the hoisted hint and the reclaim */
+		/* move only repeats or skips a pass with no loss. */
 		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-			if (lq0 <= 0 && nq0 <= 0 && mq0 <= 0) {
-				s32 oq = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
-				if (oq > 0) {
-					u64 now = flow_now();
-					u32 rec = flow_reject_reclaim_one(cpu, &visits,
-					    now, oq);
-					if (rec > left)
-						rec = left;
-					left -= rec;
-					local_moved += rec;
-					reclaim_moved += rec;
-				}
+			bool tiers_empty = (lq0 <= 0 && nq0 <= 0 && mq0 <= 0);
+			s32 oq = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
+			if (oq > 0) {
+				u64 now = flow_now();
+				u32 rec = flow_reject_reclaim_one(cpu, &visits,
+				    now, oq, tiers_empty);
+				if (rec > left)
+					rec = left;
+				left -= rec;
+				local_moved += rec;
+				reclaim_moved += rec;
 			}
 		}
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */

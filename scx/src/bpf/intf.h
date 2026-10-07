@@ -99,7 +99,7 @@ enum flow_consts {
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
 	/* Overflow reject id for overload past tier order with value order. */
-/* Named overflow for wire compat only: it holds the value ordered */
+/* Named overflow for wire compat only and it holds the value ordered */
 /* reject queue drained only by reclaim, never a tier overflow. */
 	FLOW_OVERFLOW = 0x5A01ULL,
 	/* Queue count of 1042. Holds 1024 local plus 16 node plus one */
@@ -333,7 +333,7 @@ _Static_assert(FLOW_MAX_DSQS ==
  *
  * The signed diff keeps order across the u64 wrap with no branch.
  *
- * Outlined: with noinline to keep verifier headroom on the select plus
+ * Outlined with noinline to keep verifier headroom on the select plus
  * drain paths with no order change, so SSF plus BSF share one copy.
  *
  * Returns: true when @a falls before @b, else false.
@@ -540,7 +540,7 @@ static __always_inline u64 flow_virt_deadline(u64 ve,
  * fairness, so urgent tasks still win while hogs fall behind. A zero
  * deadline means no EDF order yet, so the virtual deadline rules. The
  * signed diff picks the earlier time with wrap safety. Kept alongside
- * flow_edf_key as the same strict key by design: this name serves fair
+ * flow_edf_key as the same strict key by design and this name serves fair
  * voice while the alias serves EDF voice with one shared copy.
  *
  * Returns: earlier of @deadline plus @vd in nanos.
@@ -564,7 +564,7 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
  * The strict key is the earlier of the two times with wrap safety,
  * so the closest deadline always wins with no band jump. Intentional
  * alias of flow_fair_vtime kept for EDF voice with one shared copy
- * plus no extra verifier cost: sort-key callers use this name while
+ * plus no extra verifier cost and sort-key callers use this name while
  * fair-time callers use the other with the same result.
  *
  * Returns: earlier of @deadline plus @vd in nanos.

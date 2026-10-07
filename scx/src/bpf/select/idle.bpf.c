@@ -22,7 +22,7 @@
  *
  * Returns: picked CPU or @prev_cpu on fallback with gate count.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  */
 static __noinline s32 flow_select_pinned_cpu(struct task_struct *p,
@@ -51,7 +51,7 @@ static __noinline s32 flow_select_pinned_cpu(struct task_struct *p,
  *
  * Returns: picked CPU or negative when no idle CPU meets.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  */
 static __noinline s32 flow_select_idle_probe(struct task_struct *p,

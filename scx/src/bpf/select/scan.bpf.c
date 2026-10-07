@@ -276,7 +276,7 @@ struct flow_scan_tail {
  * Peers within 64 units count as near minimum with wrap safe order,
  * so lagging CPUs win ties.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -327,7 +327,7 @@ static __noinline u32 flow_ssf_pick(const struct flow_scan_tail *t)
  * hotspot. Covers twelve unique peers with SSF on large hosts, so
  * select pays at most 12 checks per pass.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -382,7 +382,7 @@ static __noinline u32 flow_bsf_pick(const struct flow_scan_tail *t)
  * minima on the previous CPU win in both scans with no extra walk, so
  * cache stays warm. The shared cursor with steal advances by two on
  * success with best effort races, so passes spread with no hotspot.
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -447,7 +447,7 @@ static __noinline u32 flow_select_best(const struct task_struct *p,
  * so select keeps twelve peer coverage. An empty mask falls through to
  * the machine tier at enqueue.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: picked CPU or @prev_cpu on fallback with gate count.

@@ -78,7 +78,7 @@ static __always_inline u64 flow_cpu_drain_hint(s32 local_q, s32 node_q)
  * tier with no wait. A missing node reads zero with no boost, and
  * sparse nodes fold to zero.
  *
- * Outlined: with noinline to keep verifier headroom: callers in meets
+ * Outlined with noinline to keep verifier headroom and callers in meets
  * plus fair plus BSF share one copy with no inline growth.
  *
  * Returns: combined drain in nanos.
@@ -101,7 +101,7 @@ static __noinline u64 flow_cpu_drain(u32 cpu)
  * Fails closed on saturated ready, else wrap safe before plus equal,
  * so a huge drain never reads as early with no wrap to the front.
  *
- * Outlined: with noinline to share one compare copy across drain plus
+ * Outlined with noinline to share one compare copy across drain plus
  * deadline checks with no inline growth and no order change.
  *
  * Returns: true when @ready falls before or on @deadline.
@@ -151,7 +151,7 @@ static __always_inline bool flow_cpu_meets_hint(s32 local_q, s32 node_q,
  * drain poll plus the compare split across two noinline calls, so the
  * SSF plus BSF loops share one copy each with no inline growth.
  *
- * Outlined: with noinline to keep verifier headroom on the select path
+ * Outlined with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: true when the drain finishes before @deadline.
@@ -166,33 +166,6 @@ static __noinline bool flow_cpu_meets(u32 cpu,
 	drain = flow_cpu_drain(cpu);
 	ready = flow_sat_add(now, drain);
 	return flow_ready_before(ready, deadline);
-}
-/**
- * flow_cpu_meets_fair - test fair time against one CPU drain.
- * @cpu: CPU id below the 1024 bound.
- * @vtime: fair time, zero meets all.
- * @now: current time in nanos.
- *
- * Mirrors the deadline check for the fair key, so the bypass plus the
- * tier choice test fair order while placement tests the deadline. A
- * zero fair time means no fair order yet, so the check passes. The
- * drain poll plus the compare split across two noinline calls, so the
- * loops share one copy each with no inline growth.
- *
- * Outlined: with noinline to keep verifier headroom with no order change.
- *
- * Returns: true when the drain finishes before @vtime.
- */
-__attribute__((unused)) static __noinline bool flow_cpu_meets_fair(u32 cpu,
-	u64 vtime, u64 now)
-{
-	u64 drain;
-	u64 ready;
-	if (vtime == 0)
-		return true;
-	drain = flow_cpu_drain(cpu);
-	ready = flow_sat_add(now, drain);
-	return flow_ready_before(ready, vtime);
 }
 /**
  * flow_cpu_meets_fair_hint - test fair time against hoisted drain.
@@ -319,26 +292,30 @@ static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 /* Stopping adds the unused cost minus delta on completions with */
 /* saturation at 1s, so one completion funds a later retry with no */
 /* task pointer. Dispatch peeks this credit for the head check and */
-/* consumes the exceed else 128us on a move, so the completer delta */
-/* funds the retry with no head state use. Best effort races only */
-/* delay a reclaim by one pass with no loss. */
+/* reserves the exceed else 128us before a move, so the completer delta */
+/* funds the retry with no head state use. Compare and swap retries */
+/* bound at four keep best effort races to a one pass delay with no loss. */
 /* Add one saved delta to the global reclaim credit with saturation. */
 static __always_inline void flow_credit_add(u64 delta)
 {
 	u32 key = 0;
 	u64 *slot;
-	u64 cur;
-	u64 nxt;
+	s32 i;
 	if (delta == 0)
 		return;
 	slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
 	if (!slot)
 		return;
-	cur = READ_ONCE(*slot);
-	nxt = flow_sat_add(cur, delta);
-	if (nxt > (u64)FLOW_PRED_MAX_NS)
-		nxt = (u64)FLOW_PRED_MAX_NS;
-	__sync_lock_test_and_set(slot, nxt);
+	bpf_for(i, 0, 4) {
+		u64 cur = READ_ONCE(*slot);
+		u64 nxt = flow_sat_add(cur, delta);
+		u64 old;
+		if (nxt > (u64)FLOW_PRED_MAX_NS)
+			nxt = (u64)FLOW_PRED_MAX_NS;
+		old = __sync_val_compare_and_swap(slot, cur, nxt);
+		if (old == cur)
+			break;
+	}
 }
 /* Peek the global reclaim credit with zero on miss. */
 static __always_inline u64 flow_credit_peek(void)
@@ -351,24 +328,31 @@ static __always_inline u64 flow_credit_peek(void)
 }
 /* Consume one reclaim funding with floor at zero. */
 /* Takes the exceed when past zero else 128us, so a zero exceed still */
-/* spends the bound with no free retry. Fails closed when short, so the */
-/* caller skips the move with no partial spend. */
+/* spends the bound with no free retry. Fails closed when short with no */
+/* spend, so a lost compare and swap race retries up to four times then */
+/* delays one pass. The reclaim caller reserves before the move and */
+/* falls back without reserve when tiers hold no work, so the consume */
+/* stays strict while the reclaim stays bounded at one move per pass. */
 static __always_inline bool flow_credit_consume(u64 exceed)
 {
 	u32 key = 0;
 	u64 *slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
-	u64 cur;
-	u64 need;
-	u64 nxt;
+	s32 i;
 	if (!slot)
 		return false;
-	cur = READ_ONCE(*slot);
-	need = exceed ? exceed : (u64)FLOW_RED_EMAX_NS;
-	if (cur < need)
-		return false;
-	if (cur < (u64)FLOW_RED_EMAX_NS)
-		return false;
-	nxt = cur - need;
-	__sync_lock_test_and_set(slot, nxt);
-	return true;
+	bpf_for(i, 0, 4) {
+		u64 cur = READ_ONCE(*slot);
+		u64 need = exceed ? exceed : (u64)FLOW_RED_EMAX_NS;
+		u64 nxt;
+		u64 old;
+		if (cur < need)
+			return false;
+		if (cur < (u64)FLOW_RED_EMAX_NS)
+			return false;
+		nxt = cur - need;
+		old = __sync_val_compare_and_swap(slot, cur, nxt);
+		if (old == cur)
+			return true;
+	}
+	return false;
 }

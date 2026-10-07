@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow 4.8.11 runs the earliest strict key first as the earlier of deadline plus virtual time. It adds RED admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit even now. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
+scx_flow 4.8.11 runs the earliest strict key first as the earlier of deadline plus virtual time. It adds RED admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
 
 ### Why?
 
@@ -20,7 +20,7 @@ Latency apps run urgent fair time first, so short arrivals skip long work with n
 
 ### Queues
 
-Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty. Reject stays strictly value ordered outside dispatch still with overflow name for wire compat. See `src/bpf/intf.h`.
+Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty plus aged past one period. Reject stays strictly value ordered outside dispatch still with overflow name for wire compat. See `src/bpf/intf.h`.
 
 ### Keys
 
@@ -28,7 +28,7 @@ Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor s
 
 ### Admission
 
-RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades exact choice for bounded O(1) admission still and tiers-empty reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
+RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades exact choice for bounded O(1) admission still and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
@@ -52,7 +52,7 @@ Locality stays with per-CPU plus per-node queues. Select takes prev idle, then w
 
 ### Contention
 
-Contention stays still bounded with 8 visits per pass shared across three PRIQ tiers plus steal. Each tier moves one task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves one reject when tiers hold no work. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
+Contention stays still bounded with 8 visits per pass shared across three PRIQ tiers plus steal. Each tier moves one task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves one reject when tiers hold no work plus aged past one period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
 
 ### Inversion
 
@@ -60,11 +60,11 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else `64us` up on wall miss else `128us` down. Misses stay lifetime, adapt streak stays window. Reclaim needs credit past `128us`. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else `64us` up on wall miss else `128us` down. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
 
 ### Verification
 
-Fmt, clippy, build, test stay clean. Veristat holds 20 programs below one million with dispatch 369k plus enqueue 13k plus select 901 max on dispatch. Guard holds version plus mirrors gone. Code stays knob-free with no docs plus no changelog. Needs kernel `7.2` with one kick per wait. See `src/bpf/main.bpf.c`.
+Fmt, clippy, build, test stay clean. Veristat holds 20 programs below one million with dispatch 68772 plus enqueue 75111 plus select 295895 max on select. Guard holds version plus mirrors gone. Code stays knob-free with no docs plus no changelog. Needs kernel `7.2` with one kick per wait. See `src/bpf/main.bpf.c`.
 
 ## Code map
 

@@ -17,8 +17,8 @@
  * misses hold else floor only and rejoin via the same tier escalation
  * re-derived with a fresh deadline plus skip aging. Tasks join direct
  * only when all tiers incl the reject hold no work or the target still
- * drains before the key with an empty reject, so no earlier key waits
- * behind this arrival. Missed tasks rejoin a tier queue with a fresh
+ * drains before the key with an empty machine plus an empty reject, so
+ * no earlier key waits behind this arrival. Missed tasks rejoin a tier queue with a fresh
  * deadline plus a miss count and one idle kick and no wait, else the
  * reject queue on overload. Pinned tasks wait in a tier queue with
  * wait set and one idle kick, else the reject queue on overload.
@@ -31,9 +31,9 @@
  * minimum folds forward on every charge, so fairness tracks service
  * with no table. Every tier join counts one admit plus every RED
  * overload counts one RED reject with no gate double count plus no
- * global queue use. The exiting plus idle direct plus helper plus
- * idle direct plus helper plus direct block form the four kick points,
- * so every wait meets at most one kick with no storm. A direct preempt
+ * global queue use. The exiting plus bypass plus tier idle plus preempt
+ * paths form the kick points, so every wait meets at most one kick with
+ * no storm. A direct preempt
  * needs predictor slack plus an eligible arrival plus a 100us margin
  * lead with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays. The
@@ -161,7 +161,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* Pinned tasks wait in a tier queue with wait set and one idle kick. */
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
-	/* The pinned wait runs Outlined: with no order change, so the open */
+	/* The pinned wait runs Outlined with no order change, so the open */
 	/* path keeps verifier headroom with the same fair time plus miss */
 	/* plus clamp plus kick. */
 	if (unlikely(pinned)) {
@@ -332,7 +332,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	hoist_lag = READ_ONCE(tctx->vlag);
 	hoist_min = flow_cpu_min((u32)cpu);
 	hoist_elig = flow_eligible(hoist_vr, hoist_min, hoist_lag);
-	/* Idle direct bypass plus tier join run Outlined: with no order */
+	/* Idle direct bypass plus tier join run Outlined with no order */
 	/* change, so the drain gate plus the tier escalation share one */
 	/* hoist with no second poll. A direct bypass returns at once with */
 	/* one kick, else the tier join falls into the single kick tail. */

@@ -269,12 +269,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			tctx->adapt_delta = cs;
 		}
 		/* Reclaim runs in dispatch from the global credit at or past */
-		/* 128us, so this path records only with no RCU walk here. */
+		/* 128us with tiers-empty fallback plus aged cover past one */
+		/* period, so this path records only with no RCU walk here. */
 		/* The global credit funds the retry with no share shaping. */
 		/* Dispatch scans at most eight value ordered rejects with */
 		/* positive laxity plus same key or strictly after plus mask */
-		/* wins, so strict order holds with one bounded move. */
-		flow_credit_add(csaved);
+		/* wins, so strict order holds with one bounded move. Zero */
+		/* service completions fund nothing, so only a real delta with */
+		/* a trained predictor adds credit. */
+		if (delta > 0 && have_pred)
+			flow_credit_add(csaved);
 	}
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */

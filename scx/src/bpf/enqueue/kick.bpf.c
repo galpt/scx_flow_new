@@ -10,7 +10,7 @@
  * runs only when empty plus earliest-only holds incl the reject queue
  * and the local plus node plus machine plus reject tiers hold no
  * queued work or the target still drains local plus node before the
- * strict key with an empty reject, so an earlier key never waits behind
+ * strict key with an empty machine plus an empty reject, so an earlier key never waits behind
  * this arrival in a tier queue. Rechecks keep the same order with one
  * hoist. Strict fair order gates the bypass with eligibility plus
  * drain, so hogs pace through tiers with no direct jump and one kick
@@ -45,11 +45,10 @@ struct flow_enqueue_tail {
  * Idle direct bypass only when tiers hold no earlier strict key. An idle
  * target takes the task straight to its local queue with one idle kick
  * per wait and no preempt, so wakeups take a bounded direct jump past
- * the tier plus dispatch hop with one insert plus one kick. The bypass runs only when the local plus node plus machine tiers hold
+ * the tier plus dispatch hop with one insert plus one kick. The bypass runs only when the local plus node plus machine plus reject tiers hold
  * no queued work or the target still drains local plus node before the
- * strict key, so an earlier key never waits behind this arrival in
- * a tier queue. The value ordered reject stays in scope here by design
- * with dispatch reclaiming it after the tiers, so a queued reject
+ * strict key with an empty machine plus an empty reject, so an earlier key never waits behind this arrival in
+ * a tier queue. The value ordered reject stays in scope here and a queued
  * vetoes the bypass with no jump. Local plus node depths hoist once here, so the empty
  * gate plus the drain gate share the same reads with no second poll.
  * The bypass inserts straight to local with no tier move count, so
@@ -68,7 +67,7 @@ struct flow_enqueue_tail {
  * Returns: true when the direct bypass took with one kick, else false
  * after a tier join with the kick left to the caller.
  *
- * Outlined: with noinline to keep verifier headroom: the bypass plus
+ * Outlined with noinline to keep verifier headroom and the bypass plus
  * tier join leaves the kick tail with no inline growth and the same
  * order plus the same counts.
  */
@@ -110,10 +109,13 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 		if (lq <= 0 && mq <= 0 && oq <= 0 && (!node_valid || nq <= 0))
 			tiers_empty = true;
 		/* Drain gate uses the same hoisted combined drain with */
-		/* no kfunc, so the bypass tests fair order cheap. The */
-		/* reject queue vetoes here too and the bypass needs an empty */
-		/* reject, so value order holds with no jump. */
+		/* no kfunc, so the bypass tests fair order cheap. The machine */
+		/* plus reject queues veto here too and the bypass needs an empty */
+		/* machine plus an empty reject, so shared plus value order hold */
+		/* with no jump. */
 		drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
+		if (mq > 0)
+			drain_ok = false;
 		if (oq > 0)
 			drain_ok = false;
 		if ((tiers_empty || drain_ok) && t->hoist_elig) {
@@ -181,7 +183,7 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
  * already passed above, so the helper checks lead plus tail only with
  * predictor slack gated before it.
  *
- * Outlined: with noinline to keep verifier headroom: the RCU occupant
+ * Outlined with noinline to keep verifier headroom and the RCU occupant
  * walk leaves the bypass plus tier join with no inline growth and the
  * same one kick per wait order.
  */
