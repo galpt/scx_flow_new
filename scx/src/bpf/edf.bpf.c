@@ -218,3 +218,99 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
 	ready = flow_sat_add(now, drain);
 	return flow_ready_before(ready, vtime);
 }
+/*
+ * RED guarantee core for the flow scheduler.
+ *
+ * Holds the residual plus load plus exceeding time with tolerance used
+ * only for the guarantee. Like rt.c, the deadline bounds the check,
+ * unlike fair.c, no vruntime shapes it. A newcomer with zero exceed
+ * passes at once, else the caller seeks a least value victim with cost
+ * past the exceed plus deadline at or before the newcomer plus never
+ * critical, else the newcomer rejects. The reject queue stays value
+ * ordered outside dispatch, and a saved delta at or past 128us
+ * reclaims one head with positive laxity. Runs under the caller with
+ * no lock and no RCU walk here, so the verifier stays small.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
+/**
+ * flow_red_newcomer_exceed - exceeding time of one newcomer.
+ * @deadline: newcomer absolute deadline in nanos.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos, zero for no history.
+ * @slice: stored slice in nanos, zero for no history.
+ * @is_crit: true marks critical with zero tolerance.
+ *
+ * Costs burst else slice else quantum, tolerates 64us for hard only,
+ * then residuals deadline minus now minus cost with wrap safety. Like
+ * rt.c, tolerance aids only the guarantee, unlike fair.c, it never
+ * shapes queue order.
+ *
+ * Returns: exceeding time in nanos, zero when guaranteed.
+ */
+static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
+	u64 now, u64 avg, u32 slice, bool is_crit)
+{
+	u64 cost = flow_red_cost(avg, slice);
+	u64 tol = flow_red_tol(is_crit);
+	s64 resid = flow_red_residual(deadline, now, cost);
+	return flow_red_exceed(resid, tol);
+}
+/**
+ * flow_red_victim_ok - test one victim for one exceed.
+ * @v_deadline: victim deadline in nanos, zero fails closed.
+ * @n_deadline: newcomer deadline in nanos, zero fails closed.
+ * @v_cost: victim remaining cost in nanos.
+ * @exceed: newcomer exceeding time in nanos, zero fails closed.
+ * @v_crit: true marks a critical victim that never rejects.
+ *
+ * Victim needs cost past the exceed plus deadline at or before the
+ * newcomer, so only work ahead of the overload pays. Like rt.c, the
+ * least value pays first, unlike fair.c, no vruntime shapes it. A
+ * critical victim never passes with no swap.
+ *
+ * Returns: true when the victim may cover the exceed.
+ */
+static __always_inline bool flow_red_victim_ok(u64 v_deadline,
+	u64 n_deadline, u64 v_cost, u64 exceed, bool v_crit)
+{
+	if (exceed == 0)
+		return false;
+	if (v_crit)
+		return false;
+	if (v_deadline == 0 || n_deadline == 0)
+		return false;
+	if (v_cost <= exceed)
+		return false;
+	if (v_cost <= (u64)FLOW_RED_EMAX_NS && exceed <= (u64)FLOW_RED_EMAX_NS) {
+		if (v_cost <= exceed)
+			return false;
+	}
+	if (flow_time_before(n_deadline, v_deadline))
+		return false;
+	return true;
+}
+/**
+ * flow_red_reclaim_ok - test reclaim from one saved delta.
+ * @saved: saved execution in nanos from one completion.
+ * @exceed: head exceeding time in nanos.
+ * @laxity: head laxity in nanos, zero means no room.
+ *
+ * Reclaims when the saved delta reaches past 128us plus covers the
+ * head exceed with positive laxity, so Theorem 6 holds with no scan
+ * here. Like rt.c, the delta funds the retry, unlike fair.c, no share
+ * shapes it.
+ *
+ * Returns: true when the head may rejoin.
+ */
+static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
+	u64 laxity)
+{
+	if (saved < (u64)FLOW_RED_EMAX_NS)
+		return false;
+	if (laxity == 0)
+		return false;
+	if (saved < exceed)
+		return false;
+	return true;
+}
