@@ -2,7 +2,7 @@
 
 ### What is it?
 
-scx_flow 4.8.10 runs the earliest strict key first as the earlier of deadline plus virtual time. It keeps order in kernel priority queues with vruntime plus a burst predictor from recent runs. Fresh waits earn a dynamic slice from remaining time clamped to `10us` plus `1ms`. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
+scx_flow 4.8.11 runs the earliest strict key first as the earlier of deadline plus virtual time. It keeps order in kernel priority queues with vruntime plus a burst predictor from recent runs. Fresh waits earn a dynamic slice from remaining time clamped to `10us` plus `1ms`. See `src/bpf/intf.h` and `src/bpf/dispatch.bpf.c`.
 
 ### Why?
 
