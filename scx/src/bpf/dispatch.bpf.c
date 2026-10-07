@@ -1,29 +1,33 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Dispatch with bounded drain plus steal plus fail open.
+ * Dispatch with strict PRIQ plus bounded steal plus fail open.
  *
- * Each pass drains local plus node plus machine plus overflow plus
- * steal in order with at most one hint threaded move per tier bounded
- * by remaining slots and visits capped at eight per pass shared across
- * tiers. Five depths hoist once, so tiers plus steal plus perf share the
- * same reads with no second poll. The overflow tier holds FIFO bursts
- * with mask wins, so overload still drains with no priority inversion.
- * An aged overflow head past 2ms else 8 misses earns one bounded extra
- * move, so starving bursts drain without starving the tiers.
- * The steal tier scans four to eight peers sticky with node-local
- * first plus idle affinity plus backoff on gate plus miss pressure,
- * with per peer hints threaded into one hint move plus a saturated
- * early out when tiers still hold work. A Q1 only fast path drains the
- * single queue pass skips three empty moves plus the steal polls. The
- * shared cursor advances by two on a successful steal to match select,
- * so the next pass starts past the drained peer with no hotspot and no
- * extra scan. Fail open moves through the shared mask gate, so one
- * foreign head never stalls its tier. The TOCTOU between hoisted hints
- * and moves only repeats or skips a pass with no loss. The level
- * follows after all moves through the fused hint probe with no kfunc
- * and stays transition only. The fused scope is per CPU own local plus
- * local on plus node plus running only with no machine plus overflow
- * plus steal, so a busy shared tier never forces max on an idle CPU.
+ * Each pass drains local plus node plus machine plus steal in order
+ * with at most one hint threaded move per tier bounded by remaining
+ * slots and visits capped at eight per pass shared across tiers. Four
+ * depths hoist once, so tiers plus steal plus perf share the same
+ * reads with no second poll. Three PRIQ tiers hold strict order
+ * through the kernel priority queue with insert vtime, so the
+ * earliest key always wins with no load swap. The reject queue stays
+ * value ordered outside dispatch with no tier move here, so overload
+ * never inverts the PRIQ order. A reject rejoins a PRIQ tier only on
+ * reclaim with the same key or a strictly after key, so an earlier key
+ * never waits behind a rejoin. The steal tier scans four to eight
+ * peers sticky with node-local first plus idle affinity plus backoff
+ * on gate plus miss pressure, with per peer hints threaded into one
+ * hint move plus a saturated early out when tiers still hold work. A
+ * Q1 only fast path drains the single queue pass skips two empty moves
+ * plus the steal polls. The shared cursor advances by two on a
+ * successful steal to match select, so the next pass starts past the
+ * drained peer with no hotspot and no extra scan. Fail open moves
+ * through the shared mask gate, so one foreign head never stalls its
+ * tier. The TOCTOU between hoisted hints and moves only repeats or
+ * skips a pass with no loss. The level follows after all moves through
+ * the fused hint probe with no kfunc and stays transition only. The
+ * fused scope is per CPU own local plus local on plus node plus
+ * running only with no machine plus reject plus steal, so a busy
+ * shared tier never forces max on an idle CPU. Local on stays
+ * terminal only at three sites with no global queue use.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -144,39 +148,6 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
 	else
 		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
 }
-/**
- * flow_overflow_head_aged - test the overflow head for skip promotion.
- * @dsq: overflow FIFO queue id to peek.
- * @now: current time in nanos.
- *
- * Peeks only the FIFO head with one RCU walk and no visit cost, so the
- * check stays cheap with no full scan. The head earns promotion when
- * its wait aged past 2ms else its misses reach 8, reusing the lag plus
- * visit bounds with no new knob plus no new map. A missing state fails
- * closed with no promotion, so the FIFO order holds for fresh bursts.
- * Stateless with no latch plus no per queue state: each pass re-peeks
- * the head, so promotion never sticks past the one bounded extra move.
- *
- * Returns: true when the head earns one bounded extra move.
- *
- * Outlined with noinline to keep verifier headroom on the dispatch
- * path with no order change.
- */
-static __noinline bool flow_overflow_head_aged(u64 dsq, u64 now)
-{
-	struct task_struct *p;
-	bool aged = false;
-	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, dsq, 0) {
-		struct flow_task_ctx *tctx = flow_lookup(p);
-		if (tctx && flow_skip_promote(READ_ONCE(tctx->wait_at),
-		    now, READ_ONCE(tctx->misses)))
-			aged = true;
-		break;
-	}
-	bpf_rcu_read_unlock();
-	return aged;
-}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
@@ -186,12 +157,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 local_moved = 0;
 	u32 node_moved = 0;
 	u32 machine_moved = 0;
-	u32 overflow_moved = 0;
 	u64 own_local;
 	u32 node;
 	u64 node_dsq;
 	u64 machine_dsq;
-	u64 overflow_dsq;
 	(void)prev;
 	if (unlikely(cpu < 0))
 		return;
@@ -207,32 +176,32 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		node = 0;
 	node_dsq = flow_node_dsq(node);
 	machine_dsq = flow_machine_dsq();
-	overflow_dsq = flow_overflow_dsq();
-	/* Hoist five depths once before the budget gate, so the fused perf */
+	/* Hoist four depths once before the budget gate, so the fused perf */
 	/* probe at out reuses the same reads with no second poll even when */
-	/* slots run out. Signed hints keep empty at zero or below. */
+	/* slots run out. Signed hints keep empty at zero or below. The */
+	/* reject queue stays outside here with no hoist, so the pass pays */
+	/* four reads total with no duplicate. */
 	{
 		s32 lq0 = scx_bpf_dsq_nr_queued(own_local);
 		s32 lo0 = scx_bpf_dsq_nr_queued((u64)SCX_DSQ_LOCAL_ON |
 		    (u64)(u32)cpu);
 		s32 nq0 = scx_bpf_dsq_nr_queued(node_dsq);
 		s32 mq0 = scx_bpf_dsq_nr_queued(machine_dsq);
-		s32 oq0 = scx_bpf_dsq_nr_queued(overflow_dsq);
 		if (unlikely(budget == 0))
 			goto out_hint;
 		left = budget;
-	/* Queue runnable hints hoist five depths once. Each tier move threads */
+	/* Queue runnable hints hoist four depths once. Each tier move threads */
 	/* its hint through the shared hint move with no second poll, so empty */
 	/* tiers skip the RCU scan with no visit cost. The same hints feed the */
 	/* steal early out plus the fused perf probe with no second poll, so */
-	/* the pass pays five queue reads total with no duplicate. The TOCTOU */
+	/* the pass pays four queue reads total with no duplicate. The TOCTOU */
 	/* between a hint and its move only repeats or skips a pass with no */
 	/* loss, since the shared hint move rechecks under RCU with the same */
 	/* visit cap. Signed hints keep empty at zero or below. */
 	{
-		bool q1_only = lq0 > 0 && nq0 <= 0 && mq0 <= 0 && oq0 <= 0;
+		bool q1_only = lq0 > 0 && nq0 <= 0 && mq0 <= 0;
 		/* Q1 only fast path drains the local tier alone. The common */
-		/* single queue pass skips three empty moves plus the steal */
+		/* single queue pass skips two empty moves plus the steal */
 		/* backlog with the same order plus the same counts. Threads */
 		/* the hoisted hint with no second poll. */
 		if (q1_only && likely(left) &&
@@ -271,47 +240,17 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				left -= machine_moved;
 			}
 		}
-		/* Overflow FIFO tier with the same visit cap and mask wins. */
-		/* Bursts past tier order drain here in arrival order. Threads */
-		/* the hoisted hint with no second poll. */
-		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-			if (oq0 > 0) {
-				overflow_moved = flow_move_one_hint(overflow_dsq,
-				    cpu, &visits, oq0);
-				if (overflow_moved > left)
-					overflow_moved = left;
-				left -= overflow_moved;
-			}
-		}
-		/* Aged overflow extra drain with one bounded move after tiers. */
-		/* When the FIFO move leaves work and the head waited past 2ms */
-		/* else missed 8 times, one extra move drains the aged burst */
-		/* with the same visit cap plus mask wins, so starving work */
-		/* waits at most one more move per pass with no tier reorder. */
-		/* The clock reads only here with no hot path cost, and the */
-		/* TOCTOU between the hoisted hint and the extra move only */
-		/* repeats or skips a pass with no loss. */
-		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
-			/* Signed guard first, so a negative hint never wraps */
-			/* through the unsigned compare below. */
-			if (oq0 > 0 && (u32)oq0 > overflow_moved) {
-				u64 now = flow_now();
-				if (flow_overflow_head_aged(overflow_dsq, now)) {
-					u32 extra = flow_move_one_hint(overflow_dsq,
-					    cpu, &visits, oq0);
-					if (extra > left)
-						extra = left;
-					left -= extra;
-					overflow_moved += extra;
-				}
-			}
-		}
+		/* Reject queue stays outside dispatch with no tier move here. */
+		/* A reject rejoins a PRIQ tier only on reclaim with the same */
+		/* key or a strictly after key, so strict order holds with no */
+		/* inversion. Like fair.c, the earliest key wins, unlike */
+		/* rt.c, no fixed priority holds. */
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
 		/* Only steals when tiers drained, so busy passes skip cheap with */
 		/* the hoisted hints and no second poll. Starvation stays bounded */
-		/* here: the window caps each pass while overflow skip aging plus */
-		/* miss counts pace every tier, so the lowest tier still turns. */
-		/* Backlog sums the four */
+		/* here: the window caps each pass while miss counts pace every */
+		/* tier, so the lowest tier still turns. */
+		/* Backlog sums the three */
 		/* queued tiers with saturation, so a huge depth clamps instead */
 		/* of wrapping to idle. Narrow means */
 		/* empty peers skip with no RCU through the per peer hint in the */
@@ -327,8 +266,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 				backlog = flow_sat_add(backlog, (u64)nq0);
 			if (mq0 > 0)
 				backlog = flow_sat_add(backlog, (u64)mq0);
-			if (oq0 > 0)
-				backlog = flow_sat_add(backlog, (u64)oq0);
 			if (backlog == 0) {
 				u64 nr = nr_cpu_ids;
 				cst = flow_cpu((u32)cpu);
@@ -352,7 +289,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		}
 	}
 account:
-	flow_account_local(local_moved + overflow_moved);
+	flow_account_local(local_moved);
 	flow_account_node(node_moved);
 	flow_account_machine(machine_moved);
 out_hint:

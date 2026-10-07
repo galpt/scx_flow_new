@@ -868,41 +868,6 @@ static __always_inline u32 flow_adapt_down(u32 cur)
 	return (u32)s;
 }
 /**
- * flow_skip_promote - test bounded skip promotion for aged waits.
- * @wait_at: last queue join time in nanos, zero for no wait.
- * @now: current time in nanos.
- * @misses: lifetime deadline miss count for skip aging.
- *
- * Promotes when the wait aged past the 2ms lag bound else when misses
- * reach the 8 visit bound, so starving overflow work drains with one
- * bounded extra move while fresh bursts keep FIFO order. Reuses the
- * lag plus visit constants with no new knob plus no new map. A zero
- * wait means no wait yet, so the check fails closed, and a backward
- * clock never promotes. Stateless test with no latch: each pass
- * re-evaluates the same inputs, so the extra move never sticks past
- * the pass. Misses stay lifetime by design with saturating adds, so
- * promotion latches once 8 holds with the same one-move bound; a
- * windowed decay is the noted alternative with no knob taken here to
- * keep the starvation bound stable.
- *
- * Returns: true when the wait earns one bounded promotion.
- */
-static __always_inline bool flow_skip_promote(u64 wait_at,
-	u64 now, u32 misses)
-{
-	u64 age;
-	if (wait_at == 0)
-		return false;
-	if (flow_time_before(now, wait_at))
-		return false;
-	if (now != wait_at) {
-		age = now - wait_at;
-		if (age > (u64)FLOW_VLAG_MAX_NS)
-			return true;
-	}
-	return misses >= (u32)FLOW_DISPATCH_MAX_VISIT;
-}
-/**
  * flow_deadline_at - absolute deadline from now plus period.
  * @now: current time in nanos.
  * @period: relative period in nanos.
