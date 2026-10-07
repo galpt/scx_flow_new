@@ -6,10 +6,11 @@
  * strict one kick per wait tail. An idle target takes the task straight
  * to its local queue with one idle kick per wait and no preempt, so
  * wakeups skip the tier plus dispatch hop. The bypass runs only when
- * empty plus earliest-only holds: the local plus node plus machine
- * tiers hold no queued work or the target still drains local plus node
- * before the strict key, so an earlier key never waits behind this
- * arrival in a tier queue. Rechecks keep the same order with one hoist.
+ * empty plus earliest-only holds incl the reject queue: the local plus
+ * node plus machine plus reject tiers hold no queued work or the target
+ * still drains local plus node before the strict key with an empty
+ * reject, so an earlier key never waits behind this arrival in a tier
+ * queue. Rechecks keep the same order with one hoist.
  * Strict fair order gates the bypass with eligibility plus drain, so
  * hogs pace through tiers with no direct jump and one kick per wait
  * stays. A direct preempt needs predictor slack plus an eligible
@@ -84,6 +85,7 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 		s32 lq = 0;
 		s32 nq = 0;
 		s32 mq = 0;
+		s32 oq = 0;
 		bool tiers_empty = false;
 		bool drain_ok = false;
 		if (node < (u32)FLOW_MAX_NODES &&
@@ -91,21 +93,27 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 			node_dsq = flow_node_dsq(node);
 			node_valid = true;
 		}
-		/* Hoist local plus node plus machine once with signed */
-		/* hints, so the empty gate plus the drain gate plus the */
-		/* tier escalation below share one read with no repoll. */
-		/* Overflow FIFO stays out of scope for tiers_empty by design: */
-		/* FIFO bursts drain via the dispatch overflow tier with the */
-		/* aged extra, so they never block this idle direct bypass. */
+		/* Hoist local plus node plus machine plus reject once with */
+		/* signed hints, so the empty gate plus the drain gate plus */
+		/* the tier escalation share one read with no repoll. The */
+		/* reject queue stays in scope here by design: a queued */
+		/* reject vetoes the bypass, so an earlier value never waits */
+		/* behind this arrival. Like fair.c, the earliest key wins, */
+		/* unlike rt.c, no fixed priority holds. */
 		lq = scx_bpf_dsq_nr_queued(own);
 		mq = scx_bpf_dsq_nr_queued(flow_machine_dsq());
+		oq = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
 		if (node_valid)
 			nq = scx_bpf_dsq_nr_queued(node_dsq);
-		if (lq <= 0 && mq <= 0 && (!node_valid || nq <= 0))
+		if (lq <= 0 && mq <= 0 && oq <= 0 && (!node_valid || nq <= 0))
 			tiers_empty = true;
 		/* Drain gate uses the same hoisted combined drain with */
-		/* no kfunc, so the bypass tests fair order cheap. */
+		/* no kfunc, so the bypass tests fair order cheap. The */
+		/* reject queue vetoes here too: the bypass needs an empty */
+		/* reject, so value order holds with no jump. */
 		drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
+		if (oq > 0)
+			drain_ok = false;
 		if ((tiers_empty || drain_ok) && t->hoist_elig) {
 			scx_bpf_dsq_insert(p,
 			    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,

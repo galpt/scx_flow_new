@@ -1,44 +1,50 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Enqueue op.
+ * Enqueue op with RED admission plus strict PRIQ.
  *
  * Every wakeup earns one EDF deadline from the burst predictor else
  * the hint period plus one virtual deadline from vruntime plus slice
- * over weight, and every task joins a tier queue with no admission
- * bound. Queue order uses the strict EDF key of the earlier of the two
- * times, so urgent tasks still win while hogs fall behind with lag
- * bounds. Fresh waits earn a dynamic slice from the saturated remaining
- * time clamped to 10us plus 1ms, while misses hold else floor only and
- * rejoin via the same tier escalation re-derived with a fresh deadline
- * plus skip aging. Tasks join
- * direct when the target can drain before the shared home, so no task
- * waits for a busy CPU while shared room stays open. Missed tasks
- * rejoin a tier queue with a fresh deadline plus a miss count and one
- * idle kick and no wait. Pinned tasks wait in a tier queue with wait
- * set and one idle kick. Exiting tasks run at once on the task CPU
- * with no queue wait and no gate. The gate runs first for all other
- * arrivals, so a stale CPU plus a moved task fails closed with one
- * counter. The predictor average plus deviation shape later deadlines
- * with shift updates from stopping, so short bursts earn tight
- * deadlines with no table walk. Vruntime advances by scaled service
- * with one divide, and the CPU minimum folds forward on every charge,
- * so fairness tracks service with no table. Every tier join counts one
- * admit with no reject, so the counters track joins with no bound. The
- * exiting plus idle direct plus helper plus direct block form the four
- * kick points, so every wait meets at most one kick with no storm. A
- * direct preempt needs predictor slack plus an eligible arrival plus a
- * 100us margin lead with more than 100us still left on the owner, so
- * near ties plus nearly done owners never bounce while one kick per
- * wait stays. The owner paces on a fresh 1ms quantum with no dynamic
- * use. Latency-critical slice carryover keeps the unused
- * quantum, so short bursts earn nearer keys. Strict slice writes run
- * here before the key: fresh waits earn the dynamic remaining clamp,
- * misses hold else floor only, and rotations inherit zero. Slice
- * expiry paces the rest with no stamp run here.
- * Local plus node depths hoist once, so the drain gated bypass
- * plus the combined drain tier escalation share one read with no second
- * poll. See intf.h for the deadline plus fairness helpers and
- * dispatch.bpf.c for the tier scans.
+ * over weight, then passes the RED check with residual plus load plus
+ * exceed plus tolerance used only for the guarantee. Like rt.c, the
+ * deadline bounds the check, unlike fair.c, no vruntime shapes it. A
+ * zero exceed admits at once, a critical exceed admits with no swap,
+ * else the least value newcomer with cost past the exceed plus never
+ * critical rejects to the value ordered queue outside dispatch. Queue
+ * order uses the strict EDF key of the earlier of the two times in
+ * three PRIQ tiers with insert vtime, so urgent tasks still win while
+ * hogs fall behind with lag bounds. Fresh waits earn a dynamic slice
+ * from the saturated remaining time clamped to 10us plus 1ms, while
+ * misses hold else floor only and rejoin via the same tier escalation
+ * re-derived with a fresh deadline plus skip aging. Tasks join direct
+ * only when all tiers incl the reject hold no work or the target still
+ * drains before the key with an empty reject, so no earlier key waits
+ * behind this arrival. Missed tasks rejoin a tier queue with a fresh
+ * deadline plus a miss count and one idle kick and no wait, else the
+ * reject queue on overload. Pinned tasks wait in a tier queue with
+ * wait set and one idle kick, else the reject queue on overload.
+ * Exiting tasks run at once on the task CPU with no queue wait and no
+ * gate. The gate runs first for all other arrivals, so a stale CPU
+ * plus a moved task fails closed with one counter. The predictor
+ * average plus deviation shape later deadlines with shift updates from
+ * stopping, so short bursts earn tight deadlines with no table walk.
+ * Vruntime advances by scaled service with one divide, and the CPU
+ * minimum folds forward on every charge, so fairness tracks service
+ * with no table. Every tier join counts one admit, every RED reject
+ * counts one gate reject with no global queue use. The exiting plus
+ * idle direct plus helper plus direct block form the four kick points,
+ * so every wait meets at most one kick with no storm. A direct preempt
+ * needs predictor slack plus an eligible arrival plus a 100us margin
+ * lead with more than 100us still left on the owner, so near ties plus
+ * nearly done owners never bounce while one kick per wait stays. The
+ * owner paces on a fresh 1ms quantum with no dynamic use.
+ * Latency-critical slice carryover keeps the unused quantum, so short
+ * bursts earn nearer keys. Strict slice writes run here before the key:
+ * fresh waits earn the dynamic remaining clamp, misses hold else floor
+ * only, and rotations inherit zero. Slice expiry paces the rest with
+ * no stamp run here. Local plus node depths hoist once, so the drain
+ * gated bypass plus the combined drain tier escalation share one read
+ * with no second poll. See intf.h for the deadline plus fairness
+ * helpers and dispatch.bpf.c for the tier scans.
  *
  * The op holds the target plus insert plus kick helpers in enqueue/
  * with the fair plus clamp plus pinned plus place plus kick noinline
@@ -104,15 +110,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* The gate runs first with no state create, so stale CPUs plus */
 	/* moved tasks fail closed with no alloc cost. The lookup stays */
 	/* read only here, and the create follows only on pass. Rejects are */
-	/* rare, so they stay unlikely. Gate misses join the overflow FIFO */
-	/* with no deadline wait, so no path needs a tail queue. */
+	/* rare, so they stay unlikely. Gate misses join the value ordered */
+	/* reject queue with no deadline wait, so no path needs a tail */
+	/* queue and no insert touches the kernel global queue. */
 	if (unlikely(!flow_entry_ok(sel, p, 0) && !flow_entry_ok(
 	    scx_bpf_task_cpu(p), p, 0))) {
 		struct flow_task_ctx *lctx = flow_lookup(p);
 		flow_gate_reject();
 		if (lctx)
 			lctx->wait_at = now;
-		flow_overflow_insert(p, enq_flags);
+		flow_overflow_insert(p, enq_flags, (u32)FLOW_WEIGHT_BASE);
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -159,12 +166,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	cpu = flow_pick_target(p, sel);
 	/* No live CPU waits in the machine tier with an idle kick. */
 	/* The predictor shapes the deadline when history exists else the */
-	/* homeless work waits in the overflow FIFO with no fair key, so */
-	/* no insert touches the kernel global queue. */
+	/* homeless work waits in the value ordered reject queue with no */
+	/* fair key, so no insert touches the kernel global queue. */
 	if (!flow_cpu_ok(p, cpu)) {
+		u32 hw = READ_ONCE(tctx->weight);
+		u32 hw_hint = READ_ONCE(tctx->hint_w);
+		u32 heff = flow_task_effective_weight(hw, hw_hint);
+		bool hcrit = flow_lat_crit((u64)READ_ONCE(tctx->avg_ns),
+		    (u64)READ_ONCE(tctx->dev_ns));
 		flow_gate_reject();
 		tctx->wait_at = now;
-		flow_overflow_insert(p, enq_flags);
+		flow_overflow_insert(p, enq_flags, flow_red_value(heff, hcrit));
 		flow_kick_idle_allowed(p, sel);
 		return;
 	}
@@ -208,6 +220,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	    flow_missed(READ_ONCE(tctx->deadline), now)) {
 		u64 ndl;
 		u64 nvt;
+		u32 msl;
+		bool mcrit;
+		u64 mex;
 		flow_count_miss(tctx);
 		tctx->wait_at = now;
 		ndl = flow_pred_deadline(now, avg, dev, hint);
@@ -220,6 +235,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		nvt = flow_make_fair(tctx, ndl, hint_w);
+		/* RED on the miss rejoin with the same bounded O(1) check. */
+		/* A zero exceed admits at once, a critical exceed admits */
+		/* with no victim swap, else the least value newcomer with */
+		/* cost past the exceed plus never critical rejects to the */
+		/* value ordered queue. Like rt.c, tolerance aids only the */
+		/* guarantee, unlike fair.c, it never shapes the key. A full */
+		/* O(n) least value scan stays a noted alternative with no */
+		/* knob here, so the verifier keeps one pass with no walk. */
+		msl = READ_ONCE(tctx->slice_ns);
+		mcrit = flow_lat_crit(avg, dev);
+		mex = flow_red_newcomer_exceed(ndl, now, avg, msl, mcrit);
+		if (mex && !mcrit) {
+			u32 mtw = READ_ONCE(tctx->weight);
+			u32 meff = flow_task_effective_weight(mtw, hint_w);
+			flow_gate_reject();
+			flow_overflow_insert(p, enq_flags,
+			    flow_red_value(meff, mcrit));
+			flow_kick_idle_allowed(p, sel);
+			return;
+		}
 		flow_tier_insert(p, cpu, nvt, now);
 		flow_kick_idle_allowed(p, sel);
 		return;
@@ -246,6 +281,30 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* stacks task times hint over 128, so cgroup plus task weights */
 	/* shape fairness together. */
 	vtime = flow_make_fair(tctx, deadline, hint_w);
+	/* RED admission with residual plus load plus exceed plus */
+	/* tolerance used only here. A zero exceed admits at once, a */
+	/* critical exceed admits with no victim swap, else the least */
+	/* value newcomer with cost past the exceed plus deadline at or */
+	/* before the overload plus never critical rejects to the value */
+	/* ordered queue outside dispatch. Like rt.c, the deadline bounds */
+	/* the check, unlike fair.c, no vruntime shapes it. A full O(n) */
+	/* least value scan stays a noted alternative with no knob here, */
+	/* so the verifier keeps one pass with no walk. */
+	{
+		u32 csl = READ_ONCE(tctx->slice_ns);
+		bool ccrit = flow_lat_crit(avg, dev);
+		u64 cex = flow_red_newcomer_exceed(deadline, now, avg, csl,
+		    ccrit);
+		if (cex && !ccrit) {
+			u32 ctw = READ_ONCE(tctx->weight);
+			u32 ceff = flow_task_effective_weight(ctw, hint_w);
+			flow_gate_reject();
+			flow_overflow_insert(p, enq_flags,
+			    flow_red_value(ceff, ccrit));
+			flow_kick_idle_allowed(p, sel);
+			return;
+		}
+	}
 	/* Every join counts one admit with no bound and no reject, so the */
 	/* counters track joins while tier queues hold misses plus pins. */
 	flow_count_admit();

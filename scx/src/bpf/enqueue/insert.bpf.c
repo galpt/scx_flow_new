@@ -32,27 +32,26 @@ static __always_inline void flow_machine_insert(struct task_struct *p, u64 vtime
 {
 	scx_bpf_dsq_insert_vtime(p, flow_machine_dsq(), (u64)FLOW_QUANTUM_NS, vtime, 0);
 }
-/* Insert one task into the overflow FIFO with no fair key. */
-static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_flags)
+/* Insert one task into the reject queue value ordered with no FIFO. */
+/* Orders by decreasing value through the kernel priority queue, so the */
+/* greatest value drains first on reclaim with no extra map. Like rt.c, */
+/* value picks the order, unlike fair.c, no vruntime shapes it. Runs */
+/* outside dispatch with reclaim only, so dispatch tiers stay strict. */
+static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_flags, u32 value)
 {
-	scx_bpf_dsq_insert(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, enq_flags);
+	u64 key = flow_reject_key(value);
+	scx_bpf_dsq_insert_vtime(p, flow_overflow_dsq(), (u64)FLOW_QUANTUM_NS, key, enq_flags);
 }
-/* Implicit two-layer bias from the fair time distance with no knob. */
-/* A near fair time within one quantum means interactive, so the task */
-/* stays local-first. A far fair time past one quantum means batch, so */
-/* the task moves outward one tier earlier under contention to keep */
-/* local room for interactive work. Uses the fair time plus the quantum */
-/* with no new map plus no new queue plus no knob, and reuses the tier */
-/* escalation plus the slowest sufficient pick. */
+/* Strict PRIQ needs no batch bias with no knob. Queue order uses the */
+/* strict key alone, so interactive plus batch share the same drain */
+/* gate with no outward push. Like fair.c, the earliest key wins, */
+/* unlike rt.c, no fixed priority holds. Kept as a false helper with */
+/* no caller, so the verifier drops it with no cost. */
 static __always_inline bool flow_is_batch_vtime(u64 vtime, u64 now)
 {
-	if (vtime == 0)
-		return false;
-	if (flow_time_before(vtime, now))
-		return false;
-	if (vtime == now)
-		return false;
-	return (vtime - now) > (u64)FLOW_QUANTUM_NS;
+	(void)vtime;
+	(void)now;
+	return false;
 }
 /**
  * flow_tier_insert_hint - tier join from hoisted combined drain.
@@ -66,42 +65,26 @@ static __always_inline bool flow_is_batch_vtime(u64 vtime, u64 now)
  * Takes the local tier when the hoisted combined drain finishes before
  * the fair time, else the node tier when live, else the machine tier, so
  * a busy node holds local with no wait and no second poll. Escalation
- * follows the combined drain with mask wins on dispatch drain. An
- * implicit batch bias moves outward one tier earlier under contention:
- * a batch local win with queued local work holds node instead, and a
- * batch node win with queued node work holds machine instead, so local
- * room stays for interactive work with no new queue.
+ * follows the combined drain with mask wins on dispatch drain. Strict
+ * PRIQ holds with no batch push, so the earliest key wins in every
+ * tier with no load swap. Like fair.c, the earliest key wins, unlike
+ * rt.c, no fixed priority holds.
  */
 static __always_inline void flow_tier_insert_hint(struct task_struct *p,
 	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
 {
 	u32 node;
-	bool batch = flow_is_batch_vtime(vtime, now);
 	bool drain_ok = false;
 	if (cpu >= 0)
 		drain_ok = flow_cpu_meets_fair_hint(local_q, node_q, vtime,
 		    now);
 	if (cpu >= 0 && drain_ok) {
-		if (batch && local_q > 0) {
-			node = flow_cpu_node((u32)cpu);
-			if (node < (u32)FLOW_MAX_NODES &&
-			    (u64)node < nr_node_ids) {
-				flow_node_insert(p, node, vtime);
-				return;
-			}
-			flow_machine_insert(p, vtime);
-			return;
-		}
 		flow_local_insert(p, cpu, vtime);
 		return;
 	}
 	if (cpu >= 0) {
 		node = flow_cpu_node((u32)cpu);
 		if (node < (u32)FLOW_MAX_NODES && (u64)node < nr_node_ids) {
-			if (batch && node_q > 0) {
-				flow_machine_insert(p, vtime);
-				return;
-			}
 			flow_node_insert(p, node, vtime);
 			return;
 		}
@@ -265,6 +248,25 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 	pvt = flow_make_fair(tctx, pdl, phint_w);
+	/* RED on the pinned join with the same bounded O(1) check. A zero */
+	/* exceed plus a critical exceed admit to the tier, else the least */
+	/* value newcomer rejects to the value ordered queue with no tier */
+	/* wait. Like rt.c, tolerance aids only the guarantee, unlike */
+	/* fair.c, it never shapes the key. */
+	{
+		u32 psl = READ_ONCE(tctx->slice_ns);
+		bool pcrit = flow_lat_crit(pavg, pdev);
+		u64 pex = flow_red_newcomer_exceed(pdl, now, pavg, psl,
+		    pcrit);
+		if (pex && !pcrit) {
+			u32 ptw = READ_ONCE(tctx->weight);
+			u32 peff = flow_task_effective_weight(ptw, phint_w);
+			flow_gate_reject();
+			flow_overflow_insert(p, 0, flow_red_value(peff, pcrit));
+			flow_kick_idle_allowed(p, sel);
+			return;
+		}
+	}
 	if (flow_cpu_ok(p, pc))
 		flow_tier_insert(p, pc, pvt, now);
 	else
