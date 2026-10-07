@@ -16,8 +16,8 @@
  * else quantum with no knob, and V holds weight with zero mapped to
  * 128, so the slice adapts while virtual time stays untouched. A saved
  * delta at or past 128us reclaims one value ordered reject with
- * positive laxity plus same key or strictly after, so Theorem 6 holds
- * with one bounded move. A runnable yield before one quantum keeps the
+ * positive laxity plus same key or strictly after with one bounded
+ * move. A runnable yield before one quantum keeps the
  * unused remainder when predictor slack holds critical, else the
  * adaptive step holds. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
@@ -71,7 +71,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		/* clear plus run keeps the running task with no lost update. */
 		/* The clear only clears when it still owns the pid, so the */
 		/* store always wins over a stale clear with no torn write. A */
-		/* compare and swap from the observed owner loses here: when */
+		/* compare and swap from the observed owner loses here, when */
 		/* the clear wins the race to zero first, the swap fails and */
 		/* leaves zero while this task still runs. The next running */
 		/* would fold again, but the live view stays wrong until then. */
@@ -165,8 +165,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* critical, so short bursts earn a nearer virtual deadline with no */
 	/* extra slice. All other stops adapt by 64us up on a miss else */
 	/* 128us down with clamp to 10us plus 1ms and no virtual change, */
-	/* so the slice tracks recent runs with no table walk. Like fair.c, */
-	/* the step paces service, unlike rt.c, no fixed priority holds. */
+	/* so the slice tracks recent runs with no table walk. */
+	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* C holds burst else slice else quantum, and V holds weight with */
 	/* zero mapped to 128. Exiting plus completion paths skip the carry */
 	/* with adapt only, so only runnable waits carry with one kick per */
@@ -264,8 +264,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		}
 		/* Reclaim runs in dispatch with the saved delta at or past */
 		/* 128us, so this path records only with no RCU walk here. */
-		/* Like rt.c, the delta funds the retry, unlike fair.c, no */
-		/* share shapes it. Dispatch peeks only the value ordered head */
+		/* The saved delta funds the retry with no share shaping. */
+		/* Dispatch peeks only the value ordered head */
 		/* with positive laxity plus same key or strictly after plus */
 		/* mask wins, so strict order holds with one bounded move. */
 	}
@@ -275,8 +275,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* A wall completion past the deadline counts one miss with no */
 	/* wait and no kick, since the task already left the CPU. The miss */
 	/* count stays lifetime by design with no reset here, so stopping */
-	/* records only with no order write. Like rt.c, the miss paces */
-	/* the adapt grow, unlike fair.c, no share shapes it. */
+	/* records only with no order write. The miss count paces */
+	/* the adapt grow with no share shaping. */
 	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
 	if (runnable) {

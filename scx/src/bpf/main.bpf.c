@@ -6,7 +6,7 @@
  * topology view, the capacity view, the flat hint rows, the per CPU
  * stats rows, and the perf level rows. Init creates one local queue
  * per CPU plus one shared queue per node plus one machine queue plus
- * one overflow FIFO, and it fails loudly on over bound counts. Ops
+ * one value ordered reject queue, and it fails loudly on over bound counts. Ops
  * split across per logic files with maps plus init plus exit plus the
  * ops table only here. Hotplug needs a restart, and the watchdog stays
  * at 20 seconds.
@@ -95,7 +95,7 @@ volatile u64 nr_node_ids;
  * flow_init - create queues plus seed CPU state.
  *
  * Creates one local queue per CPU plus one node queue per node plus
- * one machine queue plus one overflow FIFO. Seeds per CPU state plus
+ * one machine queue plus one value ordered reject queue. Seeds per CPU state plus
  * capacity rows, then derives the node count from the seeded view.
  * Fails loudly on over bound counts with no partial attach.
  *

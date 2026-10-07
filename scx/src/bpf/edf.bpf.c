@@ -222,8 +222,8 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * RED guarantee core for the flow scheduler.
  *
  * Holds the residual plus load plus exceeding time with tolerance used
- * only for the guarantee. Like rt.c, the deadline bounds the check,
- * unlike fair.c, no vruntime shapes it. A newcomer with zero exceed
+ * only for the guarantee. The deadline bounds the check with no
+ * vruntime shaping. A newcomer with zero exceed
  * passes at once, else the caller seeks a least value victim with cost
  * past the exceed plus deadline at or before the newcomer plus never
  * critical, else the newcomer rejects. The reject queue stays value
@@ -242,9 +242,8 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * @is_crit: true marks critical with zero tolerance.
  *
  * Costs burst else slice else quantum, tolerates 64us for hard only,
- * then residuals deadline minus now minus cost with wrap safety. Like
- * rt.c, tolerance aids only the guarantee, unlike fair.c, it never
- * shapes queue order.
+ * then residuals deadline minus now minus cost with wrap safety.
+ * Tolerance aids only the guarantee with no order shaping.
  *
  * Returns: exceeding time in nanos, zero when guaranteed.
  */
@@ -265,13 +264,14 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * @v_crit: true marks a critical victim that never rejects.
  *
  * Victim needs cost past the exceed plus deadline at or before the
- * newcomer, so only work ahead of the overload pays. Like rt.c, the
- * least value pays first, unlike fair.c, no vruntime shapes it. A
+ * newcomer, so only work ahead of the overload pays. The least value
+ * pays first with no vruntime shaping. Kept with bounded O(1) check
+ * and no caller, so the verifier drops it. A
  * critical victim never passes with no swap.
  *
  * Returns: true when the victim may cover the exceed.
  */
-static __always_inline bool flow_red_victim_ok(u64 v_deadline,
+__attribute__((unused)) static __always_inline bool flow_red_victim_ok(u64 v_deadline,
 	u64 n_deadline, u64 v_cost, u64 exceed, bool v_crit)
 {
 	if (exceed == 0)
@@ -280,12 +280,10 @@ static __always_inline bool flow_red_victim_ok(u64 v_deadline,
 		return false;
 	if (v_deadline == 0 || n_deadline == 0)
 		return false;
+	if (v_cost <= (u64)FLOW_RED_EMAX_NS)
+		return false;
 	if (v_cost <= exceed)
 		return false;
-	if (v_cost <= (u64)FLOW_RED_EMAX_NS && exceed <= (u64)FLOW_RED_EMAX_NS) {
-		if (v_cost <= exceed)
-			return false;
-	}
 	if (flow_time_before(n_deadline, v_deadline))
 		return false;
 	return true;
@@ -297,9 +295,8 @@ static __always_inline bool flow_red_victim_ok(u64 v_deadline,
  * @laxity: head laxity in nanos, zero means no room.
  *
  * Reclaims when the saved delta reaches past 128us plus covers the
- * head exceed with positive laxity, so Theorem 6 holds with no scan
- * here. Like rt.c, the delta funds the retry, unlike fair.c, no share
- * shapes it.
+ * head exceed with positive laxity with no scan here. The saved delta
+ * funds the retry with no share shaping.
  *
  * Returns: true when the head may rejoin.
  */

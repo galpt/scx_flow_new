@@ -20,7 +20,7 @@ Latency apps run urgent fair time first, so short arrivals skip long work with n
 
 ### Queues
 
-One local queue per CPU plus one per node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty. Reject stays value ordered outside dispatch. See `src/bpf/intf.h`.
+One local queue per CPU plus one shared per node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty. Reject stays strictly value ordered outside dispatch. See `src/bpf/intf.h`.
 
 ### Keys
 

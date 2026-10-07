@@ -5,8 +5,8 @@
  * Every wakeup earns one EDF deadline from the burst predictor else
  * the hint period plus one virtual deadline from vruntime plus slice
  * over weight, then passes the RED check with residual plus load plus
- * exceed plus tolerance used only for the guarantee. Like rt.c, the
- * deadline bounds the check, unlike fair.c, no vruntime shapes it. A
+ * exceed plus tolerance used only for the guarantee. The deadline
+ * bounds the check with no vruntime shaping. A
  * zero exceed admits at once, a critical exceed admits with no swap,
  * else the least value newcomer with cost past the exceed plus never
  * critical rejects to the value ordered queue outside dispatch. Queue
@@ -38,8 +38,8 @@
  * nearly done owners never bounce while one kick per wait stays. The
  * owner paces on a fresh 1ms quantum with no dynamic use.
  * Latency-critical slice carryover keeps the unused quantum, so short
- * bursts earn nearer keys. Strict slice writes run here before the key:
- * fresh waits earn the dynamic remaining clamp, misses hold else floor
+ * bursts earn nearer keys. Strict slice writes run here before the key.
+ * Fresh waits earn the dynamic remaining clamp, misses hold else floor
  * only, and rotations inherit zero. Slice expiry paces the rest with
  * no stamp run here. Local plus node depths hoist once, so the drain
  * gated bypass plus the combined drain tier escalation share one read
@@ -239,8 +239,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* A zero exceed admits at once, a critical exceed admits */
 		/* with no victim swap, else the least value newcomer with */
 		/* cost past the exceed plus never critical rejects to the */
-		/* value ordered queue. Like rt.c, tolerance aids only the */
-		/* guarantee, unlike fair.c, it never shapes the key. A full */
+		/* value ordered queue. Tolerance aids only the guarantee */
+		/* with no key shaping. A full */
 		/* O(n) least value scan stays a noted alternative with no */
 		/* knob here, so the verifier keeps one pass with no walk. */
 		msl = READ_ONCE(tctx->slice_ns);
@@ -287,8 +287,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* critical exceed admits with no victim swap, else the least */
 	/* value newcomer with cost past the exceed plus deadline at or */
 	/* before the overload plus never critical rejects to the value */
-	/* ordered queue outside dispatch. Like rt.c, the deadline bounds */
-	/* the check, unlike fair.c, no vruntime shapes it. A full O(n) */
+	/* ordered queue outside dispatch. The deadline bounds the check */
+	/* with no vruntime shaping. A full O(n) */
 	/* least value scan stays a noted alternative with no knob here, */
 	/* so the verifier keeps one pass with no walk. */
 	{

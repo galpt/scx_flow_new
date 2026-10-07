@@ -34,8 +34,8 @@ static __always_inline void flow_machine_insert(struct task_struct *p, u64 vtime
 }
 /* Insert one task into the reject queue value ordered with no FIFO. */
 /* Orders by decreasing value through the kernel priority queue, so the */
-/* greatest value drains first on reclaim with no extra map. Like rt.c, */
-/* value picks the order, unlike fair.c, no vruntime shapes it. Runs */
+/* greatest value drains first on reclaim with no extra map. Value */
+/* picks the order with no vruntime shaping. Runs */
 /* outside dispatch with reclaim only, so dispatch tiers stay strict. */
 static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_flags, u32 value)
 {
@@ -251,8 +251,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	/* RED on the pinned join with the same bounded O(1) check. A zero */
 	/* exceed plus a critical exceed admit to the tier, else the least */
 	/* value newcomer rejects to the value ordered queue with no tier */
-	/* wait. Like rt.c, tolerance aids only the guarantee, unlike */
-	/* fair.c, it never shapes the key. */
+	/* wait. Tolerance aids only the guarantee with no key shaping. */
 	{
 		u32 psl = READ_ONCE(tctx->slice_ns);
 		bool pcrit = flow_lat_crit(pavg, pdev);

@@ -34,7 +34,7 @@
 /* Depth probe with hoisted hints plus running and no kfunc. */
 /* Takes the dispatch hoisted depths for own local plus local on plus */
 /* node, so the perf pass reuses the same five reads with no second poll. */
-/* Fused early out keeps one compare on the busy path: the first queued */
+/* Fused early out keeps one compare on the busy path and the first queued */
 /* hint or running pid returns busy at once. The TOCTOU with dispatch */
 /* moves only shifts the perf level by one pass with no order effect, */
 /* since the next pass re-probes with no latch. Signed hints keep empty */
@@ -75,7 +75,7 @@ static __noinline bool flow_perf_busy_hint(s32 cpu, s32 local_q,
 /* Depth probe with own plus local plus node plus running. */
 /* Polls once then threads the hints through the shared hint probe, so */
 /* callers without hoisted depths pay the same reads with no double poll. */
-/* Dead compat with no dispatch use; dispatch fuses via the hint form with */
+/* Dead compat with no dispatch use. Dispatch fuses via the hint form with */
 /* no kfunc on the probe, so this polling form stays only for compat. */
 __attribute__((unused)) static __noinline bool flow_perf_busy(s32 cpu)
 {
@@ -130,7 +130,7 @@ static __noinline void flow_perf_set(s32 cpu, u32 want)
 	__sync_lock_test_and_set(last, want);
 	scx_bpf_cpuperf_set(cpu, want);
 }
-/* Dead compat polling update with no dispatch use; dispatch fuses via the */
+/* Dead compat polling update with no dispatch use. Dispatch fuses via the */
 /* hint form, so this stays only for compat with no caller. */
 __attribute__((unused)) static __always_inline void flow_perf_update(s32 cpu)
 {
@@ -158,9 +158,9 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
  * Peeks only the reject head with one RCU walk and no scan, so the
  * check stays cheap. Reclaims when the minimal saved delta of 128us
  * covers the head exceed with positive laxity plus the same key or a
- * strictly after key plus mask wins, so Theorem 6 holds with one
- * bounded move. Like rt.c, the delta funds the retry, unlike fair.c,
- * no share shapes it. The head holds the greatest value with no extra
+ * strictly after key plus mask wins, so the bound holds with one
+ * bounded move. The saved delta funds the retry with no share shaping.
+ * The head holds the greatest value with no extra
  * sort, so the most important reject returns first.
  *
  * Returns: one on move else zero with no state.
@@ -208,8 +208,13 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		rres = flow_red_residual(rdl, now, rcost);
 		rexc = flow_red_exceed(rres, rtol);
 		rlax = flow_red_laxity(rdl, now, rcost);
-		if (!flow_red_reclaim_ok((u64)FLOW_RED_EMAX_NS, rexc, rlax))
-			break;
+		{
+			u64 saved = (u64)READ_ONCE(rctx->adapt_delta);
+			if (saved > (u64)FLOW_PRED_MAX_NS)
+				saved = (u64)FLOW_PRED_MAX_NS;
+			if (!flow_red_reclaim_ok(saved, rexc, rlax))
+				break;
+		}
 		rvtime = flow_edf_key(rdl,
 		    flow_virt_deadline(READ_ONCE(rctx->vruntime),
 		    (u64)READ_ONCE(rctx->slice_ns),
@@ -347,7 +352,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
 		/* Only steals when tiers drained, so busy passes skip cheap with */
 		/* the hoisted hints and no second poll. Starvation stays bounded */
-		/* here: the window caps each pass while miss counts pace every */
+		/* here. The window caps each pass while miss counts pace every */
 		/* tier, so the lowest tier still turns. */
 		/* Backlog sums the three */
 		/* queued tiers with saturation, so a huge depth clamps instead */

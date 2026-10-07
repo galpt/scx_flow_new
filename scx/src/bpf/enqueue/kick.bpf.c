@@ -6,7 +6,7 @@
  * strict one kick per wait tail. An idle target takes the task straight
  * to its local queue with one idle kick per wait and no preempt, so
  * wakeups skip the tier plus dispatch hop. The bypass runs only when
- * empty plus earliest-only holds incl the reject queue: the local plus
+ * empty plus earliest-only holds incl the reject queue and the local plus
  * node plus machine plus reject tiers hold no queued work or the target
  * still drains local plus node before the strict key with an empty
  * reject, so an earlier key never waits behind this arrival in a tier
@@ -46,9 +46,9 @@ struct flow_enqueue_tail {
  * The bypass runs only when the local plus node plus machine tiers hold
  * no queued work or the target still drains local plus node before the
  * strict key, so an earlier key never waits behind this arrival in
- * a tier queue. The overflow FIFO stays out of scope here by design
- * with dispatch draining it after the tiers, so FIFO bursts never block
- * the bypass. Local plus node depths hoist once here, so the empty
+ * a tier queue. The value ordered reject stays out of scope here by
+ * design with dispatch reclaiming it after the tiers, so queued value
+ * never blocks the bypass. Local plus node depths hoist once here, so the empty
  * gate plus the drain gate share the same reads with no second poll.
  * The bypass inserts straight to local with no tier move count, so
  * admits vs moves drift by the bypass count with no loss while dispatch
@@ -96,7 +96,7 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 		/* Hoist local plus node plus machine plus reject once with */
 		/* signed hints, so the empty gate plus the drain gate plus */
 		/* the tier escalation share one read with no repoll. The */
-		/* reject queue stays in scope here by design: a queued */
+		/* reject queue stays in scope here by design and a queued */
 		/* reject vetoes the bypass, so an earlier value never waits */
 		/* behind this arrival. Like fair.c, the earliest key wins, */
 		/* unlike rt.c, no fixed priority holds. */
@@ -109,7 +109,7 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 			tiers_empty = true;
 		/* Drain gate uses the same hoisted combined drain with */
 		/* no kfunc, so the bypass tests fair order cheap. The */
-		/* reject queue vetoes here too: the bypass needs an empty */
+		/* reject queue vetoes here too and the bypass needs an empty */
 		/* reject, so value order holds with no jump. */
 		drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
 		if (oq > 0)

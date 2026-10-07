@@ -98,7 +98,7 @@ static __noinline u32 flow_move_one_hint(u64 dsq, s32 cpu, u32 *visits,
 /* the remote peer, so cache stays warm with one RCU walk. Each move */
 /* shares the per pass visit cap at eight, so a miss heavy peer never */
 /* holds RCU across the whole queue. Stolen work counts in the local */
-/* bucket with no new counter, so stats stay at 120B. The start hoists */
+/* bucket with no new counter, so stats stay at 136B. The start hoists */
 /* once outside the loop with pow2 masking, so peers step from start */
 /* plus offset with no per peer add chain. The TOCTOU between the per */
 /* peer empty hint and the shared move only delays the steal to the */

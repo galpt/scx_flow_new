@@ -260,7 +260,7 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_SLICE_MIN_NS as u64,
             SLICE_MIN_NS
         );
-        assert!(SLICE_MIN_NS < QUANTUM_NS);
+        const _: () = assert!(SLICE_MIN_NS < QUANTUM_NS);
     }
 
     #[test]
