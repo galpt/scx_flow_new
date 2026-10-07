@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.2.
+ * Flow scheduler BPF core at 4.8.11.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
  * stats rows, and the perf level rows. Init creates one local queue
  * per CPU plus one shared queue per node plus one machine queue plus
- * one overflow FIFO, and it fails loudly on over bound counts. Ops
+ * one value ordered reject queue, and it fails loudly on over bound counts. Ops
  * split across per logic files with maps plus init plus exit plus the
  * ops table only here. Hotplug needs a restart, and the watchdog stays
  * at 20 seconds.
@@ -17,6 +17,7 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include "intf.h"
+#include "topology.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 /* Per task state for the life of the task. */
@@ -76,6 +77,15 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } cpu_perf_last SEC(".maps");
+/* Global reclaim credit from completer saved deltas with no knob. */
+/* One u64 row holds the unused cost funding for dispatch reclaim with */
+/* saturation at 1s, so completions fund retries with no task pointer. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} reclaim_credit_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 #include "stats.bpf.c"
@@ -94,7 +104,7 @@ volatile u64 nr_node_ids;
  * flow_init - create queues plus seed CPU state.
  *
  * Creates one local queue per CPU plus one node queue per node plus
- * one machine queue plus one overflow FIFO. Seeds per CPU state plus
+ * one machine queue plus one value ordered reject queue. Seeds per CPU state plus
  * capacity rows, then derives the node count from the seeded view.
  * Fails loudly on over bound counts with no partial attach.
  *
@@ -134,7 +144,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			if (!tp)
 				continue;
 			nd = READ_ONCE(tp->node);
-			if (nd >= (u32)FLOW_MAX_NODES)
+			if (!flow_topo_node_ok(nd))
 				continue;
 			if (!seen || nd > hi) {
 				hi = nd;

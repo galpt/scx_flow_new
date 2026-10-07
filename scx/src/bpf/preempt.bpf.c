@@ -2,12 +2,14 @@
 /*
  * Preempt plus idle kick for the enqueue pass.
  *
- * Holds the strict one kick per wait rule with lead plus tail plus
- * eligibility. An eligible arrival leads the occupant by the margin
- * with more than the tail left on the owner, so near ties plus nearly
- * done owners never bounce while one kick per wait stays with no storm.
- * Every hold counts in preempt skipped with no missing fill. The four
- * kick points share this gate with no extra sender. Runs under the
+ * Holds the strict one kick per wait rule with predictor slack plus
+ * lead plus tail plus eligibility. A latency-critical arrival with
+ * slack within one quantum leads the occupant by the margin with more
+ * than the tail left on the owner, so near ties plus nearly done
+ * owners never bounce while one kick per wait stays with no storm.
+ * Every hold counts in preempt skipped with no missing fill. The exiting
+ * plus bypass plus tier idle plus preempt paths share this gate with no
+ * extra sender. Runs under the
  * caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -18,8 +20,9 @@
 /* started with remaining slice strictly past the tail, so nearly done */
 /* owners finish instead of taking a kick. The enqueue busy path calls */
 /* this helper after the eligibility gate, so eligibility stays outside */
-/* here with one minimum read per wait. Mirrored by preempt_leads in */
-/* Rust for tests with the same now plus start inputs. */
+/* here with one minimum read per wait. Equal arrivals pace with no */
+/* extra kick by design, so no tie assert runs with no verifier cost. */
+/* No Rust mirror by design, so the kernel stays the single truth. */
 static __always_inline bool flow_preempt_wants(u64 arrival,
 	u64 occupant, u64 now, u64 occ_start)
 {
@@ -63,7 +66,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
  * @lag: arrival lag bound for the eligibility gate.
  * @has_ctx: true when @vr plus @lag hold valid state.
  *
- * Outlined with noinline to keep verifier headroom: the three probes
+ * Outlined with noinline to keep verifier headroom and the three probes
  * share one eligibility plus kick copy with no inline growth.
  *
  * Returns: true when the kick took or an ineligible hold counted, so

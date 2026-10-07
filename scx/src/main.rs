@@ -13,8 +13,6 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 #[path = "rust/config.rs"]
 mod config;
-#[path = "rust/flow/mod.rs"]
-mod flow;
 #[path = "rust/snapshot.rs"]
 mod snapshot;
 #[path = "rust/stats.rs"]
@@ -240,7 +238,7 @@ impl<'a> Scheduler<'a> {
         }
         let m = self.get_metrics();
         info!(
-            "exit ins={} req={} done={} local={} node={} machine={} kick={} adm={} rej={} miss={} gate={} pkick={} pskip={} runtime={} oncpu={}",
+            "exit ins={} req={} done={} local={} node={} machine={} kick={} adm={} rej={} miss={} gate={} pkick={} pskip={} redrej={} redrec={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -254,6 +252,8 @@ impl<'a> Scheduler<'a> {
             m.gate_rejects,
             m.preempt_kicks,
             m.preempt_skipped,
+            m.red_rejects,
+            m.red_reclaims,
             m.total_runtime,
             m.on_cpu,
         );
@@ -345,44 +345,34 @@ mod tests {
     #[test]
     fn quantum_matches_header() {
         assert_eq!(
-            crate::flow::slice::QUANTUM_NS,
+            crate::config::QUANTUM_NS,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(crate::flow::slice::QUANTUM_NS, 1_000_000);
-        assert_eq!(crate::flow::slice::WEIGHT_BASE, 128);
-        assert_eq!(crate::flow::slice::WEIGHT_MIN, 1);
-        assert_eq!(crate::flow::slice::WEIGHT_MAX, 16_384);
+        assert_eq!(crate::config::QUANTUM_NS, 1_000_000);
+        assert_eq!(crate::config::WEIGHT_BASE, 128);
+        assert_eq!(crate::config::WEIGHT_MIN, 1);
+        assert_eq!(crate::config::WEIGHT_MAX, 16_384);
     }
 
     #[test]
     fn slot_matches_header() {
-        assert_eq!(
-            crate::flow::slot::SLOT_MACHINE,
-            crate::bpf_intf::flow_consts_FLOW_MACHINE as u64
-        );
-        assert_eq!(
-            crate::flow::slot::SLOT_OVERFLOW,
-            crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64
-        );
-        assert_eq!(
-            crate::flow::slot::SLOT_MAX_DSQS,
-            crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64
-        );
-        assert_eq!(crate::flow::slot::SLOT_MAX_DSQS, 1042);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MACHINE as u64, 0x5A00);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64, 0x5A01);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
     }
 
     #[test]
     fn period_matches_header() {
         assert_eq!(
-            crate::flow::edf::PERIOD_NS,
+            crate::config::PERIOD_NS,
             crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
         );
-        assert_eq!(crate::flow::edf::PERIOD_NS, 16_000_000);
+        assert_eq!(crate::config::PERIOD_NS, 16_000_000);
     }
 
     #[test]
-    fn task_size_is_64() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 64);
+    fn task_size_is_72() {
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
     }
 
     #[test]
@@ -396,24 +386,31 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_120() {
+    fn sched_stats_size_is_136() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            120
+            136
         );
     }
 
     #[test]
     fn kick_rule_matches_header() {
-        assert!(crate::flow::arrival_kicks(10, 20));
-        assert!(!crate::flow::arrival_kicks(20, 20));
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
+            100_000
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
+            100_000
+        );
     }
 
     #[test]
     fn hint_matches_header() {
         assert_eq!(
-            crate::flow::cgrp::HINT_MAX,
+            crate::config::HINT_MAX,
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
         );
+        assert_eq!(crate::config::HINT_MAX, 8192);
     }
 }

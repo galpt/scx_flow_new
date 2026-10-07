@@ -48,6 +48,8 @@ impl<'a> Scheduler<'a> {
         let mut gate_rejects = 0u64;
         let mut preempt_kicks = 0u64;
         let mut preempt_skipped = 0u64;
+        let mut red_rejects = 0u64;
+        let mut red_reclaims = 0u64;
         for &id in self.online_cpus.iter() {
             let s = self.read_stats(id as usize);
             total_runtime = total_runtime.saturating_add(s.total_runtime);
@@ -63,6 +65,8 @@ impl<'a> Scheduler<'a> {
             gate_rejects = gate_rejects.saturating_add(s.gate_rejects);
             preempt_kicks = preempt_kicks.saturating_add(s.preempt_kicks);
             preempt_skipped = preempt_skipped.saturating_add(s.preempt_skipped);
+            red_rejects = red_rejects.saturating_add(s.red_rejects);
+            red_reclaims = red_reclaims.saturating_add(s.red_reclaims);
         }
         stats::Metrics {
             on_cpu: self.count_on_cpu(),
@@ -83,6 +87,8 @@ impl<'a> Scheduler<'a> {
             gate_rejects,
             preempt_kicks,
             preempt_skipped,
+            red_rejects,
+            red_reclaims,
         }
     }
 
@@ -105,6 +111,8 @@ impl<'a> Scheduler<'a> {
             gate_rejects: 0,
             preempt_kicks: 0,
             preempt_skipped: 0,
+            red_rejects: 0,
+            red_reclaims: 0,
         };
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             return zero;
@@ -172,7 +180,7 @@ impl<'a> Scheduler<'a> {
                 id,
                 smt,
                 running_pid: st.running_pid,
-                slice_ns: crate::flow::slice::QUANTUM_NS,
+                slice_ns: crate::config::QUANTUM_NS,
             });
         }
         let timestamp_ns = std::time::SystemTime::now()

@@ -366,6 +366,14 @@
           Preempt skipped:</span>
           <span class="stat-value" id="preempt-skipped">0</span>
         </div>
+        <div><span style="color:var(--text-muted)">
+          RED rejects:</span>
+          <span class="stat-value" id="red-rejects">0</span>
+        </div>
+        <div><span style="color:var(--text-muted)">
+          RED reclaims:</span>
+          <span class="stat-value" id="red-reclaims">0</span>
+        </div>
       </div>
     </div>
 
@@ -498,6 +506,8 @@
       var gate = s.gate_rejects || 0;
       var pkick = s.preempt_kicks || 0;
       var pskip = s.preempt_skipped || 0;
+      var redrej = s.red_rejects || 0;
+      var redrec = s.red_reclaims || 0;
       var placed = ins + req;
       var shared = node + machine;
       var tldr, explanation;
@@ -518,7 +528,9 @@
           ' and misses ' + fmt(miss) +
           ' and gate rejects ' + fmt(gate) +
           ' and preempt kicks ' + fmt(pkick) +
-          ' with skipped ' + fmt(pskip) + '.';
+          ' with skipped ' + fmt(pskip) +
+          ' and RED rejects ' + fmt(redrej) +
+          ' with reclaims ' + fmt(redrec) + '.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -532,7 +544,9 @@
           ' and misses ' + fmt(miss) +
           ' and gate rejects ' + fmt(gate) +
           ' and preempt kicks ' + fmt(pkick) +
-          ' with skipped ' + fmt(pskip) + '.';
+          ' with skipped ' + fmt(pskip) +
+          ' and RED rejects ' + fmt(redrej) +
+          ' with reclaims ' + fmt(redrec) + '.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -604,6 +618,10 @@
         fmt(s.preempt_kicks || 0);
       el('preempt-skipped').textContent =
         fmt(s.preempt_skipped || 0);
+      el('red-rejects').textContent =
+        fmt(s.red_rejects || 0);
+      el('red-reclaims').textContent =
+        fmt(s.red_reclaims || 0);
 
       renderCoreCards(data);
     }

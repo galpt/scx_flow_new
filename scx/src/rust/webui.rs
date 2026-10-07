@@ -182,6 +182,8 @@ mod tests {
         assert_eq!(m.stats.gate_rejects, 0);
         assert_eq!(m.stats.preempt_kicks, 0);
         assert_eq!(m.stats.preempt_skipped, 0);
+        assert_eq!(m.stats.red_rejects, 0);
+        assert_eq!(m.stats.red_reclaims, 0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "4.7.0");
         assert_eq!(m.timestamp_ns, 0);
@@ -219,6 +221,8 @@ mod tests {
                 gate_rejects: 0,
                 preempt_kicks: 1,
                 preempt_skipped: 2,
+                red_rejects: 1,
+                red_reclaims: 1,
             },
             per_cpu: vec![
                 crate::stats::PerCpuMetrics {
@@ -250,6 +254,8 @@ mod tests {
         assert!(txt.contains("gate_rejects"));
         assert!(txt.contains("preempt_kicks"));
         assert!(txt.contains("preempt_skipped"));
+        assert!(txt.contains("red_rejects"));
+        assert!(txt.contains("red_reclaims"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -279,6 +285,8 @@ mod tests {
         assert_eq!(back.stats.gate_rejects, 0);
         assert_eq!(back.stats.preempt_kicks, 1);
         assert_eq!(back.stats.preempt_skipped, 2);
+        assert_eq!(back.stats.red_rejects, 1);
+        assert_eq!(back.stats.red_reclaims, 1);
         assert_eq!(back.per_cpu.len(), 2);
         assert!(!back.per_cpu[0].smt);
         assert!(back.per_cpu[1].smt);
@@ -335,6 +343,8 @@ mod tests {
         assert!(html.contains("id=\"gate-rejects\""));
         assert!(html.contains("id=\"preempt-kicks\""));
         assert!(html.contains("id=\"preempt-skipped\""));
+        assert!(html.contains("id=\"red-rejects\""));
+        assert!(html.contains("id=\"red-reclaims\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
@@ -344,6 +354,8 @@ mod tests {
         assert!(html.contains("gate_rejects"));
         assert!(html.contains("preempt_kicks"));
         assert!(html.contains("preempt_skipped"));
+        assert!(html.contains("red_rejects"));
+        assert!(html.contains("red_reclaims"));
         assert!(!html.contains("over_moves"));
         assert!(!html.contains("over-moves"));
         assert!(!html.contains("\"parks\""));

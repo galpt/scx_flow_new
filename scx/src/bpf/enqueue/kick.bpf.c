@@ -5,23 +5,28 @@
  * Holds the idle direct bypass with the hoisted drain gate plus the
  * strict one kick per wait tail. An idle target takes the task straight
  * to its local queue with one idle kick per wait and no preempt, so
- * wakeups skip the tier plus dispatch hop. The bypass runs only when
- * the local plus node plus machine tiers hold no queued work or the
- * target still drains local plus node before the fair time, so an
- * earlier fair time never waits behind this arrival in a tier queue.
- * Strict fair order gates the bypass with eligibility plus drain, so
- * hogs pace through tiers with no direct jump and one kick per wait
- * stays. A direct preempt needs an eligible arrival plus a 100us margin
- * lead with more than 100us still left on the owner, so near ties plus
- * nearly done owners never bounce while one kick per wait stays with
- * no storm. Runs under the caller with no lock.
+ * wakeups take a bounded direct jump past the tier plus dispatch hop
+ * with one insert plus one kick and no zero-cost bypass. The bypass
+ * runs only when empty plus earliest-only holds incl the reject queue
+ * and the local plus node plus machine plus reject tiers hold no
+ * queued work or the target still drains local plus node before the
+ * strict key with an empty machine plus an empty reject, so an earlier key never waits behind
+ * this arrival in a tier queue. Rechecks keep the same order with one
+ * hoist. Strict fair order gates the bypass with eligibility plus
+ * drain, so hogs pace through tiers with no direct jump and one kick
+ * per wait stays. A direct preempt needs predictor slack plus an
+ * eligible arrival plus a 100us margin lead with more than 100us still
+ * left on the owner, so near ties plus nearly done owners never bounce
+ * while one kick per wait stays with no storm. Exiting tasks stay
+ * exempt with no queue wait and no gate. Runs under the caller with no
+ * lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* Tail args for the outlined place plus kick with one call each. */
+/* Tail args for the Outlined place plus kick with one call each. */
 /* Bundles the live target plus the fair time plus the enqueue time */
 /* plus the insert flags plus the requeue pace plus the hoisted */
-/* eligibility, so each outlined tail takes one pointer with no stack */
+/* eligibility, so each Outlined tail takes one pointer with no stack */
 /* args and the bypass plus the kick share the same single reads. */
 struct flow_enqueue_tail {
 	s32 cpu;
@@ -37,13 +42,14 @@ struct flow_enqueue_tail {
  * @t: tail args with target plus fair time plus time plus flags plus
  * eligibility, hoisted once by the caller with no second poll.
  *
- * Idle direct bypass only when tiers hold no earlier fair key. An idle
+ * Idle direct bypass only when tiers hold no earlier strict key. An idle
  * target takes the task straight to its local queue with one idle kick
- * per wait and no preempt, so wakeups skip the tier plus dispatch hop.
- * The bypass runs only when the local plus node plus machine tiers hold
+ * per wait and no preempt, so wakeups take a bounded direct jump past
+ * the tier plus dispatch hop with one insert plus one kick. The bypass runs only when the local plus node plus machine plus reject tiers hold
  * no queued work or the target still drains local plus node before the
- * fair time, so an earlier fair time never waits behind this arrival in
- * a tier queue. Local plus node depths hoist once here, so the empty
+ * strict key with an empty machine plus an empty reject, so an earlier key never waits behind this arrival in
+ * a tier queue. The value ordered reject stays in scope here and a queued
+ * vetoes the bypass with no jump. Local plus node depths hoist once here, so the empty
  * gate plus the drain gate share the same reads with no second poll.
  * The bypass inserts straight to local with no tier move count, so
  * admits vs moves drift by the bypass count with no loss while dispatch
@@ -61,7 +67,7 @@ struct flow_enqueue_tail {
  * Returns: true when the direct bypass took with one kick, else false
  * after a tier join with the kick left to the caller.
  *
- * Outlined with noinline to keep verifier headroom: the bypass plus
+ * Outlined with noinline to keep verifier headroom and the bypass plus
  * tier join leaves the kick tail with no inline growth and the same
  * order plus the same counts.
  */
@@ -80,6 +86,7 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 		s32 lq = 0;
 		s32 nq = 0;
 		s32 mq = 0;
+		s32 oq = 0;
 		bool tiers_empty = false;
 		bool drain_ok = false;
 		if (node < (u32)FLOW_MAX_NODES &&
@@ -87,18 +94,30 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
 			node_dsq = flow_node_dsq(node);
 			node_valid = true;
 		}
-		/* Hoist local plus node plus machine once with signed */
-		/* hints, so the empty gate plus the drain gate plus the */
-		/* tier escalation below share one read with no repoll. */
+		/* Hoist local plus node plus machine plus reject once with */
+		/* signed hints, so the empty gate plus the drain gate plus */
+		/* the tier escalation share one read with no repoll. The */
+		/* reject queue stays in scope here by design and a queued */
+		/* reject vetoes the bypass, so an earlier value never waits */
+		/* behind this arrival. Like fair.c, the earliest key wins, */
+		/* unlike rt.c, no fixed priority holds. */
 		lq = scx_bpf_dsq_nr_queued(own);
 		mq = scx_bpf_dsq_nr_queued(flow_machine_dsq());
+		oq = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
 		if (node_valid)
 			nq = scx_bpf_dsq_nr_queued(node_dsq);
-		if (lq <= 0 && mq <= 0 && (!node_valid || nq <= 0))
+		if (lq <= 0 && mq <= 0 && oq <= 0 && (!node_valid || nq <= 0))
 			tiers_empty = true;
 		/* Drain gate uses the same hoisted combined drain with */
-		/* no kfunc, so the bypass tests fair order cheap. */
+		/* no kfunc, so the bypass tests fair order cheap. The machine */
+		/* plus reject queues veto here too and the bypass needs an empty */
+		/* machine plus an empty reject, so shared plus value order hold */
+		/* with no jump. */
 		drain_ok = flow_cpu_meets_fair_hint(lq, nq, vtime, now);
+		if (mq > 0)
+			drain_ok = false;
+		if (oq > 0)
+			drain_ok = false;
 		if ((tiers_empty || drain_ok) && t->hoist_elig) {
 			scx_bpf_dsq_insert(p,
 			    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu,
@@ -152,18 +171,19 @@ static __noinline bool flow_enqueue_place(struct task_struct *p,
  * skipped count, since no urgency holds to track. The occupant CPU
  * validates before the compare, so a migrated occupant never kicks the
  * wrong CPU with no count. A zero occupant deadline means no order yet,
- * so the arrival paces with no kick and no skipped count. Only margin
- * plus tail plus eligibility plus fair order holds count as skipped.
- * An urgent arrival leads by 100us with more than 100us left on the
- * owner, so near ties plus nearly done owners never bounce. The shared
- * preempt helper holds the margin plus tail with wrap safe order, so
- * only a truly earlier arrival with work left preempts at once with one
- * kick per wait. Equal or later arrivals pace at slice expiry with one
- * skipped preempt. The fair time leads here, so fairness plus urgency
- * gate the kick. Eligibility already passed above, so the helper checks
- * lead plus tail only.
+ * so the arrival paces with no kick and no skipped count. Only predictor
+ * slack plus margin plus tail plus eligibility plus fair order holds
+ * count as skipped. An urgent latency-critical arrival leads by 100us
+ * with more than 100us left on the owner, so near ties plus nearly
+ * done owners never bounce. The shared preempt helper holds the margin
+ * plus tail with wrap safe order, so only a truly earlier arrival with
+ * work left preempts at once with one kick per wait. Equal or later
+ * arrivals pace at slice expiry with one skipped preempt. The fair time
+ * leads here, so fairness plus urgency gate the kick. Eligibility
+ * already passed above, so the helper checks lead plus tail only with
+ * predictor slack gated before it.
  *
- * Outlined with noinline to keep verifier headroom: the RCU occupant
+ * Outlined with noinline to keep verifier headroom and the RCU occupant
  * walk leaves the bypass plus tier join with no inline growth and the
  * same one kick per wait order.
  */
@@ -237,15 +257,34 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 		bpf_rcu_read_unlock();
 		return;
 	}
-	/* An urgent arrival leads by 100us with more than 100us left */
-	/* on the owner, so near ties plus nearly done owners never */
-	/* bounce. The shared preempt helper holds the margin plus */
-	/* tail with wrap safe order, so only a truly earlier arrival */
-	/* with work left preempts at once with one kick per wait. */
-	/* Equal or later arrivals pace at slice expiry with one */
-	/* skipped preempt. The fair time leads here, so fairness */
-	/* plus urgency gate the kick. Eligibility already passed */
-	/* above, so the helper checks lead plus tail only. */
+	/* Predictor slack gates the busy preempt with no new knob. */
+	/* A batch arrival with a long predicted burst paces at slice */
+	/* expiry with one skipped preempt, so only latency-critical work */
+	/* with slack within one quantum preempts at once. Eligibility */
+	/* already passed above, so this plus lead plus tail gate the kick. */
+	{
+		struct flow_task_ctx *actx = flow_lookup(p);
+		if (actx) {
+			u64 a_avg = (u64)READ_ONCE(actx->avg_ns);
+			u64 a_dev = (u64)READ_ONCE(actx->dev_ns);
+			if (!flow_lat_crit(a_avg, a_dev)) {
+				bpf_task_release(trusted);
+				bpf_rcu_read_unlock();
+				flow_count_preempt_skip();
+				return;
+			}
+		}
+	}
+	/* An urgent latency-critical arrival leads by 100us with more than */
+	/* 100us left on the owner under the strict key, so near ties plus */
+	/* nearly done owners never bounce. The owner paces on a fresh 1ms */
+	/* quantum with no dynamic use. The shared preempt helper holds the */
+	/* margin plus tail with wrap safe order, so only a truly earlier */
+	/* arrival with work left preempts at once with one kick per wait. */
+	/* Equal or later arrivals pace at slice expiry with one skipped */
+	/* preempt. The strict key leads here, so fairness plus urgency gate */
+	/* the kick. Eligibility already passed above, so the helper checks */
+	/* lead plus tail only with slack gated just before it. */
 	if (!flow_preempt_wants(vtime, occ_deadline, now,
 	    occ_start)) {
 		bpf_task_release(trusted);
