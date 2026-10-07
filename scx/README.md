@@ -74,4 +74,4 @@ Staleness heals with retrain plus minimum fold. Each stop feeds average plus dev
 ## Limitations
 
 - Hotplug needs restart.
-- Needs kernel `7.2`.
+- Needs kernel `7.2` or newer.
