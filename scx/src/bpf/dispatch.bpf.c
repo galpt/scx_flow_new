@@ -118,6 +118,104 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
 		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
 }
 /**
+ * struct flow_reclaim_tail - reclaim args for the outlined candidate check.
+ * @rctx: reject task state with deadline plus predictor plus vruntime.
+ * @q: reject task for the mask gate.
+ * @cpu: target CPU for the mask gate.
+ * @now: current time in nanos.
+ * @credit: hoisted global reclaim credit with no second poll.
+ * @tiers_empty: true when local plus node plus machine hold no work.
+ *
+ * Bundles the candidate state plus time plus credit plus gate, so the
+ * outlined check takes one pointer with no stack args like the scan
+ * plus enqueue tails and the dispatch loop stays small.
+ */
+struct flow_reclaim_tail {
+	struct flow_task_ctx *rctx;
+	struct task_struct *q;
+	s32 cpu;
+	u64 now;
+	u64 credit;
+	bool tiers_empty;
+};
+/**
+ * flow_reclaim_candidate_ok - test one reject for reclaim plus reserve.
+ * @t: reclaim tail with state plus task plus target plus time plus credit
+ * plus gate, hoisted once by the caller with no second read.
+ *
+ * Checks laxity plus tiers-empty plus aged cover plus key freshness plus
+ * mask plus credit with reserve, so the loop keeps one call with no
+ * inline growth. Tiers-empty heads with positive laxity fall back without
+ * reserve while funded heads reserve before the move, so zero credit never
+ * idles queued work. Aged heads past one period pass even when tiers hold
+ * work. A stale key plus a foreign mask plus a lost reserve fails closed
+ * to the next candidate with no head block.
+ *
+ * Returns: true when the caller may move the candidate.
+ *
+ * Outlined with noinline to keep verifier headroom on the dispatch path
+ * with no order change.
+ */
+static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail *t)
+{
+	struct flow_task_ctx *rctx = t->rctx;
+	struct task_struct *q = t->q;
+	s32 cpu = t->cpu;
+	u64 now = t->now;
+	u64 credit = t->credit;
+	bool tiers_empty = t->tiers_empty;
+	u64 rdl;
+	u64 ravg;
+	u64 rdev;
+	u64 rcost;
+	u64 rtol;
+	s64 rres;
+	u64 rexc;
+	u64 rlax;
+	u64 rvtime;
+	u64 rwait;
+	bool rcrit;
+	bool is_aged = false;
+	bool funded;
+	if (!rctx || !q)
+		return false;
+	rdl = READ_ONCE(rctx->deadline);
+	ravg = (u64)READ_ONCE(rctx->avg_ns);
+	rdev = (u64)READ_ONCE(rctx->dev_ns);
+	rcrit = flow_lat_crit(ravg, rdev);
+	rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
+	rtol = flow_red_tol(rcrit);
+	rres = flow_red_residual(rdl, now, rcost);
+	rexc = flow_red_exceed(rres, rtol);
+	rlax = flow_red_laxity(rdl, now, rcost);
+	if (rlax == 0)
+		return false;
+	rwait = READ_ONCE(rctx->wait_at);
+	if (rwait != 0 && rwait != now &&
+	    !flow_time_before(now, rwait)) {
+		u64 age = now - rwait;
+		if (age > (u64)FLOW_PERIOD_NS)
+			is_aged = true;
+	}
+	if (!tiers_empty && !is_aged)
+		return false;
+	rvtime = flow_edf_key(rdl,
+	    flow_virt_deadline(READ_ONCE(rctx->vruntime),
+	    (u64)READ_ONCE(rctx->slice_ns),
+	    flow_task_effective_weight(READ_ONCE(rctx->weight),
+	    READ_ONCE(rctx->hint_w))));
+	if (rvtime != now && flow_time_before(rvtime, now))
+		return false;
+	if (!flow_mask_ok(cpu, q))
+		return false;
+	funded = flow_red_reclaim_ok(credit, rexc, rlax);
+	if (funded) {
+		if (!flow_credit_consume(rexc))
+			return false;
+	}
+	return true;
+}
+/**
  * flow_reject_reclaim_one - reclaim one value ordered reject.
  * @cpu: target CPU for the mask gate.
  * @visits: per pass visit count shared across tiers.
@@ -164,19 +262,7 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {
 		struct flow_task_ctx *rctx;
-		u64 rdl;
-		u64 ravg;
-		u64 rdev;
-		u64 rcost;
-		u64 rtol;
-		s64 rres;
-		u64 rexc;
-		u64 rlax;
-		u64 rvtime;
-		u64 rwait;
-		bool rcrit;
-		bool is_aged = false;
-		bool funded;
+		struct flow_reclaim_tail tail;
 		u32 cur;
 		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 			break;
@@ -186,40 +272,14 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		rctx = flow_lookup(q);
 		if (!rctx)
 			continue;
-		rdl = READ_ONCE(rctx->deadline);
-		ravg = (u64)READ_ONCE(rctx->avg_ns);
-		rdev = (u64)READ_ONCE(rctx->dev_ns);
-		rcrit = flow_lat_crit(ravg, rdev);
-		rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
-		rtol = flow_red_tol(rcrit);
-		rres = flow_red_residual(rdl, now, rcost);
-		rexc = flow_red_exceed(rres, rtol);
-		rlax = flow_red_laxity(rdl, now, rcost);
-		if (rlax == 0)
+		tail.rctx = rctx;
+		tail.q = q;
+		tail.cpu = cpu;
+		tail.now = now;
+		tail.credit = credit;
+		tail.tiers_empty = tiers_empty;
+		if (!flow_reclaim_candidate_ok(&tail))
 			continue;
-		rwait = READ_ONCE(rctx->wait_at);
-		if (rwait != 0 && rwait != now &&
-		    !flow_time_before(now, rwait)) {
-			u64 age = now - rwait;
-			if (age > (u64)FLOW_PERIOD_NS)
-				is_aged = true;
-		}
-		if (!tiers_empty && !is_aged)
-			continue;
-		rvtime = flow_edf_key(rdl,
-		    flow_virt_deadline(READ_ONCE(rctx->vruntime),
-		    (u64)READ_ONCE(rctx->slice_ns),
-		    flow_task_effective_weight(READ_ONCE(rctx->weight),
-		    READ_ONCE(rctx->hint_w))));
-		if (rvtime != now && flow_time_before(rvtime, now))
-			continue;
-		if (!flow_mask_ok(cpu, q))
-			continue;
-		funded = flow_red_reclaim_ok(credit, rexc, rlax);
-		if (funded) {
-			if (!flow_credit_consume(rexc))
-				continue;
-		}
 		cur = flow_move_candidate(BPF_FOR_EACH_ITER, cpu, q);
 		if (cur)
 			moved = cur;
