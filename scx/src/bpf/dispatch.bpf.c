@@ -10,7 +10,9 @@
  * through the kernel priority queue with insert vtime, so the
  * earliest key always wins with no load swap. The reject queue stays
  * value ordered outside dispatch with no tier move here, so overload
- * never inverts the PRIQ order. A reject rejoins a PRIQ tier only on
+ * never inverts the PRIQ order. The reject queue holds overload with
+ * no drop and reclaims at most one per pass only when tiers hold no
+ * work, so PRIQ tiers never starve behind rejects. A reject rejoins a PRIQ tier only on
  * reclaim with the same key or a strictly after key, so an earlier key
  * never waits behind a rejoin. The steal tier scans four to eight
  * peers sticky with node-local first plus idle affinity plus backoff
@@ -155,24 +157,31 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
  * @now: current time in nanos.
  * @queued: hoisted reject depth, non-positive skips with no walk.
  *
- * Peeks only the reject head with one RCU walk and no scan, so the
- * check stays cheap. Reclaims when the minimal saved delta of 128us
- * covers the head exceed with positive laxity plus the same key or a
- * strictly after key plus mask wins, so the bound holds with one
- * bounded move. The saved delta funds the retry with no share shaping.
- * The head holds the greatest value with no extra
- * sort, so the most important reject returns first.
+ * Scans at most eight value ordered rejects with one RCU walk and no
+ * unbounded loop, so the check stays cheap. Reclaims when the global
+ * completer credit at or past 128us covers the head exceed with
+ * positive laxity plus the same key or a strictly after key plus mask
+ * wins, so the bound holds with one bounded move. Non-reclaimable plus
+ * stale plus foreign entries skip to the next candidate with no head
+ * block, so one bad head never stalls the queue. The credit funds the
+ * retry with no head state use. The greatest value still wins among
+ * reclaimable entries with no extra sort. Tiers-empty gating at the
+ * caller bounds starvation: reclaim runs only when local plus node
+ * plus machine hold no work, so PRIQ tiers never wait behind rejects.
  *
  * Returns: one on move else zero with no state.
  *
- * Outlined with noinline to keep verifier headroom on the dispatch
+ * Outlined: with noinline to keep verifier headroom on the dispatch
  * path with no order change.
  */
 static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	s32 queued)
 {
+	u64 credit;
 	struct task_struct *q;
-	bool ok = false;
+	u32 moved = 0;
+	u64 need = 0;
+	bool found = false;
 	if (unlikely(cpu < 0))
 		return 0;
 	if (unlikely(!visits))
@@ -182,6 +191,9 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
 		return 0;
 	if (likely(queued <= 0))
+		return 0;
+	credit = flow_credit_peek();
+	if (credit < (u64)FLOW_RED_EMAX_NS)
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {
@@ -196,9 +208,13 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		u64 rlax;
 		u64 rvtime;
 		bool rcrit;
+		u32 cur;
+		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
+			break;
+		(*visits)++;
 		rctx = flow_lookup(q);
 		if (!rctx)
-			break;
+			continue;
 		rdl = READ_ONCE(rctx->deadline);
 		ravg = (u64)READ_ONCE(rctx->avg_ns);
 		rdev = (u64)READ_ONCE(rctx->dev_ns);
@@ -208,29 +224,31 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		rres = flow_red_residual(rdl, now, rcost);
 		rexc = flow_red_exceed(rres, rtol);
 		rlax = flow_red_laxity(rdl, now, rcost);
-		{
-			u64 saved = (u64)READ_ONCE(rctx->adapt_delta);
-			if (saved > (u64)FLOW_PRED_MAX_NS)
-				saved = (u64)FLOW_PRED_MAX_NS;
-			if (!flow_red_reclaim_ok(saved, rexc, rlax))
-				break;
-		}
+		if (!flow_red_reclaim_ok(credit, rexc, rlax))
+			continue;
 		rvtime = flow_edf_key(rdl,
 		    flow_virt_deadline(READ_ONCE(rctx->vruntime),
 		    (u64)READ_ONCE(rctx->slice_ns),
 		    flow_task_effective_weight(READ_ONCE(rctx->weight),
 		    READ_ONCE(rctx->hint_w))));
 		if (rvtime != now && flow_time_before(rvtime, now))
-			break;
+			continue;
 		if (!flow_mask_ok(cpu, q))
-			break;
-		ok = true;
+			continue;
+		cur = flow_move_candidate(BPF_FOR_EACH_ITER, cpu, q);
+		if (cur) {
+			moved = cur;
+			need = rexc;
+			found = true;
+		}
 		break;
 	}
 	bpf_rcu_read_unlock();
-	if (!ok)
+	if (!found)
 		return 0;
-	return flow_move_one_hint(flow_overflow_dsq(), cpu, visits, queued);
+	if (!flow_credit_consume(need))
+		return moved;
+	return moved;
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)

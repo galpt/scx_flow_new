@@ -8,10 +8,9 @@
  * earlier of the deadline plus the virtual deadline, so urgent tasks
  * still win while hogs fall behind with lag bounds. Tasks join direct
  * when the target can drain before the shared home, so no task waits
- * for a busy CPU while shared room stays open. An implicit two-layer
- * bias keeps interactive local-first plus batch outward one tier
- * earlier under contention with no new map plus no new queue plus no
- * knob, reusing the tier escalation plus the slowest sufficient pick.
+ * for a busy CPU while shared room stays open. Strict PRIQ holds with
+ * no batch bias plus no new map plus no new queue plus no knob,
+ * reusing the tier escalation plus the slowest sufficient pick.
  * Every tier join counts one admit with no reject, so the counters
  * track joins with no bound. Runs under the caller with no lock.
  *
@@ -124,7 +123,7 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
  *
  * Returns: strict key as the earlier of deadline plus virtual deadline.
  *
- * Outlined with noinline to keep verifier headroom: pinned plus miss
+ * Outlined: with noinline to keep verifier headroom: pinned plus miss
  * plus open paths share one divide copy with no inline growth.
  */
 static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
@@ -153,7 +152,7 @@ static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
  * early with no huge boost. Uses a compare and swap, so a concurrent
  * charge win keeps the winner with no regression.
  *
- * Outlined with noinline to keep verifier headroom: pinned plus open
+ * Outlined: with noinline to keep verifier headroom: pinned plus open
  * paths share one clamp copy with no inline growth.
  */
 static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
@@ -175,6 +174,7 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
  * @sel: selected CPU hint, negative falls back to first allowed.
  * @is_reenq: true reuses the stored hint plus weight with no lookup.
  * @now: current time in nanos.
+ * @enq_flags: enqueue flags threaded to the reject insert with no loss.
  *
  * Pinned tasks wait in a tier queue with wait set and one idle kick.
  * Queue order uses the fair time of deadline plus virtual deadline with
@@ -184,11 +184,12 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
  * overload with no stale reuse. The tier keeps mask wins on drain, so
  * a pinned task still meets only its allowed CPU.
  *
- * Outlined with noinline to keep verifier headroom: the cold pinned
+ * Outlined: with noinline to keep verifier headroom: the cold pinned
  * path leaves the open path with no inline growth and the same order.
  */
 static __noinline void flow_enqueue_pinned(struct task_struct *p,
-	struct flow_task_ctx *tctx, s32 sel, bool is_reenq, u64 now)
+	struct flow_task_ctx *tctx, s32 sel, bool is_reenq, u64 now,
+	u64 enq_flags)
 {
 	s32 pc = flow_pick_target(p, sel);
 	u32 ph;
@@ -248,10 +249,11 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 	pvt = flow_make_fair(tctx, pdl, phint_w);
-	/* RED on the pinned join with the same bounded O(1) check. A zero */
-	/* exceed plus a critical exceed admit to the tier, else the least */
-	/* value newcomer rejects to the value ordered queue with no tier */
-	/* wait. Tolerance aids only the guarantee with no key shaping. */
+	/* RED on the pinned join with the same bounded O(1) newcomer check. */
+	/* A zero exceed plus a critical exceed plus a newcomer that fails */
+	/* the victim test admits to the tier, else the newcomer rejects to */
+	/* the value ordered queue with no tier wait. Tolerance aids only */
+	/* the guarantee with no key shaping. */
 	{
 		u32 psl = READ_ONCE(tctx->slice_ns);
 		bool pcrit = flow_lat_crit(pavg, pdev);
@@ -260,9 +262,20 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		if (pex && !pcrit) {
 			u32 ptw = READ_ONCE(tctx->weight);
 			u32 peff = flow_task_effective_weight(ptw, phint_w);
-			flow_gate_reject();
+			u64 pcost = flow_red_cost(pavg, psl);
+			if (!flow_red_victim_ok(pdl, pdl, pcost, pex,
+			    pcrit)) {
+				if (flow_cpu_ok(p, pc))
+					flow_tier_insert(p, pc, pvt, now);
+				else
+					flow_machine_insert(p, pvt);
+				flow_count_admit();
+				flow_kick_idle_allowed(p, sel);
+				return;
+			}
 			flow_count_red_reject();
-			flow_overflow_insert(p, 0, flow_red_value(peff, pcrit));
+			flow_overflow_insert(p, enq_flags,
+			    flow_red_value(peff, pcrit));
 			flow_kick_idle_allowed(p, sel);
 			return;
 		}
@@ -271,5 +284,6 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		flow_tier_insert(p, pc, pvt, now);
 	else
 		flow_machine_insert(p, pvt);
+	flow_count_admit();
 	flow_kick_idle_allowed(p, sel);
 }

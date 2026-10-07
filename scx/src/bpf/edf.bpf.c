@@ -78,7 +78,7 @@ static __always_inline u64 flow_cpu_drain_hint(s32 local_q, s32 node_q)
  * tier with no wait. A missing node reads zero with no boost, and
  * sparse nodes fold to zero.
  *
- * Outlined with noinline to keep verifier headroom: callers in meets
+ * Outlined: with noinline to keep verifier headroom: callers in meets
  * plus fair plus BSF share one copy with no inline growth.
  *
  * Returns: combined drain in nanos.
@@ -101,7 +101,7 @@ static __noinline u64 flow_cpu_drain(u32 cpu)
  * Fails closed on saturated ready, else wrap safe before plus equal,
  * so a huge drain never reads as early with no wrap to the front.
  *
- * Outlined with noinline to share one compare copy across drain plus
+ * Outlined: with noinline to share one compare copy across drain plus
  * deadline checks with no inline growth and no order change.
  *
  * Returns: true when @ready falls before or on @deadline.
@@ -151,7 +151,7 @@ static __always_inline bool flow_cpu_meets_hint(s32 local_q, s32 node_q,
  * drain poll plus the compare split across two noinline calls, so the
  * SSF plus BSF loops share one copy each with no inline growth.
  *
- * Outlined with noinline to keep verifier headroom on the select path
+ * Outlined: with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: true when the drain finishes before @deadline.
@@ -179,7 +179,7 @@ static __noinline bool flow_cpu_meets(u32 cpu,
  * drain poll plus the compare split across two noinline calls, so the
  * loops share one copy each with no inline growth.
  *
- * Outlined with noinline to keep verifier headroom with no order change.
+ * Outlined: with noinline to keep verifier headroom with no order change.
  *
  * Returns: true when the drain finishes before @vtime.
  */
@@ -221,13 +221,17 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
 /*
  * RED guarantee core for the flow scheduler.
  *
- * Holds the residual plus load plus exceeding time with tolerance used
+ * Holds the residual plus exceeding time with tolerance used
  * only for the guarantee. The deadline bounds the check with no
  * vruntime shaping. A newcomer with zero exceed
- * passes at once, else the caller seeks a least value victim with cost
- * past the exceed plus deadline at or before the newcomer plus never
- * critical, else the newcomer rejects. The reject queue stays value
- * ordered outside dispatch, and a saved delta at or past 128us
+ * passes at once, else the newcomer itself is tested as the bounded
+ * O(1) victim with cost past the exceed plus deadline at or before
+ * itself plus never critical, else the newcomer admits. A full least
+ * value scan stays a noted alternative with no knob here, so the
+ * verifier keeps one pass with no walk. Newcomer-pays trades exact
+ * victim choice for bounded admission with starvation bounded by the
+ * tiers-empty reclaim below. The reject queue stays value
+ * ordered outside dispatch, and a global saved credit at or past 128us
  * reclaims one head with positive laxity. Runs under the caller with
  * no lock and no RCU walk here, so the verifier stays small.
  *
@@ -263,15 +267,15 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * @exceed: newcomer exceeding time in nanos, zero fails closed.
  * @v_crit: true marks a critical victim that never rejects.
  *
- * Victim needs cost past the exceed plus deadline at or before the
- * newcomer, so only work ahead of the overload pays. The least value
- * pays first with no vruntime shaping. Kept with bounded O(1) check
- * and no caller, so the verifier drops it. A
- * critical victim never passes with no swap.
+ * Victim needs cost past 128us plus cost past the exceed plus deadline
+ * at or before the newcomer, so only work ahead of the overload pays.
+ * Callers test the newcomer itself as the bounded O(1) victim with no
+ * scan, so a full least value scan stays a noted alternative with no
+ * knob here. A critical victim never passes with no swap.
  *
  * Returns: true when the victim may cover the exceed.
  */
-__attribute__((unused)) static __always_inline bool flow_red_victim_ok(u64 v_deadline,
+static __always_inline bool flow_red_victim_ok(u64 v_deadline,
 	u64 n_deadline, u64 v_cost, u64 exceed, bool v_crit)
 {
 	if (exceed == 0)
@@ -289,13 +293,13 @@ __attribute__((unused)) static __always_inline bool flow_red_victim_ok(u64 v_dea
 	return true;
 }
 /**
- * flow_red_reclaim_ok - test reclaim from one saved delta.
- * @saved: saved execution in nanos from one completion.
+ * flow_red_reclaim_ok - test reclaim from one global credit.
+ * @saved: global completer credit in nanos from completions.
  * @exceed: head exceeding time in nanos.
  * @laxity: head laxity in nanos, zero means no room.
  *
- * Reclaims when the saved delta reaches past 128us plus covers the
- * head exceed with positive laxity with no scan here. The saved delta
+ * Reclaims when the global credit reaches past 128us plus covers the
+ * head exceed with positive laxity with no scan here. The global credit
  * funds the retry with no share shaping.
  *
  * Returns: true when the head may rejoin.
@@ -309,5 +313,62 @@ static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 		return false;
 	if (saved < exceed)
 		return false;
+	return true;
+}
+/* Global reclaim credit from completer saved deltas with no knob. */
+/* Stopping adds the unused cost minus delta on completions with */
+/* saturation at 1s, so one completion funds a later retry with no */
+/* task pointer. Dispatch peeks this credit for the head check and */
+/* consumes the exceed else 128us on a move, so the completer delta */
+/* funds the retry with no head state use. Best effort races only */
+/* delay a reclaim by one pass with no loss. */
+/* Add one saved delta to the global reclaim credit with saturation. */
+static __always_inline void flow_credit_add(u64 delta)
+{
+	u32 key = 0;
+	u64 *slot;
+	u64 cur;
+	u64 nxt;
+	if (delta == 0)
+		return;
+	slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
+	if (!slot)
+		return;
+	cur = READ_ONCE(*slot);
+	nxt = flow_sat_add(cur, delta);
+	if (nxt > (u64)FLOW_PRED_MAX_NS)
+		nxt = (u64)FLOW_PRED_MAX_NS;
+	__sync_lock_test_and_set(slot, nxt);
+}
+/* Peek the global reclaim credit with zero on miss. */
+static __always_inline u64 flow_credit_peek(void)
+{
+	u32 key = 0;
+	u64 *slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
+	if (!slot)
+		return 0;
+	return READ_ONCE(*slot);
+}
+/* Consume one reclaim funding with floor at zero. */
+/* Takes the exceed when past zero else 128us, so a zero exceed still */
+/* spends the bound with no free retry. Fails closed when short, so the */
+/* caller skips the move with no partial spend. */
+static __always_inline bool flow_credit_consume(u64 exceed)
+{
+	u32 key = 0;
+	u64 *slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
+	u64 cur;
+	u64 need;
+	u64 nxt;
+	if (!slot)
+		return false;
+	cur = READ_ONCE(*slot);
+	need = exceed ? exceed : (u64)FLOW_RED_EMAX_NS;
+	if (cur < need)
+		return false;
+	if (cur < (u64)FLOW_RED_EMAX_NS)
+		return false;
+	nxt = cur - need;
+	__sync_lock_test_and_set(slot, nxt);
 	return true;
 }

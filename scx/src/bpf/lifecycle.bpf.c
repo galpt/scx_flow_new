@@ -8,18 +8,19 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then adapts the slice by 64us up on a miss else 128us
- * down with clamp to 10us plus 1ms and no virtual change, then carries
- * the latency-critical slice up to one quantum, then counts one requeue
- * per runnable stop else one completion. Like fair.c, vruntime paces
- * order, unlike rt.c, no fixed priority holds. C holds burst else slice
- * else quantum with no knob, and V holds weight with zero mapped to
- * 128, so the slice adapts while virtual time stays untouched. A saved
- * delta at or past 128us reclaims one value ordered reject with
- * positive laxity plus same key or strictly after with one bounded
- * move. A runnable yield before one quantum keeps the
- * unused remainder when predictor slack holds critical, else the
- * adaptive step holds. A wall completion past the deadline counts one
+ * with shifts, then adapts the slice by 64us up on a wall miss else
+ * 128us down with clamp to 10us plus 1ms and no virtual change, then
+ * carries the latency-critical slice up to one quantum clamped to 10us
+ * plus 1ms, then counts one requeue per runnable stop else one
+ * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
+ * priority holds. C holds burst else slice else quantum with no knob,
+ * and V holds weight with zero mapped to 128, so the slice adapts
+ * while virtual time stays untouched. A global saved credit at or past
+ * 128us reclaims one value ordered reject with positive laxity plus
+ * same key or strictly after with one bounded move. A runnable yield
+ * before one quantum keeps the unused remainder only when wall time
+ * still meets the deadline plus predictor slack holds critical, else
+ * the wall miss step holds. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
  * Enable clears vruntime plus deadline plus stamps plus predictor plus
  * lag plus weight plus slice plus hint plus hint weight plus misses plus
@@ -161,26 +162,25 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	}
 	/* Latency-critical slice carryover up to the quantum with no knob. */
 	/* A runnable task that yields before one quantum keeps the unused */
-	/* remainder as the next slice when the predictor slack still holds */
-	/* critical, so short bursts earn a nearer virtual deadline with no */
-	/* extra slice. All other stops adapt by 64us up on a miss else */
-	/* 128us down with clamp to 10us plus 1ms and no virtual change, */
-	/* so the slice tracks recent runs with no table walk. */
+	/* remainder as the next slice when wall time still meets the */
+	/* deadline plus predictor slack still holds critical, so short */
+	/* bursts earn a nearer virtual deadline with no extra slice. All */
+	/* other stops adapt by 64us up on a wall miss else 128us down with */
+	/* clamp to 10us plus 1ms and no virtual change, so the slice tracks */
+	/* recent runs with no table walk. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* C holds burst else slice else quantum, and V holds weight with */
 	/* zero mapped to 128. Exiting plus completion paths skip the carry */
 	/* with adapt only, so only runnable waits carry with one kick per */
-	/* wait at enqueue. */
+	/* wait at enqueue. Misses count lifetime with saturation, adapt */
+	/* miss counts the consecutive wall miss streak with saturation, so */
+	/* promotion latches on lifetime while adapt tracks the window. */
 	if (runnable) {
-		if (have_pred && delta > 0 &&
+		bool wmiss = !flow_deadline_ok(READ_ONCE(tctx->deadline), now);
+		if (!wmiss && have_pred && delta > 0 &&
 		    delta < (u64)FLOW_QUANTUM_NS &&
 		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
-			u32 carry =
-			    (u32)((u64)FLOW_QUANTUM_NS - delta);
-			if (carry < 1)
-				carry = 1;
-			if (carry > (u32)FLOW_QUANTUM_NS)
-				carry = (u32)FLOW_QUANTUM_NS;
+			u32 carry = flow_carry_for(delta);
 			__sync_lock_test_and_set(&tctx->slice_ns, carry);
 			tctx->adapt_miss = 0;
 			{
@@ -204,13 +204,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		} else {
 			u32 cur = READ_ONCE(tctx->slice_ns);
 			u32 nxt;
-			bool m = have_pred && !flow_lat_crit(n_avg_keep, n_dev_keep);
+			bool m = wmiss;
 			if (m)
 				nxt = flow_adapt_up(cur);
 			else
 				nxt = flow_adapt_down(cur);
 			__sync_lock_test_and_set(&tctx->slice_ns, nxt);
-			tctx->adapt_miss = 0;
+			if (m) {
+				u16 mm = READ_ONCE(tctx->adapt_miss);
+				if (mm < 0xffffU)
+					tctx->adapt_miss = mm + 1;
+			} else {
+				tctx->adapt_miss = 0;
+			}
 			{
 				u16 sat = READ_ONCE(tctx->adapt_sat);
 				if (nxt == (u32)FLOW_SLICE_MIN_NS ||
@@ -232,7 +238,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	} else {
 		/* Completion adapt with no carry and no kick. A miss grows */
 		/* by 64us, a hit shrinks by 128us, both clamped with no */
-		/* virtual change. The saved delta funds reclaim below. */
+		/* virtual change. The global credit funds reclaim below. */
 		u32 cur = READ_ONCE(tctx->slice_ns);
 		bool cmiss = !flow_deadline_ok(READ_ONCE(tctx->deadline), now);
 		u32 nxt = cmiss ? flow_adapt_up(cur) : flow_adapt_down(cur);
@@ -262,12 +268,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			u32 cs = csaved > 0xffffffffULL ? 0xffffffffU : (u32)csaved;
 			tctx->adapt_delta = cs;
 		}
-		/* Reclaim runs in dispatch with the saved delta at or past */
+		/* Reclaim runs in dispatch from the global credit at or past */
 		/* 128us, so this path records only with no RCU walk here. */
-		/* The saved delta funds the retry with no share shaping. */
-		/* Dispatch peeks only the value ordered head */
-		/* with positive laxity plus same key or strictly after plus */
-		/* mask wins, so strict order holds with one bounded move. */
+		/* The global credit funds the retry with no share shaping. */
+		/* Dispatch scans at most eight value ordered rejects with */
+		/* positive laxity plus same key or strictly after plus mask */
+		/* wins, so strict order holds with one bounded move. */
+		flow_credit_add(csaved);
 	}
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */

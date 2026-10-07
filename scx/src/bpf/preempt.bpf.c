@@ -65,7 +65,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
  * @lag: arrival lag bound for the eligibility gate.
  * @has_ctx: true when @vr plus @lag hold valid state.
  *
- * Outlined with noinline to keep verifier headroom: the three probes
+ * Outlined: with noinline to keep verifier headroom: the three probes
  * share one eligibility plus kick copy with no inline growth.
  *
  * Returns: true when the kick took or an ineligible hold counted, so

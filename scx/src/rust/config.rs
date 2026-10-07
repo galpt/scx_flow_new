@@ -69,8 +69,8 @@ impl Config {
     /// three PRIQ tiers plus steal plus reclaim window 4 to 8 with BSF
     /// four disjoint past SSF eight for twelve unique peers on hosts
     /// with at least twelve CPUs with node-local phases plus drain plus
-    /// minimum plus id tiebreak, and RED admits with residual plus load
-    /// plus exceed plus tolerance used only for the guarantee with base
+    /// minimum plus id tiebreak, and RED admits with residual plus
+    /// exceed plus tolerance used only for the guarantee with base
     /// capacity 1024. Queues hold 1024 local plus 16 node plus machine
     /// plus reject with ids in the 0x5100 region. Hints hold 8192 flat
     /// rows with period plus weight and no timer wait. Preempt needs

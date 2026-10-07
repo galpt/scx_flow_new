@@ -15,7 +15,8 @@
  * to the next pass with no loss. The SSF scan plus the BSF fallback
  * live in select/scan.bpf.c with the same order plus prev-CPU ties, so
  * select keeps twelve unique peers with no overlap on large hosts.
- * Runs under the caller with no lock.
+ * Eight peers cover under one percent on a 1024 CPU host, so large
+ * hosts steal across many passes with no single pass stall. Runs under the caller with no lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

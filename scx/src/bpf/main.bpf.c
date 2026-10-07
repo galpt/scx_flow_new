@@ -77,6 +77,15 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 } cpu_perf_last SEC(".maps");
+/* Global reclaim credit from completer saved deltas with no knob. */
+/* One u64 row holds the unused cost funding for dispatch reclaim with */
+/* saturation at 1s, so completions fund retries with no task pointer. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} reclaim_credit_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 #include "stats.bpf.c"

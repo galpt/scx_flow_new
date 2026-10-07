@@ -18,10 +18,10 @@
  * millisecond. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
  * escalation plus skip aging, and a zero slice inherits the 1ms
- * quantum. A saved delta at or past 128us reclaims one value ordered
- * reject with positive laxity plus the same key or a strictly after
- * key with one bounded move, so overload drains without starving the
- * tiers. A miss counts when wall time passes the deadline, and
+ * quantum. A global completer credit at or past 128us reclaims one
+ * value ordered reject with positive laxity plus the same key or a
+ * strictly after key with one bounded move, so overload drains without
+ * starving the tiers. A miss counts when wall time passes the deadline, and
  * the miss rejoins a tier queue with a fresh deadline plus a direct
  * kick and no wait. Placement takes the slowest sufficient CPU among
  * the allowed set that can meet the deadline, so light work never
@@ -99,6 +99,8 @@ enum flow_consts {
 	/* Machine queue id shared by every CPU. */
 	FLOW_MACHINE = 0x5A00ULL,
 	/* Overflow reject id for overload past tier order with value order. */
+/* Named overflow for wire compat only: it holds the value ordered */
+/* reject queue drained only by reclaim, never a tier overflow. */
 	FLOW_OVERFLOW = 0x5A01ULL,
 	/* Queue count of 1042. Holds 1024 local plus 16 node plus one */
 	/* machine plus one value ordered reject. */
@@ -143,7 +145,7 @@ enum flow_consts {
 	/* more than one extra slice of boost with no storm. */
 	FLOW_VLAG_MAX_NS = 2000000ULL,
 	/* RED bound of 128us with no knob. Caps the maximum exceeding */
-	/* time, so a saved delta at or past this bound reclaims one */
+	/* time, so a global credit at or past this bound reclaims one */
 	/* reject, and a victim cost at or below this bound keeps the */
 	/* newcomer with no swap. The bound caps lateness with no share */
 	/* shaping. */
@@ -214,8 +216,9 @@ enum flow_consts {
 /* ragged burst widens step by step with no wrap. Adapt sat holds the */
 /* clamp streak at the slice floor plus ceiling with saturation, so a */
 /* stuck slice shows its bound with no extra map. Adapt delta holds the */
-/* last saved execution in nanos for the reclaim check, so a completion */
-/* with delta at or past 128us reclaims one reject with no scan. */
+/* last saved execution in nanos per task for debug, while the global */
+/* completer credit funds reclaim, so a completion with delta at or */
+/* past 128us reclaims one reject with no scan. */
 /* Like fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
 /* C holds burst else slice else quantum with no knob, and V holds */
 /* weight with zero mapped to 128, so the slice adapts while virtual */
@@ -330,7 +333,7 @@ _Static_assert(FLOW_MAX_DSQS ==
  *
  * The signed diff keeps order across the u64 wrap with no branch.
  *
- * Outlined with noinline to keep verifier headroom on the select plus
+ * Outlined: with noinline to keep verifier headroom on the select plus
  * drain paths with no order change, so SSF plus BSF share one copy.
  *
  * Returns: true when @a falls before @b, else false.
@@ -736,43 +739,12 @@ static __always_inline u64 flow_red_exceed(s64 resid, u64 tol)
 	return (u64)(-sum);
 }
 /**
- * flow_red_rho - scaled load from residual plus window.
- * @resid: signed residual in nanos.
- * @window: deadline minus arrival in nanos, zero fails closed.
- *
- * The load depicts overload with no vruntime shaping. Scales by 1024, so 1024 means full, past 1024 means
- * overload with saturation. A zero window fails closed to full. Kept
- * with bounded O(1) math and no caller, so the verifier drops it.
- *
- * Returns: load scaled by 1024.
- */
-__attribute__((unused)) static __always_inline u64 flow_red_rho(s64 resid, u64 window)
-{
-	u64 used;
-	if (window == 0)
-		return 1024ULL;
-	if (resid >= 0) {
-		u64 r = (u64)resid;
-		if (r >= window)
-			return 0;
-		used = window - r;
-	} else {
-		u64 e = (u64)(-resid);
-		if (e > (u64)~0ULL - window)
-			return (u64)~0ULL;
-		used = window + e;
-	}
-	if (used > (u64)~0ULL / 1024ULL)
-		return (u64)~0ULL;
-	return (used * 1024ULL) / window;
-}
-/**
  * flow_red_value - admission value from weight plus critical.
  * @weight: task base share, zero maps to 128.
  * @is_crit: true marks critical with maximum value.
  *
- * Value picks the victim with no vruntime shaping. Critical tasks hold the top value with no reject, hard
- * tasks hold the clamped base share, so the least value victim pays
+ * Value orders the reject queue with no vruntime shaping. Critical tasks hold the top value with no reject, hard
+ * tasks hold the clamped base share, so the greatest value reclaims
  * first with no storm.
  *
  * Returns: value from 1 to 16384, top for critical.
@@ -865,6 +837,31 @@ static __always_inline u32 flow_adapt_down(u32 cur)
 	if (s > (u64)FLOW_QUANTUM_NS)
 		return (u32)FLOW_QUANTUM_NS;
 	return (u32)s;
+}
+/**
+ * flow_carry_for - carryover slice from unused quantum with clamp.
+ * @delta: raw service in nanos of the yielding slice.
+ *
+ * Keeps the unused quantum remainder with clamp to 10us plus 1ms
+ * through the adapt bounds, so a tiny remainder never floors below
+ * the slice minimum with no zero slice. Callers gate on runnable plus
+ * short plus latency-critical plus no wall miss, so only short bursts
+ * carry with no virtual change.
+ *
+ * Returns: carry slice in nanos from 10us to 1ms.
+ */
+static __always_inline u32 flow_carry_for(u64 delta)
+{
+	u64 q = (u64)FLOW_QUANTUM_NS;
+	u64 c;
+	if (delta >= q)
+		return (u32)FLOW_SLICE_MIN_NS;
+	c = q - delta;
+	if (c < (u64)FLOW_SLICE_MIN_NS)
+		return (u32)FLOW_SLICE_MIN_NS;
+	if (c > q)
+		return (u32)FLOW_QUANTUM_NS;
+	return (u32)c;
 }
 /**
  * flow_deadline_at - absolute deadline from now plus period.

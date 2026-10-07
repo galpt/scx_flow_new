@@ -14,7 +14,9 @@
  * SSF window from cursor plus 9, so the two scans
  * cover twelve unique peers with no overlap when the host holds at
  * least twelve CPUs, else the windows wrap and overlap, and symmetric
- * hosts still spread work with no topology walk. SSF runs in O(VISIT)
+ * hosts still spread work with no topology walk. Twelve peers cover
+ * about one percent on a 1024 CPU host, so large hosts need many passes
+ * with the cursor spreading the load and no single pass stall. SSF runs in O(VISIT)
  * with VISIT at most eight peers from the cursor with no hotspot, and
  * BSF adds at most four more from the disjoint window. The shared
  * cursor with dispatch steal advances by two with best effort races
@@ -237,7 +239,7 @@ static int flow_bsf_step(u32 idx, void *ctx_)
 }
 
 /**
- * struct flow_scan_tail - scan args for the outlined SSF plus BSF picks.
+ * struct flow_scan_tail - scan args for the Outlined SSF plus BSF picks.
  * @p: task to place, typed for the mask gate.
  * @deadline: absolute deadline, zero meets all.
  * @now: current time in nanos.
@@ -246,7 +248,7 @@ static int flow_bsf_step(u32 idx, void *ctx_)
  * @cursor: shared cursor for the scan start.
  *
  * Bundles the live task plus the deadline plus the poll time plus the
- * waker plus the previous CPU plus the shared cursor, so each outlined
+ * waker plus the previous CPU plus the shared cursor, so each Outlined
  * pick takes one pointer with no stack args and the two scans share
  * the same single reads.
  */
@@ -274,7 +276,7 @@ struct flow_scan_tail {
  * Peers within 64 units count as near minimum with wrap safe order,
  * so lagging CPUs win ties.
  *
- * Outlined with noinline to keep verifier headroom on the select path
+ * Outlined: with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -325,7 +327,7 @@ static __noinline u32 flow_ssf_pick(const struct flow_scan_tail *t)
  * hotspot. Covers twelve unique peers with SSF on large hosts, so
  * select pays at most 12 checks per pass.
  *
- * Outlined with noinline to keep verifier headroom on the select path
+ * Outlined: with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -380,7 +382,7 @@ static __noinline u32 flow_bsf_pick(const struct flow_scan_tail *t)
  * minima on the previous CPU win in both scans with no extra walk, so
  * cache stays warm. The shared cursor with steal advances by two on
  * success with best effort races, so passes spread with no hotspot.
- * Outlined with noinline to keep verifier headroom on the select path
+ * Outlined: with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: peer id or 0xffffffffU when no peer meets.
@@ -441,11 +443,11 @@ static __noinline u32 flow_select_best(const struct task_struct *p,
  * One ktime serves the previous plus SSF plus BSF with no second read.
  * Early exit on the previous CPU avoids both scans when it meets, so
  * the common stay keeps one drain check with no peer walk. Shared SSF
- * plus disjoint BSF run in one outlined call with no topology signal,
+ * plus disjoint BSF run in one Outlined call with no topology signal,
  * so select keeps twelve peer coverage. An empty mask falls through to
  * the machine tier at enqueue.
  *
- * Outlined with noinline to keep verifier headroom on the select path
+ * Outlined: with noinline to keep verifier headroom on the select path
  * with no order change.
  *
  * Returns: picked CPU or @prev_cpu on fallback with gate count.
@@ -464,7 +466,7 @@ static __noinline s32 flow_select_scan(const struct task_struct *p,
 		if (flow_cpu_meets((u32)prev_cpu, deadline, now))
 			return prev_cpu;
 	}
-	/* Shared SSF plus disjoint BSF in one outlined call with sticky */
+	/* Shared SSF plus disjoint BSF in one Outlined call with sticky */
 	/* prev-CPU ties, so select keeps twelve peer coverage with warm */
 	/* cache. */
 	best = flow_select_best(p, deadline, now, this_cpu, prev_cpu);
