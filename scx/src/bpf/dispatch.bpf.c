@@ -148,6 +148,89 @@ static __always_inline void flow_perf_update_hint(s32 cpu, s32 local_q,
 	else
 		flow_perf_set(cpu, (u32)FLOW_CPU_PERF_HALF);
 }
+/**
+ * flow_reject_reclaim_one - reclaim one value ordered reject.
+ * @cpu: target CPU for the mask gate.
+ * @visits: per pass visit count shared across tiers.
+ * @now: current time in nanos.
+ * @queued: hoisted reject depth, non-positive skips with no walk.
+ *
+ * Peeks only the reject head with one RCU walk and no scan, so the
+ * check stays cheap. Reclaims when the minimal saved delta of 128us
+ * covers the head exceed with positive laxity plus the same key or a
+ * strictly after key plus mask wins, so Theorem 6 holds with one
+ * bounded move. Like rt.c, the delta funds the retry, unlike fair.c,
+ * no share shapes it. The head holds the greatest value with no extra
+ * sort, so the most important reject returns first.
+ *
+ * Returns: one on move else zero with no state.
+ *
+ * Outlined with noinline to keep verifier headroom on the dispatch
+ * path with no order change.
+ */
+static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
+	s32 queued)
+{
+	struct task_struct *q;
+	u32 moved = 0;
+	if (unlikely(cpu < 0))
+		return 0;
+	if (unlikely(!visits))
+		return 0;
+	if (unlikely(!flow_cpu_live((u32)cpu)))
+		return 0;
+	if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
+		return 0;
+	if (likely(queued <= 0))
+		return 0;
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {
+		struct flow_task_ctx *rctx;
+		u64 rdl;
+		u64 ravg;
+		u64 rdev;
+		u64 rcost;
+		u64 rtol;
+		s64 rres;
+		u64 rexc;
+		u64 rlax;
+		u64 rvtime;
+		bool rcrit;
+		if (unlikely(moved))
+			break;
+		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
+			break;
+		(*visits)++;
+		rctx = flow_lookup(q);
+		if (!rctx)
+			break;
+		rdl = READ_ONCE(rctx->deadline);
+		ravg = (u64)READ_ONCE(rctx->avg_ns);
+		rdev = (u64)READ_ONCE(rctx->dev_ns);
+		rcrit = flow_lat_crit(ravg, rdev);
+		rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
+		rtol = flow_red_tol(rcrit);
+		rres = flow_red_residual(rdl, now, rcost);
+		rexc = flow_red_exceed(rres, rtol);
+		rlax = flow_red_laxity(rdl, now, rcost);
+		if (!flow_red_reclaim_ok((u64)FLOW_RED_EMAX_NS, rexc, rlax))
+			break;
+		rvtime = flow_edf_key(rdl,
+		    flow_virt_deadline(READ_ONCE(rctx->vruntime),
+		    (u64)READ_ONCE(rctx->slice_ns),
+		    flow_task_effective_weight(READ_ONCE(rctx->weight),
+		    READ_ONCE(rctx->hint_w))));
+		if (rvtime != now && flow_time_before(rvtime, now))
+			break;
+		if (!flow_mask_ok(cpu, q))
+			break;
+		moved += (u32)scx_bpf_dsq_move(BPF_FOR_EACH_ITER, q,
+		    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu, 0);
+		break;
+	}
+	bpf_rcu_read_unlock();
+	return moved;
+}
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
 {
@@ -245,6 +328,24 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 		/* key or a strictly after key, so strict order holds with no */
 		/* inversion. Like fair.c, the earliest key wins, unlike */
 		/* rt.c, no fixed priority holds. */
+		/* Reclaim one value ordered reject when tiers hold no work. */
+		/* The clock reads only here with no hot path cost, and the */
+		/* TOCTOU between the hoisted hint and the reclaim move only */
+		/* repeats or skips a pass with no loss. */
+		if (likely(left) && likely(visits < (u32)FLOW_DISPATCH_MAX_VISIT)) {
+			if (lq0 <= 0 && nq0 <= 0 && mq0 <= 0) {
+				s32 oq = scx_bpf_dsq_nr_queued(flow_overflow_dsq());
+				if (oq > 0) {
+					u64 now = flow_now();
+					u32 rec = flow_reject_reclaim_one(cpu, &visits,
+					    now, oq);
+					if (rec > left)
+						rec = left;
+					left -= rec;
+					local_moved += rec;
+				}
+			}
+		}
 		/* Steal tier last with a bounded 4 to 8 peer window with saturation. */
 		/* Only steals when tiers drained, so busy passes skip cheap with */
 		/* the hoisted hints and no second poll. Starvation stays bounded */

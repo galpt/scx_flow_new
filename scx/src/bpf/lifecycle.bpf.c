@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Task lifecycle ops.
+ * Task lifecycle ops with adaptive slice plus reclaim.
  *
  * Running claims the segment start from zero with an unconditional
  * pid store and no BPF gauge. Only stopping charges.
@@ -8,23 +8,30 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then carries the latency-critical slice up to one
- * quantum, then counts one requeue per runnable stop else one
- * completion. The carry feeds the held slice on misses plus rotations
- * while fresh waits earn the dynamic remaining clamp at enqueue, so
- * stopping records only with no key write here. A runnable yield before one quantum keeps the unused
- * remainder when predictor slack holds critical, else resets to one
- * quantum. A wall completion past the deadline counts one miss with
- * no wait and no kick, since the task already left the CPU. Enable
- * clears vruntime plus deadline plus stamps plus predictor plus lag
- * plus weight plus slice plus hint plus hint weight plus misses, and
- * Disable plus exit clear with no charge, so each segment meets exactly
- * one charge in stopping with no double count. Disable clears the cached hierarchy
- * id like move plus enable plus exit, so a reused pid never reads stale. A closed gate still counts one
- * reject with no charge. Release clears a stale running view with no
- * charge. The gate runs first in every op except the exiting paths, so
- * a stale CPU fails closed with one counter. See intf.h for the shared
- * helpers and enqueue.bpf.c for the fair time choice.
+ * with shifts, then adapts the slice by 64us up on a miss else 128us
+ * down with clamp to 10us plus 1ms and no virtual change, then carries
+ * the latency-critical slice up to one quantum, then counts one requeue
+ * per runnable stop else one completion. Like fair.c, vruntime paces
+ * order, unlike rt.c, no fixed priority holds. C holds burst else slice
+ * else quantum with no knob, and V holds weight with zero mapped to
+ * 128, so the slice adapts while virtual time stays untouched. A saved
+ * delta at or past 128us reclaims one value ordered reject with
+ * positive laxity plus same key or strictly after, so Theorem 6 holds
+ * with one bounded move. A runnable yield before one quantum keeps the
+ * unused remainder when predictor slack holds critical, else the
+ * adaptive step holds. A wall completion past the deadline counts one
+ * miss with no wait and no kick, since the task already left the CPU.
+ * Enable clears vruntime plus deadline plus stamps plus predictor plus
+ * lag plus weight plus slice plus hint plus hint weight plus misses plus
+ * adapt miss plus sat plus delta, and Disable plus exit clear with no
+ * charge, so each segment meets exactly one charge in stopping with no
+ * double count. Disable clears the cached hierarchy id like move plus
+ * enable plus exit, so a reused pid never reads stale. A closed gate
+ * still counts one reject with no charge. Release clears a stale
+ * running view with no charge. The gate runs first in every op except
+ * the exiting paths, so a stale CPU fails closed with one counter. See
+ * intf.h for the shared helpers and enqueue.bpf.c for the fair time
+ * choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -156,10 +163,14 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* A runnable task that yields before one quantum keeps the unused */
 	/* remainder as the next slice when the predictor slack still holds */
 	/* critical, so short bursts earn a nearer virtual deadline with no */
-	/* extra slice. A full quantum plus a batch burst resets to one */
-	/* quantum, so the carry never passes one quantum with no new map. */
-	/* Exiting plus completion paths skip here with no carry, so only */
-	/* runnable waits carry with one kick per wait at enqueue. */
+	/* extra slice. All other stops adapt by 64us up on a miss else */
+	/* 128us down with clamp to 10us plus 1ms and no virtual change, */
+	/* so the slice tracks recent runs with no table walk. Like fair.c, */
+	/* the step paces service, unlike rt.c, no fixed priority holds. */
+	/* C holds burst else slice else quantum, and V holds weight with */
+	/* zero mapped to 128. Exiting plus completion paths skip the carry */
+	/* with adapt only, so only runnable waits carry with one kick per */
+	/* wait at enqueue. */
 	if (runnable) {
 		if (have_pred && delta > 0 &&
 		    delta < (u64)FLOW_QUANTUM_NS &&
@@ -171,21 +182,101 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			if (carry > (u32)FLOW_QUANTUM_NS)
 				carry = (u32)FLOW_QUANTUM_NS;
 			__sync_lock_test_and_set(&tctx->slice_ns, carry);
-		} else if (delta >= (u64)FLOW_QUANTUM_NS ||
-		    !flow_lat_crit(n_avg_keep, n_dev_keep)) {
-			__sync_lock_test_and_set(&tctx->slice_ns,
-			    (u32)FLOW_QUANTUM_NS);
+			tctx->adapt_miss = 0;
+			{
+				u16 sat = READ_ONCE(tctx->adapt_sat);
+				if (carry == (u32)FLOW_SLICE_MIN_NS ||
+				    carry == (u32)FLOW_QUANTUM_NS) {
+					if (sat < 0xffffU)
+						tctx->adapt_sat = sat + 1;
+				} else {
+					tctx->adapt_sat = 0;
+				}
+			}
+			{
+				u64 ccost = flow_red_cost(n_avg_keep,
+				    READ_ONCE(tctx->slice_ns));
+				u64 csaved = ccost > delta ? ccost - delta : 0;
+				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
+				    (u32)csaved;
+				tctx->adapt_delta = cs;
+			}
+		} else {
+			u32 cur = READ_ONCE(tctx->slice_ns);
+			u32 nxt;
+			bool m = have_pred && !flow_lat_crit(n_avg_keep, n_dev_keep);
+			if (m)
+				nxt = flow_adapt_up(cur);
+			else
+				nxt = flow_adapt_down(cur);
+			__sync_lock_test_and_set(&tctx->slice_ns, nxt);
+			tctx->adapt_miss = 0;
+			{
+				u16 sat = READ_ONCE(tctx->adapt_sat);
+				if (nxt == (u32)FLOW_SLICE_MIN_NS ||
+				    nxt == (u32)FLOW_QUANTUM_NS) {
+					if (sat < 0xffffU)
+						tctx->adapt_sat = sat + 1;
+				} else {
+					tctx->adapt_sat = 0;
+				}
+			}
+			{
+				u64 ccost = flow_red_cost(have_pred ? n_avg_keep : 0, cur);
+				u64 csaved = ccost > delta ? ccost - delta : 0;
+				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
+				    (u32)csaved;
+				tctx->adapt_delta = cs;
+			}
 		}
+	} else {
+		/* Completion adapt with no carry and no kick. A miss grows */
+		/* by 64us, a hit shrinks by 128us, both clamped with no */
+		/* virtual change. The saved delta funds reclaim below. */
+		u32 cur = READ_ONCE(tctx->slice_ns);
+		bool cmiss = !flow_deadline_ok(READ_ONCE(tctx->deadline), now);
+		u32 nxt = cmiss ? flow_adapt_up(cur) : flow_adapt_down(cur);
+		u64 ccost;
+		u64 csaved;
+		__sync_lock_test_and_set(&tctx->slice_ns, nxt);
+		if (cmiss) {
+			u16 m = READ_ONCE(tctx->adapt_miss);
+			if (m < 0xffffU)
+				tctx->adapt_miss = m + 1;
+		} else {
+			tctx->adapt_miss = 0;
+		}
+		{
+			u16 sat = READ_ONCE(tctx->adapt_sat);
+			if (nxt == (u32)FLOW_SLICE_MIN_NS ||
+			    nxt == (u32)FLOW_QUANTUM_NS) {
+				if (sat < 0xffffU)
+					tctx->adapt_sat = sat + 1;
+			} else {
+				tctx->adapt_sat = 0;
+			}
+		}
+		ccost = flow_red_cost(have_pred ? n_avg_keep : 0, cur);
+		csaved = ccost > delta ? ccost - delta : 0;
+		{
+			u32 cs = csaved > 0xffffffffULL ? 0xffffffffU : (u32)csaved;
+			tctx->adapt_delta = cs;
+		}
+		/* Reclaim runs in dispatch with the saved delta at or past */
+		/* 128us, so this path records only with no RCU walk here. */
+		/* Like rt.c, the delta funds the retry, unlike fair.c, no */
+		/* share shapes it. Dispatch peeks only the value ordered head */
+		/* with positive laxity plus same key or strictly after plus */
+		/* mask wins, so strict order holds with one bounded move. */
 	}
 	/* The pid view clears when owned with no gauge use. */
 	/* The snapshot counts live pids for the on CPU gauge. */
 	flow_clear_running_if_owner(cpu, (u32)p->pid);
 	/* A wall completion past the deadline counts one miss with no */
 	/* wait and no kick, since the task already left the CPU. The miss */
-	/* count doubles as skip aging for the re-derived tier rejoin plus */
-	/* the overflow promotion, so stopping records only with no order */
-	/* write. Misses stay lifetime by design with the same one-move */
-	/* bound; on-time completions keep the count with no reset here. */
+	/* count stays lifetime by design with no reset here, so stopping */
+	/* records only with no order write. Like rt.c, the miss paces */
+	/* the adapt grow, unlike fair.c, no share shapes it. */
 	if (!runnable && !flow_deadline_ok(READ_ONCE(tctx->deadline), now))
 		flow_count_miss(tctx);
 	if (runnable) {
@@ -207,11 +298,12 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 		return;
 	/* Fresh tasks hold no vruntime, no deadline, no stamps, no */
 	/* predictor, no lag, neutral weight, fixed slice, no hint, neutral */
-	/* hint weight, and no misses. The first enqueue clamps vruntime to */
-	/* the CPU minimum minus the lag bound with a fallback deadline */
-	/* plus a virtual deadline, so sleepers gain no more than one */
-	/* boost. The cached hierarchy id clears too, so a reused pid */
-	/* never reads a stale hierarchy. */
+	/* hint weight, no misses, no adapt miss, no adapt sat, and no adapt */
+	/* delta. The first enqueue clamps vruntime to the CPU minimum */
+	/* minus the lag bound with a fallback deadline plus a virtual */
+	/* deadline, so sleepers gain no more than one boost. The cached */
+	/* hierarchy id clears too, so a reused pid never reads a stale */
+	/* hierarchy. */
 	flow_cgrp_cache_invalidate((u32)p->pid);
 	tctx->vruntime = 0;
 	tctx->deadline = 0;
@@ -225,6 +317,9 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	tctx->slice_ns = (u32)FLOW_QUANTUM_NS;
 	tctx->hint_us = 0;
 	tctx->misses = 0;
+	tctx->adapt_miss = 0;
+	tctx->adapt_sat = 0;
+	tctx->adapt_delta = 0;
 }
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
