@@ -240,6 +240,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	u32 local_moved = 0;
 	u32 node_moved = 0;
 	u32 machine_moved = 0;
+	u32 reclaim_moved = 0;
 	u64 own_local;
 	u32 node;
 	u64 node_dsq;
@@ -343,6 +344,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 						rec = left;
 					left -= rec;
 					local_moved += rec;
+					reclaim_moved += rec;
 				}
 			}
 		}
@@ -393,6 +395,7 @@ account:
 	flow_account_local(local_moved);
 	flow_account_node(node_moved);
 	flow_account_machine(machine_moved);
+	flow_count_red_reclaim(reclaim_moved);
 out_hint:
 	/* Fused perf probe reuses the hoisted local plus local on plus node */
 	/* hints with no kfunc, so the pass pays no second poll on the busy */

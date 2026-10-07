@@ -262,6 +262,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			u32 ptw = READ_ONCE(tctx->weight);
 			u32 peff = flow_task_effective_weight(ptw, phint_w);
 			flow_gate_reject();
+			flow_count_red_reject();
 			flow_overflow_insert(p, 0, flow_red_value(peff, pcrit));
 			flow_kick_idle_allowed(p, sel);
 			return;

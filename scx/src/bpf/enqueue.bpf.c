@@ -250,6 +250,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u32 mtw = READ_ONCE(tctx->weight);
 			u32 meff = flow_task_effective_weight(mtw, hint_w);
 			flow_gate_reject();
+			flow_count_red_reject();
 			flow_overflow_insert(p, enq_flags,
 			    flow_red_value(meff, mcrit));
 			flow_kick_idle_allowed(p, sel);
@@ -299,6 +300,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			u32 ctw = READ_ONCE(tctx->weight);
 			u32 ceff = flow_task_effective_weight(ctw, hint_w);
 			flow_gate_reject();
+			flow_count_red_reject();
 			flow_overflow_insert(p, enq_flags,
 			    flow_red_value(ceff, ccrit));
 			flow_kick_idle_allowed(p, sel);

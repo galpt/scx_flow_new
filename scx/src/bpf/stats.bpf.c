@@ -144,3 +144,22 @@ static __always_inline void flow_count_preempt_skip(void)
 		return;
 	__sync_fetch_and_add(&row->preempt_skipped, 1);
 }
+/* Count one RED overload reject on the local row. */
+static __always_inline void flow_count_red_reject(void)
+{
+	struct flow_sched_stats *row = flow_stat_row();
+	if (!row)
+		return;
+	__sync_fetch_and_add(&row->red_rejects, 1);
+}
+/* Count one RED reclaim move on the local row. */
+static __always_inline void flow_count_red_reclaim(u32 n)
+{
+	struct flow_sched_stats *row;
+	if (!n)
+		return;
+	row = flow_stat_row();
+	if (!row)
+		return;
+	__sync_fetch_and_add(&row->red_reclaims, (u64)n);
+}

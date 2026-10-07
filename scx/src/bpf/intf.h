@@ -275,13 +275,16 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
-/* Scheduler counters with 15 fields. Overflow plus steal moves count */
-/* in the local bucket with no new counter, so stats stay at 120B. */
-/* Rejects stay dead at zero for wire compat only with no writer, */
-/* while real rejects count in gate_rejects. Readers must use */
-/* gate_rejects for drops. */
+/* Scheduler counters with 17 fields. Reject plus reclaim moves count */
+/* RED overload plus reclaim detail with no extra map, so stats stay at */
+/* 136B. Overflow plus steal moves count in the local bucket with no new */
+/* counter. Rejects stay dead at zero for wire compat only with no */
+/* writer, while real rejects count in gate plus RED rejects. Readers */
+/* must use gate_rejects for drops plus red_rejects for overload. */
 /* Preempt kicks count busy preempts sent, and preempt skipped counts */
-/* suppressed preempts held by margin plus tail plus eligibility. */
+/* suppressed preempts held by margin plus tail plus eligibility. Like */
+/* fair.c, counters pace with no knob, unlike rt.c, no fixed priority */
+/* holds. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -298,6 +301,8 @@ struct flow_sched_stats {
 	u64 gate_rejects;
 	u64 preempt_kicks;
 	u64 preempt_skipped;
+	u64 red_rejects;
+	u64 red_reclaims;
 };
 /* Task state holds vruntime plus deadline plus stamps plus predictor */
 /* plus lag plus weight plus slice plus hint plus misses plus adapt */
@@ -310,9 +315,9 @@ _Static_assert(sizeof(struct flow_cpu_state) == 16,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 15 counters in 120 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 120,
-	"stats stay at 120B");
+/* Stats hold 17 counters in 136 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 136,
+	"stats stay at 136B");
 /* Queue count holds local plus node plus machine plus overflow. */
 /* Steal reuses peer locals with no new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==

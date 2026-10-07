@@ -29,6 +29,14 @@ pub const WEIGHT_MIN: u32 = 1;
 pub const WEIGHT_MAX: u32 = 16_384;
 /// Max hint rows bound shared with the BPF header.
 pub const HINT_MAX: u64 = 8192;
+/// RED bound in nanos at 128us. Caps the maximum exceeding time.
+pub const RED_EMAX_NS: u64 = 128_000;
+/// RED tolerance in nanos at 64us. Holds hard task slack only.
+pub const RED_TOL_NS: u64 = 64_000;
+/// Adaptive grow step in nanos at 64us. Widens the slice on a miss.
+pub const ADAPT_GROW_NS: u64 = 64_000;
+/// Adaptive shrink step in nanos at 128us. Narrows the slice on a hit.
+pub const ADAPT_SHRINK_NS: u64 = 128_000;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
@@ -58,17 +66,21 @@ impl Config {
     /// ceiling with misses holding else flooring only.
     /// Dispatch moves at most one hint threaded move per tier bounded
     /// by remaining slots with visits capped at 8 per pass shared across
-    /// five tiers plus steal window 4 to 8 with BSF four disjoint past
-    /// SSF eight for twelve unique peers on hosts with at least twelve
-    /// CPUs with node-local phases plus drain plus minimum plus id
-    /// tiebreak, and joins carry no admission bound with base capacity
-    /// 1024. Queues hold 1024 local plus 16 node plus machine plus
-    /// overflow with ids in the 0x5100 region. Hints hold 8192 flat rows
-    /// with period plus weight and no timer wait. Preempt needs 100us
-    /// margin plus 100us tail strictly with a floor at 100us and one kick
-    /// per wait gated on eligibility. Fairness bounds lag at 2ms with
-    /// vruntime plus virtual deadline pacing queue order. Stats hold 15
-    /// counters at 120B with preempt kicks plus skipped.
+    /// three PRIQ tiers plus steal plus reclaim window 4 to 8 with BSF
+    /// four disjoint past SSF eight for twelve unique peers on hosts
+    /// with at least twelve CPUs with node-local phases plus drain plus
+    /// minimum plus id tiebreak, and RED admits with residual plus load
+    /// plus exceed plus tolerance used only for the guarantee with base
+    /// capacity 1024. Queues hold 1024 local plus 16 node plus machine
+    /// plus reject with ids in the 0x5100 region. Hints hold 8192 flat
+    /// rows with period plus weight and no timer wait. Preempt needs
+    /// 100us margin plus 100us tail strictly with a floor at 100us and
+    /// one kick per wait gated on eligibility. Fairness bounds lag at
+    /// 2ms with vruntime plus virtual deadline pacing queue order.
+    /// Stats hold 17 counters at 136B with preempt kicks plus skipped
+    /// plus RED rejects plus reclaims. Adaptive grows 64us on a miss
+    /// else shrinks 128us with clamp to 10us plus 1ms and no virtual
+    /// change.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -155,8 +167,23 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64 != 0x5A01 {
             bail!("overflow id bad");
         }
-        if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 120 {
+        if crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64 != RED_EMAX_NS {
+            bail!("red emax bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64 != RED_TOL_NS {
+            bail!("red tol bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS as u64 != ADAPT_GROW_NS {
+            bail!("adapt grow bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS as u64 != ADAPT_SHRINK_NS {
+            bail!("adapt shrink bad");
+        }
+        if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 136 {
             bail!("stats size bad");
+        }
+        if std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() != 72 {
+            bail!("task size bad");
         }
         Ok(())
     }
@@ -252,6 +279,10 @@ mod tests {
         assert_eq!(WEIGHT_BASE, 128);
         assert_eq!(WEIGHT_MAX, 16_384);
         assert_eq!(HINT_MAX, 8192);
+        assert_eq!(RED_EMAX_NS, 128_000);
+        assert_eq!(RED_TOL_NS, 64_000);
+        assert_eq!(ADAPT_GROW_NS, 64_000);
+        assert_eq!(ADAPT_SHRINK_NS, 128_000);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64,
@@ -294,6 +325,30 @@ mod tests {
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
             100_000
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
+            RED_EMAX_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64,
+            RED_TOL_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS as u64,
+            ADAPT_GROW_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS as u64,
+            ADAPT_SHRINK_NS
+        );
+        assert_eq!(
+            std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
+            136
+        );
+        assert_eq!(
+            std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(),
+            72
         );
     }
 }

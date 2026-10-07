@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 15 counters, Rust adds display-only uptime for 16.
+/// BPF holds 17 counters, Rust adds display-only uptime for 18.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -78,6 +78,12 @@ pub struct Metrics {
     #[stat(desc = "Preempts held by margin plus tail plus eligibility")]
     #[serde(default)]
     pub preempt_skipped: u64,
+    #[stat(desc = "RED overload rejects to the value ordered queue")]
+    #[serde(default)]
+    pub red_rejects: u64,
+    #[stat(desc = "RED reclaims from the value ordered queue")]
+    #[serde(default)]
+    pub red_reclaims: u64,
 }
 
 /// One card of the per CPU grid.
@@ -161,7 +167,7 @@ impl Metrics {
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
              local={} node={} machine={} kick={} adm={} rej={} \
-             miss={} gate={} pkick={} pskip={}",
+             miss={} gate={} pkick={} pskip={} redrej={} redrec={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -179,6 +185,8 @@ impl Metrics {
             self.gate_rejects,
             self.preempt_kicks,
             self.preempt_skipped,
+            self.red_rejects,
+            self.red_reclaims,
         )?;
         Ok(())
     }
@@ -203,6 +211,8 @@ impl Metrics {
             gate_rejects: self.gate_rejects.wrapping_sub(rhs.gate_rejects),
             preempt_kicks: self.preempt_kicks.wrapping_sub(rhs.preempt_kicks),
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
+            red_rejects: self.red_rejects.wrapping_sub(rhs.red_rejects),
+            red_reclaims: self.red_reclaims.wrapping_sub(rhs.red_reclaims),
         }
     }
 }
