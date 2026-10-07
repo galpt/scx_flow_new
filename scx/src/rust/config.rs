@@ -346,9 +346,6 @@ mod tests {
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             136
         );
-        assert_eq!(
-            std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(),
-            72
-        );
+        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
     }
 }
