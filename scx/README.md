@@ -2,11 +2,11 @@
 
 ### What is it?
 
-scx_flow 4.8.11 runs the earliest strict key first as the earlier of deadline plus virtual time. It adds RED admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
+scx_flow runs the earliest strict key first as the earlier of deadline plus virtual time. It adds [RED](https://web.cs.umass.edu/publication/docs/1993/UM-CS-1993-025.pdf) admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
 
 ### Why?
 
-The goal is to test strict order with prediction in the kernel and see if short bursts reach a CPU sooner. Like fair.c, earliest strict key runs first, unlike rt.c, no fixed priority holds. Direct queue order keeps the test fair and repeatable with no tuning at all. See `src/bpf/intf.h`.
+The goal is to test strict order with prediction in the kernel and see if short bursts reach a CPU sooner. See `src/bpf/intf.h`.
 
 ### How it works?
 
@@ -14,7 +14,9 @@ Arrivals pass a gate first, then pass RED with residual plus exceed plus toleran
 
 ## Typical Use Cases
 
-Latency apps run urgent fair time first, so short arrivals skip long work with no wait. Desktop keeps `1ms` slices smooth with no tuning across CPUs. Batch work drains best effort with misses tracked plus RED rejects counted. Servers hold overload with value order plus reclaim on global credit time.
+- Latency-sensitive applications.
+- General desktop use.
+- Mixed batch workloads.
 
 ## More details
 
@@ -62,14 +64,14 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else `64us` up on wall miss else `128us` down. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
 
-### Verification
-
-Fmt, clippy, build, test stay clean. Veristat holds 20 programs below one million with dispatch 68772 plus enqueue 75111 plus select 295895 max on select. Guard holds version plus mirrors gone. Code stays knob-free with no docs plus no changelog. Needs kernel `7.2` with one kick per wait. See `src/bpf/main.bpf.c`.
-
 ## Code map
 
-Rules live in `src/bpf/intf.h` with RED plus adapt helpers. Core lives in cgroup, weight, vtime, edf, placement, select, enqueue, preempt, dispatch, lifecycle, stats, and timer, with select plus enqueue split. Init lives in main plus topology still. Dashboard lives in snapshot, stats, topology, webui, and ui now even today still.
+- Rules live in `src/bpf/intf.h` with RED plus adapt helpers.
+- Core lives in cgroup, weight, vtime, edf, placement, select, enqueue, preempt, dispatch, lifecycle, stats, and timer, with select plus enqueue split.
+- Init lives in main plus topology still.
+- Dashboard lives in snapshot, stats, topology, webui, and ui now even today still.
 
 ## Limitations
 
-Hotplug needs restart. State is `72B`, `16B`, `8B`, `136B`. Needs kernel `7.2`. Mask wins on drain. One kick per wait `100us` margin and tail. Bypass takes bounded jump, never zero cost. Twelve cover one percent on 1024. Governor half max. Tied minima prefer prev lower id. Extra threads stay single.
+- Hotplug needs restart.
+- Needs kernel `7.2`.
