@@ -172,7 +172,7 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	s32 queued)
 {
 	struct task_struct *q;
-	u32 moved = 0;
+	bool ok = false;
 	if (unlikely(cpu < 0))
 		return 0;
 	if (unlikely(!visits))
@@ -196,11 +196,6 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		u64 rlax;
 		u64 rvtime;
 		bool rcrit;
-		if (unlikely(moved))
-			break;
-		if (unlikely(*visits >= (u32)FLOW_DISPATCH_MAX_VISIT))
-			break;
-		(*visits)++;
 		rctx = flow_lookup(q);
 		if (!rctx)
 			break;
@@ -224,12 +219,13 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 			break;
 		if (!flow_mask_ok(cpu, q))
 			break;
-		moved += (u32)scx_bpf_dsq_move(BPF_FOR_EACH_ITER, q,
-		    (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)cpu, 0);
+		ok = true;
 		break;
 	}
 	bpf_rcu_read_unlock();
-	return moved;
+	if (!ok)
+		return 0;
+	return flow_move_one_hint(flow_overflow_dsq(), cpu, visits, queued);
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu,
 	struct task_struct *prev)
