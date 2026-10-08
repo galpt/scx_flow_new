@@ -13,11 +13,11 @@
  * queue. The strict key holds the earlier of deadline plus virtual
  * deadline with a 2ms lag bound, so the earliest key always
  * runs next. Each fresh wait earns a dynamic slice from the saturated
- * remaining time clamped to 10us at the floor plus 1ms at the ceiling,
- * so near deadlines pace tightly while far deadlines still rotate each
- * millisecond. A miss holds the stored slice else floors it to 10us
+ * remaining time clamped to 10us at the floor plus 5ms at the ceiling,
+ * so near deadlines pace tightly while far deadlines still rotate every
+ * 5ms. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
- * escalation plus skip aging, and a zero slice inherits the 1ms
+ * escalation plus skip aging, and a zero slice inherits the 5ms
  * quantum. A global completer credit at or past 128us reclaims one
  * value ordered reject with positive laxity plus the same key or a
  * strictly after key with one bounded move, so overload drains without
@@ -59,18 +59,18 @@ typedef int pid_t;
 #ifndef READ_ONCE
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
 #endif
-/* Slice ceiling of 1ms with no knob. Caps the dynamic slice plus the */
+/* Slice ceiling of 5ms with no knob. Caps the dynamic slice plus the */
 /* preempt tail window plus the carryover, so one slice always spans */
 /* one wakeup with no extra hold. Fresh waits clamp the saturated */
 /* remaining time to this ceiling with a 10us floor. */
 enum flow_consts {
-	FLOW_QUANTUM_NS = 1000000ULL,
+	FLOW_QUANTUM_NS = 5000000ULL,
 	/* Dynamic slice floor of 10us with no knob. Holds the smallest */
 	/* charge that still outlasts the kick cost, so near deadlines */
 	/* pace tightly with no zero slice. Misses hold else floor here, */
 	/* and a zero slice inherits the ceiling. */
 	FLOW_SLICE_MIN_NS = 10000ULL,
-	/* Default period of 16ms with no knob. Holds sixteen slices, */
+	/* Default period of 16ms with no knob. Holds ~three slices, */
 	/* so a fully used task still leaves room for one wait plus */
 	/* one retry inside the period. */
 	FLOW_PERIOD_NS = 16000000ULL,
@@ -156,8 +156,8 @@ enum flow_consts {
 	/* shaping. */
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Proportional adapt cap of 256us with no knob. Caps one shift */
-	/* step, so a huge exceed plus slack moves at most one quarter */
-	/* slice with no storm. Exceed shrinks, slack grows, both shift 3. */
+	/* step, so a huge exceed plus slack moves at most about one */
+	/* twentieth slice with no storm. Exceed shrinks, slack grows, both shift 3. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_PROP_MAX_NS = 256000ULL,
@@ -205,7 +205,7 @@ enum flow_consts {
 /* over 128 on the stack with no store. Slice holds the per task slice */
 /* in nanos with the dynamic remaining clamp on fresh waits. A miss */
 /* holds the stored slice else floors it to 10us, and a zero slice */
-/* inherits the 1ms quantum with strict preempt on a fresh quantum. */
+/* inherits the 5ms quantum with strict preempt on a fresh quantum. */
 /* Hint holds the flat period */
 /* hint in micros for the deadline. A zero hint means no hint, so the */
 /* default period applies. Misses holds the count of deadline misses */
@@ -604,12 +604,12 @@ static __always_inline u64 flow_remaining_ns(u64 deadline,
  * @deadline: absolute EDF deadline in nanos.
  * @now: current time in nanos.
  *
- * Clamps the remaining time to the 10us floor plus the 1ms ceiling
+ * Clamps the remaining time to the 10us floor plus the 5ms ceiling
  * with no knob, so near deadlines pace tightly while far deadlines
- * still rotate each millisecond. A zero plus a past deadline floors
+ * still rotate every 5ms. A zero plus a past deadline floors
  * to 10us with no zero slice.
  *
- * Returns: dynamic slice in nanos from 10us to 1ms.
+ * Returns: dynamic slice in nanos from 10us to 5ms.
  */
 static __always_inline u32 flow_slice_for(u64 deadline,
 	u64 now)
@@ -625,10 +625,10 @@ static __always_inline u32 flow_slice_for(u64 deadline,
  * flow_slice_inherit - slice default for zero stored state.
  * @cur: stored slice in nanos, zero for no history.
  *
- * A zero slice means no history, so the 1ms quantum applies with no
+ * A zero slice means no history, so the 5ms quantum applies with no
  * extra write at the caller.
  *
- * Returns: @cur else the 1ms quantum.
+ * Returns: @cur else the 5ms quantum.
  */
 static __always_inline u32 flow_slice_inherit(u32 cur)
 {
@@ -661,9 +661,9 @@ static __always_inline u32 flow_slice_miss_hold(u32 cur)
  * @slice: stored slice in nanos, zero for no history.
  *
  * The cost bounds the guarantee with no share shaping. A burst average wins when present, else the stored slice,
- * else the 1ms quantum, so C tracks recent runs with no table walk.
+ * else the 5ms quantum, so C tracks recent runs with no table walk.
  *
- * Returns: cost in nanos from 10us to 1ms.
+ * Returns: cost in nanos from 10us to 5ms.
  */
 static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
 {
@@ -809,13 +809,13 @@ static __always_inline u64 flow_reject_key(u32 value)
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. An exceed shrinks by exceed shifted right by 3, a slack grows
  * by slack shifted right by 3, each capped at 256us with shifts only
- * and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
+ * and no divide. Clamps to 10us plus 5ms, so one step never stalls nor
  * holds the CPU. An on-time stop with both zero holds the clamped slice.
  * Exceed wins when both hold with no wrap. Virtual time stays untouched,
  * RED never writes the slice, and the caller keeps the carry gate first
  * on the same expiring deadline.
  *
- * Returns: adapted slice in nanos from 10us to 1ms.
+ * Returns: adapted slice in nanos from 10us to 5ms.
  */
 static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 	u64 slack)
@@ -871,13 +871,13 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
  * flow_carry_for - carryover slice from unused quantum with clamp.
  * @delta: raw service in nanos of the yielding slice.
  *
- * Keeps the unused quantum remainder with clamp to 10us plus 1ms
+ * Keeps the unused quantum remainder with clamp to 10us plus 5ms
  * through the adapt bounds, so a tiny remainder never floors below
  * the slice minimum with no zero slice. Callers gate on runnable plus
  * short plus latency-critical plus no wall miss, so only short bursts
  * carry with no virtual change.
  *
- * Returns: carry slice in nanos from 10us to 1ms.
+ * Returns: carry slice in nanos from 10us to 5ms.
  */
 static __always_inline u32 flow_carry_for(u64 delta)
 {

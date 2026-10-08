@@ -8,12 +8,12 @@
 use anyhow::Result;
 use anyhow::bail;
 
-/// Fixed slice in nanos at 1ms. Every insert uses this slice.
-pub const QUANTUM_NS: u64 = 1_000_000;
+/// Fixed slice in nanos at 5ms. Every insert uses this slice.
+pub const QUANTUM_NS: u64 = 5_000_000;
 /// Dynamic slice floor in nanos at 10us. Fresh waits clamp the
 /// saturated remaining time to this floor with the quantum ceiling.
 pub const SLICE_MIN_NS: u64 = 10_000;
-/// Default period in nanos at 16ms. Holds sixteen slices.
+/// Default period in nanos at 16ms. Holds ~three slices.
 pub const PERIOD_NS: u64 = 16_000_000;
 /// Least predictor value in nanos at 1. Clamps short bursts.
 pub const PRED_MIN_NS: u64 = 1;
@@ -42,12 +42,12 @@ pub const ADAPT_PROP_SHIFT: u32 = 3;
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 
 /// Mirror of flow_adapt_prop in intf.h for host tests.
-/// Shifts only with no divide, capped at 256us, clamped 10us to 1ms.
+/// Shifts only with no divide, capped at 256us, clamped 10us to 5ms.
 /// An exceed shrinks, a slack grows, both zero holds, exceed wins.
 #[cfg(test)]
 pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
     let base = if cur == 0 { QUANTUM_NS } else { cur as u64 };
-    // Clamp helper keeps the same 10us plus 1ms bounds as BPF.
+    // Clamp helper keeps the same 10us plus 5ms bounds as BPF.
     let clamp = |v: u64| -> u32 {
         if v < SLICE_MIN_NS {
             return SLICE_MIN_NS as u32;
@@ -86,7 +86,7 @@ pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
-    /// Fixed slice in nanos. Always 1ms with no knob.
+    /// Fixed slice in nanos. Always 5ms with no knob.
     pub quantum_ns: u64,
 }
 
@@ -102,9 +102,9 @@ impl Default for Config {
 impl Config {
     /// Validate the constants against the bounds the BPF side relies on.
     /// An invalid value is a programming fault, not a runtime state.
-    /// The slice stays fixed at 1ms with base weight 128 in range
+    /// The slice stays fixed at 5ms with base weight 128 in range
     /// 1 to 16384. The period stays at 16ms with predictor 1ns to 1s.
-    /// Fresh waits clamp remaining time to the 10us floor plus the 1ms
+    /// Fresh waits clamp remaining time to the 10us floor plus the 5ms
     /// ceiling with misses holding else flooring only.
     /// Dispatch moves at most one hint threaded move per tier bounded
     /// by remaining slots with visits capped at 8 per pass shared across
@@ -122,7 +122,7 @@ impl Config {
     /// Stats hold 17 counters at 136B with preempt kicks plus skipped
     /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
     /// capped 256us on late else grows by slack right 3 capped 256us on
-    /// early with clamp to 10us plus 1ms and no virtual change.
+    /// early with clamp to 10us plus 5ms and no virtual change.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -299,12 +299,12 @@ mod tests {
     /// Summary holds the fixed slice with no knob.
     fn describe_is_stable() {
         let s = Config::default().describe();
-        assert!(s.contains("quantum=1000us"));
+        assert!(s.contains("quantum=5000us"));
         assert!(!s.contains("batch"));
     }
 
     #[test]
-    /// Dynamic slice spans the 10us floor to the 1ms ceiling.
+    /// Dynamic slice spans the 10us floor to the 5ms ceiling.
     fn slice_bounds_match_intf_h() {
         assert_eq!(SLICE_MIN_NS, 10_000);
         assert_eq!(
@@ -321,7 +321,7 @@ mod tests {
             Config::default().quantum_ns,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(QUANTUM_NS, 1_000_000);
+        assert_eq!(QUANTUM_NS, 5_000_000);
         assert_eq!(PERIOD_NS, 16_000_000);
         assert_eq!(PRED_MIN_NS, 1);
         assert_eq!(PRED_MAX_NS, 1_000_000_000);
@@ -406,19 +406,19 @@ mod tests {
     /// Proportional adapt shrinks on exceed plus grows on slack.
     fn prop_shrink_grow_matches_intf_h() {
         // Exceed 8us shrinks 1us with shift 3 only.
-        assert_eq!(adapt_prop(1_000_000, 8_000, 0), 999_000);
+        assert_eq!(adapt_prop(5_000_000, 8_000, 0), 4_999_000);
         // Slack 1.6us grows 200ns with shift 3 only.
         assert_eq!(adapt_prop(500_000, 0, 1_600), 500_200);
         // Huge exceed caps at 256us shrink.
-        assert_eq!(adapt_prop(1_000_000, 10_000_000, 0), 744_000);
-        // Huge slack caps at 256us grow clamped to 1ms.
-        assert_eq!(adapt_prop(900_000, 0, 10_000_000), 1_000_000);
+        assert_eq!(adapt_prop(5_000_000, 10_000_000, 0), 4_744_000);
+        // Huge slack caps at 256us grow clamped to 5ms.
+        assert_eq!(adapt_prop(4_900_000, 0, 10_000_000), 5_000_000);
         // Small base shrinks to the 10us floor.
         assert_eq!(adapt_prop(10_000, 80_000, 0), 10_000);
         // On-time hold keeps the clamped slice.
         assert_eq!(adapt_prop(500_000, 0, 0), 500_000);
         // Zero slice inherits the quantum then shrinks.
-        assert_eq!(adapt_prop(0, 8_000, 0), 999_000);
+        assert_eq!(adapt_prop(0, 8_000, 0), 4_999_000);
         // Tiny exceed below 8ns holds with no divide.
         assert_eq!(adapt_prop(500_000, 7, 0), 500_000);
         // Early 500 plus 700 slack 200 grows 25ns.

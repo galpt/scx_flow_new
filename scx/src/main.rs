@@ -348,7 +348,7 @@ mod tests {
             crate::config::QUANTUM_NS,
             crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64
         );
-        assert_eq!(crate::config::QUANTUM_NS, 1_000_000);
+        assert_eq!(crate::config::QUANTUM_NS, 5_000_000);
         assert_eq!(crate::config::WEIGHT_BASE, 128);
         assert_eq!(crate::config::WEIGHT_MIN, 1);
         assert_eq!(crate::config::WEIGHT_MAX, 16_384);
