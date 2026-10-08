@@ -207,8 +207,6 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * ordered outside dispatch, and a global saved credit at or past 128us
  * reclaims one head with positive laxity. Runs under the caller with
  * no lock and no RCU walk here, so the verifier stays small.
- *
- * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 /**
  * flow_red_newcomer_exceed - exceeding time of one newcomer.
