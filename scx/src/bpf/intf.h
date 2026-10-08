@@ -282,14 +282,15 @@ struct flow_hint {
 /* Scheduler counters with 17 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail with no extra map, so stats stay at */
 /* 136B. Overflow plus steal moves count in the local bucket with no new */
-/* counter. Rejects plus on CPU stay frozen at zero for wire compat only */
-/* with no BPF writer, while real rejects count in gate plus RED rejects. */
-/* Readers must use gate_rejects for drops plus red_rejects for overload, */
-/* and the snapshot counts live pids for the on CPU gauge. Miss plus Term */
-/* stay counters only with no queues, so misses plus completions record */
-/* history with no extra queue. Preempt kicks count busy preempts sent, */
-/* and preempt skipped counts suppressed preempts held by margin plus tail */
-/* plus eligibility. Counters run with no knob and no fixed priority. */
+/* counter. Rejects plus on CPU stay frozen at zero in BPF snapshot-counted */
+/* for wire compat only with no BPF writer, while real rejects count in gate */
+/* plus RED rejects. Readers must use gate_rejects for drops plus red_rejects */
+/* for overload, and the snapshot counts live pids for the on CPU gauge. Miss */
+/* plus Term where Term equals completions stay counters only with no queues, */
+/* so misses plus completions record history with no extra queue. Preempt kicks */
+/* count busy preempts sent, and preempt skipped counts suppressed preempts held */
+/* by margin plus tail plus eligibility. Counters run with no knob and no fixed */
+/* priority. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
