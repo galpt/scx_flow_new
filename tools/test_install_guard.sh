@@ -21,10 +21,10 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "4.8.11" ] || fail "version not at 4.8.11"
+[ "${want}" = "4.8.12" ] || fail "version not at 4.8.12"
 
 # Deleted Rust mirrors stay deleted with no reappearance.
-# The flow facade plus its helpers left in 4.8.11 with constants in
+# The flow facade plus its helpers left in 4.8.12 with constants in
 # config.rs, so any return fails closed here before any build.
 for gone in \
     "src/rust/flow/mod.rs" \
