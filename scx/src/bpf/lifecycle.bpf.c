@@ -8,18 +8,19 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then carries the latency-critical slice up to one quantum
- * clamped to 10us plus 5ms else adapts proportionally by exceed right 3
- * capped 256us shrink on late else slack right 3 capped 256us grow on
- * early with clamp to 10us plus 5ms and no virtual change, then counts one requeue per runnable stop else one
+ * with shifts, then carries the latency-critical slice up to the frozen
+ * 1ms threshold clamped to 10us plus 1ms else adapts proportionally by
+ * exceed right 3 capped 512us shrink on late else slack right 3 capped
+ * 512us grow on early with clamp to 10us plus 5ms and no virtual change,
+ * then counts one requeue per runnable stop else one
  * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
  * priority holds. C holds burst else slice else quantum with no knob,
  * and V holds weight with zero mapped to 128, so the slice adapts
  * while virtual time stays untouched. A global saved credit at or past
  * 128us reclaims one value ordered reject with positive laxity plus
  * same key or strictly after with one bounded move. A runnable yield
- * before one quantum keeps the unused remainder only when wall time
- * still meets the deadline plus predictor slack holds critical, else
+ * before the frozen 1ms threshold keeps the unused remainder only when
+ * wall time still meets the deadline plus predictor slack holds critical, else
  * the proportional step runs on the same expiring deadline. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
  * Miss plus Term where Term equals completions stay counters only with
@@ -164,13 +165,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		n_dev_keep = n_dev;
 		have_pred = true;
 	}
-	/* Latency-critical slice carryover up to the quantum with no knob. */
-	/* A runnable task that yields before one quantum keeps the unused */
-	/* remainder as the next slice when wall time still meets the */
+	/* Latency-critical slice carryover up to the frozen 1ms with no knob. */
+	/* A runnable task that yields before the frozen threshold keeps the */
+	/* unused remainder as the next slice when wall time still meets the */
 	/* deadline plus predictor slack still holds critical, so short */
 	/* bursts earn a nearer virtual deadline with no extra slice. All */
-	/* other stops adapt proportionally with exceed right 3 capped 256us */
-	/* shrink on late else slack right 3 capped 256us grow on early with */
+	/* other stops adapt proportionally with exceed right 3 capped 512us */
+	/* shrink on late else slack right 3 capped 512us grow on early with */
 	/* clamp to 10us plus 5ms and no virtual change, so the slice tracks */
 	/* recent runs with shifts only and no divide. The same expiring */
 	/* deadline feeds exceed plus slack, and the carry gate runs first. */
@@ -178,14 +179,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* C holds burst else slice else quantum, and V holds weight with */
 	/* zero mapped to 128. Exiting plus completion paths skip the carry */
 	/* with adapt only, so only runnable waits carry with one kick per */
-	/* wait at enqueue. Misses count lifetime with saturation, adapt */
-	/* miss counts the consecutive wall miss streak with saturation, so */
-	/* promotion latches on lifetime while adapt tracks the window. */
+	/* wait at enqueue. Misses count lifetime with saturation plus no */
+	/* reset except enable, adapt miss counts the consecutive wall miss */
+	/* streak with reset on timely stop, so promotion latches on lifetime */
+	/* while adapt tracks the window. */
 	if (runnable) {
 		u64 exp_dl = READ_ONCE(tctx->deadline);
 		bool wmiss = !flow_deadline_ok(exp_dl, now);
 		if (!wmiss && have_pred && delta > 0 &&
-		    delta < (u64)FLOW_QUANTUM_NS &&
+		    delta < (u64)FLOW_LAT_CRIT_NS &&
 		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
 			u32 carry = flow_carry_for(delta);
 			__sync_lock_test_and_set(&tctx->slice_ns, carry);
@@ -193,7 +195,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			{
 				u16 sat = READ_ONCE(tctx->adapt_sat);
 				if (carry == (u32)FLOW_SLICE_MIN_NS ||
-				    carry == (u32)FLOW_QUANTUM_NS) {
+				    carry == (u32)FLOW_LAT_CRIT_NS) {
 					if (sat < 0xffffU)
 						tctx->adapt_sat = sat + 1;
 				} else {
@@ -249,8 +251,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		}
 	} else {
 		/* Completion adapt with no carry and no kick. An exceed */
-		/* shrinks by exceed right 3 capped 256us, a slack grows by */
-		/* slack right 3 capped 256us, both clamped with no virtual */
+		/* shrinks by exceed right 3 capped 512us, a slack grows by */
+		/* slack right 3 capped 512us, both clamped with no virtual */
 		/* change. The global credit funds reclaim below. */
 		u64 exp_dl = READ_ONCE(tctx->deadline);
 		u32 cur = READ_ONCE(tctx->slice_ns);

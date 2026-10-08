@@ -33,8 +33,14 @@ pub const HINT_MAX: u64 = 8192;
 pub const RED_EMAX_NS: u64 = 128_000;
 /// RED tolerance in nanos at 64us. Holds hard task slack only.
 pub const RED_TOL_NS: u64 = 64_000;
-/// Proportional adapt cap in nanos at 256us. Caps one shift step.
-pub const ADAPT_PROP_MAX_NS: u64 = 256_000;
+/// Latency threshold in nanos at 1ms frozen. Bounds the predictor slack
+/// that stays critical decoupled from the 5ms ceiling.
+pub const LAT_CRIT_NS: u64 = 1_000_000;
+/// Drain slice in nanos at 1ms frozen. Estimates one queued task for
+/// meets plus placement plus the preempt window.
+pub const DRAIN_SLICE_NS: u64 = 1_000_000;
+/// Proportional adapt cap in nanos at 512us. Caps one shift step.
+pub const ADAPT_PROP_MAX_NS: u64 = 512_000;
 /// Proportional adapt shift at 3. Maps exceed plus slack to one eighth.
 pub const ADAPT_PROP_SHIFT: u32 = 3;
 
@@ -42,7 +48,7 @@ pub const ADAPT_PROP_SHIFT: u32 = 3;
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 
 /// Mirror of flow_adapt_prop in intf.h for host tests.
-/// Shifts only with no divide, capped at 256us, clamped 10us to 5ms.
+/// Shifts only with no divide, capped at 512us, clamped 10us to 5ms.
 /// An exceed shrinks, a slack grows, both zero holds, exceed wins.
 #[cfg(test)]
 pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
@@ -121,7 +127,7 @@ impl Config {
     /// 2ms with vruntime plus virtual deadline pacing queue order.
     /// Stats hold 17 counters at 136B with preempt kicks plus skipped
     /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
-    /// capped 256us on late else grows by slack right 3 capped 256us on
+    /// capped 512us on late else grows by slack right 3 capped 512us on
     /// early with clamp to 10us plus 5ms and no virtual change.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
@@ -215,14 +221,26 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64 != RED_TOL_NS {
             bail!("red tol bad");
         }
+        if crate::bpf_intf::flow_consts_FLOW_LAT_CRIT_NS as u64 != LAT_CRIT_NS {
+            bail!("lat crit bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_DRAIN_SLICE_NS as u64 != DRAIN_SLICE_NS {
+            bail!("drain slice bad");
+        }
         if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64 != ADAPT_PROP_MAX_NS {
             bail!("adapt prop max bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT as u64 != ADAPT_PROP_SHIFT as u64 {
             bail!("adapt prop shift bad");
         }
-        if ADAPT_PROP_MAX_NS != 256_000 {
+        if ADAPT_PROP_MAX_NS != 512_000 {
             bail!("prop max bounds bad");
+        }
+        if LAT_CRIT_NS != 1_000_000 {
+            bail!("lat crit bounds bad");
+        }
+        if DRAIN_SLICE_NS != 1_000_000 {
+            bail!("drain slice bounds bad");
         }
         if ADAPT_PROP_SHIFT != 3 {
             bail!("prop shift bounds bad");
@@ -332,7 +350,9 @@ mod tests {
         assert_eq!(HINT_MAX, 8192);
         assert_eq!(RED_EMAX_NS, 128_000);
         assert_eq!(RED_TOL_NS, 64_000);
-        assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
+        assert_eq!(LAT_CRIT_NS, 1_000_000);
+        assert_eq!(DRAIN_SLICE_NS, 1_000_000);
+        assert_eq!(ADAPT_PROP_MAX_NS, 512_000);
         assert_eq!(ADAPT_PROP_SHIFT, 3);
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64, 1042);
         assert_eq!(
@@ -386,6 +406,14 @@ mod tests {
             RED_TOL_NS
         );
         assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_LAT_CRIT_NS as u64,
+            LAT_CRIT_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_DRAIN_SLICE_NS as u64,
+            DRAIN_SLICE_NS
+        );
+        assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64,
             ADAPT_PROP_MAX_NS
         );
@@ -393,7 +421,7 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT as u64,
             ADAPT_PROP_SHIFT as u64
         );
-        assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
+        assert_eq!(ADAPT_PROP_MAX_NS, 512_000);
         assert_eq!(ADAPT_PROP_SHIFT, 3);
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
@@ -409,9 +437,9 @@ mod tests {
         assert_eq!(adapt_prop(5_000_000, 8_000, 0), 4_999_000);
         // Slack 1.6us grows 200ns with shift 3 only.
         assert_eq!(adapt_prop(500_000, 0, 1_600), 500_200);
-        // Huge exceed caps at 256us shrink.
-        assert_eq!(adapt_prop(5_000_000, 10_000_000, 0), 4_744_000);
-        // Huge slack caps at 256us grow clamped to 5ms.
+        // Huge exceed caps at 512us shrink.
+        assert_eq!(adapt_prop(5_000_000, 10_000_000, 0), 4_488_000);
+        // Huge slack caps at 512us grow clamped to 5ms.
         assert_eq!(adapt_prop(4_900_000, 0, 10_000_000), 5_000_000);
         // Small base shrinks to the 10us floor.
         assert_eq!(adapt_prop(10_000, 80_000, 0), 10_000);

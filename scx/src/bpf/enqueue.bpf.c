@@ -37,9 +37,11 @@
  * needs predictor slack plus an eligible arrival plus a 100us margin
  * lead with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays. The
- * owner paces on a fresh 5ms quantum with no dynamic use.
- * Latency-critical slice carryover keeps the unused quantum, so short
- * bursts earn nearer keys. Strict slice writes run here before the key.
+ * owner paces on a fresh 5ms dispatch slice with no dynamic use. The
+ * preempt tail test uses the frozen 1ms drain slice above, so the 100us
+ * tail keeps a 10% guard with no neuter.
+ * Latency-critical slice carryover keeps the unused 1ms threshold, so
+ * short bursts earn nearer keys with no 4.8ms inflation. Strict slice writes run here before the key.
  * Fresh waits earn the dynamic remaining clamp, misses hold else floor
  * only, and rotations inherit zero. Slice expiry paces the rest with
  * no stamp run here. Local plus node depths hoist once, so the drain

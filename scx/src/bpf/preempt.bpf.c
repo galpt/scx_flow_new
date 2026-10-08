@@ -16,13 +16,14 @@
  */
 /* True when one arrival strictly preempts with margin plus tail. */
 /* The arrival must lead the occupant strictly with the margin also */
-/* strictly before, so near ties never bounce. The owner must have */
-/* started with remaining slice strictly past the tail, so nearly done */
-/* owners finish instead of taking a kick. The enqueue busy path calls */
-/* this helper after the eligibility gate, so eligibility stays outside */
-/* here with one minimum read per wait. Equal arrivals pace with no */
-/* extra kick by design, so no tie assert runs with no verifier cost. */
-/* No Rust mirror by design, so the kernel stays the single truth. */
+/* strictly before, so near ties never bounce. The owner window uses */
+/* the frozen 1ms drain slice decoupled from the 5ms ceiling, so the */
+/* 100us tail keeps a 10% guard with no 2% neuter. The enqueue busy */
+/* path calls this helper after the eligibility gate, so eligibility */
+/* stays outside here with one minimum read per wait. Equal arrivals */
+/* pace with no extra kick by design, so no tie assert runs with no */
+/* verifier cost. No Rust mirror by design, so the kernel stays the */
+/* single truth. */
 static __always_inline bool flow_preempt_wants(u64 arrival,
 	u64 occupant, u64 now, u64 occ_start)
 {
@@ -42,7 +43,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
 		return false;
 	if (occ_start == 0)
 		return false;
-	occ_end = flow_sat_add(occ_start, (u64)FLOW_QUANTUM_NS);
+	occ_end = flow_sat_add(occ_start, (u64)FLOW_DRAIN_SLICE_NS);
 	if (occ_end == (u64)~0ULL)
 		return false;
 	tail = flow_sat_add(now, (u64)FLOW_PREEMPT_TAIL_NS);

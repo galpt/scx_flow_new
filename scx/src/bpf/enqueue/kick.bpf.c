@@ -277,8 +277,10 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	}
 	/* An urgent latency-critical arrival leads by 100us with more than */
 	/* 100us left on the owner under the strict key, so near ties plus */
-	/* nearly done owners never bounce. The owner paces on a fresh 5ms */
-	/* quantum with no dynamic use. The shared preempt helper holds the */
+	/* nearly done owners never bounce. The owner dispatch slice stays a */
+	/* fresh 5ms with no dynamic use while the tail test uses the frozen */
+	/* 1ms drain slice, so the guard keeps 10% with no neuter. The shared */
+	/* preempt helper holds the */
 	/* margin plus tail with wrap safe order, so only a truly earlier */
 	/* arrival with work left preempts at once with one kick per wait. */
 	/* Equal or later arrivals pace at slice expiry with one skipped */

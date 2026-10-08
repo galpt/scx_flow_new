@@ -60,11 +60,22 @@ typedef int pid_t;
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
 #endif
 /* Slice ceiling of 5ms with no knob. Caps the dynamic slice plus the */
-/* preempt tail window plus the carryover, so one slice always spans */
-/* one wakeup with no extra hold. Fresh waits clamp the saturated */
-/* remaining time to this ceiling with a 10us floor. */
+/* dispatch time slice, so one service spans one wakeup with no extra */
+/* hold. Fresh waits clamp the saturated remaining time to this */
+/* ceiling with a 10us floor. Drain plus preempt plus latency use the */
+/* frozen 1ms mates below, so placement plus tail plus boost keep the */
+/* 1ms bounds with a 5ms service ceiling. */
 enum flow_consts {
 	FLOW_QUANTUM_NS = 5000000ULL,
+	/* Latency threshold of 1ms frozen with no knob. Bounds the */
+	/* predictor slack that stays critical, so only sub-ms bursts */
+	/* carry plus keep RED critical with no 5ms inflation. */
+	FLOW_LAT_CRIT_NS = 1000000ULL,
+	/* Drain slice of 1ms frozen with no knob. Estimates one queued */
+	/* task for meets plus placement plus the preempt window, so the */
+	/* 4ms band plus the 100us tail keep the 1ms bounds with no 5x */
+	/* overestimate. Dispatch still paces the 5ms ceiling above. */
+	FLOW_DRAIN_SLICE_NS = 1000000ULL,
 	/* Dynamic slice floor of 10us with no knob. Holds the smallest */
 	/* charge that still outlasts the kick cost, so near deadlines */
 	/* pace tightly with no zero slice. Misses hold else floor here, */
@@ -155,12 +166,12 @@ enum flow_consts {
 	/* with no late run. Tolerance aids the guarantee with no order */
 	/* shaping. */
 	FLOW_RED_TOL_NS = 64000ULL,
-	/* Proportional adapt cap of 256us with no knob. Caps one shift */
+	/* Proportional adapt cap of 512us with no knob. Caps one shift */
 	/* step, so a huge exceed plus slack moves at most about one */
-	/* twentieth slice with no storm. Exceed shrinks, slack grows, both shift 3. */
+	/* tenth slice with no storm. Exceed shrinks, slack grows, both shift 3. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
-	FLOW_ADAPT_PROP_MAX_NS = 256000ULL,
+	FLOW_ADAPT_PROP_MAX_NS = 512000ULL,
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
@@ -209,11 +220,12 @@ enum flow_consts {
 /* Hint holds the flat period */
 /* hint in micros for the deadline. A zero hint means no hint, so the */
 /* default period applies. Misses holds the count of deadline misses */
-/* for the life of the task with saturating adds, so a huge miss count */
-/* clamps instead of wrapping. Lifetime by design, so promotion latches */
-/* once 8 holds with the same one-move bound. A windowed decay stays a */
-/* noted alternative with no knob here. Adapt miss holds the consecutive */
-/* miss streak for the adaptive slice with saturation at 0xffff, so a */
+/* for the life of the task with saturating adds plus no reset except */
+/* enable, so a huge miss count clamps instead of wrapping. Lifetime */
+/* by design, so promotion latches once 8 holds with the same one-move */
+/* bound. A windowed decay stays a noted alternative with no knob here. */
+/* Adapt miss holds the consecutive miss streak for the adaptive slice */
+/* with saturation at 0xffff plus reset to zero on a timely stop, so a */
 /* ragged burst widens step by step with no wrap. Adapt sat holds the */
 /* clamp streak at the slice floor plus ceiling with saturation, so a */
 /* stuck slice shows its bound with no extra map. Adapt delta holds the */
@@ -808,7 +820,7 @@ static __always_inline u64 flow_reject_key(u32 value)
  *
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. An exceed shrinks by exceed shifted right by 3, a slack grows
- * by slack shifted right by 3, each capped at 256us with shifts only
+ * by slack shifted right by 3, each capped at 512us with shifts only
  * and no divide. Clamps to 10us plus 5ms, so one step never stalls nor
  * holds the CPU. An on-time stop with both zero holds the clamped slice.
  * Exceed wins when both hold with no wrap. Virtual time stays untouched,
@@ -868,20 +880,21 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 	return (u32)base;
 }
 /**
- * flow_carry_for - carryover slice from unused quantum with clamp.
+ * flow_carry_for - carryover slice from unused 1ms threshold with clamp.
  * @delta: raw service in nanos of the yielding slice.
  *
- * Keeps the unused quantum remainder with clamp to 10us plus 5ms
- * through the adapt bounds, so a tiny remainder never floors below
- * the slice minimum with no zero slice. Callers gate on runnable plus
- * short plus latency-critical plus no wall miss, so only short bursts
- * carry with no virtual change.
+ * Keeps the unused 1ms threshold remainder with clamp to 10us plus 1ms
+ * decoupled from the 5ms ceiling, so a 200us run carries 800us with no
+ * 4.8ms inflation. Callers gate on runnable plus short plus
+ * latency-critical plus no wall miss, so only short bursts carry with
+ * no virtual change. Like fair.c, the step paces service, unlike rt.c,
+ * no fixed priority holds.
  *
- * Returns: carry slice in nanos from 10us to 5ms.
+ * Returns: carry slice in nanos from 10us to 1ms.
  */
 static __always_inline u32 flow_carry_for(u64 delta)
 {
-	u64 q = (u64)FLOW_QUANTUM_NS;
+	u64 q = (u64)FLOW_LAT_CRIT_NS;
 	u64 c;
 	if (delta >= q)
 		return (u32)FLOW_SLICE_MIN_NS;
@@ -889,7 +902,7 @@ static __always_inline u32 flow_carry_for(u64 delta)
 	if (c < (u64)FLOW_SLICE_MIN_NS)
 		return (u32)FLOW_SLICE_MIN_NS;
 	if (c > q)
-		return (u32)FLOW_QUANTUM_NS;
+		return (u32)FLOW_LAT_CRIT_NS;
 	return (u32)c;
 }
 /**
@@ -1077,9 +1090,10 @@ static __always_inline u64 flow_pred_deadline(u64 now,
  *
  * A zero average means no history, so the task counts as latency
  * critical with no stall. Later tasks add average plus deviation with
- * saturation, so a short predicted burst within one quantum stays
- * critical while a long burst paces at slice expiry. Uses the quantum
- * with no new map plus no new queue plus no knob.
+ * saturation, so a short predicted burst within the frozen 1ms stays
+ * critical while a long burst paces at slice expiry. Uses the frozen
+ * threshold decoupled from the 5ms ceiling with no new map plus no new
+ * queue plus no knob.
  *
  * Returns: true when latency-critical, else false.
  */
@@ -1092,7 +1106,7 @@ static __always_inline bool flow_lat_crit(u64 avg,
 	pred = flow_sat_add(avg, dev);
 	if (pred == (u64)~0ULL)
 		return false;
-	return pred <= (u64)FLOW_QUANTUM_NS;
+	return pred <= (u64)FLOW_LAT_CRIT_NS;
 }
 /**
  * flow_fallback_deadline - fallback deadline from now plus hint.

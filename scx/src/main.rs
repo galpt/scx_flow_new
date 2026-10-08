@@ -413,4 +413,23 @@ mod tests {
         );
         assert_eq!(crate::config::HINT_MAX, 8192);
     }
+
+    #[test]
+    fn frozen_thresholds_match_header() {
+        assert_eq!(
+            crate::config::LAT_CRIT_NS,
+            crate::bpf_intf::flow_consts_FLOW_LAT_CRIT_NS as u64
+        );
+        assert_eq!(crate::config::LAT_CRIT_NS, 1_000_000);
+        assert_eq!(
+            crate::config::DRAIN_SLICE_NS,
+            crate::bpf_intf::flow_consts_FLOW_DRAIN_SLICE_NS as u64
+        );
+        assert_eq!(crate::config::DRAIN_SLICE_NS, 1_000_000);
+        assert_eq!(
+            crate::config::ADAPT_PROP_MAX_NS,
+            crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64
+        );
+        assert_eq!(crate::config::ADAPT_PROP_MAX_NS, 512_000);
+    }
 }

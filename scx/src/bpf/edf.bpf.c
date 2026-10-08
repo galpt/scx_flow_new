@@ -28,9 +28,11 @@ static __always_inline bool flow_deadline_ok(u64 deadline,
 		return true;
 	return false;
 }
-/* Drain depth of one CPU as queued slices times the quantum. */
+/* Drain depth of one CPU as queued slices times the frozen 1ms slice. */
 /* Saturates on wrap, so a huge depth clamps instead of wrapping to */
-/* an idle view. A bad read drops to zero with no boost. */
+/* an idle view. A bad read drops to zero with no boost. Decoupled */
+/* from the 5ms dispatch ceiling, so meets plus placement keep the 1ms */
+/* bounds with no 5x overestimate on the 4ms band. */
 static __always_inline u64 flow_drain_ns(u64 dsq)
 {
 	s32 n = scx_bpf_dsq_nr_queued(dsq);
@@ -38,22 +40,23 @@ static __always_inline u64 flow_drain_ns(u64 dsq)
 	if (n <= 0)
 		return 0;
 	depth = (u64)n;
-	if (depth > (u64)~0ULL / (u64)FLOW_QUANTUM_NS)
+	if (depth > (u64)~0ULL / (u64)FLOW_DRAIN_SLICE_NS)
 		return (u64)~0ULL;
-	return depth * (u64)FLOW_QUANTUM_NS;
+	return depth * (u64)FLOW_DRAIN_SLICE_NS;
 }
 /* Drain nanos from a hoisted queued hint with no kfunc. */
 /* Non-positive hints read zero with no boost. Saturates on wrap, so a */
-/* huge depth clamps instead of wrapping to an idle view. */
+/* huge depth clamps instead of wrapping to an idle view. Uses the */
+/* frozen 1ms slice like the polled drain above with no 5x overestimate. */
 static __always_inline u64 flow_drain_from_q(s32 n)
 {
 	u64 depth;
 	if (n <= 0)
 		return 0;
 	depth = (u64)n;
-	if (depth > (u64)~0ULL / (u64)FLOW_QUANTUM_NS)
+	if (depth > (u64)~0ULL / (u64)FLOW_DRAIN_SLICE_NS)
 		return (u64)~0ULL;
-	return depth * (u64)FLOW_QUANTUM_NS;
+	return depth * (u64)FLOW_DRAIN_SLICE_NS;
 }
 /**
  * flow_cpu_drain_hint - combined drain from hoisted local plus node.
