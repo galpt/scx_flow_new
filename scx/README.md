@@ -2,11 +2,11 @@
 
 ### What is it?
 
-scx_flow 4.8.11 runs the earliest strict key as earlier of deadline plus virtual time. It adds [RED](https://web.cs.umass.edu/publication/docs/1993/UM-CS-1993-025.pdf) admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus value ordered reject queue outside dispatch plus reclaim on completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
+scx_flow runs the earliest strict key first as the earlier of deadline plus virtual time. It adds [RED](https://web.cs.umass.edu/publication/docs/1993/UM-CS-1993-025.pdf) admission with guarantee-only tolerance plus three PRIQ tiers with insert vtime plus a value ordered reject queue outside dispatch plus reclaim on global completer credit with tiers-empty fallback plus aged cover. See `src/bpf/intf.h` and `src/bpf/edf.bpf.c`.
 
 ### Why?
 
-The goal is to test strict order with prediction in the kernel and see if short bursts reach a CPU sooner. Like fair.c, earliest strict key runs first, unlike rt.c, no fixed priority holds. Direct queue order keeps the test fair and repeatable with no tuning at all. See `src/bpf/intf.h`.
+The goal is to test strict order with prediction in the kernel and see if short bursts reach a CPU sooner. See `src/bpf/intf.h`.
 
 ### How it works?
 
@@ -14,13 +14,15 @@ Arrivals pass a gate first, then pass RED with residual plus exceed plus toleran
 
 ## Typical Use Cases
 
-Latency apps run urgent fair time first, so short arrivals skip long work with no wait. Desktop keeps `1ms` slices smooth with no tuning across CPUs. Batch work drains best effort with misses tracked plus RED rejects counted. Servers hold overload with value order plus reclaim on completer credit time.
+- Latency-sensitive applications.
+- General desktop use.
+- Mixed batch workloads.
 
 ## More details
 
 ### Queues
 
-Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with move capped by slots and 8 visits plus reclaim when empty plus aged past period. Reject stays value ordered outside dispatch with overflow name for wire compat. See `src/bpf/intf.h`.
+Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers plus steal with one move capped by slots and 8 visits plus one reclaim when empty plus aged past one period. Reject stays strictly value ordered outside dispatch still with overflow name for wire compat. See `src/bpf/intf.h`.
 
 ### Keys
 
@@ -28,7 +30,7 @@ Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor s
 
 ### Admission
 
-RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for bounded O(1) admission and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
+RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `128us` plus past exceed plus never critical, else admits. Newcomer-pays trades exact choice for bounded O(1) admission still and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
@@ -52,7 +54,7 @@ Locality stays with per-CPU plus per-node queues. Select takes prev idle, then w
 
 ### Contention
 
-Contention stays bounded with 8 visits per pass across three PRIQ tiers plus steal. Each tier moves task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves reject when tiers hold no work plus aged past period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
+Contention stays still bounded with 8 visits per pass shared across three PRIQ tiers plus steal. Each tier moves one task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves one reject when tiers hold no work plus aged past one period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
 
 ### Inversion
 
@@ -60,16 +62,16 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals with retrain plus fold. Stop feeds average plus deviation plus credit. Yields carry `10us` plus `1ms` when critical plus wall meets, else `64us` up on miss else `128us` down. Misses stay lifetime, adapt stays window. Reclaim reserves credit `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
-
-### Verification
-
-Fmt, clippy, build, test stay clean. Veristat holds 20 programs below one million with dispatch 59173 plus enqueue 78231 plus select 295895 max on select. Guard holds version plus mirrors gone. Code stays knob-free with no docs plus no changelog. Needs kernel `7.2` with one kick per wait. See `src/bpf/main.bpf.c`.
+Staleness heals with retrain plus minimum fold. Each stop feeds average plus deviation plus credit. Yields keep carry to `10us` plus `1ms` when critical plus wall meets, else `64us` up on wall miss else `128us` down. Misses stay lifetime, adapt streak stays window. Reclaim reserves credit past `128us` with fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
 
 ## Code map
 
-Rules live in `src/bpf/intf.h` with RED plus adapt helpers. Core lives in cgroup, weight, vtime, edf, placement, select, enqueue, preempt, dispatch, lifecycle, stats, and timer, with select plus enqueue split. Init lives in main plus topology still. Dashboard lives in snapshot, stats, topology, webui, and ui now even today still.
+- Rules live in `src/bpf/intf.h` with RED plus adapt helpers.
+- Core lives in cgroup, weight, vtime, edf, placement, select, enqueue, preempt, dispatch, lifecycle, stats, and timer, with select plus enqueue split.
+- Init lives in main plus topology still.
+- Dashboard lives in snapshot, stats, topology, webui, and ui now even today still.
 
 ## Limitations
 
-Hotplug needs restart. State is `72B`, `16B`, `8B`, `136B`. Needs kernel `7.2` or newer. Mask wins on drain. One kick per wait `100us` margin and tail. Bypass takes bounded jump, never zero cost. Twelve cover one percent on 1024. Governor half max. Tied minima prefer prev id. Threads stay single.
+- Hotplug needs restart.
+- Needs kernel `7.2` or newer.
