@@ -13,7 +13,7 @@
  * full least value scan stays a noted alternative. Queue order uses the strict EDF key of the earlier of the two times in
  * three PRIQ tiers with insert vtime, so urgent tasks still win while
  * hogs fall behind with lag bounds. Fresh waits earn a dynamic slice
- * from the saturated remaining time clamped to 10us plus 1ms, while
+ * from the saturated remaining time clamped to 10us plus 5ms, while
  * misses hold else floor only and rejoin via the same tier escalation
  * re-derived with a fresh deadline plus skip aging. Tasks join direct
  * only when all tiers incl the reject hold no work or the target still
@@ -37,7 +37,7 @@
  * needs predictor slack plus an eligible arrival plus a 100us margin
  * lead with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays. The
- * owner paces on a fresh 1ms quantum with no dynamic use.
+ * owner paces on a fresh 5ms quantum with no dynamic use.
  * Latency-critical slice carryover keeps the unused quantum, so short
  * bursts earn nearer keys. Strict slice writes run here before the key.
  * Fresh waits earn the dynamic remaining clamp, misses hold else floor
@@ -306,7 +306,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
 	tctx->wait_at = now;
 	/* Strict slice before the key with no stale reuse. A fresh wait */
-	/* earns the dynamic remaining clamp from 10us to 1ms, while a */
+	/* earns the dynamic remaining clamp from 10us to 5ms, while a */
 	/* slice rotation holds the stored charge else inherits the quantum */
 	/* on zero, so the virtual deadline tracks the same charge the key */
 	/* sorts. The remaining time feeds the slice plus slack only with */

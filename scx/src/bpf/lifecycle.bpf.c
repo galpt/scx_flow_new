@@ -9,9 +9,9 @@
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
  * with shifts, then carries the latency-critical slice up to one quantum
- * clamped to 10us plus 1ms else adapts proportionally by exceed right 3
+ * clamped to 10us plus 5ms else adapts proportionally by exceed right 3
  * capped 256us shrink on late else slack right 3 capped 256us grow on
- * early with clamp to 10us plus 1ms and no virtual change, then counts one requeue per runnable stop else one
+ * early with clamp to 10us plus 5ms and no virtual change, then counts one requeue per runnable stop else one
  * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
  * priority holds. C holds burst else slice else quantum with no knob,
  * and V holds weight with zero mapped to 128, so the slice adapts
@@ -171,7 +171,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* bursts earn a nearer virtual deadline with no extra slice. All */
 	/* other stops adapt proportionally with exceed right 3 capped 256us */
 	/* shrink on late else slack right 3 capped 256us grow on early with */
-	/* clamp to 10us plus 1ms and no virtual change, so the slice tracks */
+	/* clamp to 10us plus 5ms and no virtual change, so the slice tracks */
 	/* recent runs with shifts only and no divide. The same expiring */
 	/* deadline feeds exceed plus slack, and the carry gate runs first. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
