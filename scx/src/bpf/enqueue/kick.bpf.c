@@ -200,7 +200,7 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	struct task_struct *trusted;
 	struct flow_task_ctx *octx;
 	u64 occ_deadline;
-	u64 occ_start;
+	u64 occ_run_at;
 	u64 o_avg;
 	u64 o_dev;
 	bool occ_lat = false;
@@ -257,7 +257,7 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 		return;
 	}
 	occ_deadline = READ_ONCE(octx->deadline);
-	occ_start = READ_ONCE(octx->run_at);
+	occ_run_at = READ_ONCE(octx->run_at);
 	/* Occupant latency uses the unified base plus ext with the same */
 	/* occupant lookup, so RED and preempt agree with probation. */
 	o_avg = (u64)READ_ONCE(octx->avg_ns);
@@ -325,8 +325,8 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	/* urgency gate the kick. Eligibility already passed above, so the */
 	/* helper checks tier plus lead plus tail only with slack gated */
 	/* just before it. */
-	if (!flow_preempt_wants(vtime, occ_deadline, now,
-	    occ_start, arr_lat, occ_lat)) {
+	if (!flow_preempt_ok(vtime, occ_deadline, now,
+	    occ_run_at, arr_lat, occ_lat)) {
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		flow_count_preempt_skip();

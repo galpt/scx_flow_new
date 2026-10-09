@@ -191,6 +191,62 @@ pub fn is_lat(
     lat_crit_ext(avg, dev, hint_us, sleep_ns, uclamp_min, eff_w)
 }
 
+/// Wrap-safe order for host tests mirroring flow_time_before.
+/// Uses the signed diff, so the u64 wrap keeps order with no branch.
+#[cfg(test)]
+fn time_before(a: u64, b: u64) -> bool {
+    (a.wrapping_sub(b) as i64) < 0
+}
+
+/// Mirror of flow_preempt_ok in preempt.bpf.c for host tests.
+/// Needs lat arrival against batch owner with 100us margin lead plus
+/// 100us tail left on the stored quantum, so near ties plus nearly
+/// done owners never bounce with wrap safety.
+#[cfg(test)]
+pub fn preempt_ok(
+    arr_key: u64,
+    occ_key: u64,
+    now: u64,
+    occ_run_at: u64,
+    arr_lat: bool,
+    occ_lat: bool,
+) -> bool {
+    if !arr_lat || occ_lat {
+        return false;
+    }
+    if arr_key == 0 || arr_key == u64::MAX {
+        return false;
+    }
+    if occ_key == 0 || occ_key == u64::MAX {
+        return false;
+    }
+    if !time_before(arr_key, occ_key) {
+        return false;
+    }
+    let margin = arr_key.saturating_add(100_000);
+    if margin == u64::MAX {
+        return false;
+    }
+    if !time_before(margin, occ_key) {
+        return false;
+    }
+    if occ_run_at == 0 || occ_run_at == u64::MAX {
+        return false;
+    }
+    let occ_end = occ_run_at.saturating_add(QUANTUM_NS);
+    if occ_end == u64::MAX {
+        return false;
+    }
+    let tail = now.saturating_add(100_000);
+    if tail == u64::MAX {
+        return false;
+    }
+    if !time_before(tail, occ_end) {
+        return false;
+    }
+    true
+}
+
 /// Mirror of flow_slice_resume in intf.h for host tests.
 /// Keeps start plus cur leftover clamped to 10us plus 250us else 1ms.
 #[cfg(test)]
@@ -686,10 +742,27 @@ mod tests {
     #[test]
     /// Preempt needs lat arrival against batch owner only.
     fn preempt_needs_lat_to_batch_only() {
-        let wants = |arr: bool, occ: bool| arr && !occ;
-        assert!(wants(true, false));
-        assert!(!wants(true, true));
-        assert!(!wants(false, false));
-        assert!(!wants(false, true));
+        // Arrival 1ms leads occupant 2ms with margin plus tail held.
+        assert!(preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, true, false
+        ));
+        // Lat to lat plus batch to batch plus batch to lat fail closed.
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, true, true
+        ));
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, false, false
+        ));
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, false, true
+        ));
+        // Near tie within 100us margin never bounces.
+        assert!(!preempt_ok(
+            1_950_000, 2_000_000, 500_000, 500_000, true, false
+        ));
+        // Nearly done owner with tail left fails closed.
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 1_450_000, 500_000, true, false
+        ));
     }
 }
