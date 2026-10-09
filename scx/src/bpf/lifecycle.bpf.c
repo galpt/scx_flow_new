@@ -8,24 +8,25 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then resumes a preempted head with occ_end minus now
- * clamped to 10us plus 250us for latency else 1ms with inherit on
- * bad start plus end else carries the latency-critical slice up to one
- * quantum clamped to 10us plus 1ms else adapts proportionally by exceed
- * right 3 capped 256us shrink on late else slack right 3 capped 256us
- * grow on early with clamp to 10us plus 1ms and no virtual change,
- * then counts one requeue per runnable stop else one
+ * with shifts, then resumes a preempt-like head with start plus cur
+ * minus now clamped to 10us plus 250us for latency else 1ms with
+ * inherit on bad start plus end else carries the latency-critical
+ * slice up to one quantum clamped to 10us plus 1ms else adapts
+ * proportionally by exceed SHIFT capped 256us shrink on late else
+ * slack SHIFT capped 256us grow on early with clamp to 10us plus 1ms
+ * and latency grow to 250us plus no virtual change, then counts one
+ * requeue per runnable stop else one
  * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
  * priority holds. C holds burst else slice else quantum with no knob,
  * and V holds weight with zero mapped to 128, so the slice adapts
  * while virtual time stays untouched. A global saved credit at or past
  * 128us reclaims one value ordered reject with positive laxity plus
- * same key or strictly after with one bounded move. A runnable early
- * yield with delta below slice and no wall miss keeps occ_end minus
- * now, else a yield before one quantum keeps the unused remainder
- * only when wall time still meets the deadline plus predictor slack
- * holds critical, else the proportional step runs on the same expiring
- * deadline. A wall completion past the deadline counts one
+ * same key or strictly after with one bounded move. A runnable
+ * preempt-like yield with history plus tail left and no wall miss
+ * keeps start plus cur minus now, else a yield before one quantum
+ * keeps the unused remainder only when wall time still meets the
+ * deadline plus unified latency holds, else the proportional step runs
+ * on the same expiring deadline. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
  * Miss plus Term where Term equals completions stay counters only with
  * no queues, so misses plus completions record history with no extra
@@ -188,11 +189,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* miss counts the consecutive wall miss streak with saturation, so */
 	/* promotion latches on lifetime while adapt tracks the window. */
 	/* Latency recompute per stop with no stored bit, so 72B holds. */
-	/* Sleep stays unknown with fail open, while hint plus uclamp plus */
-	/* effective share veto toward batch with quantum-relative bounds. */
-	/* Like fair.c, the test paces service, unlike rt.c, no fixed */
-	/* priority holds. Carry caps at 250us plus adapt caps at 250us with */
-	/* no grow for latency, so urgent bursts rotate each quarter quantum. */
+	/* Sleep stays unknown with fail open, while hint plus effective */
+	/* share veto toward batch with quantum-relative bounds and */
+	/* probation, so newcomers stay batch. Like fair.c, the test paces */
+	/* service, unlike rt.c, no fixed priority holds. Carry caps at */
+	/* 250us plus adapt caps at 250us with slack grow allowed to the */
+	/* cap, so urgent bursts rotate each quarter quantum. */
 	stop_is_lat = false;
 	{
 		u64 s_avg = have_pred ? n_avg_keep :
@@ -203,32 +205,28 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		u32 s_task_w = READ_ONCE(tctx->weight);
 		u32 s_hint_w = READ_ONCE(tctx->hint_w);
 		u32 s_eff;
-		u32 s_uclamp = 0;
-		bool s_base;
-		bool s_ext;
 		if (s_task_w == 0)
 			s_task_w = (u32)FLOW_WEIGHT_BASE;
 		s_eff = flow_task_effective_weight(s_task_w, s_hint_w);
 		/* No stable uclamp field in this task view, so fail open to */
-		/* zero with no map plus no knob, and the ext helper keeps the */
-		/* veto for callers that thread a real clamp. */
-		s_uclamp = 0;
-		s_base = flow_lat_crit(s_avg, s_dev);
-		s_ext = flow_lat_crit_ext(s_avg, s_dev, s_hint, 0, s_uclamp,
-		    s_eff);
-		stop_is_lat = s_base && s_ext;
+		/* zero with no map plus no knob, and probation holds through */
+		/* both helpers. */
+		stop_is_lat = flow_is_lat(s_avg, s_dev, s_hint, 0, 0, s_eff);
 	}
 	if (runnable) {
 		u64 exp_dl = READ_ONCE(tctx->deadline);
 		bool wmiss = !flow_deadline_ok(exp_dl, now);
 		u32 pre_cur = READ_ONCE(tctx->slice_ns);
-		/* Same-tier-head resume keeps the leftover when runnable */
-		/* yields early with no wall miss, so a preempted head */
-		/* resumes with occ_end minus now clamped to 10us plus */
-		/* 250us for latency else 1ms with inherit on bad start */
-		/* plus end. Only early yields resume with no virtual */
-		/* change, so slice expiry still paces the rest. */
-		if (!wmiss && delta > 0 && delta < (u64)pre_cur) {
+		/* Preempt-like resume keeps the start plus cur leftover when */
+		/* runnable yields early with history plus tail left and no */
+		/* wall miss, so only preempt heads with more than 100us left */
+		/* resume with occ start plus cur clamped to 10us plus 250us */
+		/* for latency else 1ms with inherit on bad start plus end. */
+		/* Voluntary short yields fall through to carry plus adapt, so */
+		/* resume never shadows with no virtual change. */
+		if (!wmiss && have_pred && delta > 0 &&
+		    flow_sat_add(delta, (u64)FLOW_PREEMPT_TAIL_NS) <
+		    (u64)pre_cur) {
 			u32 rem = flow_slice_resume(start, now, stop_is_lat,
 			    pre_cur);
 			u32 rem_cap = stop_is_lat ?
@@ -254,8 +252,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				tctx->adapt_delta = cs;
 			}
 		} else if (!wmiss && have_pred && delta > 0 &&
-		    delta < (u64)FLOW_QUANTUM_NS &&
-		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
+		    delta < (u64)FLOW_QUANTUM_NS && stop_is_lat) {
 			u32 carry = flow_carry_for(delta);
 			u32 lat_cap = stop_is_lat ?
 			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
@@ -293,11 +290,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 					slack = exp_dl - now;
 			}
 			nxt = flow_adapt_prop(cur, exceed, slack);
-			if (stop_is_lat) {
-				if (nxt > cur)
-					nxt = cur;
+			if (stop_is_lat)
 				nxt = flow_slice_lat_clamp(nxt, true);
-			}
 			__sync_lock_test_and_set(&tctx->slice_ns, nxt);
 			if (m) {
 				u16 mm = READ_ONCE(tctx->adapt_miss);
@@ -345,11 +339,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				slack = exp_dl - now;
 		}
 		nxt = flow_adapt_prop(cur, exceed, slack);
-		if (stop_is_lat) {
-			if (nxt > cur)
-				nxt = cur;
+		if (stop_is_lat)
 			nxt = flow_slice_lat_clamp(nxt, true);
-		}
 		u64 ccost;
 		u64 csaved;
 		__sync_lock_test_and_set(&tctx->slice_ns, nxt);

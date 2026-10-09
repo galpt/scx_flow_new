@@ -2,12 +2,12 @@
 /*
  * Preempt plus idle kick for the enqueue pass.
  *
- * Holds the strict one kick per wait rule with predictor slack plus
- * tier plus lead plus tail plus eligibility. A latency-critical arrival
- * with slack within one quantum leads the occupant by the margin with
- * more than the tail left on the owner in the same tier, so near ties
- * plus nearly done owners never bounce while one kick per wait stays
- * with no storm. Cross tier pairs fail closed with one skipped count.
+ * Holds the strict one kick per wait rule with unified latency plus
+ * lead plus tail plus eligibility. Only a latency arrival against a
+ * batch occupant leads by the margin with more than the tail left on
+ * the owner, so near ties plus nearly done owners never bounce while
+ * one kick per wait stays with no storm. Lat to lat plus batch to
+ * batch plus batch to lat fail closed with one skipped count.
  * Every hold counts in preempt skipped with no missing fill. The exiting
  * plus bypass plus tier idle plus preempt paths share this gate with no
  * extra sender. Runs under the
@@ -19,9 +19,10 @@
 /* The arrival must lead the occupant strictly with the margin also */
 /* strictly before, so near ties never bounce. The owner must have */
 /* started with remaining slice strictly past the tail, so nearly done */
-/* owners finish instead of taking a kick. Latency gates first with */
-/* same tier only, so cross tier pairs fail closed with one skipped */
-/* count and no kick. The enqueue busy path calls */
+/* owners finish instead of taking a kick. Only a latency arrival */
+/* against a batch occupant preempts, so lat to batch wins while lat */
+/* to lat plus batch to batch plus batch to lat fail closed with one */
+/* skipped count and no kick. The enqueue busy path calls */
 /* this helper after the eligibility gate, so eligibility stays outside */
 /* here with one minimum read per wait. Equal arrivals pace with no */
 /* extra kick by design, so no tie assert runs with no verifier cost. */
@@ -32,9 +33,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
 	u64 margin;
 	u64 occ_end;
 	u64 tail;
-	if (arr_lat && !occ_lat)
-		return false;
-	if (!arr_lat && occ_lat)
+	if (!arr_lat || occ_lat)
 		return false;
 	if (arrival == 0 || arrival == (u64)~0ULL)
 		return false;

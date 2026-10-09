@@ -868,9 +868,9 @@ static __always_inline u32 flow_adapt_down(u32 cur)
  * @slack: earliness in nanos, expiring deadline minus now else zero.
  *
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
- * holds. An exceed shrinks by exceed shifted right by 3, a slack grows
- * by slack shifted right by 3, each capped at 256us with shifts only
- * and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
+ * holds. An exceed shrinks by exceed shifted right by SHIFT, a slack
+ * grows by slack shifted right by SHIFT, each capped at 256us with
+ * shifts only and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
  * holds the CPU. An on-time stop with both zero holds the clamped slice.
  * Exceed wins when both hold with no wrap. Virtual time stays untouched,
  * RED never writes the slice, and the caller keeps the carry gate first
@@ -885,7 +885,7 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 	u64 step;
 	u64 nxt;
 	if (exceed) {
-		step = exceed >> 3;
+		step = exceed >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
 		if (step == 0) {
@@ -905,7 +905,7 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 		return (u32)nxt;
 	}
 	if (slack) {
-		step = slack >> 3;
+		step = slack >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
 		if (step == 0) {
@@ -960,26 +960,28 @@ static __always_inline u32 flow_carry_for(u64 delta)
  * @occ_lat: true caps the ceiling at 250us else 1ms.
  * @cur: stored slice in nanos, zero inherits the quantum.
  *
- * Keeps occ_end minus now with occ_end at start plus 1ms, clamped
- * to 10us plus 250us for latency else 1ms, so a preempted head
+ * Keeps occ_end minus now with occ_end at start plus the stored slice,
+ * clamped to 10us plus 250us for latency else 1ms, so a preempted head
  * resumes with its leftover with no extra hold. A bad start plus
  * a saturated end falls back to the inherited slice, while a past
  * end floors to the minimum, so no zero slice runs with no wrap.
- * Callers gate on runnable preempted via SCX_ENQ_PREEMPT else delta
- * below slice with no wall miss, so only early yields resume with
- * no virtual change and no extra map.
+ * Callers gate on runnable early yield with tail plus history and no
+ * wall miss, so only preempt-like early yields resume with no virtual
+ * change and no extra map.
  *
  * Returns: remaining slice else inherited slice on bad start plus end.
  */
 static __always_inline u32 flow_slice_resume(u64 occ_start, u64 now,
 	bool occ_lat, u32 cur)
 {
+	u64 base;
 	u64 occ_end;
 	u64 rem;
 	u64 cap;
 	if (occ_start == 0 || occ_start == (u64)~0ULL)
 		return flow_slice_inherit(cur);
-	occ_end = flow_sat_add(occ_start, (u64)FLOW_QUANTUM_NS);
+	base = (u64)flow_slice_inherit(cur);
+	occ_end = flow_sat_add(occ_start, base);
 	if (occ_end == (u64)~0ULL)
 		return flow_slice_inherit(cur);
 	if (!flow_time_before(now, occ_end) && now != occ_end)
@@ -1178,8 +1180,8 @@ static __always_inline u64 flow_pred_deadline(u64 now,
  * @avg: burst average in nanos, zero for no history.
  * @dev: burst deviation in nanos.
  *
- * A zero average means no history, so the task counts as latency
- * critical with no stall. Later tasks add average plus deviation with
+ * A zero average means no history, so the task counts as batch with
+ * probation and no stall. Later tasks add average plus deviation with
  * saturation, so a short predicted burst within one quantum stays
  * critical while a long burst paces at slice expiry. Uses the quantum
  * with no new map plus no new queue plus no knob.
@@ -1191,7 +1193,7 @@ static __always_inline bool flow_lat_crit(u64 avg,
 {
 	u64 pred;
 	if (avg == 0)
-		return true;
+		return false;
 	pred = flow_sat_add(avg, dev);
 	if (pred == (u64)~0ULL)
 		return false;
@@ -1248,12 +1250,14 @@ static __always_inline u64 flow_lat_deadline(u64 now,
  * @eff_w: effective share, zero for unknown.
  *
  * Like fair.c, the test paces service, unlike rt.c, no fixed priority
- * holds. Each signal vetoes only toward batch with quantum-relative
- * bounds plus shifts only plus no divide, so unknown inputs fail open
- * with no stall. A predicted burst past one quantum vetoes, a hint
- * period past one quantum vetoes, a short sleep below 250us vetoes, an
- * explicit low clamp below half vetoes, and a light share below 128
- * vetoes. All pass keeps latency with no order change.
+ * holds. Newcomers with no history stay batch with probation, so only
+ * trained bursts earn latency. Each signal vetoes only toward batch
+ * with quantum-relative bounds plus shifts only plus no divide, so
+ * unknown sleep plus clamp plus share fail open with no stall. A
+ * predicted burst past one quantum vetoes, a hint period past one
+ * quantum vetoes, a short sleep below 250us vetoes, an explicit low
+ * clamp below half vetoes, and a light share below 128 vetoes. All
+ * pass keeps latency with no order change.
  *
  * Returns: true when latency holds, else false for batch.
  */
@@ -1263,13 +1267,13 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
 {
 	u64 pred;
 	u64 hint_ns;
-	if (avg != 0) {
-		pred = flow_sat_add(avg, dev);
-		if (pred == (u64)~0ULL)
-			return false;
-		if (pred > (u64)FLOW_QUANTUM_NS)
-			return false;
-	}
+	if (avg == 0)
+		return false;
+	pred = flow_sat_add(avg, dev);
+	if (pred == (u64)~0ULL)
+		return false;
+	if (pred > (u64)FLOW_QUANTUM_NS)
+		return false;
 	if (hint_us != 0) {
 		u64 h = (u64)hint_us;
 		if (h > 18446744073709551ULL)
@@ -1291,6 +1295,31 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
 			return false;
 	}
 	return true;
+}
+/**
+ * flow_is_lat - unified latency test from base plus ext.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @hint_us: flat period hint in micros, zero for no hint.
+ * @sleep_ns: sleep time in nanos, zero for unknown.
+ * @uclamp_min: uclamp minimum 0 to 1024, zero for unknown.
+ * @eff_w: effective share, zero for unknown.
+ *
+ * Unifies the base predictor plus the extended veto, so every path
+ * agrees with RED critical on the same value. Newcomers stay batch
+ * with probation through both helpers, so no path needs a separate
+ * fail-open case. Like fair.c, the test paces service, unlike rt.c,
+ * no fixed priority holds.
+ *
+ * Returns: true when latency holds, else false for batch.
+ */
+static __always_inline bool flow_is_lat(u64 avg, u64 dev,
+	u32 hint_us, u64 sleep_ns, u32 uclamp_min, u32 eff_w)
+{
+	if (!flow_lat_crit(avg, dev))
+		return false;
+	return flow_lat_crit_ext(avg, dev, hint_us, sleep_ns,
+	    uclamp_min, eff_w);
 }
 /**
  * flow_fallback_deadline - fallback deadline from now plus hint.
