@@ -339,21 +339,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* now plus one period, so far keys never starve past the bound. */
 	if (!is_reenq) {
 		u64 old_wait = READ_ONCE(tctx->wait_at);
-		u64 lat_sleep = 0;
+		u64 lat_sleep = flow_sleep_ns(old_wait, now, avg);
 		u32 lat_task_w = READ_ONCE(tctx->weight);
 		u32 lat_eff = 0;
 		bool is_lat;
 		u32 pre_slice;
 		u32 lat_slice;
 		u64 lat_vt;
-		if (old_wait != 0 && flow_time_before(old_wait, now)) {
-			u64 gap = now - old_wait;
-			if (avg != 0 && gap > avg)
-				gap -= avg;
-			else if (avg != 0)
-				gap = 0;
-			lat_sleep = gap;
-		}
 		/* No stable uclamp field in this task view, so fail open to */
 		/* zero with no map plus no knob, and the ext helper keeps the */
 		/* veto for callers that thread a real clamp. Probation holds */

@@ -619,6 +619,36 @@ static __always_inline u64 flow_remaining_ns(u64 deadline,
 	return 0;
 }
 /**
+ * flow_sleep_ns - true sleep gap as now minus wait minus burst.
+ * @old_wait: last wait stamp in nanos, zero for unknown.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos, zero for no history.
+ *
+ * Isolates the true gap as now minus wait minus burst, so queue plus
+ * run never masquerade as sleep. A zero wait plus a wait at or after
+ * now plus a burst-covered gap all read zero with wrap safety, so
+ * newcomers plus requeues fail open with no stall.
+ *
+ * Returns: sleep time in nanos, zero when unknown.
+ */
+static __always_inline u64 flow_sleep_ns(u64 old_wait, u64 now,
+	u64 avg)
+{
+	u64 gap;
+	if (old_wait == 0)
+		return 0;
+	if (!flow_time_before(old_wait, now))
+		return 0;
+	gap = now - old_wait;
+	if (avg != 0) {
+		if (gap > avg)
+			gap -= avg;
+		else
+			gap = 0;
+	}
+	return gap;
+}
+/**
  * flow_slice_for - dynamic slice from the saturated remaining time.
  * @deadline: absolute EDF deadline in nanos.
  * @now: current time in nanos.

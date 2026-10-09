@@ -269,21 +269,13 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		}
 	} else if (!is_reenq) {
 		u64 p_old_wait = READ_ONCE(tctx->wait_at);
-		u64 p_sleep = 0;
+		u64 p_sleep = flow_sleep_ns(p_old_wait, now, pavg);
 		u32 p_task_w = READ_ONCE(tctx->weight);
 		u32 p_eff = 0;
 		bool p_is_lat;
 		u32 p_pre;
 		u32 p_slice;
 		u64 p_vt;
-		if (p_old_wait != 0 && flow_time_before(p_old_wait, now)) {
-			u64 pgap = now - p_old_wait;
-			if (pavg != 0 && pgap > pavg)
-				pgap -= pavg;
-			else if (pavg != 0)
-				pgap = 0;
-			p_sleep = pgap;
-		}
 		/* No stable uclamp field in this task view, so fail open to */
 		/* zero with no map plus no knob, and probation holds through */
 		/* both helpers, so newcomers stay batch. */

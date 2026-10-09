@@ -198,6 +198,28 @@ fn time_before(a: u64, b: u64) -> bool {
     (a.wrapping_sub(b) as i64) < 0
 }
 
+/// Mirror of flow_sleep_ns in intf.h for host tests.
+/// Isolates now minus wait minus burst, so queue plus run never count
+/// as sleep with wrap safety and probation.
+#[cfg(test)]
+pub fn sleep_ns(old_wait: u64, now: u64, avg: u64) -> u64 {
+    if old_wait == 0 {
+        return 0;
+    }
+    if !time_before(old_wait, now) {
+        return 0;
+    }
+    let mut gap = now - old_wait;
+    if avg != 0 {
+        if gap > avg {
+            gap -= avg;
+        } else {
+            gap = 0;
+        }
+    }
+    gap
+}
+
 /// Mirror of flow_preempt_ok in preempt.bpf.c for host tests.
 /// Needs lat arrival against batch owner with 100us margin lead plus
 /// 100us tail left on the stored quantum, so near ties plus nearly
@@ -715,6 +737,20 @@ mod tests {
         // Light share vetoes, heavy keeps.
         assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 32));
         assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 1024));
+    }
+
+    #[test]
+    /// Sleep isolates now minus wait minus burst with probation.
+    fn sleep_isolates_gap_minus_burst() {
+        // Gap 1ms minus 200us burst leaves 800us sleep.
+        assert_eq!(sleep_ns(1_000, 1_001_000, 200_000), 800_000);
+        // Burst-covered gap reads zero with no underflow.
+        assert_eq!(sleep_ns(1_000, 1_001_000, 2_000_000), 0);
+        // No history keeps the full gap.
+        assert_eq!(sleep_ns(1_000, 1_001_000, 0), 1_000_000);
+        // Unknown wait plus wait at now both read zero.
+        assert_eq!(sleep_ns(0, 1_000, 100_000), 0);
+        assert_eq!(sleep_ns(1_000, 1_000, 100_000), 0);
     }
 
     #[test]
