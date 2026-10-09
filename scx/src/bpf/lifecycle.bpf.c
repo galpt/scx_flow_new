@@ -171,9 +171,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		n_dev_keep = n_dev;
 		have_pred = true;
 	}
-	/* Latency-critical slice carryover up to the quantum with no knob. */
-	/* A runnable task that yields before one quantum keeps the unused */
-	/* remainder as the next slice when wall time still meets the */
+	/* Latency-critical slice carryover from the fixed quantum with no knob. */
+	/* A runnable task that yields before one quantum keeps quantum */
+	/* minus delta as the next slice when wall time still meets the */
 	/* deadline plus predictor slack still holds critical, so short */
 	/* bursts earn a nearer virtual deadline with no extra slice. All */
 	/* other stops adapt proportionally with exceed right 3 capped 256us */

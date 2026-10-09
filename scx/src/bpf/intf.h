@@ -962,9 +962,11 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
  * flow_carry_for - carryover slice from unused quantum with clamp.
  * @delta: raw service in nanos of the yielding slice.
  *
- * Keeps the unused quantum remainder with clamp to 10us plus 1ms
- * through the adapt bounds, so a tiny remainder never floors below
- * the slice minimum with no zero slice. Callers gate on runnable plus
+ * Keeps the unused quantum remainder as quantum minus delta with clamp
+ * to 10us plus 1ms through the adapt bounds, so a tiny remainder never
+ * floors below the slice minimum with no zero slice. Uses the fixed
+ * 1ms quantum, not the stored slice, so short bursts carry the true
+ * unused quantum with no virtual change. Callers gate on runnable plus
  * short plus latency-critical plus no wall miss, so only short bursts
  * carry with no virtual change.
  *
