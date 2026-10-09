@@ -40,7 +40,7 @@
  * owner paces on start plus inherit cur with no fresh quantum, so the
  * tail tracks the stored slice. A preempted
  * head resumes via lifecycle only with start plus cur clamped to 10us
- * plus 250us for latency else 1ms with inherit on bad start plus tail
+ * plus 100us for latency else 1ms with inherit on bad start plus tail
  * plus history, so the same head resumes with its leftover.
  * Latency-critical slice carryover keeps the unused quantum, so short
  * bursts earn nearer keys. Strict slice writes run here before the key.
@@ -329,7 +329,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
 	/* Latency recompute per enqueue with no stored bit, so 72B holds. */
-	/* A fresh wait clamps the slice to 250us plus caps the key to now */
+	/* A fresh wait clamps the slice to 100us plus caps the key to now */
 	/* plus max 4ms else slice plus 100us via the strict key, while RED */
 	/* stays on the original deadline with no order change. Like fair.c, */
 	/* the cap paces service, unlike rt.c, no fixed priority holds. A */

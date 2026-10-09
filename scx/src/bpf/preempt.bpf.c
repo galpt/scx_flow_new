@@ -19,7 +19,8 @@
 /* The arrival key must lead the occupant key strictly with the margin also */
 /* strictly before, so near ties never bounce. The owner must hold more */
 /* than the tail past now from start plus inherit cur, so nearly done */
-/* owners finish instead of taking a kick. Only a latency arrival */
+/* owners finish instead of taking a kick. Equality fails closed and */
+/* floors, so a head with exactly the tail left never kicks. Only a latency arrival */
 /* against a batch occupant preempts, so lat to batch wins while lat */
 /* to lat plus batch to batch plus batch to lat fail closed with one */
 /* skipped count and no kick. The enqueue busy path calls */

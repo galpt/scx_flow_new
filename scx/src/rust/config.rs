@@ -43,9 +43,15 @@ pub const ADAPT_SHRINK_NS: u64 = 128_000;
 pub const ADAPT_PROP_MAX_NS: u64 = 256_000;
 /// Proportional adapt shift at 3. Maps exceed plus slack to one eighth.
 pub const ADAPT_PROP_SHIFT: u32 = 3;
-/// Latency slice cap in nanos at 250us. Caps the dynamic slice plus
-/// the carryover plus the adapt step for latency work.
-pub const SLICE_LAT_NS: u64 = 250_000;
+/// Latency slice cap in nanos at 100us. Caps the dynamic slice plus
+/// the carryover plus the adapt step for latency work, so urgent
+/// wakeups rotate each tenth quantum with no extra hold. The cap
+/// equals the preempt tail, so a latency head at the cap never passes
+/// the tail gate and floors with no resume. Adapt steps cap at 256us
+/// then re-clamp here, so one shift never holds past the cap. RED Emax
+/// stays at 128us past the cap, so a capped latency slice never pays
+/// as victim with no swap.
+pub const SLICE_LAT_NS: u64 = 100_000;
 /// Latency deadline bound in nanos at 4ms. Holds one quarter period.
 pub const D_LAT_NS: u64 = 4_000_000;
 /// Preempt margin in nanos at 100us. Leads the occupant key, so near
@@ -101,7 +107,7 @@ pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
 }
 
 /// Mirror of flow_slice_lat_clamp in intf.h for host tests.
-/// Caps the slice at 250us for latency with no knob.
+/// Caps the slice at 100us for latency with no knob.
 #[cfg(test)]
 pub fn slice_lat_clamp(slice: u32, is_lat: bool) -> u32 {
     if is_lat && (slice as u64) > SLICE_LAT_NS {
@@ -309,8 +315,10 @@ pub fn preempt_ok(
 }
 
 /// Mirror of flow_slice_resume in intf.h for host tests.
-/// Keeps start plus cur leftover clamped to 10us plus 250us else 1ms
+/// Keeps start plus cur leftover clamped to 10us plus 100us else 1ms
 /// with wrap-safe order, so a wrapped clock never reads as leftover.
+/// Equality fails closed and floors, so a head at the 100us cap never
+/// resumes past the equal tail.
 #[cfg(test)]
 pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
     let base = if cur == 0 { QUANTUM_NS } else { cur as u64 };
@@ -378,7 +386,7 @@ impl Config {
     /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
     /// capped 256us on late else grows by slack right 3 capped 256us on
     /// early with clamp to 10us plus 1ms and no virtual change. Latency
-    /// caps the slice at 250us plus the key at now plus max 4ms else
+    /// caps the slice at 100us plus the key at now plus max 4ms else
     /// slice plus 100us with RED on the original deadline.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
@@ -499,7 +507,7 @@ impl Config {
         if ADAPT_PROP_MAX_NS >= QUANTUM_NS {
             bail!("prop max over ceiling bad");
         }
-        if SLICE_LAT_NS != 250_000 {
+        if SLICE_LAT_NS != 100_000 {
             bail!("slice lat bad");
         }
         if D_LAT_NS != 4_000_000 {
@@ -698,7 +706,7 @@ mod tests {
         );
         assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
         assert_eq!(ADAPT_PROP_SHIFT, 3);
-        assert_eq!(SLICE_LAT_NS, 250_000);
+        assert_eq!(SLICE_LAT_NS, 100_000);
         assert_eq!(D_LAT_NS, 4_000_000);
         assert_eq!(D_LAT_NS, PERIOD_NS / 4);
         assert_eq!(
@@ -744,13 +752,13 @@ mod tests {
     #[test]
     /// RED costs the pre-clamp slice with no post-clamp underestimate.
     fn red_uses_pre_clamp_not_post() {
-        // Fresh 1ms pre-clamp caps to 250us for latency slice.
+        // Fresh 1ms pre-clamp caps to 100us for latency slice.
         let pre = 1_000_000;
         let post = slice_lat_clamp(pre, true);
-        assert_eq!(post, 250_000);
+        assert_eq!(post, 100_000);
         // RED still costs the 1ms pre-clamp with no underestimate.
         assert_eq!(red_cost(0, pre), 1_000_000);
-        assert_eq!(red_cost(0, post), 250_000);
+        assert_eq!(red_cost(0, post), 100_000);
         assert!(red_cost(0, pre) > red_cost(0, post));
         // Burst wins over slice with the same 10us plus 1ms clamp.
         assert_eq!(red_cost(900_000, 1_000_000), 900_000);
@@ -759,24 +767,24 @@ mod tests {
     }
 
     #[test]
-    /// Latency slice clamps at 250us plus deadline at max 4ms.
+    /// Latency slice clamps at 100us plus deadline at max 4ms.
     fn lat_bounds_match_intf_h() {
         const _: () = assert!(SLICE_LAT_NS > SLICE_MIN_NS);
         const _: () = assert!(SLICE_LAT_NS < QUANTUM_NS);
-        assert_eq!(SLICE_LAT_NS, 250_000);
+        assert_eq!(SLICE_LAT_NS, 100_000);
         assert_eq!(D_LAT_NS, 4_000_000);
         assert_eq!(D_LAT_NS, PERIOD_NS / 4);
         // Non latency keeps the slice.
         assert_eq!(slice_lat_clamp(1_000_000, false), 1_000_000);
-        // Latency caps at 250us.
-        assert_eq!(slice_lat_clamp(1_000_000, true), 250_000);
+        // Latency caps at 100us.
+        assert_eq!(slice_lat_clamp(1_000_000, true), 100_000);
         assert_eq!(slice_lat_clamp(100_000, true), 100_000);
         // Deadline floors at 4ms plus adds slice plus 100us.
-        assert_eq!(lat_deadline(0, 250_000), 4_000_000);
+        assert_eq!(lat_deadline(0, 100_000), 4_000_000);
         assert_eq!(lat_deadline(1_000, 1_000_000), 1_000 + 4_000_000);
         assert_eq!(lat_deadline(0, 5_000_000), 5_100_000);
         // Saturates on wrap with ns accuracy.
-        assert_eq!(lat_deadline(u64::MAX - 1_000, 250_000), u64::MAX);
+        assert_eq!(lat_deadline(u64::MAX - 1_000, 100_000), u64::MAX);
     }
 
     #[test]
@@ -793,15 +801,17 @@ mod tests {
         // Unified latency matches base plus ext, so RED agrees.
         assert!(!is_lat(900_000, 200_000, 0, 1_000_000, 0, 128));
         assert!(!is_lat(100_000, 10_000, 2000, 1_000_000, 0, 128));
-        assert!(!is_lat(100_000, 10_000, 0, 100_000, 0, 128));
+        assert!(!is_lat(100_000, 10_000, 0, 50_000, 0, 128));
+        assert!(is_lat(100_000, 10_000, 0, 150_000, 0, 128));
         // Long burst past quantum vetoes.
         assert!(!lat_crit_ext(900_000, 200_000, 0, 1_000_000, 0, 128));
         // Large hint past quantum vetoes.
         assert!(!lat_crit_ext(100_000, 10_000, 2000, 1_000_000, 0, 128));
         // Small hint keeps latency.
         assert!(lat_crit_ext(100_000, 10_000, 500, 1_000_000, 0, 128));
-        // Short sleep below 250us vetoes.
-        assert!(!lat_crit_ext(100_000, 10_000, 0, 100_000, 0, 128));
+        // Short sleep below 100us vetoes, sleep at 150us keeps.
+        assert!(!lat_crit_ext(100_000, 10_000, 0, 50_000, 0, 128));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 150_000, 0, 128));
         // Explicit low clamp vetoes, unknown passes.
         assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 100, 128));
         assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 1024, 128));
@@ -832,10 +842,10 @@ mod tests {
             slice_resume(1_000, 1_000 + 100_000, false, 500_000),
             400_000
         );
-        // Latency caps the same leftover at 250us.
-        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 500_000), 250_000);
-        // Start plus 250us cur keeps 150us for latency.
-        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 250_000), 150_000);
+        // Latency caps the same leftover at 100us.
+        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 500_000), 100_000);
+        // Start plus 250us cur keeps 150us rem capped to 100us for latency.
+        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 250_000), 100_000);
         // Bad start inherits the stored slice.
         assert_eq!(slice_resume(0, 1_000, false, 500_000), 500_000);
         assert_eq!(slice_resume(0, 1_000, true, 500_000), 500_000);

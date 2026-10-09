@@ -9,12 +9,12 @@
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
  * with shifts, then resumes a preempt-like head with start plus cur
- * minus now clamped to 10us plus 250us for latency else 1ms with
+ * minus now clamped to 10us plus 100us for latency else 1ms with
  * inherit on bad start plus end else carries the latency-critical
  * slice up to one quantum clamped to 10us plus 1ms else adapts
  * proportionally by exceed SHIFT capped 256us shrink on late else
  * slack SHIFT capped 256us grow on early with clamp to 10us plus 1ms
- * and latency grow to 250us plus no virtual change, then counts one
+ * and latency grow to 100us plus no virtual change, then counts one
  * requeue per runnable stop else one
  * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
  * priority holds. C holds burst else slice else quantum with no knob,
@@ -193,8 +193,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* share veto toward batch with quantum-relative bounds and */
 	/* probation, so newcomers stay batch. Like fair.c, the test paces */
 	/* service, unlike rt.c, no fixed priority holds. Carry caps at */
-	/* 250us plus adapt caps at 250us with slack grow allowed to the */
-	/* cap, so urgent bursts rotate each quarter quantum. */
+	/* 100us plus adapt re-clamps at 100us past the 256us step with slack */
+	/* grow allowed to the cap, so urgent bursts rotate each tenth quantum. */
 	stop_is_lat = false;
 	{
 		u64 s_avg = have_pred ? n_avg_keep :
@@ -220,10 +220,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		/* Preempt-like resume keeps the start plus cur leftover when */
 		/* runnable yields early with history plus tail left and no */
 		/* wall miss, so only preempt heads with more than 100us left */
-		/* resume with occ start plus cur clamped to 10us plus 250us */
+		/* resume with occ start plus cur clamped to 10us plus 100us */
 		/* for latency else 1ms with inherit on bad start plus end. */
 		/* The TAIL gate is delta plus 100us below cur here, so the */
-		/* helper keeps no tail check. Voluntary short yields fall */
+		/* helper keeps no tail check. Equality fails closed and floors, */
+		/* so a latency head at the 100us cap never resumes with no */
+		/* extra hold. Voluntary short yields fall */
 		/* through to carry plus adapt, so resume never shadows with */
 		/* no virtual change. */
 		if (!wmiss && have_pred && delta > 0 &&

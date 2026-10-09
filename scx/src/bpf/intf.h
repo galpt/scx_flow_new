@@ -147,8 +147,9 @@ enum flow_consts {
 	/* RED bound of 128us with no knob. Caps the maximum exceeding */
 	/* time, so a global credit at or past this bound reclaims one */
 	/* reject, and a victim cost at or below this bound keeps the */
-	/* newcomer with no swap. The bound caps lateness with no share */
-	/* shaping. */
+	/* newcomer with no swap. A capped latency slice at 100us never */
+	/* passes, so latency never pays as victim. The bound caps */
+	/* lateness with no share shaping. */
 	FLOW_RED_EMAX_NS = 128000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
 	/* for hard tasks only, so critical tasks keep zero tolerance */
@@ -174,12 +175,17 @@ enum flow_consts {
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	FLOW_ADAPT_PROP_SHIFT = 3ULL,
-	/* Latency slice cap of 250us with no knob. Caps the dynamic slice */
+	/* Latency slice cap of 100us with no knob. Caps the dynamic slice */
 	/* plus the carryover plus the adapt step for latency work, so */
-	/* urgent wakeups rotate each quarter quantum with no extra hold. */
+	/* urgent wakeups rotate each tenth quantum with no extra hold. */
 	/* Like fair.c, the cap paces service, unlike rt.c, no fixed */
-	/* priority holds. Clamps with the slice floor plus ceiling. */
-	FLOW_SLICE_LAT_NS = 250000ULL,
+	/* priority holds. Clamps with the slice floor plus ceiling. The */
+	/* cap equals the preempt tail, so a latency head at the cap never */
+	/* passes the tail gate and floors with no resume. Adapt steps cap */
+	/* at 256us then re-clamp here, so one shift never holds past the */
+	/* cap. RED Emax stays at 128us past the cap, so a capped latency */
+	/* slice never pays as victim with no swap. */
+	FLOW_SLICE_LAT_NS = 100000ULL,
 	/* Latency deadline bound of 4ms with no knob. Holds one quarter */
 	/* period, so latency keys order within one quarter period with no */
 	/* extra hold. Like fair.c, the bound paces order, unlike rt.c, no */
@@ -909,7 +915,8 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
  * holds the CPU. An on-time stop with both zero holds the clamped slice.
  * Exceed wins when both hold with no wrap. Virtual time stays untouched,
  * RED never writes the slice, and the caller keeps the carry gate first
- * on the same expiring deadline.
+ * on the same expiring deadline. Latency callers re-clamp the result to
+ * 100us past the 256us step, so one shift never holds past the cap.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
@@ -994,18 +1001,19 @@ static __always_inline u32 flow_carry_for(u64 delta)
  * flow_slice_resume - remaining slice for a preempted head with clamp.
  * @occ_start: segment start in nanos, zero or max falls back to inherit.
  * @now: current time in nanos.
- * @occ_lat: true caps the ceiling at 250us else 1ms.
+ * @occ_lat: true caps the ceiling at 100us else 1ms.
  * @cur: stored slice in nanos, zero inherits the quantum.
  *
  * Keeps occ_end minus now with occ_end at start plus the stored slice,
- * clamped to 10us plus 250us for latency else 1ms, so a preempted head
+ * clamped to 10us plus 100us for latency else 1ms, so a preempted head
  * resumes with its leftover with no extra hold. A bad start plus
  * a saturated end falls back to the inherited slice, while a past
  * end floors to the minimum, so no zero slice runs with wrap-safe order.
  * The TAIL gate lives in the caller as delta plus 100us below cur
  * with history plus no wall miss, so this helper keeps no tail check
  * and only preempt-like early yields resume with no virtual
- * change and no extra map.
+ * change and no extra map. Equality fails closed and floors, so a
+ * latency head at the 100us cap never resumes past the equal tail.
  *
  * Returns: remaining slice else inherited slice on bad start plus end.
  */
@@ -1240,11 +1248,11 @@ static __always_inline bool flow_lat_crit(u64 avg,
 /**
  * flow_slice_lat_clamp - clamp one slice to the latency cap.
  * @slice: stored slice in nanos.
- * @is_lat: true when latency-critical with the 250us cap.
+ * @is_lat: true when latency-critical with the 100us cap.
  *
  * Like fair.c, the cap paces service, unlike rt.c, no fixed priority
- * holds. A latency task keeps the smaller of the slice plus the 250us
- * cap with no knob, so urgent wakeups rotate each quarter quantum. A
+ * holds. A latency task keeps the smaller of the slice plus the 100us
+ * cap with no knob, so urgent wakeups rotate each tenth quantum. A
  * non latency task keeps the slice unchanged with no extra write.
  *
  * Returns: capped slice for latency else @slice.
@@ -1293,7 +1301,7 @@ static __always_inline u64 flow_lat_deadline(u64 now,
  * with quantum-relative bounds plus shifts only plus no divide, so
  * unknown sleep plus clamp plus share fail open with no stall. A
  * predicted burst past one quantum vetoes, a hint period past one
- * quantum vetoes, a short sleep below 250us vetoes, an explicit low
+ * quantum vetoes, a short sleep below 100us vetoes, an explicit low
  * clamp below half vetoes, and a light share below 128 vetoes. All
  * pass keeps latency with no order change.
  *
