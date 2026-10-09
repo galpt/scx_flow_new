@@ -104,6 +104,33 @@ pub fn slice_lat_clamp(slice: u32, is_lat: bool) -> u32 {
     slice
 }
 
+/// Mirror of flow_red_cost in intf.h for host tests.
+/// Costs burst else slice else quantum clamped to 10us plus 1ms, so
+/// the guarantee bounds with no share shaping.
+#[cfg(test)]
+pub fn red_cost(avg: u64, slice: u32) -> u64 {
+    if avg != 0 {
+        if avg < SLICE_MIN_NS {
+            return SLICE_MIN_NS;
+        }
+        if avg > QUANTUM_NS {
+            return QUANTUM_NS;
+        }
+        return avg;
+    }
+    if slice != 0 {
+        let s = slice as u64;
+        if s < SLICE_MIN_NS {
+            return SLICE_MIN_NS;
+        }
+        if s > QUANTUM_NS {
+            return QUANTUM_NS;
+        }
+        return s;
+    }
+    QUANTUM_NS
+}
+
 /// Mirror of flow_lat_deadline in intf.h for host tests.
 /// Takes max 4ms else slice plus 100us with saturation, then adds now
 /// with saturation for ns accuracy with no divide.
@@ -691,6 +718,23 @@ mod tests {
             adapt_prop(500_000, 8_000, 1_600),
             adapt_prop(500_000, 8_000, 0)
         );
+    }
+
+    #[test]
+    /// RED costs the pre-clamp slice with no post-clamp underestimate.
+    fn red_uses_pre_clamp_not_post() {
+        // Fresh 1ms pre-clamp caps to 250us for latency slice.
+        let pre = 1_000_000;
+        let post = slice_lat_clamp(pre, true);
+        assert_eq!(post, 250_000);
+        // RED still costs the 1ms pre-clamp with no underestimate.
+        assert_eq!(red_cost(0, pre), 1_000_000);
+        assert_eq!(red_cost(0, post), 250_000);
+        assert!(red_cost(0, pre) > red_cost(0, post));
+        // Burst wins over slice with the same 10us plus 1ms clamp.
+        assert_eq!(red_cost(900_000, 1_000_000), 900_000);
+        assert_eq!(red_cost(0, 0), QUANTUM_NS);
+        assert_eq!(red_cost(1, 1_000_000), SLICE_MIN_NS);
     }
 
     #[test]
