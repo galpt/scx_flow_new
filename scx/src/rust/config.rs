@@ -116,7 +116,8 @@ pub fn lat_deadline(now: u64, slice: u32) -> u64 {
 
 /// Mirror of flow_lat_crit_ext in intf.h for host tests.
 /// Advisory veto toward batch with quantum-relative bounds plus no
-/// divide, so unknown inputs fail open with no stall.
+/// divide, so unknown sleep plus clamp plus share fail open with no
+/// stall. Newcomers with no history stay batch with probation.
 #[cfg(test)]
 pub fn lat_crit_ext(
     avg: u64,
@@ -126,7 +127,10 @@ pub fn lat_crit_ext(
     uclamp_min: u32,
     eff_w: u32,
 ) -> bool {
-    if avg != 0 {
+    if avg == 0 {
+        return false;
+    }
+    {
         let pred = avg.saturating_add(dev);
         if pred == u64::MAX {
             return false;
@@ -154,6 +158,60 @@ pub fn lat_crit_ext(
         return false;
     }
     true
+}
+
+/// Mirror of flow_lat_crit in intf.h for host tests.
+/// Newcomers with no history stay batch with probation.
+#[cfg(test)]
+pub fn lat_crit(avg: u64, dev: u64) -> bool {
+    if avg == 0 {
+        return false;
+    }
+    let pred = avg.saturating_add(dev);
+    if pred == u64::MAX {
+        return false;
+    }
+    pred <= QUANTUM_NS
+}
+
+/// Mirror of flow_is_lat in intf.h for host tests.
+/// Unifies base plus ext, so RED and slice agree.
+#[cfg(test)]
+pub fn is_lat(
+    avg: u64,
+    dev: u64,
+    hint_us: u32,
+    sleep_ns: u64,
+    uclamp_min: u32,
+    eff_w: u32,
+) -> bool {
+    if !lat_crit(avg, dev) {
+        return false;
+    }
+    lat_crit_ext(avg, dev, hint_us, sleep_ns, uclamp_min, eff_w)
+}
+
+/// Mirror of flow_slice_resume in intf.h for host tests.
+/// Keeps start plus cur leftover clamped to 10us plus 250us else 1ms.
+#[cfg(test)]
+pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
+    let base = if cur == 0 { QUANTUM_NS } else { cur as u64 };
+    if start == 0 || start == u64::MAX {
+        return base as u32;
+    }
+    let end = start.saturating_add(base);
+    if end == u64::MAX {
+        return base as u32;
+    }
+    let rem = if end > now { end - now } else { 0 };
+    let cap = if is_lat { SLICE_LAT_NS } else { QUANTUM_NS };
+    if rem < SLICE_MIN_NS {
+        return SLICE_MIN_NS as u32;
+    }
+    if rem > cap {
+        return cap as u32;
+    }
+    rem as u32
 }
 
 /// Validated scheduling constants.
@@ -573,12 +631,20 @@ mod tests {
     }
 
     #[test]
-    /// Extended latency vetoes batch hints with fail open.
+    /// Extended latency vetoes batch hints with probation.
     fn lat_ext_veto_matches_intf_h() {
-        // Unknown inputs fail open.
-        assert!(lat_crit_ext(0, 0, 0, 0, 0, 0));
+        // Newcomers with no history stay batch with probation.
+        assert!(!lat_crit_ext(0, 0, 0, 0, 0, 0));
+        assert!(!lat_crit(0, 0));
+        assert!(!is_lat(0, 0, 0, 0, 0, 0));
         // Short burst with neutral signals keeps latency.
         assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 128));
+        assert!(lat_crit(100_000, 10_000));
+        assert!(is_lat(100_000, 10_000, 0, 1_000_000, 0, 128));
+        // Unified latency matches base plus ext, so RED agrees.
+        assert!(!is_lat(900_000, 200_000, 0, 1_000_000, 0, 128));
+        assert!(!is_lat(100_000, 10_000, 2000, 1_000_000, 0, 128));
+        assert!(!is_lat(100_000, 10_000, 0, 100_000, 0, 128));
         // Long burst past quantum vetoes.
         assert!(!lat_crit_ext(900_000, 200_000, 0, 1_000_000, 0, 128));
         // Large hint past quantum vetoes.
@@ -593,5 +659,37 @@ mod tests {
         // Light share vetoes, heavy keeps.
         assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 32));
         assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 1024));
+    }
+
+    #[test]
+    /// Resume keeps start plus cur leftover with clamp.
+    fn resume_uses_cur_not_quantum() {
+        // Start plus 500us cur with 400us left keeps 400us batch.
+        assert_eq!(
+            slice_resume(1_000, 1_000 + 100_000, false, 500_000),
+            400_000
+        );
+        // Latency caps the same leftover at 250us.
+        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 500_000), 250_000);
+        // Start plus 250us cur keeps 150us for latency.
+        assert_eq!(
+            slice_resume(0 + 1_000, 1_000 + 100_000, true, 250_000),
+            150_000
+        );
+        // Bad start inherits the stored slice.
+        assert_eq!(slice_resume(0, 1_000, false, 500_000), 500_000);
+        assert_eq!(slice_resume(0, 1_000, true, 500_000), 500_000);
+        // Past end floors to the minimum with no zero slice.
+        assert_eq!(slice_resume(1_000, 1_000 + 600_000, false, 500_000), 10_000);
+    }
+
+    #[test]
+    /// Preempt needs lat arrival against batch owner only.
+    fn preempt_needs_lat_to_batch_only() {
+        let wants = |arr: bool, occ: bool| arr && !occ;
+        assert!(wants(true, false));
+        assert!(!wants(true, true));
+        assert!(!wants(false, false));
+        assert!(!wants(false, true));
     }
 }

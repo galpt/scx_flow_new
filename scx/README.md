@@ -66,7 +66,7 @@ Staleness heals retrain plus fold. Stop feeds average deviation plus credit. Yie
 
 ### Latency
 
-Latency caps the slice at `250us` non-extendable plus the key at now plus max `4ms` else slice plus `100us` with RED on deadline. Arrival preempts only when same-tier latency matches owner else fails closed. Resume keeps leftover clamped to `10us` plus `250us` else `1ms`. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
+Latency caps slice at `250us` plus key at now plus max `4ms` else slice plus `100us` with RED on deadline. Arrival preempts only when lat meets batch owner else fails closed. Resume keeps start plus cur leftover clamped to `10us` plus `250us` else `1ms`. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
 
 ## Code map
 
