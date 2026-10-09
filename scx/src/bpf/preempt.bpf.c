@@ -3,10 +3,11 @@
  * Preempt plus idle kick for the enqueue pass.
  *
  * Holds the strict one kick per wait rule with predictor slack plus
- * lead plus tail plus eligibility. A latency-critical arrival with
- * slack within one quantum leads the occupant by the margin with more
- * than the tail left on the owner, so near ties plus nearly done
- * owners never bounce while one kick per wait stays with no storm.
+ * tier plus lead plus tail plus eligibility. A latency-critical arrival
+ * with slack within one quantum leads the occupant by the margin with
+ * more than the tail left on the owner in the same tier, so near ties
+ * plus nearly done owners never bounce while one kick per wait stays
+ * with no storm. Cross tier pairs fail closed with one skipped count.
  * Every hold counts in preempt skipped with no missing fill. The exiting
  * plus bypass plus tier idle plus preempt paths share this gate with no
  * extra sender. Runs under the
@@ -14,24 +15,30 @@
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-/* True when one arrival strictly preempts with margin plus tail. */
+/* True when one arrival strictly preempts with margin plus tail plus latency. */
 /* The arrival must lead the occupant strictly with the margin also */
 /* strictly before, so near ties never bounce. The owner must have */
 /* started with remaining slice strictly past the tail, so nearly done */
-/* owners finish instead of taking a kick. The enqueue busy path calls */
+/* owners finish instead of taking a kick. Latency gates first with */
+/* same tier only, so cross tier pairs fail closed with one skipped */
+/* count and no kick. The enqueue busy path calls */
 /* this helper after the eligibility gate, so eligibility stays outside */
 /* here with one minimum read per wait. Equal arrivals pace with no */
 /* extra kick by design, so no tie assert runs with no verifier cost. */
 /* No Rust mirror by design, so the kernel stays the single truth. */
 static __always_inline bool flow_preempt_wants(u64 arrival,
-	u64 occupant, u64 now, u64 occ_start)
+	u64 occupant, u64 now, u64 occ_start, bool arr_lat, bool occ_lat)
 {
 	u64 margin;
 	u64 occ_end;
 	u64 tail;
+	if (arr_lat && !occ_lat)
+		return false;
+	if (!arr_lat && occ_lat)
+		return false;
 	if (arrival == 0 || arrival == (u64)~0ULL)
 		return false;
-	if (occupant == 0)
+	if (occupant == 0 || occupant == (u64)~0ULL)
 		return false;
 	if (!flow_time_before(arrival, occupant))
 		return false;
@@ -40,7 +47,7 @@ static __always_inline bool flow_preempt_wants(u64 arrival,
 		return false;
 	if (!flow_time_before(margin, occupant))
 		return false;
-	if (occ_start == 0)
+	if (occ_start == 0 || occ_start == (u64)~0ULL)
 		return false;
 	occ_end = flow_sat_add(occ_start, (u64)FLOW_QUANTUM_NS);
 	if (occ_end == (u64)~0ULL)

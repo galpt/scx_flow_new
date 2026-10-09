@@ -34,10 +34,12 @@
  * global queue use. The exiting plus bypass plus tier idle plus preempt
  * paths form the kick points, so every wait meets at most one kick with
  * no storm. A direct preempt
- * needs predictor slack plus an eligible arrival plus a 100us margin
- * lead with more than 100us still left on the owner, so near ties plus
- * nearly done owners never bounce while one kick per wait stays. The
- * owner paces on a fresh 1ms quantum with no dynamic use.
+ * needs predictor slack plus same tier plus an eligible arrival plus
+ * a 100us margin lead with more than 100us still left on the owner,
+ * so near ties plus nearly done owners never bounce while one kick
+ * per wait stays. The owner paces on a fresh 1ms quantum with no
+ * dynamic use. A preempted wait keeps occ_end minus now clamped to
+ * 10us plus 250us for latency else 1ms with inherit on bad start.
  * Latency-critical slice carryover keeps the unused quantum, so short
  * bursts earn nearer keys. Strict slice writes run here before the key.
  * Fresh waits earn the dynamic remaining clamp, misses hold else floor
@@ -308,42 +310,56 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* A fresh wait clamps the slice to 250us plus caps the key to now */
 	/* plus max 4ms else slice plus 100us via the strict key, while RED */
 	/* stays on the original deadline with no order change. Like fair.c, */
-	/* the cap paces service, unlike rt.c, no fixed priority holds. */
+	/* the cap paces service, unlike rt.c, no fixed priority holds. A */
+	/* preempted wait keeps occ_end minus now clamped to 10us plus */
+	/* 250us for latency else 1ms with inherit on bad start plus end, */
+	/* so the same head resumes with its leftover. */
 	if (!is_reenq) {
-		u64 old_wait = READ_ONCE(tctx->wait_at);
-		u64 lat_sleep = 0;
-		u32 lat_uclamp = 0;
-		u32 lat_task_w = READ_ONCE(tctx->weight);
-		u32 lat_eff = 0;
-		bool lat_base;
-		bool lat_ext;
-		bool is_lat;
-		u32 lat_slice;
-		u64 lat_vt;
-		u64 lat_dl;
-		tctx->wait_at = now;
-		if (old_wait != 0 && flow_time_before(old_wait, now))
-			lat_sleep = now - old_wait;
-		/* No stable uclamp field in this task view, so fail open to */
-		/* zero with no map plus no knob, and the ext helper keeps the */
-		/* veto for callers that thread a real clamp. */
-		lat_uclamp = 0;
-		if (lat_task_w == 0)
-			lat_task_w = (u32)FLOW_WEIGHT_BASE;
-		lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
-		lat_base = flow_lat_crit(avg, dev);
-		lat_ext = flow_lat_crit_ext(avg, dev, hint, lat_sleep,
-		    lat_uclamp, lat_eff);
-		is_lat = lat_base && lat_ext;
-		lat_slice = flow_slice_lat_clamp(flow_slice_for(deadline,
-		    now), is_lat);
-		__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
-		lat_vt = flow_make_fair(tctx, deadline, hint_w);
-		if (is_lat) {
-			lat_dl = flow_lat_deadline(now, lat_slice);
-			vtime = flow_edf_key(lat_vt, lat_dl);
+		if (enq_flags & SCX_ENQ_PREEMPT) {
+			u64 r_start = READ_ONCE(tctx->run_at);
+			u32 r_cur = READ_ONCE(tctx->slice_ns);
+			bool r_lat = flow_lat_crit(avg, dev);
+			u32 r_rem = flow_slice_resume(r_start, now, r_lat,
+			    r_cur);
+			tctx->wait_at = now;
+			__sync_lock_test_and_set(&tctx->slice_ns, r_rem);
+			vtime = flow_make_fair(tctx, deadline, hint_w);
 		} else {
-			vtime = lat_vt;
+			u64 old_wait = READ_ONCE(tctx->wait_at);
+			u64 lat_sleep = 0;
+			u32 lat_uclamp = 0;
+			u32 lat_task_w = READ_ONCE(tctx->weight);
+			u32 lat_eff = 0;
+			bool lat_base;
+			bool lat_ext;
+			bool is_lat;
+			u32 lat_slice;
+			u64 lat_vt;
+			u64 lat_dl;
+			tctx->wait_at = now;
+			if (old_wait != 0 && flow_time_before(old_wait, now))
+				lat_sleep = now - old_wait;
+			/* No stable uclamp field in this task view, so fail open to */
+			/* zero with no map plus no knob, and the ext helper keeps the */
+			/* veto for callers that thread a real clamp. */
+			lat_uclamp = 0;
+			if (lat_task_w == 0)
+				lat_task_w = (u32)FLOW_WEIGHT_BASE;
+			lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
+			lat_base = flow_lat_crit(avg, dev);
+			lat_ext = flow_lat_crit_ext(avg, dev, hint, lat_sleep,
+			    lat_uclamp, lat_eff);
+			is_lat = lat_base && lat_ext;
+			lat_slice = flow_slice_lat_clamp(flow_slice_for(deadline,
+			    now), is_lat);
+			__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
+			lat_vt = flow_make_fair(tctx, deadline, hint_w);
+			if (is_lat) {
+				lat_dl = flow_lat_deadline(now, lat_slice);
+				vtime = flow_edf_key(lat_vt, lat_dl);
+			} else {
+				vtime = lat_vt;
+			}
 		}
 	} else {
 		tctx->wait_at = now;

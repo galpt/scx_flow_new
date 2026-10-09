@@ -249,47 +249,60 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	/* to now plus max 4ms else slice plus 100us via the strict key, */
 	/* while RED stays on the original deadline with no order change. */
 	/* Like fair.c, the cap paces service, unlike rt.c, no fixed */
-	/* priority holds. */
+	/* priority holds. A preempted pinned wait keeps occ_end minus */
+	/* now clamped to 10us plus 250us for latency else 1ms with */
+	/* inherit on bad start plus end, so the same head resumes. */
 	if (pmiss) {
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		pvt = flow_make_fair(tctx, pdl, phint_w);
 	} else if (!is_reenq) {
-		u64 p_old_wait = READ_ONCE(tctx->wait_at);
-		u64 p_sleep = 0;
-		u32 p_uclamp = 0;
-		u32 p_task_w = READ_ONCE(tctx->weight);
-		u32 p_eff = 0;
-		bool p_base;
-		bool p_ext;
-		bool p_is_lat;
-		u32 p_slice;
-		u64 p_vt;
-		u64 p_dl;
-		tctx->wait_at = now;
-		if (p_old_wait != 0 && flow_time_before(p_old_wait, now))
-			p_sleep = now - p_old_wait;
-		/* No stable uclamp field in this task view, so fail open to */
-		/* zero with no map plus no knob, and the ext helper keeps the */
-		/* veto for callers that thread a real clamp. */
-		p_uclamp = 0;
-		if (p_task_w == 0)
-			p_task_w = (u32)FLOW_WEIGHT_BASE;
-		p_eff = flow_task_effective_weight(p_task_w, phint_w);
-		p_base = flow_lat_crit(pavg, pdev);
-		p_ext = flow_lat_crit_ext(pavg, pdev, ph, p_sleep, p_uclamp,
-		    p_eff);
-		p_is_lat = p_base && p_ext;
-		p_slice = flow_slice_lat_clamp(flow_slice_for(pdl, now),
-		    p_is_lat);
-		__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
-		p_vt = flow_make_fair(tctx, pdl, phint_w);
-		if (p_is_lat) {
-			p_dl = flow_lat_deadline(now, p_slice);
-			pvt = flow_edf_key(p_vt, p_dl);
+		if (enq_flags & SCX_ENQ_PREEMPT) {
+			u64 pr_start = READ_ONCE(tctx->run_at);
+			u32 pr_cur = READ_ONCE(tctx->slice_ns);
+			bool pr_lat = flow_lat_crit(pavg, pdev);
+			u32 pr_rem = flow_slice_resume(pr_start, now, pr_lat,
+			    pr_cur);
+			tctx->wait_at = now;
+			__sync_lock_test_and_set(&tctx->slice_ns, pr_rem);
+			pvt = flow_make_fair(tctx, pdl, phint_w);
 		} else {
-			pvt = p_vt;
+			u64 p_old_wait = READ_ONCE(tctx->wait_at);
+			u64 p_sleep = 0;
+			u32 p_uclamp = 0;
+			u32 p_task_w = READ_ONCE(tctx->weight);
+			u32 p_eff = 0;
+			bool p_base;
+			bool p_ext;
+			bool p_is_lat;
+			u32 p_slice;
+			u64 p_vt;
+			u64 p_dl;
+			tctx->wait_at = now;
+			if (p_old_wait != 0 && flow_time_before(p_old_wait, now))
+				p_sleep = now - p_old_wait;
+			/* No stable uclamp field in this task view, so fail open to */
+			/* zero with no map plus no knob, and the ext helper keeps the */
+			/* veto for callers that thread a real clamp. */
+			p_uclamp = 0;
+			if (p_task_w == 0)
+				p_task_w = (u32)FLOW_WEIGHT_BASE;
+			p_eff = flow_task_effective_weight(p_task_w, phint_w);
+			p_base = flow_lat_crit(pavg, pdev);
+			p_ext = flow_lat_crit_ext(pavg, pdev, ph, p_sleep, p_uclamp,
+			    p_eff);
+			p_is_lat = p_base && p_ext;
+			p_slice = flow_slice_lat_clamp(flow_slice_for(pdl, now),
+			    p_is_lat);
+			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
+			p_vt = flow_make_fair(tctx, pdl, phint_w);
+			if (p_is_lat) {
+				p_dl = flow_lat_deadline(now, p_slice);
+				pvt = flow_edf_key(p_vt, p_dl);
+			} else {
+				pvt = p_vt;
+			}
 		}
 	} else {
 		tctx->wait_at = now;

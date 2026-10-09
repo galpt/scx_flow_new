@@ -8,19 +8,24 @@
  * the start once, charges the raw segment to total runtime, advances
  * vruntime by the scaled delta, folds the CPU minimum forward, then
  * feeds the burst predictor average plus deviation from the same delta
- * with shifts, then carries the latency-critical slice up to one quantum
- * clamped to 10us plus 1ms else adapts proportionally by exceed right 3
- * capped 256us shrink on late else slack right 3 capped 256us grow on
- * early with clamp to 10us plus 1ms and no virtual change, then counts one requeue per runnable stop else one
+ * with shifts, then resumes a preempted head with occ_end minus now
+ * clamped to 10us plus 250us for latency else 1ms with inherit on
+ * bad start plus end else carries the latency-critical slice up to one
+ * quantum clamped to 10us plus 1ms else adapts proportionally by exceed
+ * right 3 capped 256us shrink on late else slack right 3 capped 256us
+ * grow on early with clamp to 10us plus 1ms and no virtual change,
+ * then counts one requeue per runnable stop else one
  * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
  * priority holds. C holds burst else slice else quantum with no knob,
  * and V holds weight with zero mapped to 128, so the slice adapts
  * while virtual time stays untouched. A global saved credit at or past
  * 128us reclaims one value ordered reject with positive laxity plus
- * same key or strictly after with one bounded move. A runnable yield
- * before one quantum keeps the unused remainder only when wall time
- * still meets the deadline plus predictor slack holds critical, else
- * the proportional step runs on the same expiring deadline. A wall completion past the deadline counts one
+ * same key or strictly after with one bounded move. A runnable early
+ * yield with delta below slice and no wall miss keeps occ_end minus
+ * now, else a yield before one quantum keeps the unused remainder
+ * only when wall time still meets the deadline plus predictor slack
+ * holds critical, else the proportional step runs on the same expiring
+ * deadline. A wall completion past the deadline counts one
  * miss with no wait and no kick, since the task already left the CPU.
  * Miss plus Term where Term equals completions stay counters only with
  * no queues, so misses plus completions record history with no extra
@@ -216,7 +221,39 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	if (runnable) {
 		u64 exp_dl = READ_ONCE(tctx->deadline);
 		bool wmiss = !flow_deadline_ok(exp_dl, now);
-		if (!wmiss && have_pred && delta > 0 &&
+		u32 pre_cur = READ_ONCE(tctx->slice_ns);
+		/* Same-tier-head resume keeps the leftover when runnable */
+		/* yields early with no wall miss, so a preempted head */
+		/* resumes with occ_end minus now clamped to 10us plus */
+		/* 250us for latency else 1ms with inherit on bad start */
+		/* plus end. Only early yields resume with no virtual */
+		/* change, so slice expiry still paces the rest. */
+		if (!wmiss && delta > 0 && delta < (u64)pre_cur) {
+			u32 rem = flow_slice_resume(start, now, stop_is_lat,
+			    pre_cur);
+			u32 rem_cap = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			__sync_lock_test_and_set(&tctx->slice_ns, rem);
+			tctx->adapt_miss = 0;
+			{
+				u16 sat = READ_ONCE(tctx->adapt_sat);
+				if (rem == (u32)FLOW_SLICE_MIN_NS ||
+				    rem == rem_cap) {
+					if (sat < 0xffffU)
+						tctx->adapt_sat = sat + 1;
+				} else {
+					tctx->adapt_sat = 0;
+				}
+			}
+			{
+				u64 ccost = flow_red_cost(have_pred ? n_avg_keep : 0,
+				    pre_cur);
+				u64 csaved = ccost > delta ? ccost - delta : 0;
+				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
+				    (u32)csaved;
+				tctx->adapt_delta = cs;
+			}
+		} else if (!wmiss && have_pred && delta > 0 &&
 		    delta < (u64)FLOW_QUANTUM_NS &&
 		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
 			u32 carry = flow_carry_for(delta);

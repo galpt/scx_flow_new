@@ -954,6 +954,48 @@ static __always_inline u32 flow_carry_for(u64 delta)
 	return (u32)c;
 }
 /**
+ * flow_slice_resume - remaining slice for a preempted head with clamp.
+ * @occ_start: segment start in nanos, zero or max falls back to inherit.
+ * @now: current time in nanos.
+ * @occ_lat: true caps the ceiling at 250us else 1ms.
+ * @cur: stored slice in nanos, zero inherits the quantum.
+ *
+ * Keeps occ_end minus now with occ_end at start plus 1ms, clamped
+ * to 10us plus 250us for latency else 1ms, so a preempted head
+ * resumes with its leftover with no extra hold. A bad start plus
+ * a saturated end falls back to the inherited slice, while a past
+ * end floors to the minimum, so no zero slice runs with no wrap.
+ * Callers gate on runnable preempted via SCX_ENQ_PREEMPT else delta
+ * below slice with no wall miss, so only early yields resume with
+ * no virtual change and no extra map.
+ *
+ * Returns: remaining slice else inherited slice on bad start plus end.
+ */
+static __always_inline u32 flow_slice_resume(u64 occ_start, u64 now,
+	bool occ_lat, u32 cur)
+{
+	u64 occ_end;
+	u64 rem;
+	u64 cap;
+	if (occ_start == 0 || occ_start == (u64)~0ULL)
+		return flow_slice_inherit(cur);
+	occ_end = flow_sat_add(occ_start, (u64)FLOW_QUANTUM_NS);
+	if (occ_end == (u64)~0ULL)
+		return flow_slice_inherit(cur);
+	if (!flow_time_before(now, occ_end) && now != occ_end)
+		rem = 0;
+	else if (occ_end > now)
+		rem = occ_end - now;
+	else
+		rem = 0;
+	cap = occ_lat ? (u64)FLOW_SLICE_LAT_NS : (u64)FLOW_QUANTUM_NS;
+	if (rem < (u64)FLOW_SLICE_MIN_NS)
+		return (u32)FLOW_SLICE_MIN_NS;
+	if (rem > cap)
+		return (u32)cap;
+	return (u32)rem;
+}
+/**
  * flow_deadline_at - absolute deadline from now plus period.
  * @now: current time in nanos.
  * @period: relative period in nanos.
