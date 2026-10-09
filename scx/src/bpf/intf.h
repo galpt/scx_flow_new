@@ -186,6 +186,12 @@ enum flow_consts {
 	/* cap. RED Emax stays at 128us past the cap, so a capped latency */
 	/* slice never pays as victim with no swap. */
 	FLOW_SLICE_LAT_NS = 100000ULL,
+	/* Latency sleep floor of 20us with no knob. Vetoes only sleeps */
+	/* below this floor toward batch, so the 100us slice cap stays */
+	/* decoupled with no extra hold. Like fair.c, the floor paces */
+	/* service, unlike rt.c, no fixed priority holds. Unknown sleep */
+	/* fails open with no stall. */
+	FLOW_LAT_SLEEP_MIN_NS = 20000ULL,
 	/* Latency deadline bound of 4ms with no knob. Holds one quarter */
 	/* period, so latency keys order within one quarter period with no */
 	/* extra hold. Like fair.c, the bound paces order, unlike rt.c, no */
@@ -1301,8 +1307,10 @@ static __always_inline u64 flow_lat_deadline(u64 now,
  * with quantum-relative bounds plus shifts only plus no divide, so
  * unknown sleep plus clamp plus share fail open with no stall. A
  * predicted burst past one quantum vetoes, a hint period past one
- * quantum vetoes, a short sleep below 100us vetoes, an explicit low
- * clamp below half vetoes, and a light share below 128 vetoes. All
+ * quantum vetoes, a short sleep below 20us vetoes, an explicit low
+ * clamp below half vetoes, and a light share below 128 vetoes. The
+ * sleep floor stays decoupled from the 100us slice cap, so the veto
+ * needs only a short nap with no extra hold. All
  * pass keeps latency with no order change.
  *
  * Returns: true when latency holds, else false for batch.
@@ -1329,7 +1337,7 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
 			return false;
 	}
 	if (sleep_ns != 0) {
-		if (sleep_ns < (u64)FLOW_SLICE_LAT_NS)
+		if (sleep_ns < (u64)FLOW_LAT_SLEEP_MIN_NS)
 			return false;
 	}
 	if (uclamp_min != 0) {

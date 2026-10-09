@@ -52,6 +52,11 @@ pub const ADAPT_PROP_SHIFT: u32 = 3;
 /// stays at 128us past the cap, so a capped latency slice never pays
 /// as victim with no swap.
 pub const SLICE_LAT_NS: u64 = 100_000;
+/// Latency sleep floor in nanos at 20us. Vetoes only sleeps below this
+/// floor toward batch with no knob, so the 100us slice cap stays
+/// decoupled with no extra hold. Like fair.c, the floor paces service
+/// with no fixed priority hold. Unknown sleep fails open with no stall.
+pub const LAT_SLEEP_MIN_NS: u64 = 20_000;
 /// Latency deadline bound in nanos at 4ms. Holds one quarter period.
 pub const D_LAT_NS: u64 = 4_000_000;
 /// Preempt margin in nanos at 100us. Leads the occupant key, so near
@@ -154,9 +159,11 @@ pub fn lat_deadline(now: u64, slice: u32) -> u64 {
 }
 
 /// Mirror of flow_lat_crit_ext in intf.h for host tests.
-/// Advisory veto toward batch with quantum-relative bounds plus no
-/// divide, so unknown sleep plus clamp plus share fail open with no
-/// stall. Newcomers with no history stay batch with probation.
+/// Advisory veto toward batch with 20us sleep floor plus
+/// quantum-relative bounds plus no divide, so unknown sleep plus clamp
+/// plus share fail open with no stall. The sleep floor stays decoupled
+/// from the 100us slice cap. Newcomers with no history stay batch with
+/// probation.
 #[cfg(test)]
 pub fn lat_crit_ext(
     avg: u64,
@@ -187,7 +194,7 @@ pub fn lat_crit_ext(
             return false;
         }
     }
-    if sleep_ns != 0 && sleep_ns < SLICE_LAT_NS {
+    if sleep_ns != 0 && sleep_ns < LAT_SLEEP_MIN_NS {
         return false;
     }
     if uclamp_min != 0 && uclamp_min < 512 {
@@ -387,7 +394,9 @@ impl Config {
     /// capped 256us on late else grows by slack right 3 capped 256us on
     /// early with clamp to 10us plus 1ms and no virtual change. Latency
     /// caps the slice at 100us plus the key at now plus max 4ms else
-    /// slice plus 100us with RED on the original deadline.
+    /// slice plus 100us with RED on the original deadline. Latency
+    /// vetoes sleeps below 20us toward batch with unknown open, so the
+    /// sleep floor stays decoupled from the slice cap.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -527,6 +536,18 @@ impl Config {
         }
         if crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS as u64 != SLICE_LAT_NS {
             bail!("slice lat header bad");
+        }
+        if LAT_SLEEP_MIN_NS != 20_000 {
+            bail!("lat sleep bad");
+        }
+        if LAT_SLEEP_MIN_NS < PRED_MIN_NS {
+            bail!("lat sleep floor bad");
+        }
+        if LAT_SLEEP_MIN_NS >= SLICE_LAT_NS {
+            bail!("lat sleep over slice bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_LAT_SLEEP_MIN_NS as u64 != LAT_SLEEP_MIN_NS {
+            bail!("lat sleep header bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64 != D_LAT_NS {
             bail!("d lat header bad");
@@ -707,11 +728,16 @@ mod tests {
         assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
         assert_eq!(ADAPT_PROP_SHIFT, 3);
         assert_eq!(SLICE_LAT_NS, 100_000);
+        assert_eq!(LAT_SLEEP_MIN_NS, 20_000);
         assert_eq!(D_LAT_NS, 4_000_000);
         assert_eq!(D_LAT_NS, PERIOD_NS / 4);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS as u64,
             SLICE_LAT_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_LAT_SLEEP_MIN_NS as u64,
+            LAT_SLEEP_MIN_NS
         );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64, D_LAT_NS);
         assert_eq!(
@@ -771,7 +797,10 @@ mod tests {
     fn lat_bounds_match_intf_h() {
         const _: () = assert!(SLICE_LAT_NS > SLICE_MIN_NS);
         const _: () = assert!(SLICE_LAT_NS < QUANTUM_NS);
+        const _: () = assert!(LAT_SLEEP_MIN_NS < SLICE_LAT_NS);
+        const _: () = assert!(LAT_SLEEP_MIN_NS >= PRED_MIN_NS);
         assert_eq!(SLICE_LAT_NS, 100_000);
+        assert_eq!(LAT_SLEEP_MIN_NS, 20_000);
         assert_eq!(D_LAT_NS, 4_000_000);
         assert_eq!(D_LAT_NS, PERIOD_NS / 4);
         // Non latency keeps the slice.
@@ -801,17 +830,24 @@ mod tests {
         // Unified latency matches base plus ext, so RED agrees.
         assert!(!is_lat(900_000, 200_000, 0, 1_000_000, 0, 128));
         assert!(!is_lat(100_000, 10_000, 2000, 1_000_000, 0, 128));
-        assert!(!is_lat(100_000, 10_000, 0, 50_000, 0, 128));
+        assert!(!is_lat(100_000, 10_000, 0, 10_000, 0, 128));
+        assert!(is_lat(100_000, 10_000, 0, 30_000, 0, 128));
+        assert!(is_lat(100_000, 10_000, 0, 50_000, 0, 128));
         assert!(is_lat(100_000, 10_000, 0, 150_000, 0, 128));
+        assert!(is_lat(100_000, 10_000, 0, 0, 0, 128));
         // Long burst past quantum vetoes.
         assert!(!lat_crit_ext(900_000, 200_000, 0, 1_000_000, 0, 128));
         // Large hint past quantum vetoes.
         assert!(!lat_crit_ext(100_000, 10_000, 2000, 1_000_000, 0, 128));
         // Small hint keeps latency.
         assert!(lat_crit_ext(100_000, 10_000, 500, 1_000_000, 0, 128));
-        // Short sleep below 100us vetoes, sleep at 150us keeps.
-        assert!(!lat_crit_ext(100_000, 10_000, 0, 50_000, 0, 128));
+        // Short sleep below 20us vetoes, 30us plus 50us plus 150us keep,
+        // unknown sleep fails open with no stall.
+        assert!(!lat_crit_ext(100_000, 10_000, 0, 10_000, 0, 128));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 30_000, 0, 128));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 50_000, 0, 128));
         assert!(lat_crit_ext(100_000, 10_000, 0, 150_000, 0, 128));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 0, 0, 128));
         // Explicit low clamp vetoes, unknown passes.
         assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 100, 128));
         assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 1024, 128));
