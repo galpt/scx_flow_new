@@ -64,6 +64,10 @@ Mask wins bound inversion with fail open. Each move checks the CPU mask and pick
 
 Staleness heals retrain plus fold. Stop feeds average deviation plus credit. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `256us` on late else grow `slack>>3` capped `256us` on early. Misses stay lifetime, adapt window. Reclaim `128us` fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
 
+### Latency
+
+Latency caps the slice at `250us` non-extendable plus the key at now plus max `4ms` else slice plus `100us` with RED on deadline. Arrival preempts only when same-tier latency matches owner else fails closed. Resume keeps leftover clamped to `10us` plus `250us` else `1ms`. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
+
 ## Code map
 
 - Rules live in `src/bpf/intf.h` with RED plus adapt helpers.
