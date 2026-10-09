@@ -37,7 +37,8 @@
  * an eligible lat arrival against a batch owner plus a 100us margin
  * lead with more than 100us still left on the owner, so near ties plus
  * nearly done owners never bounce while one kick per wait stays. The
- * owner paces on a fresh 1ms quantum with no dynamic use. A preempted
+ * owner paces on start plus inherit cur with no fresh quantum, so the
+ * tail tracks the stored slice. A preempted
  * head resumes via lifecycle only with start plus cur clamped to 10us
  * plus 250us for latency else 1ms with inherit on bad start plus tail
  * plus history, so the same head resumes with its leftover.

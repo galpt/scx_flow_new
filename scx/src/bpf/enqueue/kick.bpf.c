@@ -201,6 +201,7 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	struct flow_task_ctx *octx;
 	u64 occ_deadline;
 	u64 occ_run_at;
+	u32 occ_cur;
 	u64 o_avg;
 	u64 o_dev;
 	bool occ_lat = false;
@@ -258,6 +259,7 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	}
 	occ_deadline = READ_ONCE(octx->deadline);
 	occ_run_at = READ_ONCE(octx->run_at);
+	occ_cur = READ_ONCE(octx->slice_ns);
 	/* Occupant latency uses the unified base plus ext with the same */
 	/* occupant lookup, so RED and preempt agree with probation. */
 	o_avg = (u64)READ_ONCE(octx->avg_ns);
@@ -315,8 +317,9 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	}
 	/* An urgent latency-critical arrival leads by 100us with more than */
 	/* 100us left on the owner under the strict key, so near ties plus */
-	/* nearly done owners never bounce. The owner paces on a fresh 1ms */
-	/* quantum with no dynamic use. The shared preempt helper holds the */
+	/* nearly done owners never bounce. The owner paces on start plus */
+	/* inherit cur with no fresh quantum, so the tail tracks the stored */
+	/* slice. The shared preempt helper holds the */
 	/* margin plus tail with wrap safe order, so only a */
 	/* truly earlier arrival with work left preempts at once with one */
 	/* kick per wait. Equal or later arrivals pace at slice expiry with */
@@ -326,7 +329,7 @@ static __noinline void flow_enqueue_kick(struct task_struct *p,
 	/* helper checks lead plus tail only with slack gated */
 	/* just before it. */
 	if (!flow_preempt_ok(vtime, occ_deadline, now,
-	    occ_run_at, arr_lat, occ_lat)) {
+	    occ_run_at, occ_cur, arr_lat, occ_lat)) {
 		bpf_task_release(trusted);
 		bpf_rcu_read_unlock();
 		flow_count_preempt_skip();

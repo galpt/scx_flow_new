@@ -222,7 +222,7 @@ pub fn sleep_ns(old_wait: u64, now: u64, avg: u64) -> u64 {
 
 /// Mirror of flow_preempt_ok in preempt.bpf.c for host tests.
 /// Needs lat arrival against batch owner with 100us margin lead plus
-/// 100us tail left on the stored quantum, so near ties plus nearly
+/// 100us tail left on start plus inherit cur, so near ties plus nearly
 /// done owners never bounce with wrap safety.
 #[cfg(test)]
 pub fn preempt_ok(
@@ -230,6 +230,7 @@ pub fn preempt_ok(
     occ_key: u64,
     now: u64,
     occ_run_at: u64,
+    occ_cur: u32,
     arr_lat: bool,
     occ_lat: bool,
 ) -> bool {
@@ -255,7 +256,12 @@ pub fn preempt_ok(
     if occ_run_at == 0 || occ_run_at == u64::MAX {
         return false;
     }
-    let occ_end = occ_run_at.saturating_add(QUANTUM_NS);
+    let base = if occ_cur == 0 {
+        QUANTUM_NS
+    } else {
+        occ_cur as u64
+    };
+    let occ_end = occ_run_at.saturating_add(base);
     if occ_end == u64::MAX {
         return false;
     }
@@ -780,25 +786,33 @@ mod tests {
     fn preempt_needs_lat_to_batch_only() {
         // Arrival 1ms leads occupant 2ms with margin plus tail held.
         assert!(preempt_ok(
-            1_000_000, 2_000_000, 500_000, 500_000, true, false
+            1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, true, false
         ));
         // Lat to lat plus batch to batch plus batch to lat fail closed.
         assert!(!preempt_ok(
-            1_000_000, 2_000_000, 500_000, 500_000, true, true
+            1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, true, true
         ));
         assert!(!preempt_ok(
-            1_000_000, 2_000_000, 500_000, 500_000, false, false
+            1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, false, false
         ));
         assert!(!preempt_ok(
-            1_000_000, 2_000_000, 500_000, 500_000, false, true
+            1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, false, true
         ));
         // Near tie within 100us margin never bounces.
         assert!(!preempt_ok(
-            1_950_000, 2_000_000, 500_000, 500_000, true, false
+            1_950_000, 2_000_000, 500_000, 500_000, 1_000_000, true, false
         ));
         // Nearly done owner with tail left fails closed.
         assert!(!preempt_ok(
-            1_000_000, 2_000_000, 1_450_000, 500_000, true, false
+            1_000_000, 2_000_000, 1_450_000, 500_000, 1_000_000, true, false
+        ));
+        // Zero cur inherits quantum, so the same lead still wins.
+        assert!(preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, 0, true, false
+        ));
+        // Short 50us cur leaves no tail, so the kick fails closed.
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, 50_000, true, false
         ));
     }
 }
