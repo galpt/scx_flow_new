@@ -101,6 +101,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	u64 n_avg_keep = 0;
 	u64 n_dev_keep = 0;
 	bool have_pred = false;
+	bool stop_is_lat = false;
 	cpu = scx_bpf_task_cpu(p);
 	if (!flow_entry_ok(cpu, p, 0)) {
 		flow_gate_reject();
@@ -181,6 +182,37 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* wait at enqueue. Misses count lifetime with saturation, adapt */
 	/* miss counts the consecutive wall miss streak with saturation, so */
 	/* promotion latches on lifetime while adapt tracks the window. */
+	/* Latency recompute per stop with no stored bit, so 72B holds. */
+	/* Sleep stays unknown with fail open, while hint plus uclamp plus */
+	/* effective share veto toward batch with quantum-relative bounds. */
+	/* Like fair.c, the test paces service, unlike rt.c, no fixed */
+	/* priority holds. Carry caps at 250us plus adapt caps at 250us with */
+	/* no grow for latency, so urgent bursts rotate each quarter quantum. */
+	stop_is_lat = false;
+	{
+		u64 s_avg = have_pred ? n_avg_keep :
+		    (u64)READ_ONCE(tctx->avg_ns);
+		u64 s_dev = have_pred ? n_dev_keep :
+		    (u64)READ_ONCE(tctx->dev_ns);
+		u32 s_hint = READ_ONCE(tctx->hint_us);
+		u32 s_task_w = READ_ONCE(tctx->weight);
+		u32 s_hint_w = READ_ONCE(tctx->hint_w);
+		u32 s_eff;
+		u32 s_uclamp = 0;
+		bool s_base;
+		bool s_ext;
+		if (s_task_w == 0)
+			s_task_w = (u32)FLOW_WEIGHT_BASE;
+		s_eff = flow_task_effective_weight(s_task_w, s_hint_w);
+		/* No stable uclamp field in this task view, so fail open to */
+		/* zero with no map plus no knob, and the ext helper keeps the */
+		/* veto for callers that thread a real clamp. */
+		s_uclamp = 0;
+		s_base = flow_lat_crit(s_avg, s_dev);
+		s_ext = flow_lat_crit_ext(s_avg, s_dev, s_hint, 0, s_uclamp,
+		    s_eff);
+		stop_is_lat = s_base && s_ext;
+	}
 	if (runnable) {
 		u64 exp_dl = READ_ONCE(tctx->deadline);
 		bool wmiss = !flow_deadline_ok(exp_dl, now);
@@ -188,12 +220,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		    delta < (u64)FLOW_QUANTUM_NS &&
 		    flow_lat_crit(n_avg_keep, n_dev_keep)) {
 			u32 carry = flow_carry_for(delta);
+			u32 lat_cap = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			carry = flow_slice_lat_clamp(carry, stop_is_lat);
 			__sync_lock_test_and_set(&tctx->slice_ns, carry);
 			tctx->adapt_miss = 0;
 			{
 				u16 sat = READ_ONCE(tctx->adapt_sat);
 				if (carry == (u32)FLOW_SLICE_MIN_NS ||
-				    carry == (u32)FLOW_QUANTUM_NS) {
+				    carry == lat_cap) {
 					if (sat < 0xffffU)
 						tctx->adapt_sat = sat + 1;
 				} else {
@@ -221,6 +256,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 					slack = exp_dl - now;
 			}
 			nxt = flow_adapt_prop(cur, exceed, slack);
+			if (stop_is_lat) {
+				if (nxt > cur)
+					nxt = cur;
+				nxt = flow_slice_lat_clamp(nxt, true);
+			}
 			__sync_lock_test_and_set(&tctx->slice_ns, nxt);
 			if (m) {
 				u16 mm = READ_ONCE(tctx->adapt_miss);
@@ -231,8 +271,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			}
 			{
 				u16 sat = READ_ONCE(tctx->adapt_sat);
+				u32 sat_hi = stop_is_lat ?
+				    (u32)FLOW_SLICE_LAT_NS :
+				    (u32)FLOW_QUANTUM_NS;
 				if (nxt == (u32)FLOW_SLICE_MIN_NS ||
-				    nxt == (u32)FLOW_QUANTUM_NS) {
+				    nxt == sat_hi) {
 					if (sat < 0xffffU)
 						tctx->adapt_sat = sat + 1;
 				} else {
@@ -265,6 +308,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 				slack = exp_dl - now;
 		}
 		nxt = flow_adapt_prop(cur, exceed, slack);
+		if (stop_is_lat) {
+			if (nxt > cur)
+				nxt = cur;
+			nxt = flow_slice_lat_clamp(nxt, true);
+		}
 		u64 ccost;
 		u64 csaved;
 		__sync_lock_test_and_set(&tctx->slice_ns, nxt);
@@ -277,8 +325,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		}
 		{
 			u16 sat = READ_ONCE(tctx->adapt_sat);
+			u32 sat_hi = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
 			if (nxt == (u32)FLOW_SLICE_MIN_NS ||
-			    nxt == (u32)FLOW_QUANTUM_NS) {
+			    nxt == sat_hi) {
 				if (sat < 0xffffU)
 					tctx->adapt_sat = sat + 1;
 			} else {

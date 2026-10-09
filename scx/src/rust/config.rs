@@ -43,6 +43,11 @@ pub const ADAPT_SHRINK_NS: u64 = 128_000;
 pub const ADAPT_PROP_MAX_NS: u64 = 256_000;
 /// Proportional adapt shift at 3. Maps exceed plus slack to one eighth.
 pub const ADAPT_PROP_SHIFT: u32 = 3;
+/// Latency slice cap in nanos at 250us. Caps the dynamic slice plus
+/// the carryover plus the adapt step for latency work.
+pub const SLICE_LAT_NS: u64 = 250_000;
+/// Latency deadline bound in nanos at 4ms. Holds one quarter period.
+pub const D_LAT_NS: u64 = 4_000_000;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
@@ -89,6 +94,68 @@ pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
     clamp(base)
 }
 
+/// Mirror of flow_slice_lat_clamp in intf.h for host tests.
+/// Caps the slice at 250us for latency with no knob.
+#[cfg(test)]
+pub fn slice_lat_clamp(slice: u32, is_lat: bool) -> u32 {
+    if is_lat && (slice as u64) > SLICE_LAT_NS {
+        return SLICE_LAT_NS as u32;
+    }
+    slice
+}
+
+/// Mirror of flow_lat_deadline in intf.h for host tests.
+/// Takes max 4ms else slice plus 100us with saturation, then adds now
+/// with saturation for ns accuracy with no divide.
+#[cfg(test)]
+pub fn lat_deadline(now: u64, slice: u32) -> u64 {
+    let need = (slice as u64).saturating_add(100_000);
+    let bound = if need > D_LAT_NS { need } else { D_LAT_NS };
+    now.saturating_add(bound)
+}
+
+/// Mirror of flow_lat_crit_ext in intf.h for host tests.
+/// Advisory veto toward batch with quantum-relative bounds plus no
+/// divide, so unknown inputs fail open with no stall.
+#[cfg(test)]
+pub fn lat_crit_ext(
+    avg: u64,
+    dev: u64,
+    hint_us: u32,
+    sleep_ns: u64,
+    uclamp_min: u32,
+    eff_w: u32,
+) -> bool {
+    if avg != 0 {
+        let pred = avg.saturating_add(dev);
+        if pred == u64::MAX {
+            return false;
+        }
+        if pred > QUANTUM_NS {
+            return false;
+        }
+    }
+    if hint_us != 0 {
+        let h = hint_us as u64;
+        if h > 18_446_744_073_709_551 {
+            return false;
+        }
+        if h * 1000 > QUANTUM_NS {
+            return false;
+        }
+    }
+    if sleep_ns != 0 && sleep_ns < SLICE_LAT_NS {
+        return false;
+    }
+    if uclamp_min != 0 && uclamp_min < 512 {
+        return false;
+    }
+    if eff_w != 0 && eff_w < WEIGHT_BASE {
+        return false;
+    }
+    true
+}
+
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -128,7 +195,9 @@ impl Config {
     /// Stats hold 17 counters at 136B with preempt kicks plus skipped
     /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
     /// capped 256us on late else grows by slack right 3 capped 256us on
-    /// early with clamp to 10us plus 1ms and no virtual change.
+    /// early with clamp to 10us plus 1ms and no virtual change. Latency
+    /// caps the slice at 250us plus the key at now plus max 4ms else
+    /// slice plus 100us with RED on the original deadline.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -241,6 +310,30 @@ impl Config {
         }
         if ADAPT_PROP_MAX_NS >= QUANTUM_NS {
             bail!("prop max over ceiling bad");
+        }
+        if SLICE_LAT_NS != 250_000 {
+            bail!("slice lat bad");
+        }
+        if D_LAT_NS != 4_000_000 {
+            bail!("d lat bad");
+        }
+        if SLICE_LAT_NS <= SLICE_MIN_NS {
+            bail!("slice lat floor bad");
+        }
+        if SLICE_LAT_NS >= QUANTUM_NS {
+            bail!("slice lat over ceiling bad");
+        }
+        if D_LAT_NS != PERIOD_NS / 4 {
+            bail!("d lat period bad");
+        }
+        if D_LAT_NS >= PERIOD_NS {
+            bail!("d lat over period bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS as u64 != SLICE_LAT_NS {
+            bail!("slice lat header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64 != D_LAT_NS {
+            bail!("d lat header bad");
         }
         if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 136 {
             bail!("stats size bad");
@@ -415,6 +508,14 @@ mod tests {
         );
         assert_eq!(ADAPT_PROP_MAX_NS, 256_000);
         assert_eq!(ADAPT_PROP_SHIFT, 3);
+        assert_eq!(SLICE_LAT_NS, 250_000);
+        assert_eq!(D_LAT_NS, 4_000_000);
+        assert_eq!(D_LAT_NS, PERIOD_NS / 4);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS as u64,
+            SLICE_LAT_NS
+        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64, D_LAT_NS);
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
             136
@@ -448,5 +549,49 @@ mod tests {
             adapt_prop(500_000, 8_000, 1_600),
             adapt_prop(500_000, 8_000, 0)
         );
+    }
+
+    #[test]
+    /// Latency slice clamps at 250us plus deadline at max 4ms.
+    fn lat_bounds_match_intf_h() {
+        assert_eq!(SLICE_LAT_NS, 250_000);
+        assert_eq!(D_LAT_NS, 4_000_000);
+        assert!(SLICE_LAT_NS > SLICE_MIN_NS);
+        assert!(SLICE_LAT_NS < QUANTUM_NS);
+        assert_eq!(D_LAT_NS, PERIOD_NS / 4);
+        // Non latency keeps the slice.
+        assert_eq!(slice_lat_clamp(1_000_000, false), 1_000_000);
+        // Latency caps at 250us.
+        assert_eq!(slice_lat_clamp(1_000_000, true), 250_000);
+        assert_eq!(slice_lat_clamp(100_000, true), 100_000);
+        // Deadline floors at 4ms plus adds slice plus 100us.
+        assert_eq!(lat_deadline(0, 250_000), 4_000_000);
+        assert_eq!(lat_deadline(1_000, 1_000_000), 1_000 + 4_000_000);
+        assert_eq!(lat_deadline(0, 5_000_000), 5_100_000);
+        // Saturates on wrap with ns accuracy.
+        assert_eq!(lat_deadline(u64::MAX - 1_000, 250_000), u64::MAX);
+    }
+
+    #[test]
+    /// Extended latency vetoes batch hints with fail open.
+    fn lat_ext_veto_matches_intf_h() {
+        // Unknown inputs fail open.
+        assert!(lat_crit_ext(0, 0, 0, 0, 0, 0));
+        // Short burst with neutral signals keeps latency.
+        assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 128));
+        // Long burst past quantum vetoes.
+        assert!(!lat_crit_ext(900_000, 200_000, 0, 1_000_000, 0, 128));
+        // Large hint past quantum vetoes.
+        assert!(!lat_crit_ext(100_000, 10_000, 2000, 1_000_000, 0, 128));
+        // Small hint keeps latency.
+        assert!(lat_crit_ext(100_000, 10_000, 500, 1_000_000, 0, 128));
+        // Short sleep below 250us vetoes.
+        assert!(!lat_crit_ext(100_000, 10_000, 0, 100_000, 0, 128));
+        // Explicit low clamp vetoes, unknown passes.
+        assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 100, 128));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 1024, 128));
+        // Light share vetoes, heavy keeps.
+        assert!(!lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 32));
+        assert!(lat_crit_ext(100_000, 10_000, 0, 1_000_000, 0, 1024));
     }
 }

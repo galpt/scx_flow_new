@@ -174,6 +174,17 @@ enum flow_consts {
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	FLOW_ADAPT_PROP_SHIFT = 3ULL,
+	/* Latency slice cap of 250us with no knob. Caps the dynamic slice */
+	/* plus the carryover plus the adapt step for latency work, so */
+	/* urgent wakeups rotate each quarter quantum with no extra hold. */
+	/* Like fair.c, the cap paces service, unlike rt.c, no fixed */
+	/* priority holds. Clamps with the slice floor plus ceiling. */
+	FLOW_SLICE_LAT_NS = 250000ULL,
+	/* Latency deadline bound of 4ms with no knob. Holds one quarter */
+	/* period, so latency keys order within one quarter period with no */
+	/* extra hold. Like fair.c, the bound paces order, unlike rt.c, no */
+	/* fixed priority holds. */
+	FLOW_D_LAT_NS = 4000000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine plus overflow plus steal drain in fair order through the */
@@ -1143,6 +1154,101 @@ static __always_inline bool flow_lat_crit(u64 avg,
 	if (pred == (u64)~0ULL)
 		return false;
 	return pred <= (u64)FLOW_QUANTUM_NS;
+}
+/**
+ * flow_slice_lat_clamp - clamp one slice to the latency cap.
+ * @slice: stored slice in nanos.
+ * @is_lat: true when latency-critical with the 250us cap.
+ *
+ * Like fair.c, the cap paces service, unlike rt.c, no fixed priority
+ * holds. A latency task keeps the smaller of the slice plus the 250us
+ * cap with no knob, so urgent wakeups rotate each quarter quantum. A
+ * non latency task keeps the slice unchanged with no extra write.
+ *
+ * Returns: capped slice for latency else @slice.
+ */
+static __always_inline u32 flow_slice_lat_clamp(u32 slice,
+	bool is_lat)
+{
+	if (is_lat && slice > (u32)FLOW_SLICE_LAT_NS)
+		return (u32)FLOW_SLICE_LAT_NS;
+	return slice;
+}
+/**
+ * flow_lat_deadline - latency deadline from now plus slice plus margin.
+ * @now: current time in nanos.
+ * @slice: clamped slice in nanos.
+ *
+ * Takes the larger of the 4ms bound plus slice plus 100us with
+ * saturation, then adds now with saturation, so a huge slice never
+ * wraps to the front and ns accuracy holds with no micro truncation.
+ * Like fair.c, the bound paces order, unlike rt.c, no fixed priority
+ * holds. Uses no divide plus no map plus no knob.
+ *
+ * Returns: absolute latency deadline in nanos.
+ */
+static __always_inline u64 flow_lat_deadline(u64 now,
+	u32 slice)
+{
+	u64 need = flow_sat_add((u64)slice,
+	    (u64)FLOW_PREEMPT_MARGIN_NS);
+	u64 bound = need > (u64)FLOW_D_LAT_NS ? need :
+	    (u64)FLOW_D_LAT_NS;
+	return flow_sat_add(now, bound);
+}
+/**
+ * flow_lat_crit_ext - extended latency test with advisory veto.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @hint_us: flat period hint in micros, zero for no hint.
+ * @sleep_ns: sleep time in nanos, zero for unknown.
+ * @uclamp_min: uclamp minimum 0 to 1024, zero for unknown.
+ * @eff_w: effective share, zero for unknown.
+ *
+ * Like fair.c, the test paces service, unlike rt.c, no fixed priority
+ * holds. Each signal vetoes only toward batch with quantum-relative
+ * bounds plus shifts only plus no divide, so unknown inputs fail open
+ * with no stall. A predicted burst past one quantum vetoes, a hint
+ * period past one quantum vetoes, a short sleep below 250us vetoes, an
+ * explicit low clamp below half vetoes, and a light share below 128
+ * vetoes. All pass keeps latency with no order change.
+ *
+ * Returns: true when latency holds, else false for batch.
+ */
+static __always_inline bool flow_lat_crit_ext(u64 avg,
+	u64 dev, u32 hint_us, u64 sleep_ns, u32 uclamp_min,
+	u32 eff_w)
+{
+	u64 pred;
+	u64 hint_ns;
+	if (avg != 0) {
+		pred = flow_sat_add(avg, dev);
+		if (pred == (u64)~0ULL)
+			return false;
+		if (pred > (u64)FLOW_QUANTUM_NS)
+			return false;
+	}
+	if (hint_us != 0) {
+		u64 h = (u64)hint_us;
+		if (h > 18446744073709551ULL)
+			return false;
+		hint_ns = h * 1000ULL;
+		if (hint_ns > (u64)FLOW_QUANTUM_NS)
+			return false;
+	}
+	if (sleep_ns != 0) {
+		if (sleep_ns < (u64)FLOW_SLICE_LAT_NS)
+			return false;
+	}
+	if (uclamp_min != 0) {
+		if (uclamp_min < (u32)FLOW_CPU_PERF_HALF)
+			return false;
+	}
+	if (eff_w != 0) {
+		if (eff_w < (u32)FLOW_WEIGHT_BASE)
+			return false;
+	}
+	return true;
 }
 /**
  * flow_fallback_deadline - fallback deadline from now plus hint.

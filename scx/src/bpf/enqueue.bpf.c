@@ -304,26 +304,65 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	}
 	deadline = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, deadline);
-	tctx->wait_at = now;
-	/* Strict slice before the key with no stale reuse. A fresh wait */
-	/* earns the dynamic remaining clamp from 10us to 1ms, while a */
-	/* slice rotation holds the stored charge else inherits the quantum */
-	/* on zero, so the virtual deadline tracks the same charge the key */
-	/* sorts. The remaining time feeds the slice plus slack only with */
-	/* the sort staying the earlier of deadline plus virtual time. */
-	if (!is_reenq)
-		__sync_lock_test_and_set(&tctx->slice_ns,
-		    flow_slice_for(deadline, now));
-	else
+	/* Latency recompute per enqueue with no stored bit, so 72B holds. */
+	/* A fresh wait clamps the slice to 250us plus caps the key to now */
+	/* plus max 4ms else slice plus 100us via the strict key, while RED */
+	/* stays on the original deadline with no order change. Like fair.c, */
+	/* the cap paces service, unlike rt.c, no fixed priority holds. */
+	if (!is_reenq) {
+		u64 old_wait = READ_ONCE(tctx->wait_at);
+		u64 lat_sleep = 0;
+		u32 lat_uclamp = 0;
+		u32 lat_task_w = READ_ONCE(tctx->weight);
+		u32 lat_eff = 0;
+		bool lat_base;
+		bool lat_ext;
+		bool is_lat;
+		u32 lat_slice;
+		u64 lat_vt;
+		u64 lat_dl;
+		tctx->wait_at = now;
+		if (old_wait != 0 && flow_time_before(old_wait, now))
+			lat_sleep = now - old_wait;
+		/* No stable uclamp field in this task view, so fail open to */
+		/* zero with no map plus no knob, and the ext helper keeps the */
+		/* veto for callers that thread a real clamp. */
+		lat_uclamp = 0;
+		if (lat_task_w == 0)
+			lat_task_w = (u32)FLOW_WEIGHT_BASE;
+		lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
+		lat_base = flow_lat_crit(avg, dev);
+		lat_ext = flow_lat_crit_ext(avg, dev, hint, lat_sleep,
+		    lat_uclamp, lat_eff);
+		is_lat = lat_base && lat_ext;
+		lat_slice = flow_slice_lat_clamp(flow_slice_for(deadline,
+		    now), is_lat);
+		__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
+		lat_vt = flow_make_fair(tctx, deadline, hint_w);
+		if (is_lat) {
+			lat_dl = flow_lat_deadline(now, lat_slice);
+			vtime = flow_edf_key(lat_vt, lat_dl);
+		} else {
+			vtime = lat_vt;
+		}
+	} else {
+		tctx->wait_at = now;
+		/* Strict slice before the key with no stale reuse. A slice */
+		/* rotation holds the stored charge else inherits the quantum */
+		/* on zero, so the virtual deadline tracks the same charge the */
+		/* key sorts. The remaining time feeds the slice plus slack only */
+		/* with the sort staying the earlier of deadline plus virtual */
+		/* time. */
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-	/* Strict EDF key from the virtual deadline plus the EDF deadline. */
-	/* Heavy tasks earn a near virtual time while light tasks earn a */
-	/* far one with one divide, so the earlier of the two paces order */
-	/* with latency still capped by the deadline. The effective share */
-	/* stacks task times hint over 128, so cgroup plus task weights */
-	/* shape fairness together. */
-	vtime = flow_make_fair(tctx, deadline, hint_w);
+		/* Strict EDF key from the virtual deadline plus the EDF */
+		/* deadline. Heavy tasks earn a near virtual time while light */
+		/* tasks earn a far one with one divide, so the earlier of the */
+		/* two paces order with latency still capped by the deadline. */
+		/* The effective share stacks task times hint over 128, so */
+		/* cgroup plus task weights shape fairness together. */
+		vtime = flow_make_fair(tctx, deadline, hint_w);
+	}
 	/* RED admission with residual plus exceed plus tolerance used only */
 	/* here. A zero exceed plus a critical exceed plus a newcomer that */
 	/* fails the victim test admits at once, else the newcomer rejects */
