@@ -853,13 +853,15 @@ static __always_inline u64 flow_reject_key(u32 value)
  * flow_adapt_up - widen the slice by 64us with clamp.
  * @cur: stored slice in nanos, zero inherits the quantum.
  *
+ * Frozen, unused after the proportional law, kept for wire compat only
+ * with no caller, so old headers still decode with no behavior change.
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. Adds 64us with saturation, then clamps to 10us plus 1ms,
  * so a miss earns room with no wrap. Virtual time stays untouched.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
-static __always_inline u32 flow_adapt_up(u32 cur)
+static __always_inline __attribute__((unused)) u32 flow_adapt_up(u32 cur)
 {
 	u64 s = (u64)flow_slice_inherit(cur);
 	s = flow_sat_add(s, (u64)FLOW_ADAPT_GROW_NS);
@@ -873,13 +875,15 @@ static __always_inline u32 flow_adapt_up(u32 cur)
  * flow_adapt_down - narrow the slice by 128us with clamp.
  * @cur: stored slice in nanos, zero inherits the quantum.
  *
+ * Frozen, unused after the proportional law, kept for wire compat only
+ * with no caller, so old headers still decode with no behavior change.
  * Like fair.c, the step tracks load, unlike rt.c, no fixed priority
  * holds. Subtracts 128us with floor at 10us, then clamps to 1ms, so
  * a hit returns room with no stall. Virtual time stays untouched.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
-static __always_inline u32 flow_adapt_down(u32 cur)
+static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
 {
 	u64 s = (u64)flow_slice_inherit(cur);
 	if (s <= (u64)FLOW_ADAPT_SHRINK_NS)
