@@ -314,7 +314,7 @@ pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
     if end == u64::MAX {
         return base as u32;
     }
-    let rem = if end > now { end - now } else { 0 };
+    let rem = end.saturating_sub(now);
     let cap = if is_lat { SLICE_LAT_NS } else { QUANTUM_NS };
     if rem < SLICE_MIN_NS {
         return SLICE_MIN_NS as u32;
@@ -740,10 +740,10 @@ mod tests {
     #[test]
     /// Latency slice clamps at 250us plus deadline at max 4ms.
     fn lat_bounds_match_intf_h() {
+        const _: () = assert!(SLICE_LAT_NS > SLICE_MIN_NS);
+        const _: () = assert!(SLICE_LAT_NS < QUANTUM_NS);
         assert_eq!(SLICE_LAT_NS, 250_000);
         assert_eq!(D_LAT_NS, 4_000_000);
-        assert!(SLICE_LAT_NS > SLICE_MIN_NS);
-        assert!(SLICE_LAT_NS < QUANTUM_NS);
         assert_eq!(D_LAT_NS, PERIOD_NS / 4);
         // Non latency keeps the slice.
         assert_eq!(slice_lat_clamp(1_000_000, false), 1_000_000);
@@ -814,10 +814,7 @@ mod tests {
         // Latency caps the same leftover at 250us.
         assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 500_000), 250_000);
         // Start plus 250us cur keeps 150us for latency.
-        assert_eq!(
-            slice_resume(0 + 1_000, 1_000 + 100_000, true, 250_000),
-            150_000
-        );
+        assert_eq!(slice_resume(1_000, 1_000 + 100_000, true, 250_000), 150_000);
         // Bad start inherits the stored slice.
         assert_eq!(slice_resume(0, 1_000, false, 500_000), 500_000);
         assert_eq!(slice_resume(0, 1_000, true, 500_000), 500_000);
