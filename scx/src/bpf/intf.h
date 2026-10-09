@@ -1001,7 +1001,7 @@ static __always_inline u32 flow_carry_for(u64 delta)
  * clamped to 10us plus 250us for latency else 1ms, so a preempted head
  * resumes with its leftover with no extra hold. A bad start plus
  * a saturated end falls back to the inherited slice, while a past
- * end floors to the minimum, so no zero slice runs with no wrap.
+ * end floors to the minimum, so no zero slice runs with wrap-safe order.
  * The TAIL gate lives in the caller as delta plus 100us below cur
  * with history plus no wall miss, so this helper keeps no tail check
  * and only preempt-like early yields resume with no virtual
@@ -1024,7 +1024,7 @@ static __always_inline u32 flow_slice_resume(u64 occ_start, u64 now,
 		return flow_slice_inherit(cur);
 	if (!flow_time_before(now, occ_end) && now != occ_end)
 		rem = 0;
-	else if (occ_end > now)
+	else if (flow_time_before(now, occ_end))
 		rem = occ_end - now;
 	else
 		rem = 0;

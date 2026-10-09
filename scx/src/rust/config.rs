@@ -48,6 +48,12 @@ pub const ADAPT_PROP_SHIFT: u32 = 3;
 pub const SLICE_LAT_NS: u64 = 250_000;
 /// Latency deadline bound in nanos at 4ms. Holds one quarter period.
 pub const D_LAT_NS: u64 = 4_000_000;
+/// Preempt margin in nanos at 100us. Leads the occupant key, so near
+/// ties never bounce with no knob.
+pub const PREEMPT_MARGIN_NS: u64 = 100_000;
+/// Preempt tail in nanos at 100us. Holds the owner leftover, so nearly
+/// done owners finish with no knob.
+pub const PREEMPT_TAIL_NS: u64 = 100_000;
 
 /// Default fixed slice in nanos.
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
@@ -132,11 +138,11 @@ pub fn red_cost(avg: u64, slice: u32) -> u64 {
 }
 
 /// Mirror of flow_lat_deadline in intf.h for host tests.
-/// Takes max 4ms else slice plus 100us with saturation, then adds now
+/// Takes max 4ms else slice plus margin with saturation, then adds now
 /// with saturation for ns accuracy with no divide.
 #[cfg(test)]
 pub fn lat_deadline(now: u64, slice: u32) -> u64 {
-    let need = (slice as u64).saturating_add(100_000);
+    let need = (slice as u64).saturating_add(PREEMPT_MARGIN_NS);
     let bound = if need > D_LAT_NS { need } else { D_LAT_NS };
     now.saturating_add(bound)
 }
@@ -273,7 +279,7 @@ pub fn preempt_ok(
     if !time_before(arr_key, occ_key) {
         return false;
     }
-    let margin = arr_key.saturating_add(100_000);
+    let margin = arr_key.saturating_add(PREEMPT_MARGIN_NS);
     if margin == u64::MAX {
         return false;
     }
@@ -292,7 +298,7 @@ pub fn preempt_ok(
     if occ_end == u64::MAX {
         return false;
     }
-    let tail = now.saturating_add(100_000);
+    let tail = now.saturating_add(PREEMPT_TAIL_NS);
     if tail == u64::MAX {
         return false;
     }
@@ -303,7 +309,8 @@ pub fn preempt_ok(
 }
 
 /// Mirror of flow_slice_resume in intf.h for host tests.
-/// Keeps start plus cur leftover clamped to 10us plus 250us else 1ms.
+/// Keeps start plus cur leftover clamped to 10us plus 250us else 1ms
+/// with wrap-safe order, so a wrapped clock never reads as leftover.
 #[cfg(test)]
 pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
     let base = if cur == 0 { QUANTUM_NS } else { cur as u64 };
@@ -314,7 +321,13 @@ pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
     if end == u64::MAX {
         return base as u32;
     }
-    let rem = end.saturating_sub(now);
+    let rem = if !time_before(now, end) && now != end {
+        0
+    } else if time_before(now, end) {
+        end.wrapping_sub(now)
+    } else {
+        0
+    };
     let cap = if is_lat { SLICE_LAT_NS } else { QUANTUM_NS };
     if rem < SLICE_MIN_NS {
         return SLICE_MIN_NS as u32;
@@ -422,11 +435,17 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64 != HINT_MAX {
             bail!("hint header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != 100_000 {
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != PREEMPT_MARGIN_NS {
             bail!("margin bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != 100_000 {
+        if PREEMPT_MARGIN_NS != 100_000 {
+            bail!("margin bounds bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != PREEMPT_TAIL_NS {
             bail!("tail bad");
+        }
+        if PREEMPT_TAIL_NS != 100_000 {
+            bail!("tail bounds bad");
         }
         if crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64 != 2_000_000 {
             bail!("lag bound bad");
@@ -645,12 +664,14 @@ mod tests {
         );
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64,
-            100_000
+            PREEMPT_MARGIN_NS
         );
+        assert_eq!(PREEMPT_MARGIN_NS, 100_000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64,
-            100_000
+            PREEMPT_TAIL_NS
         );
+        assert_eq!(PREEMPT_TAIL_NS, 100_000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
             RED_EMAX_NS
@@ -820,6 +841,8 @@ mod tests {
         assert_eq!(slice_resume(0, 1_000, true, 500_000), 500_000);
         // Past end floors to the minimum with no zero slice.
         assert_eq!(slice_resume(1_000, 1_000 + 600_000, false, 500_000), 10_000);
+        // Saturated end near wrap inherits with no wrap to front.
+        assert_eq!(slice_resume(u64::MAX - 10, 100, false, 500_000), 500_000);
     }
 
     #[test]
