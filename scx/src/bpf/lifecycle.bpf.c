@@ -222,8 +222,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		/* wall miss, so only preempt heads with more than 100us left */
 		/* resume with occ start plus cur clamped to 10us plus 250us */
 		/* for latency else 1ms with inherit on bad start plus end. */
-		/* Voluntary short yields fall through to carry plus adapt, so */
-		/* resume never shadows with no virtual change. */
+		/* The TAIL gate is delta plus 100us below cur here, so the */
+		/* helper keeps no tail check. Voluntary short yields fall */
+		/* through to carry plus adapt, so resume never shadows with */
+		/* no virtual change. */
 		if (!wmiss && have_pred && delta > 0 &&
 		    flow_sat_add(delta, (u64)FLOW_PREEMPT_TAIL_NS) <
 		    (u64)pre_cur) {

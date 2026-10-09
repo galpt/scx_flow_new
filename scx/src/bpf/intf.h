@@ -995,8 +995,9 @@ static __always_inline u32 flow_carry_for(u64 delta)
  * resumes with its leftover with no extra hold. A bad start plus
  * a saturated end falls back to the inherited slice, while a past
  * end floors to the minimum, so no zero slice runs with no wrap.
- * Callers gate on runnable early yield with tail plus history and no
- * wall miss, so only preempt-like early yields resume with no virtual
+ * The TAIL gate lives in the caller as delta plus 100us below cur
+ * with history plus no wall miss, so this helper keeps no tail check
+ * and only preempt-like early yields resume with no virtual
  * change and no extra map.
  *
  * Returns: remaining slice else inherited slice on bad start plus end.
