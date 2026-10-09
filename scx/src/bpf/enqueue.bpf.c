@@ -336,8 +336,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* preempted head resumes via lifecycle only with no slice rewrite */
 	/* here, so the stored leftover stays with one charge in stopping. */
 	/* Sleep isolates the true gap as now minus wait minus burst, so */
-	/* queue plus run never masquerade as sleep. In-tier keys cap at */
-	/* now plus one period, so far keys never starve past the bound. */
+	/* queue plus run never masquerade as sleep. Intentional: in-tier */
+	/* keys cap at now plus one period, so far keys never starve past */
+	/* the bound with no extra queue. */
 	if (!is_reenq) {
 		u64 old_wait = READ_ONCE(tctx->wait_at);
 		u64 lat_sleep = flow_sleep_ns(old_wait, now, avg);

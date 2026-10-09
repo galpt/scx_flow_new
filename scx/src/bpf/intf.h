@@ -308,8 +308,9 @@ struct flow_hint {
 /* for overload, and the snapshot counts live pids for the on CPU gauge. Miss */
 /* plus Term where Term equals completions stay counters only with no queues, */
 /* so misses plus completions record history with no extra queue. Preempt kicks */
-/* count busy preempts sent, and preempt skipped counts suppressed preempts held */
-/* by margin plus tail plus eligibility. Counters run with no knob and no fixed */
+/* count busy preempts sent, and preempt skipped intentionally counts every */
+/* suppressed hold by margin plus tail plus eligibility with no missing fill. */
+/* Counters run with no knob and no fixed */
 /* priority. */
 struct flow_sched_stats {
 	u64 on_cpu;
@@ -1378,9 +1379,11 @@ static __always_inline u64 flow_fallback_deadline(u64 now,
  * @deadline: absolute deadline in nanos, zero for no order.
  * @now: current time in nanos.
  *
- * A zero deadline means no order yet, so the check skips. A time that
- * falls before or on the deadline passes, so only a strictly later
- * time counts a miss with wrap safety.
+ * Intentional: a zero deadline means no order yet, so the check skips
+ * with no count. A time that falls before or on the deadline passes,
+ * so only a strictly later time counts a miss with wrap safety. Miss
+ * counts stay lifetime with saturation, so promotion latches with no
+ * windowed decay.
  *
  * Returns: true when missed, else false.
  */

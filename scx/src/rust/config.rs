@@ -856,4 +856,18 @@ mod tests {
             1_000_000, 2_000_000, 500_000, 500_000, 50_000, true, false
         ));
     }
+
+    #[test]
+    /// Miss plus skip plus period stays intentional with no drift.
+    fn miss_skip_period_are_intentional() {
+        // Misses stay lifetime: newcomers with no history stay batch.
+        assert!(!is_lat(0, 0, 0, 0, 0, 0));
+        // Skips count every hold: lat to lat fails closed by design.
+        assert!(!preempt_ok(
+            1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, true, true
+        ));
+        // Period caps in-tier keys at now plus one period by design.
+        assert_eq!(D_LAT_NS, PERIOD_NS / 4);
+        assert_eq!(PERIOD_NS, 16_000_000);
+    }
 }
