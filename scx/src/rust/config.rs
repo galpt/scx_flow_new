@@ -295,16 +295,17 @@ pub fn ml_grad_s32(g: i64) -> i32 {
 }
 
 /// Mirror of flow_red_cost in intf.h for host tests.
-/// Costs burst else slice else quantum clamped to 10us plus 1ms, so the
-/// guarantee holds without shaping shares.
+/// Costs burst else slice else quantum clamped to 10us plus 20ms, so the
+/// guarantee holds without shaping shares plus throughput never
+/// underestimates past the quantum.
 #[cfg(test)]
 pub fn red_cost(avg: u64, slice: u32) -> u64 {
     if avg != 0 {
         if avg < SLICE_MIN_NS {
             return SLICE_MIN_NS;
         }
-        if avg > QUANTUM_NS {
-            return QUANTUM_NS;
+        if avg > SLICE_MAX_NS {
+            return SLICE_MAX_NS;
         }
         return avg;
     }
@@ -313,8 +314,8 @@ pub fn red_cost(avg: u64, slice: u32) -> u64 {
         if s < SLICE_MIN_NS {
             return SLICE_MIN_NS;
         }
-        if s > QUANTUM_NS {
-            return QUANTUM_NS;
+        if s > SLICE_MAX_NS {
+            return SLICE_MAX_NS;
         }
         return s;
     }
@@ -1110,10 +1111,15 @@ mod tests {
         assert_eq!(red_cost(0, pre), 1_000_000);
         assert_eq!(red_cost(0, post), 100_000);
         assert!(red_cost(0, pre) > red_cost(0, post));
-        // Burst wins over slice with the same 10us plus 1ms clamp.
+        // Burst wins over slice with the same 10us plus 20ms clamp.
         assert_eq!(red_cost(900_000, 1_000_000), 900_000);
         assert_eq!(red_cost(0, 0), QUANTUM_NS);
         assert_eq!(red_cost(1, 1_000_000), SLICE_MIN_NS);
+        // Throughput bursts past 1ms keep room to 20ms with no cap.
+        assert_eq!(red_cost(5_000_000, 0), 5_000_000);
+        assert_eq!(red_cost(0, 5_000_000), 5_000_000);
+        assert_eq!(red_cost(30_000_000, 0), SLICE_MAX_NS);
+        assert_eq!(red_cost(0, 30_000_000), SLICE_MAX_NS);
     }
 
     #[test]
@@ -1310,6 +1316,13 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64,
             PERIOD_NS
         );
+        // Fresh waits cap the tier at 1ms, so bulk still rotates.
+        let bulk = classify_tier(6_000_000, 0, false);
+        assert_eq!(bulk, SLICE_MAX_NS);
+        assert_eq!(bulk.min(QUANTUM_NS as u32), QUANTUM_NS as u32);
+        let audio = classify_tier(40_000, 10_000, false);
+        assert_eq!(audio, SLICE_ULL_NS);
+        assert!(audio < QUANTUM_NS as u32);
     }
 
     #[test]

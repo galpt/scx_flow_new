@@ -804,25 +804,28 @@ static __always_inline u32 flow_slice_miss_hold(u32 cur)
  * @avg: burst average in nanos, zero for no history.
  * @slice: stored slice in nanos, zero for no history.
  *
- * The cost bounds the guarantee with no share shaping. A burst average wins when present, else the stored slice,
- * else the 1ms quantum, so C tracks recent runs with no table walk.
+ * The cost bounds the guarantee with no share shaping. A burst average
+ * wins when present, else the stored slice, else the 1ms quantum, so C
+ * tracks recent runs with no table walk. Caps at the 20ms slice max,
+ * so a throughput burst never underestimates past the 1ms quantum
+ * with no share shaping.
  *
- * Returns: cost in nanos from 10us to 1ms.
+ * Returns: cost in nanos from 10us to 20ms.
  */
 static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
 {
 	if (avg) {
 		if (avg < (u64)FLOW_SLICE_MIN_NS)
 			return (u64)FLOW_SLICE_MIN_NS;
-		if (avg > (u64)FLOW_QUANTUM_NS)
-			return (u64)FLOW_QUANTUM_NS;
+		if (avg > (u64)FLOW_SLICE_MAX_NS)
+			return (u64)FLOW_SLICE_MAX_NS;
 		return avg;
 	}
 	if (slice) {
 		if ((u64)slice < (u64)FLOW_SLICE_MIN_NS)
 			return (u64)FLOW_SLICE_MIN_NS;
-		if ((u64)slice > (u64)FLOW_QUANTUM_NS)
-			return (u64)FLOW_QUANTUM_NS;
+		if ((u64)slice > (u64)FLOW_SLICE_MAX_NS)
+			return (u64)FLOW_SLICE_MAX_NS;
 		return (u64)slice;
 	}
 	return (u64)FLOW_QUANTUM_NS;
@@ -1366,18 +1369,15 @@ static __always_inline u32 flow_slice_lat_clamp(u32 slice,
  * keeps a tight tier while a ragged burst holds margin. Critical work
  * plus a prediction at or below 50us earns the ULL ceiling, then 100us
  * plus 500us plus 1ms plus 5ms bound LL plus MLL plus NL plus ENL, else
- * the 20ms ceiling holds throughput.
- *
- * Host-test mirror only at 4.8.13 without a BPF slice caller: BPF slice
- * selection uses the dynamic remaining clamp plus the 100us latency
- * clamp, so this helper shapes no slice here. Wiring to slice selection
- * stays deferred without an extra map, and host tests keep the kernel
- * and the host agreed. Six latency ceilings name burst sizes, while
- * five dispatch tiers name queues, so the counts differ by design.
+ * the 20ms ceiling holds throughput. Fresh waits cap the dynamic slice
+ * by this ceiling capped at 1ms, so audio plus UI plus IPC plus desktop
+ * pace tightly with no extra hold, while bulk still rotates each
+ * quantum. Six latency ceilings name burst sizes apart from five
+ * dispatch tiers.
  *
  * Returns: tier ceiling in nanos from 50us to 20ms.
  */
-static __always_inline __attribute__((unused)) u32 flow_classify_latency_tier(u64 avg, u64 dev,
+static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
 	bool is_crit)
 {
 	u64 pred = flow_sat_add(avg, dev);

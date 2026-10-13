@@ -70,7 +70,7 @@ Latency caps slice at `100us` plus key at now plus max `4ms` else slice plus `10
 
 ### Tiers
 
-Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with a `20ms` ceiling under an `80ms` period. Predicted burst maps avg plus dev to the ceiling with critical forced to `50us`, so audio plus UI plus IPC plus desktop plus bulk work hold room without starving. Six latency ceilings name burst sizes apart from five dispatch tiers. Tier helper stays host-test mirror only without a BPF slice caller; BPF slices use dynamic remaining plus `100us` latency clamp. Like fair.c, tiers pace service with no fixed hold. See `src/bpf/intf.h` plus `src/rust/config.rs`.
+Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with a `20ms` ceiling under an `80ms` period. Predicted burst maps avg plus dev to the ceiling with critical forced to `50us`, so audio plus UI plus IPC plus desktop plus bulk work hold room without starving. Six latency ceilings name burst sizes apart from five dispatch tiers. Fresh waits cap the dynamic slice by the tier capped at `1ms`, so small bursts pace tightly while bulk still rotates each quantum. Like fair.c, tiers pace service with no fixed hold. See `src/bpf/intf.h` plus `src/rust/config.rs`.
 
 ### Learning
 
