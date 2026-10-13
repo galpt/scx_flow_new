@@ -1626,4 +1626,103 @@ static __always_inline u32 flow_wrap_idx(u64 base, u32 n)
 		return (u32)(base & ((u64)n - 1ULL));
 	return (u32)(base % (u64)n);
 }
+/**
+ * flow_ml_cap_burst - cap burst input for the online model.
+ * @v: raw burst in nanos.
+ *
+ * Caps at the 1ms quantum, so a huge burst never saturates the dot
+ * product to the error clip on every step. Keeps the fixed point
+ * multiply in range with no wrap, so one train step still moves
+ * small with shifts only.
+ *
+ * Returns: capped burst in nanos from 0 to 1ms.
+ */
+static __always_inline u64 flow_ml_cap_burst(u64 v)
+{
+	if (v > (u64)FLOW_QUANTUM_NS)
+		return (u64)FLOW_QUANTUM_NS;
+	return v;
+}
+/**
+ * flow_ml_cap_lag - cap lag input for the online model.
+ * @v: raw lag in nanos as a signed bound.
+ *
+ * Caps at plus or minus the 1ms quantum, so a stale lag never
+ * saturates the dot product with no storm. Keeps the sign with
+ * no divide, so the correction still tracks direction.
+ *
+ * Returns: capped lag from minus 1ms to 1ms.
+ */
+static __always_inline s32 flow_ml_cap_lag(s32 v)
+{
+	s32 bound = (s32)FLOW_QUANTUM_NS;
+	if (v > bound)
+		return bound;
+	if (v < -bound)
+		return -bound;
+	return v;
+}
+/**
+ * flow_ml_cap_w - cap share input for the online model.
+ * @w: effective share from 1 to 16384.
+ *
+ * Caps at the top bound, so a huge share never saturates the dot
+ * product with no wrap. Keeps the neutral 128 plus range with
+ * no extra map, so heavy shares still read heavy.
+ *
+ * Returns: capped share from 1 to 16384.
+ */
+static __always_inline u32 flow_ml_cap_w(u32 w)
+{
+	if (w < (u32)FLOW_WEIGHT_MIN)
+		return (u32)FLOW_WEIGHT_MIN;
+	if (w > (u32)FLOW_WEIGHT_MAX)
+		return (u32)FLOW_WEIGHT_MAX;
+	return w;
+}
+/**
+ * flow_ml_grad_s32 - clamp one gradient into s32 range.
+ * @g: raw gradient in s64.
+ *
+ * Clamps to plus or minus 32767, so the cast to s32 never truncates
+ * with no wrap. Keeps one train step small with no storm, so the
+ * weight clamp below stays best effort with no tear.
+ *
+ * Returns: clamped gradient from minus 32767 to 32767.
+ */
+static __always_inline s32 flow_ml_grad_s32(s64 g)
+{
+	if (g > 32767)
+		return 32767;
+	if (g < -32767)
+		return -32767;
+	return (s32)g;
+}
+/**
+ * flow_ml_clamp_one - clamp one weight with CAS.
+ * @addr: weight cell to clamp, null drops.
+ *
+ * Reads once then swaps only when past plus or minus 524288, so a
+ * concurrent fetch and add win keeps the winner with no lost clamp.
+ * Retries the swap once on a lost race, then leaves the next train
+ * to fold the bound with no stall. Runs with no lock, so the verifier
+ * stays small.
+ */
+static __always_inline void flow_ml_clamp_one(s32 *addr)
+{
+	s32 cur;
+	s32 nxt;
+	s32 old;
+	if (!addr)
+		return;
+	cur = READ_ONCE(*addr);
+	if (cur > (s32)FLOW_ML_WEIGHT_BOUND)
+		nxt = (s32)FLOW_ML_WEIGHT_BOUND;
+	else if (cur < -((s32)FLOW_ML_WEIGHT_BOUND))
+		nxt = -((s32)FLOW_ML_WEIGHT_BOUND);
+	else
+		return;
+	old = __sync_val_compare_and_swap(addr, cur, nxt);
+	(void)old;
+}
 #endif

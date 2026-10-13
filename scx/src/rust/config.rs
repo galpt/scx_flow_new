@@ -230,8 +230,8 @@ pub fn sgd_clip_err(err: i64) -> i64 {
 }
 
 /// Mirror of the SGD weight clamp in ml/online_sgd.bpf.c for host tests.
-/// Clamps each weight to plus or minus 524288 best effort, so one step
-/// never wraps with saturation.
+/// Clamps each weight to plus or minus 524288 with CAS, so one step
+/// never wraps with no lost clamp.
 #[cfg(test)]
 pub fn sgd_clip_weight(w: i32) -> i32 {
     if w > ML_WEIGHT_BOUND {
@@ -241,6 +241,57 @@ pub fn sgd_clip_weight(w: i32) -> i32 {
         return -ML_WEIGHT_BOUND;
     }
     w
+}
+
+/// Mirror of flow_ml_cap_burst in intf.h for host tests.
+/// Caps at the 1ms quantum, so a huge burst never saturates the dot.
+#[cfg(test)]
+pub fn ml_cap_burst(v: u64) -> u64 {
+    if v > QUANTUM_NS {
+        return QUANTUM_NS;
+    }
+    v
+}
+
+/// Mirror of flow_ml_cap_lag in intf.h for host tests.
+/// Caps at plus or minus the 1ms quantum with sign kept.
+#[cfg(test)]
+pub fn ml_cap_lag(v: i32) -> i32 {
+    let bound = QUANTUM_NS as i32;
+    if v > bound {
+        return bound;
+    }
+    if v < -bound {
+        return -bound;
+    }
+    v
+}
+
+/// Mirror of flow_ml_cap_w in intf.h for host tests.
+/// Caps the share at the top bound with no wrap.
+#[cfg(test)]
+pub fn ml_cap_w(w: u32) -> u32 {
+    if w < WEIGHT_MIN {
+        return WEIGHT_MIN;
+    }
+    if w > WEIGHT_MAX {
+        return WEIGHT_MAX;
+    }
+    w
+}
+
+/// Mirror of flow_ml_grad_s32 in intf.h for host tests.
+/// Clamps the gradient to plus or minus 32767, so the s32 cast never
+/// truncates with no wrap.
+#[cfg(test)]
+pub fn ml_grad_s32(g: i64) -> i32 {
+    if g > 32767 {
+        return 32767;
+    }
+    if g < -32767 {
+        return -32767;
+    }
+    g as i32
 }
 
 /// Mirror of flow_red_cost in intf.h for host tests.
@@ -1314,6 +1365,26 @@ mod tests {
         assert_eq!(sgd_clip_weight(-600_000), -524_288);
         assert_eq!(sgd_clip_weight(i32::MAX), 524_288);
         assert_eq!(sgd_clip_weight(i32::MIN), -524_288);
+    }
+
+    #[test]
+    /// ML caps keep the dot product in range with no truncate.
+    fn ml_caps_match_intf_h() {
+        assert_eq!(ml_cap_burst(500), 500);
+        assert_eq!(ml_cap_burst(1_000_000), 1_000_000);
+        assert_eq!(ml_cap_burst(20_000_000), 1_000_000);
+        assert_eq!(ml_cap_lag(500), 500);
+        assert_eq!(ml_cap_lag(-500), -500);
+        assert_eq!(ml_cap_lag(5_000_000), 1_000_000);
+        assert_eq!(ml_cap_lag(-5_000_000), -1_000_000);
+        assert_eq!(ml_cap_w(1), 1);
+        assert_eq!(ml_cap_w(128), 128);
+        assert_eq!(ml_cap_w(0), 1);
+        assert_eq!(ml_cap_w(100_000), 16_384);
+        assert_eq!(ml_grad_s32(100), 100);
+        assert_eq!(ml_grad_s32(-100), -100);
+        assert_eq!(ml_grad_s32(100_000), 32767);
+        assert_eq!(ml_grad_s32(-100_000), -32767);
     }
 
     #[test]
