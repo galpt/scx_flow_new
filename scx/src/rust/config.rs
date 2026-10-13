@@ -194,7 +194,7 @@ pub fn slice_lat_clamp(slice: u32, is_lat: bool) -> u32 {
 /// tier while ragged bursts hold margin with no wrap. Critical forces
 /// ULL, then 50us plus 100us plus 500us plus 1ms plus 5ms bound ULL
 /// plus LL plus MLL plus NL plus ENL, else 20ms holds throughput.
-/// Host-test mirror only at 4.8.13 with no BPF slice caller.
+/// Host-test mirror only at 4.8.14 with no BPF slice caller.
 #[cfg(test)]
 pub fn classify_tier(avg: u64, dev: u64, is_crit: bool) -> u32 {
     let pred = avg.saturating_add(dev);

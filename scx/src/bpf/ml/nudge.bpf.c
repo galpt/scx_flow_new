@@ -4,16 +4,17 @@
  *
  * Holds the inference dot product that maps task features through the
  * global online model to one capped correction with integer shifts
- * only. The score sums avg plus dev plus vlag plus sleep plus eff_w
- * times their weights with FP_SHIFT 8 plus bias, then clamps to plus
- * or minus 250us, so one nudge never holds past one quarter quantum.
- * Each saturation counts one clamped event with no wrap, so the
- * snapshot tracks how often the model hits its outer. ML shapes the
- * fair key that drives admit plus drop plus kick plus placement with
- * PRIQ only plus outer safety still checked. A missing row or a null
- * task fails closed to zero, so the deterministic shift-3 EMA baseline
- * owns deadline math. Runs with shifts plus 64-bit multiplies, so the
- * verifier stays small.
+ * only. The score sums burst capped avg plus dev plus sleep at the
+ * quantum plus direct lag plus share times their weights with FP_SHIFT
+ * 8 plus bias, then clamps to plus or minus 250us, so one nudge never
+ * holds past one quarter quantum. Each saturation counts one clamped
+ * event with no wrap, so the snapshot tracks how often the model hits
+ * its outer. ML shapes the fair key that drives tier plus kick with
+ * PRIQ only plus outer safety still checked, while placement tests
+ * the deadline plus drain. Accuracy stays observability-only with no
+ * closed-loop gate. A missing row or a null task fails closed to zero,
+ * so the deterministic shift-3 EMA baseline owns deadline math. Runs
+ * with shifts plus 64-bit multiplies, so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -23,18 +24,23 @@
  * @sleep_ns: sleep time in nanos from the caller wrap-safe helper.
  * @eff_w: effective share from task times hint over 128.
  *
- * Forms the fixed point score plus bias with FP_SHIFT 8, reads the
+ * Forms the fixed point score plus bias with FP_SHIFT 8 over burst
+ * capped inputs at the quantum plus direct lag plus share, reads the
  * stored max clamp with fail closed to 250us when the row holds zero
  * or past 250us, then clamps the score to that bound with one clamped
- * count on saturation. Train caps inputs at the quantum plus clamps
- * gradients, so weights stay small with no wrap, while this infer keeps
- * the original shifts with the 250us bound holding saturation with no
- * extra branch. A cross-task row stays global by design with the bound
- * plus fail closed keeping one task from holding another past one
- * quarter quantum. The shaped fair key drives placement plus kick with
- * outer margin plus tail still checked, so ML owns the input with
- * bounds. Like fair.c, the nudge paces order, unlike rt.c, no fixed
- * priority holds.
+ * count on saturation. Burst caps keep a huge avg plus dev plus sleep
+ * from saturating the score on every call, so train plus infer agree
+ * where it matters with no wrap while lag stays within plus or minus
+ * 2ms via the lag bound plus share stays within 1 to 16384 via the
+ * effective helper with no extra cap. Three burst caps keep the
+ * enqueue verifier under one million with no extra branch past the
+ * bound. A cross-task row stays global by design with the bound plus
+ * fail closed keeping one task from holding another past one quarter
+ * quantum. The shaped fair key drives tier plus kick with outer margin
+ * plus tail still checked, while placement tests the deadline, so ML
+ * shapes order with bounds and stays observability-only on accuracy.
+ * Like fair.c, the nudge paces order, unlike rt.c, no fixed priority
+ * holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
  * copy. Called from the enqueue path; returns zero when state missing.
@@ -49,6 +55,11 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	struct flow_online_model *m;
 	s64 score = 0;
 	s64 max_nudge;
+	u64 c_avg;
+	u64 c_dev;
+	s32 c_lag;
+	u64 c_sleep;
+	u32 c_w;
 
 	if (!tctx)
 		return 0;
@@ -57,15 +68,25 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	if (!m)
 		return 0;
 
-	score += ((s64)(READ_ONCE(tctx->avg_ns) >> 4) *
+	/* Burst caps at the quantum match train, so infer never saturates */
+	/* past the train range on huge inputs. Lag stays within plus or */
+	/* minus 2ms via the lag bound plus share stays within 1 to 16384 */
+	/* via the effective helper, so no extra cap keeps the verifier */
+	/* under one million with train plus infer agreeing on bursts. */
+	c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
+	c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
+	c_lag = READ_ONCE(tctx->vlag);
+	c_sleep = flow_ml_cap_burst(sleep_ns);
+	c_w = eff_w;
+	score += ((s64)(c_avg >> 4) *
 	    (s64)READ_ONCE(m->w_avg)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)(READ_ONCE(tctx->dev_ns) >> 4) *
+	score += ((s64)(c_dev >> 4) *
 	    (s64)READ_ONCE(m->w_dev)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)READ_ONCE(tctx->vlag) *
+	score += ((s64)c_lag *
 	    (s64)READ_ONCE(m->w_lag)) >> FLOW_ML_FP_SHIFT;
-	score += ((s64)(sleep_ns >> 4) *
+	score += ((s64)(c_sleep >> 4) *
 	    (s64)READ_ONCE(m->w_sleep)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)eff_w *
+	score += ((s64)c_w *
 	    (s64)READ_ONCE(m->w_weight)) >> FLOW_ML_FP_SHIFT;
 	score += (s64)READ_ONCE(m->bias);
 

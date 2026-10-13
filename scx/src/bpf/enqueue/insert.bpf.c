@@ -109,10 +109,13 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
  * remaining clamp on fresh waits else the held charge on misses, so near
  * deadlines earn near virtual times without a band jump. Takes the real
  * wrap-safe sleep from the caller without a zero stub, then applies the
- * in-kernel ML nudge within plus or minus 250us with saturation, so one
- * nudge never holds past one quarter quantum. RED cost stays on the
- * pre-clamp slice before this nudge, and a missing model fails closed to
- * zero with the deterministic shift-3 EMA baseline owning order.
+ * in-kernel ML nudge within plus or minus 250us over burst capped
+ * inputs with saturation, so one nudge never holds past one quarter
+ * quantum and train plus infer agree on bursts. RED cost stays on the
+ * pre-clamp slice before this nudge, and a missing model fails closed to zero
+ * with the deterministic shift-3 EMA baseline owning order. The nudged
+ * key drives tier plus kick while placement tests the deadline, so
+ * accuracy stays observability-only.
  *
  * Returns: strict key as the earlier of deadline plus nudged virtual deadline.
  *

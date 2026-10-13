@@ -84,6 +84,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	bool open_is_lat = false;
 	u32 open_pre = 0;
 	bool have_open = false;
+	u64 open_sleep_hold = 0;
 	u64 re_sleep_hold = 0;
 	bool have_re = false;
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
@@ -366,6 +367,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		lat_slice = flow_slice_lat_clamp(pre_slice, is_lat);
 		open_is_lat = is_lat;
 		open_pre = pre_slice;
+		open_sleep_hold = lat_sleep;
 		have_open = true;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
 			tctx->wait_at = now;
@@ -485,15 +487,22 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* hogs pace through tiers without a direct jump and one kick per wait */
 	/* stays. A stale hint only races a concurrent tier join, since */
 	/* dispatch still drains in fair order with mask wins on the next pass. */
+	/* Arrival sleep threads the pre-overwrite gap, so kick agrees with */
+	/* RED plus slice on the same latency with no second wait read. */
 	{
-		struct flow_enqueue_tail tail = {
-			.cpu = cpu,
-			.vtime = vtime,
-			.now = now,
-			.enq_flags = enq_flags,
-			.is_reenq = is_reenq,
-			.hoist_elig = hoist_elig,
-		};
+		u64 tail_sleep = 0;
+		struct flow_enqueue_tail tail;
+		if (have_open)
+			tail_sleep = open_sleep_hold;
+		else if (have_re)
+			tail_sleep = re_sleep_hold;
+		tail.cpu = cpu;
+		tail.vtime = vtime;
+		tail.now = now;
+		tail.enq_flags = enq_flags;
+		tail.arr_sleep = tail_sleep;
+		tail.is_reenq = is_reenq;
+		tail.hoist_elig = hoist_elig;
 		if (flow_enqueue_place(p, &tail))
 			return;
 		flow_enqueue_kick(p, &tail);

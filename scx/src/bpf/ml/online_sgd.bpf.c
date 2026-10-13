@@ -4,17 +4,19 @@
  *
  * Holds one batch-one train step for the global online model with
  * integer shifts only. The prediction forms a fixed point dot product
- * over capped avg plus dev plus vlag plus sleep plus eff_w with
- * FP_SHIFT 8, the raw error counts accuracy with a 64us hit window
- * plus saturating hits over total, the error then clamps to plus or
- * minus 64us, each gradient steps with LEARN_SHIFT 11 plus an s32
- * clamp, and each weight clamps to plus or minus 524288 with CAS.
- * Learnable RED bounds drift slowly with the hit signal within outer
- * 0 to 256us plus 64us to 1ms with defaults on legacy, so ML owns
- * admit plus drop with safety still checked. Updates use atomics via
- * fetch and add with no lock, so concurrent trains never tear. Runs
- * with shifts plus 64-bit multiplies and no divide, so the verifier
- * stays small.
+ * over burst capped avg plus dev plus sleep at the quantum plus direct
+ * lag plus share with FP_SHIFT 8, the raw error counts accuracy
+ * observability-only with a 64us hit window plus saturating hits over
+ * total, the error then clamps to plus or minus 64us, each gradient
+ * steps with LEARN_SHIFT 11 plus an s32 clamp, and each weight clamps
+ * to plus or minus 524288 with CAS plus one retry. Learnable RED
+ * bounds drift slowly with the per-sample hit signal within outer 0
+ * to 256us plus 64us to 1ms with defaults on legacy, so ML owns admit
+ * plus drop with safety still checked and accuracy never gates a
+ * decision. Updates use atomics via fetch and add with no lock plus a
+ * CAS loop for the shared count, so concurrent trains never tear nor
+ * wrap. Runs with shifts plus 64-bit multiplies and no divide, so the
+ * verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,19 +28,22 @@
  * @eff_w: effective share from task times hint over 128.
  *
  * Forms the predicted burst as the fixed point dot product plus bias
- * with FP_SHIFT 8 over capped inputs, floors the prediction to the
- * 10us slice minimum plus caps it at the 1s predictor top, then takes
- * raw err as actual minus predicted and counts accuracy with a 64us
- * hit window plus saturating hits over total before clipping err to
- * plus or minus 64us. Each weight steps as err times its capped feature
- * shifted right by LEARN_SHIFT 11 with an s32 clamp plus fetch and add
- * atomics, and the count bumps once with saturation. Each weight then
- * clamps to plus or minus 524288 with CAS, so one step never wraps with
- * no lost clamp. Learnable RED bounds drift by one small step on the
- * hit signal within their outers with CAS, so one train never storms.
- * A null task plus a zero delta plus a missing row drops with no
- * update. Like fair.c, the step paces learning, unlike rt.c, no fixed
- * priority holds.
+ * with FP_SHIFT 8 over burst capped inputs at the quantum plus direct
+ * lag plus share, floors the prediction to the 10us slice minimum plus
+ * caps it at the 1s predictor top, then takes raw err as actual minus
+ * predicted and counts accuracy observability-only with a 64us hit
+ * window plus saturating hits over total before clipping err to plus
+ * or minus 64us. Each weight steps as err times its burst capped or
+ * direct feature shifted right by LEARN_SHIFT 11 with an s32 clamp plus
+ * fetch and add atomics, and the count bumps once with a CAS loop at
+ * max, so concurrent trains never wrap. Each weight then clamps to
+ * plus or minus 524288 with CAS plus one retry, so one step never
+ * wraps with no lost clamp. Learnable RED bounds drift by one small
+ * step on the per-sample hit signal within their outers with CAS plus
+ * one retry, so one train never storms and the aggregate accuracy
+ * never gates a decision. A null task plus a zero delta plus a missing
+ * row drops with no update. Like fair.c, the step paces learning,
+ * unlike rt.c, no fixed priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
  * copy. Called from stopping and enqueue; returns without an update
@@ -52,7 +57,6 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	s64 pred = 0;
 	s64 err;
 	s64 grad;
-	s64 raw_err = 0;
 	bool acc_hit = false;
 
 	if (!tctx)
@@ -64,15 +68,19 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	if (!m)
 		return;
 
-	/* Fixed point dot product over capped inputs with FP_SHIFT 8. */
-	/* Caps keep a huge burst plus lag plus share from saturating */
-	/* the score to the error clip on every step. */
+	/* Fixed point dot product over burst capped inputs with FP_SHIFT 8. */
+	/* Burst caps keep a huge avg plus dev plus sleep from saturating */
+	/* the score to the error clip on every step, while lag stays */
+	/* within plus or minus 2ms via the lag bound plus share stays */
+	/* within 1 to 16384 via the effective helper with no extra cap, */
+	/* so train plus infer agree on bursts with three caps keeping the */
+	/* enqueue verifier under one million. */
 	{
 		u64 c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
 		u64 c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
-		s32 c_lag = flow_ml_cap_lag(READ_ONCE(tctx->vlag));
+		s32 c_lag = READ_ONCE(tctx->vlag);
 		u64 c_sleep = flow_ml_cap_burst(sleep_ns);
-		u32 c_w = flow_ml_cap_w(eff_w);
+		u32 c_w = eff_w;
 		pred += ((s64)(c_avg >> 4) *
 		    (s64)READ_ONCE(m->w_avg)) >> (FLOW_ML_FP_SHIFT - 4);
 		pred += ((s64)(c_dev >> 4) *
@@ -92,14 +100,14 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 		pred = (s64)FLOW_PRED_MAX_NS;
 
 	/* Error against actual execution with accuracy first. */
-	/* Raw err counts a hit when the absolute value stays at or below */
-	/* 64us with saturating hits over total, so accuracy reads 0.0 to */
-	/* 1.0 with higher better. The clip below keeps the gradient small. */
+	/* Raw err counts a hit observability-only when the absolute value */
+	/* stays at or below 64us with saturating hits over total, so */
+	/* accuracy reads 0.0 to 1.0 with higher better and never gates a */
+	/* decision. The clip below keeps the gradient small. */
 	{
 		s64 raw = (s64)actual_delta - pred;
 		bool hit = flow_ml_is_hit(raw);
 		flow_count_ml_sample(hit);
-		raw_err = raw;
 		acc_hit = hit;
 		err = raw;
 	}
@@ -110,15 +118,16 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	else if (err < -((s64)FLOW_ML_GRAD_MAX_NS))
 		err = -((s64)FLOW_ML_GRAD_MAX_NS);
 
-	/* Atomic SGD updates over capped inputs with LEARN_SHIFT 11. */
+	/* Atomic SGD updates over burst capped inputs with LEARN_SHIFT 11. */
 	/* The s32 clamp keeps the cast with no truncate, so a huge */
-	/* burst never wraps the weight add. */
+	/* burst never wraps the weight add with lag plus share already */
+	/* bounded with no extra cap. */
 	{
 		u64 c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
 		u64 c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
-		s32 c_lag = flow_ml_cap_lag(READ_ONCE(tctx->vlag));
+		s32 c_lag = READ_ONCE(tctx->vlag);
 		u64 c_sleep = flow_ml_cap_burst(sleep_ns);
-		u32 c_w = flow_ml_cap_w(eff_w);
+		u32 c_w = eff_w;
 		grad = (err * (s64)(c_avg >> 6)) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_avg, flow_ml_grad_s32(grad));
 
@@ -138,11 +147,25 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 		__sync_fetch_and_add(&m->bias, flow_ml_grad_s32(grad));
 	}
 
-	/* Bump the train count with saturation, so the count never wraps. */
-	if (READ_ONCE(m->update_count) != 0xffffffffU)
-		__sync_fetch_and_add(&m->update_count, 1);
+	/* Bump the train count with a CAS loop at max, so concurrent */
+	/* trains never wrap past max with no lost bump. Per CPU stats */
+	/* saturate without a loop since each CPU owns its row, while */
+	/* this global row needs the loop with no lock. */
+	{
+		s32 i;
+		bpf_for(i, 0, 4) {
+			u32 cur = READ_ONCE(m->update_count);
+			u32 old;
+			if (cur == 0xffffffffU)
+				break;
+			old = __sync_val_compare_and_swap(&m->update_count,
+			    cur, cur + 1);
+			if (old == cur)
+				break;
+		}
+	}
 
-	/* Clamp each weight to plus or minus 524288 with CAS. */
+	/* Clamp each weight to plus or minus 524288 with CAS plus retry. */
 	flow_ml_clamp_one(&m->w_avg);
 	flow_ml_clamp_one(&m->w_dev);
 	flow_ml_clamp_one(&m->w_lag);
@@ -150,18 +173,20 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	flow_ml_clamp_one(&m->w_weight);
 	flow_ml_clamp_one(&m->bias);
 
-	/* Drift the learnable RED bounds by one small step on the hit */
-	/* signal with outer clamps plus CAS, so ML owns admit plus drop */
-	/* with safety still checked. A hit tightens toward the defaults */
-	/* by 16ns for tolerance plus 64ns for Emax, a miss widens by 64ns */
-	/* plus 256ns, each within outer 0 to 256us plus 64us to 1ms with */
-	/* one retry and no storm. Legacy rows with version past 1 skip */
-	/* with no write, so old headers never drive the bounds. */
+	/* Drift the learnable RED bounds by one small step on the */
+	/* per-sample hit signal with outer clamps plus CAS plus one retry, */
+	/* so ML owns admit plus drop with safety still checked and the */
+	/* aggregate accuracy never gates a decision. A hit tightens toward */
+	/* the defaults by 16ns for tolerance plus 64ns for Emax, a miss */
+	/* widens by 64ns plus 256ns, each within outer 0 to 256us plus */
+	/* 64us to 1ms with no storm. The asymmetric step needs near 80% */
+	/* hits to hold steady, so weak accuracy drifts to the outer with */
+	/* safety still checked. Legacy rows with version past 1 skip with */
+	/* no write, so old headers never drive the bounds. */
 	{
 		u32 ver = READ_ONCE(m->version);
 		if (ver == (u32)FLOW_ML_MODEL_VERSION) {
 			bool hit = acc_hit;
-			(void)raw_err;
 			u64 tol_cur = (u64)READ_ONCE(m->red_tol_ns);
 			u64 emax_cur = (u64)READ_ONCE(m->red_emax_ns);
 			u64 tol_nxt;
@@ -185,10 +210,38 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 			emax_nxt = flow_red_emax_clamp(emax_nxt);
 			tol_old = __sync_val_compare_and_swap(&m->red_tol_ns,
 			    (u32)tol_cur, (u32)tol_nxt);
-			(void)tol_old;
+			if (tol_old != (u32)tol_cur) {
+				tol_cur = (u64)READ_ONCE(m->red_tol_ns);
+				tol_cur = flow_red_tol_clamp(tol_cur);
+				if (hit) {
+					tol_nxt = tol_cur > (u64)FLOW_RED_TOL_NS ?
+					    tol_cur - 16ULL : tol_cur < (u64)FLOW_RED_TOL_NS ?
+					    tol_cur + 16ULL : tol_cur;
+				} else {
+					tol_nxt = flow_red_tol_clamp(flow_sat_add(tol_cur, 64ULL));
+				}
+				tol_nxt = flow_red_tol_clamp(tol_nxt);
+				tol_old = __sync_val_compare_and_swap(&m->red_tol_ns,
+				    (u32)tol_cur, (u32)tol_nxt);
+				(void)tol_old;
+			}
 			emax_old = __sync_val_compare_and_swap(&m->red_emax_ns,
 			    (u32)emax_cur, (u32)emax_nxt);
-			(void)emax_old;
+			if (emax_old != (u32)emax_cur) {
+				emax_cur = (u64)READ_ONCE(m->red_emax_ns);
+				emax_cur = flow_red_emax_clamp(emax_cur);
+				if (hit) {
+					emax_nxt = emax_cur > (u64)FLOW_RED_EMAX_NS ?
+					    emax_cur - 64ULL : emax_cur < (u64)FLOW_RED_EMAX_NS ?
+					    emax_cur + 64ULL : emax_cur;
+				} else {
+					emax_nxt = flow_red_emax_clamp(flow_sat_add(emax_cur, 256ULL));
+				}
+				emax_nxt = flow_red_emax_clamp(emax_nxt);
+				emax_old = __sync_val_compare_and_swap(&m->red_emax_ns,
+				    (u32)emax_cur, (u32)emax_nxt);
+				(void)emax_old;
+			}
 		}
 	}
 }

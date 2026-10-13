@@ -30,11 +30,16 @@
  * and no group or pool shapes order. Each stop feeds the burst
  * predictor average plus deviation with shift updates, so later
  * deadlines track recent bursts without a table walk. ML owns
- * admit plus drop plus kick plus placement through learnable inputs
- * with outer safety bounds still checked, so the nudge shapes the
- * fair key plus learnable RED bounds gate overload with PRIQ only.
- * Accuracy counts hits over total in BPF with a 64us hit window, so
- * the snapshot reads 0.0 to 1.0 with higher better. See
+ * admit plus drop plus kick through learnable inputs with outer
+ * safety bounds still checked, so the nudge shapes the fair key for
+ * tier plus kick while placement tests the deadline plus drain and
+ * learnable RED bounds gate overload with PRIQ only for tiers. The
+ * direct plus exiting LOCAL_ON queue stays terminal FIFO outside
+ * PRIQ order with no tier rank. Hard means batch non-latency while
+ * critical means latency-critical via the unified latency test, so
+ * tolerance aids hard only. Accuracy counts hits over total in BPF
+ * with a 64us hit window observability-only with no closed-loop gate,
+ * so the snapshot reads 0.0 to 1.0 with higher better. See
  * select_cpu.bpf.c for placement and enqueue.bpf.c for the
  * deadline choice plus dispatch.bpf.c for the tier scans and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
@@ -191,11 +196,12 @@ enum flow_consts {
 	/* the model value clamps to that outer with this default on miss. */
 	FLOW_RED_EMAX_NS = 256000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
-	/* for hard tasks only, so critical tasks keep zero tolerance */
-	/* with no late run. Tolerance aids the guarantee with no order */
-	/* shaping. At 4.8.14 the bound is the default for the learnable */
-	/* tolerance within outer 0 to 256us, so the model value clamps */
-	/* to that outer with this default on miss. */
+	/* for hard batch only scoped to non-latency, so latency-critical */
+	/* keeps zero tolerance with no late run. Tolerance aids the */
+	/* guarantee with no order shaping. At 4.8.14 the bound is the */
+	/* default for the learnable tolerance within outer 0 to 256us, */
+	/* so the model value clamps to that outer with this default on */
+	/* miss plus reclaim shares the same learnable path. */
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Adaptive grow step of 64us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
@@ -882,14 +888,16 @@ static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
 }
 /**
  * flow_red_tol - guarantee tolerance for one task.
- * @is_crit: true when latency critical with no tolerance.
+ * @is_crit: true when latency-critical via the unified latency test
+ * with no tolerance, false for hard batch.
  *
- * Tolerance aids the guarantee only with no order shaping. Critical tasks keep zero, hard tasks
- * keep 64us, so the check stays strict for urgent work. At 4.8.14 this
- * is the default for the learnable path with outer 0 to 256us still
- * checked on the learned value.
+ * Tolerance aids the guarantee only with no order shaping. Hard batch
+ * keeps 64us while latency-critical keeps zero, so the check stays
+ * strict for urgent work with no separate class past latency. At
+ * 4.8.14 this is the default for the learnable path with outer 0 to
+ * 256us still checked on the learned value via tol_eff.
  *
- * Returns: tolerance in nanos, zero for critical.
+ * Returns: tolerance in nanos, zero for latency-critical.
  */
 static __always_inline u64 flow_red_tol(bool is_crit)
 {
@@ -934,13 +942,16 @@ static __always_inline u64 flow_red_emax_clamp(u64 v)
 /**
  * flow_red_tol_eff - effective tolerance from learnable plus critical.
  * @learned: clamped learnable tolerance in nanos from the model.
- * @is_crit: true when latency critical with no tolerance.
+ * @is_crit: true when latency-critical via the unified latency test
+ * with no tolerance, false for hard batch.
  *
- * Critical tasks keep zero with no learned slack, so urgent work stays
- * strict while hard tasks take the clamped learned value. Outer safety
- * stays checked at the caller clamp, so ML owns the input with bounds.
+ * Latency-critical keeps zero with no learned slack, so urgent work
+ * stays strict while hard batch takes the clamped learned value
+ * within 0 to 256us. Admit plus reclaim share this helper, so both
+ * agree with no separate class past latency. Outer safety stays
+ * checked at the caller clamp, so ML owns the input with bounds.
  *
- * Returns: effective tolerance in nanos, zero for critical.
+ * Returns: effective tolerance in nanos, zero for latency-critical.
  */
 static __always_inline u64 flow_red_tol_eff(u64 learned, bool is_crit)
 {
@@ -1014,13 +1025,15 @@ static __always_inline u64 flow_red_exceed(s64 resid, u64 tol)
 /**
  * flow_red_value - admission value from weight plus critical.
  * @weight: task base share, zero maps to 128.
- * @is_crit: true marks critical with maximum value.
+ * @is_crit: true marks latency-critical via the unified latency test
+ * with maximum value, false for hard batch.
  *
- * Value orders the reject queue without shaping vruntime. Critical tasks
- * hold the top value, hard tasks hold the clamped base share, so the
- * greatest value reclaims first.
+ * Value orders the reject queue without shaping vruntime.
+ * Latency-critical holds the top value while hard batch holds the
+ * clamped base share, so the greatest value reclaims first with no
+ * separate class past latency.
  *
- * Returns: value from 1 to 16384, top for critical.
+ * Returns: value from 1 to 16384, top for latency-critical.
  */
 static __always_inline u32 flow_red_value(u32 weight, bool is_crit)
 {
@@ -1861,14 +1874,14 @@ static __always_inline s32 flow_ml_grad_s32(s64 g)
 	return (s32)g;
 }
 /**
- * flow_ml_clamp_one - clamp one weight with CAS.
+ * flow_ml_clamp_one - clamp one weight with CAS plus one retry.
  * @addr: weight cell to clamp, null drops.
  *
  * Reads once then swaps only when past plus or minus 524288, so a
  * concurrent fetch and add win keeps the winner with no lost clamp.
- * Retries the swap once on a lost race, then leaves the next train
- * to fold the bound with no stall. Runs with no lock, so the verifier
- * stays small.
+ * Retries the swap once on a lost race with a fresh read, then leaves
+ * the next train to fold the bound with no stall. Runs with no lock
+ * plus no loop past two tries, so the verifier stays small.
  */
 static __always_inline void flow_ml_clamp_one(s32 *addr)
 {
@@ -1877,6 +1890,18 @@ static __always_inline void flow_ml_clamp_one(s32 *addr)
 	s32 old;
 	if (!addr)
 		return;
+	cur = READ_ONCE(*addr);
+	if (cur > (s32)FLOW_ML_WEIGHT_BOUND)
+		nxt = (s32)FLOW_ML_WEIGHT_BOUND;
+	else if (cur < -((s32)FLOW_ML_WEIGHT_BOUND))
+		nxt = -((s32)FLOW_ML_WEIGHT_BOUND);
+	else
+		return;
+	old = __sync_val_compare_and_swap(addr, cur, nxt);
+	if (old == cur)
+		return;
+	/* One retry on a lost race with a fresh read, so a concurrent */
+	/* add that still holds past the bound folds at once. */
 	cur = READ_ONCE(*addr);
 	if (cur > (s32)FLOW_ML_WEIGHT_BOUND)
 		nxt = (s32)FLOW_ML_WEIGHT_BOUND;

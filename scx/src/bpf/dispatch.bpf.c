@@ -30,7 +30,8 @@
  * through the shared hint check without a kfunc and stays transition
  * only. The check covers per CPU local, local on, node, and running, and
  * skips machine, reject, and steal, so a busy shared tier never forces
- * max on an idle CPU. Local on stays terminal at three sites.
+ * max on an idle CPU. Local on stays terminal FIFO at three sites
+ * outside PRIQ order with no tier rank, so tiers stay PRIQ-only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -147,12 +148,15 @@ struct flow_reclaim_tail {
  * @t: reclaim tail with state plus task plus target plus time plus credit
  * plus gate, read once by the caller.
  *
- * Checks laxity plus tiers-empty plus aged cover plus key freshness plus
- * mask plus credit with reserve, so the loop keeps one call. Tiers-empty
- * heads with positive laxity fall back without reserve while funded heads
- * reserve before the move, so zero credit never idles queued work. Aged
- * heads past one period pass even when tiers hold work. A stale key, a
- * foreign mask, or a lost reserve fails closed to the next candidate.
+ * Checks laxity with the learnable tolerance plus tiers-empty plus
+ * aged cover plus key freshness plus mask plus credit with reserve,
+ * so the loop keeps one call. Hard takes the clamped model value
+ * while latency-critical keeps zero, so reclaim agrees with admit.
+ * Tiers-empty heads with positive laxity fall back without reserve
+ * while funded heads reserve before the move, so zero credit never
+ * idles queued work. Aged heads past one period pass even when tiers
+ * hold work. A stale key, a foreign mask, or a lost reserve fails
+ * closed to the next candidate.
  *
  * Returns: true when the caller may move the candidate.
  *
@@ -198,7 +202,10 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 		rcrit = flow_is_lat(ravg, rdev, rhint, 0, 0, reff);
 	}
 	rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
-	rtol = flow_red_tol(rcrit);
+	/* Reclaim shares the learnable tolerance with admit, so hard */
+	/* takes the clamped model value within 0 to 256us while */
+	/* latency-critical keeps zero with no learned slack. */
+	rtol = flow_red_tol_eff(flow_ml_red_tol_ns(), rcrit);
 	rres = flow_red_residual(rdl, now, rcost);
 	rexc = flow_red_exceed(rres, rtol);
 	rlax = flow_red_laxity(rdl, now, rcost);

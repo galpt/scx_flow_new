@@ -188,14 +188,16 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * @now: current time in nanos.
  * @avg: burst average in nanos, zero for no history.
  * @slice: stored slice in nanos, zero for no history.
- * @is_crit: true marks critical with zero tolerance.
+ * @is_crit: true marks latency-critical via the unified latency test
+ * with zero tolerance, false for hard batch.
  *
  * Costs burst else slice else quantum, tolerates the learnable value
- * within outer 0 to 256us defaulting to 64us for hard only, then
- * residuals deadline minus now minus cost with wrap safety. Critical
- * keeps zero with no learned slack, so ML owns the input with outer
- * safety still checked. Tolerance aids only the guarantee with no
- * order shaping.
+ * within outer 0 to 256us defaulting to 64us for hard batch only,
+ * then residuals deadline minus now minus cost with wrap safety.
+ * Latency-critical keeps zero with no learned slack, so ML owns the
+ * input with outer safety still checked and no separate class holds
+ * past latency. Tolerance aids only the guarantee with no order
+ * shaping. Admit plus reclaim share this path.
  *
  * Returns: exceeding time in nanos, zero when guaranteed.
  */
@@ -214,16 +216,17 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * @n_deadline: newcomer deadline in nanos, zero fails closed.
  * @v_cost: victim remaining cost in nanos.
  * @exceed: newcomer exceeding time in nanos, zero fails closed.
- * @v_crit: true marks a critical victim that never rejects.
+ * @v_crit: true marks a latency-critical victim via the unified test
+ * that never rejects, false for hard batch.
  *
  * Victim needs cost past the learnable Emax within outer 64us to 1ms
  * defaulting to 256us plus cost past the exceed plus deadline at or
  * before the newcomer, so only work ahead of the overload pays with
  * outer safety still checked. Callers test the newcomer itself as the
  * O(1) victim without a scan, so a full least value scan stays a noted
- * alternative. A critical victim never passes. A capped latency slice
- * at 100us never passes the 64us floor, so latency never pays as
- * victim.
+ * alternative. A latency-critical victim never passes with no separate
+ * class past latency. A capped latency slice at 100us never passes
+ * the 64us floor, so latency never pays as victim.
  *
  * Returns: true when the victim may cover the exceed.
  */

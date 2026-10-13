@@ -487,9 +487,9 @@
     /* Summary prose built from the live gauges plus ML accuracy. */
     /* The tldr names the running count with ML accuracy. The */
     /* explanation walks joins plus moves plus admission plus misses */
-    /* plus accuracy in 0.0-1.0 higher better affecting preempt plus */
-    /* classification. Live pid count from the per CPU cards. */
-    /* Counts cards with a nonzero pid with no gauge use. */
+    /* plus accuracy in 0.0-1.0 higher better observability-only with */
+    /* no preempt on accuracy alone. Live pid count from the per CPU */
+    /* cards. Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
       var n = 0;
       var i;
@@ -501,7 +501,8 @@
 
     /* Clamped on CPU for display. Caps the raw gauge at the */
     /* online card count so a stale gauge never prints past */
-    /* the live cards. */
+    /* the live cards. The display uses the live card count for */
+    /* consistency with the cards, so a raced gauge never drifts. */
     function shownOnCpu(s, perCpu) {
       var raw = s.on_cpu || 0;
       if (raw < 0) raw = 0;
@@ -548,8 +549,8 @@
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
           'no tasks have been placed yet. ML accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, affects preempt ' +
-          'and classification.';
+          ' in range 0.0-1.0, higher better, observability-only ' +
+          'with no preempt on accuracy alone.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
           ' tasks with ML accuracy ' + acc + '.';
@@ -570,8 +571,8 @@
           ' over total ' + fmt(mtotal) +
           ' with clamped ' + fmt(mclamp) +
           ' and accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, affects preempt ' +
-          'and classification.';
+          ' in range 0.0-1.0, higher better, observability-only ' +
+          'with no preempt on accuracy alone.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -592,8 +593,8 @@
           ' over total ' + fmt(mtotal) +
           ' with clamped ' + fmt(mclamp) +
           ' and accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, affects preempt ' +
-          'and classification.';
+          ' in range 0.0-1.0, higher better, observability-only ' +
+          'with no preempt on accuracy alone.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -615,7 +616,10 @@
           disp[k] = s[k];
         }
       }
-      disp.on_cpu = shown;
+      /* Display the live card count, so the summary plus the gauge */
+      /* never drift past the cards on a raced poll. The capped gauge */
+      /* stays in the title for diagnosis with no extra read. */
+      disp.on_cpu = live;
       /* Top-level ML keys mirror the stats sums with accuracy first, so */
       /* the summary reads one value with no nested walk. Falls back to */
       /* the stats ratio when the top level holds no number. */
@@ -652,9 +656,9 @@
       el('meta-line').textContent = meta ||
         'per-CPU fair queues, fixed quantum and placement';
 
-      el('on-cpu').textContent = fmt(shown);
+      el('on-cpu').textContent = fmt(live);
       el('on-cpu').title = 'raw ' + fmt(s.on_cpu || 0) +
-        ', live cards ' + fmt(live);
+        ', live cards ' + fmt(live) + ', capped ' + fmt(shown);
       el('running-pids').textContent = fmt(live);
       el('uptime').textContent =
         fmtRuntime(s.uptime_ns || 0);
@@ -701,7 +705,7 @@
           (s.ml_accuracy !== undefined ? s.ml_accuracy : 0);
         el('ml-accuracy').textContent = fmtAcc(accRaw);
         el('ml-accuracy').title = 'range 0.0-1.0, higher better, ' +
-          'affects preempt and classification';
+          'observability-only with no preempt on accuracy alone';
       }
 
       renderCoreCards(data);

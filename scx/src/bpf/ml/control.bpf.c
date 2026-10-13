@@ -4,13 +4,16 @@
  *
  * Holds the learnable RED bounds that let ML own admit plus drop with
  * outer safety still checked. Tolerance learns within outer 0 to 256us
- * defaulting to 64us, Emax learns within outer 64us to 1ms defaulting
- * to 256us, each clamped to its outer with defaults on miss or legacy
- * version. Critical tolerance stays zero with no learned slack, so
- * urgent work stays strict. Placement plus kick ride the capped nudge
- * shaped fair key with PRIQ only, so one learnable input drives all
- * four decisions with bounds. Runs with one map read plus clamps, so
- * the verifier stays small.
+ * defaulting to 64us for hard batch only, Emax learns within outer
+ * 64us to 1ms defaulting to 256us, each clamped to its outer with
+ * defaults on miss or legacy version. Hard means batch non-latency
+ * while critical means latency-critical via the unified latency test,
+ * so no separate class holds past latency. Critical tolerance stays
+ * zero with no learned slack, so urgent work stays strict. Kick rides
+ * the capped nudge shaped fair key with PRIQ only, while placement
+ * tests the deadline plus drain, so learnable inputs drive admit plus
+ * drop plus kick with bounds and accuracy stays observability-only.
+ * Runs with one map read plus clamps, so the verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

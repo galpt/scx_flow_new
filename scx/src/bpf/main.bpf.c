@@ -88,12 +88,13 @@ struct {
 } reclaim_credit_stor SEC(".maps");
 /* Global online model with five weights plus bias plus clamp plus count */
 /* plus version plus learnable RED bounds plus reserve. */
-/* One 48B row holds the fixed point SGD state with zero for no */
-/* training, so the dot product reads zero with no shift and the nudge */
-/* returns zero. Version seeds 1 with tol at 64us plus Emax at 256us, */
-/* each clamped to its outer on read. Updates use atomics with bound */
-/* 524288, the nudge clamps to plus or minus 250us, and the task state */
-/* stays at 72B with integer arithmetic. */
+/* One 48B row holds the fixed point SGD state with weights plus bias */
+/* at zero for no training, so the dot product reads zero with no shift */
+/* and the nudge returns zero. Version seeds 1 with tol at 64us plus */
+/* Emax at 256us plus max clamp at 250us, each clamped to its outer on */
+/* read. Updates use atomics with bound 524288, the nudge clamps to */
+/* plus or minus 250us, and the task state stays at 72B with integer */
+/* arithmetic. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
@@ -221,7 +222,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			m->w_sleep = 0;
 			m->w_weight = 0;
 			m->bias = 0;
-			m->max_clamp_ns = 0;
+			/* Seed the nudge bound at 250us, so the infer clamp */
+			/* holds without relying on the zero fail-closed path. */
+			m->max_clamp_ns = (s32)FLOW_ML_NUDGE_MAX_NS;
 			m->update_count = 0;
 			m->version = (u32)FLOW_ML_MODEL_VERSION;
 			m->red_tol_ns = (u32)FLOW_RED_TOL_NS;

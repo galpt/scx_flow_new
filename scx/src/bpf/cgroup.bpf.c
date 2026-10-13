@@ -149,8 +149,9 @@ static __always_inline void flow_task_hint_weight(
 }
 /* Init one flat hint row with zero period plus neutral weight. */
 /* Zero period means no hint, so the default 80ms period applies with */
-/* no extra fill. A missing row reads the same, so init plus miss */
-/* agree with no stale hint. */
+/* no extra fill and a huge hint still clamps via saturation at the */
+/* period caller. A missing row reads the same, so init plus miss */
+/* agree with no stale hint and the count never wraps. */
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 	struct scx_cgroup_init_args *args)
 {
