@@ -30,7 +30,7 @@ Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor s
 
 ### Admission
 
-RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `256us` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for single-check admission and tiers-empty plus aged reclaim caps starvation without dropping. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
+RED checks residual from deadline minus cost plus learnable tolerance of zero for critical else `64us` default within outer `0` to `256us`. Newcomer victim needs cost past learnable `Emax` default `256us` within outer `64us` to `1ms` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for single-check admission and tiers-empty plus aged reclaim caps starvation without dropping. ML owns admit plus drop through learnable bounds with outer safety still checked plus PRIQ only. See `src/bpf/edf.bpf.c` plus `src/bpf/ml/control.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
@@ -38,7 +38,7 @@ A gate runs first so tasks and CPUs wait. Exiting work runs at once without wait
 
 ### Reporting
 
-Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at `50005`. Page keeps local, node, machine, kicks, preempt, plus RED rejects plus reclaims. Snapshots share one moment with times plus topology. Dashboard shows seventeen counters plus uptime with CPU cards plus five key merged JSON intact. See `src/rust/stats.rs`.
+Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at `50005`. Page keeps local, node, machine, kicks, preempt, plus RED rejects plus reclaims plus ML hits plus total plus clamped plus accuracy. Snapshots share one moment with times plus topology. Dashboard shows twenty counters plus uptime with CPU cards plus ten key merged JSON intact. Accuracy reads hits over total in `0.0` to `1.0` with higher better. See `src/rust/stats.rs`.
 
 ### Fairness
 
@@ -62,11 +62,11 @@ Mask check caps inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals retrain plus fold. Stop feeds average deviation plus credit with train on one eighth of stops picked by pid plus time hash. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` and limited to half per stop on late else grow `slack>>3` capped `1ms` and limited to half per stop on early. Misses stay lifetime, adapt window. Reclaim `256us` fallback when tiers hold no work. Stopping train time holds queue plus run minus burst, not true sleep, with enqueue inference using the true gap before wait overwrite. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals retrain plus fold. Stop feeds average deviation plus credit with train on one eighth of stops picked by pid plus time hash. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` and limited to half per stop on late else grow `slack>>3` capped `1ms` and limited to half per stop on early. Misses stay lifetime, adapt window. Reclaim learnable `Emax` fallback when tiers hold no work. Stopping train time holds queue plus run minus burst, not true sleep, with enqueue inference using the true gap before wait overwrite. Accuracy counts `|pred-actual|<=64us` with saturating hits over total. See `src/bpf/lifecycle.bpf.c`.
 
 ### Latency
 
-Latency caps slice at `100us` plus key at now plus max `4ms` else slice plus `100us` with RED on deadline. Sleep below `20us` vetoes toward batch with unknown open, decoupled from the `100us` cap. Arrival preempts only when lat meets batch owner else fails closed. Resume keeps start plus cur leftover clamped to `10us` plus `100us` else `1ms`. Adapt steps cap at `1ms` then re-clamp here, so one shift never holds past the cap with RED `256us` past the cap. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
+Latency caps slice at `100us` plus key at now plus max `4ms` else slice plus `100us` with RED on deadline. Sleep below `20us` vetoes toward batch with unknown open, decoupled from the `100us` cap. Arrival preempts only when lat meets batch owner else fails closed with the ML shaped key driving kick plus placement and outer margin plus tail still checked. Resume keeps start plus cur leftover clamped to `10us` plus `100us` else `1ms`. Adapt steps cap at `1ms` then re-clamp here, so one shift never holds past the cap with learnable RED `Emax` past the cap. See `src/bpf/intf.h` plus `src/bpf/preempt.bpf.c` plus `src/bpf/lifecycle.bpf.c`.
 
 ### Tiers
 
@@ -74,7 +74,7 @@ Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with
 
 ### Learning
 
-Learning trains one global `32B` model with fixed point SGD plus a capped nudge trained on one eighth of stops picked by pid plus time hash with no per CPU map. Train caps burst plus lag plus share at the quantum plus clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus s32 clamp plus CAS at `524288` with saturation, so one step stays small. Nudge keeps original shifts with the `250us` bound holding saturation plus fail closed and caller sleep read before wait overwrite, so one correction never holds past one quarter quantum with the task at `72B`. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c`.
+Learning trains one global `48B` version `1` model with fixed point SGD plus a capped nudge plus accuracy plus learnable RED bounds trained on one eighth of stops picked by pid plus time hash with no per CPU map. Train caps burst plus lag plus share at the quantum plus counts hits when `|pred-actual|<=64us` with saturating hits over total plus clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus s32 clamp plus CAS at `524288` with saturation, so one step stays small. Nudge keeps original shifts with the `250us` bound holding saturation plus clamped count plus fail closed and caller sleep read before wait overwrite, so one correction never holds past one quarter quantum with the task at `72B`. Tolerance learns within `0` to `256us` default `64us` plus Emax within `64us` to `1ms` default `256us` with outer safety still checked, so ML owns admit plus drop plus kick plus placement with PRIQ only. Accuracy reads `0.0` to `1.0` with higher better and affects preempt plus classification. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c` plus `src/bpf/ml/control.bpf.c`.
 
 ## Code map
 
