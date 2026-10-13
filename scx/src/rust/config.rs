@@ -1318,10 +1318,10 @@ mod tests {
         );
         // Fresh waits cap the tier at 1ms, so bulk still rotates.
         let bulk = classify_tier(6_000_000, 0, false);
-        assert_eq!(bulk, SLICE_MAX_NS);
+        assert_eq!(bulk, SLICE_MAX_NS as u32);
         assert_eq!(bulk.min(QUANTUM_NS as u32), QUANTUM_NS as u32);
         let audio = classify_tier(40_000, 10_000, false);
-        assert_eq!(audio, SLICE_ULL_NS);
+        assert_eq!(audio, SLICE_ULL_NS as u32);
         assert!(audio < QUANTUM_NS as u32);
     }
 
