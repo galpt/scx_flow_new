@@ -52,9 +52,29 @@ pub const WEIGHT_MAX: u32 = 16_384;
 /// Max hint rows bound shared with the BPF header.
 pub const HINT_MAX: u64 = 8192;
 /// RED bound in nanos at 256us. Caps the maximum exceeding time.
+/// Default for the learnable Emax within outer 64us to 1ms.
 pub const RED_EMAX_NS: u64 = 256_000;
 /// RED tolerance in nanos at 64us. Holds hard task slack only.
+/// Default for the learnable tolerance within outer 0 to 256us.
 pub const RED_TOL_NS: u64 = 64_000;
+/// RED tolerance outer floor in nanos at 0. Holds the learnable lower
+/// bound with no clamp, so zero stays valid.
+pub const RED_TOL_MIN_NS: u64 = 0;
+/// RED tolerance outer ceiling in nanos at 256us. Caps the learnable
+/// tolerance with no storm.
+pub const RED_TOL_MAX_NS: u64 = 256_000;
+/// RED Emax outer floor in nanos at 64us. Holds the learnable lower
+/// bound, so one value never drops past the victim gate.
+pub const RED_EMAX_MIN_NS: u64 = 64_000;
+/// RED Emax outer ceiling in nanos at 1ms. Caps the learnable Emax
+/// with no storm past one quantum.
+pub const RED_EMAX_MAX_NS: u64 = 1_000_000;
+/// Online model version at 1 for 4.8.14. Marks the 48B layout with
+/// learnable RED bounds, so zero reads as legacy with defaults.
+pub const ML_MODEL_VERSION: u32 = 1;
+/// ML accuracy hit window in nanos at 64us. Counts a hit when the
+/// absolute burst error stays at or below this window.
+pub const ML_ACC_HIT_NS: u64 = 64_000;
 /// Adaptive grow step in nanos at 64us frozen for wire compat only.
 /// Kept with no use after the proportional law.
 pub const ADAPT_GROW_NS: u64 = 64_000;
@@ -292,6 +312,66 @@ pub fn ml_grad_s32(g: i64) -> i32 {
         return -32767;
     }
     g as i32
+}
+
+/// Mirror of flow_red_tol_clamp in intf.h for host tests.
+/// Caps to outer 0 to 256us with no divide, so zero stays valid.
+#[cfg(test)]
+pub fn red_tol_clamp(v: u64) -> u64 {
+    if v > RED_TOL_MAX_NS {
+        return RED_TOL_MAX_NS;
+    }
+    v
+}
+
+/// Mirror of flow_red_emax_clamp in intf.h for host tests.
+/// Caps to outer 64us to 1ms with no divide.
+#[cfg(test)]
+pub fn red_emax_clamp(v: u64) -> u64 {
+    if v < RED_EMAX_MIN_NS {
+        return RED_EMAX_MIN_NS;
+    }
+    if v > RED_EMAX_MAX_NS {
+        return RED_EMAX_MAX_NS;
+    }
+    v
+}
+
+/// Mirror of flow_red_tol_eff in intf.h for host tests.
+/// Critical keeps zero with no learned slack.
+#[cfg(test)]
+pub fn red_tol_eff(learned: u64, is_crit: bool) -> u64 {
+    if is_crit {
+        return 0;
+    }
+    red_tol_clamp(learned)
+}
+
+/// Mirror of flow_ml_is_hit in intf.h for host tests.
+/// Counts a hit when the absolute error stays at or below 64us.
+#[cfg(test)]
+pub fn ml_is_hit(err: i64) -> bool {
+    if err > ML_ACC_HIT_NS as i64 {
+        return false;
+    }
+    if err < -(ML_ACC_HIT_NS as i64) {
+        return false;
+    }
+    true
+}
+
+/// Mirror of Metrics::accuracy in stats.rs for host tests.
+/// Zero on no samples with clamp to 1.0 and no NaN.
+#[cfg(test)]
+pub fn ml_accuracy(hits: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let v = hits as f64 / total as f64;
+    if !v.is_finite() {
+        return 0.0;
+    }
+    v.clamp(0.0, 1.0)
 }
 
 /// Mirror of flow_red_cost in intf.h for host tests.
@@ -557,25 +637,27 @@ impl Config {
     /// four disjoint past SSF eight for twelve unique peers on hosts
     /// with at least twelve CPUs with node-local phases plus drain plus
     /// minimum plus id tiebreak, and RED admits with residual plus
-    /// exceed plus tolerance used only for the guarantee with base
-    /// capacity 1024. Queues hold 1024 local plus 16 node plus machine
-    /// plus reject with ids in the 0x5100 region. Hints hold 8192 flat
-    /// rows with period plus weight and no timer wait. Preempt needs
-    /// 100us margin plus 100us tail strictly with a floor at 100us and
-    /// one kick per wait gated on eligibility. Fairness bounds lag at
-    /// 2ms with vruntime plus virtual deadline pacing queue order.
-    /// Stats hold 17 counters at 136B with preempt kicks plus skipped
-    /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
-    /// capped 1ms on late else grows by slack right 3 capped 1ms on
-    /// early with clamp to 10us plus 1ms without changing virtual time. Latency
-    /// caps the slice at 100us plus the key at now plus max 4ms else
-    /// slice plus 100us with RED on the original deadline. Latency
-    /// vetoes sleeps below 20us toward batch with unknown open, so the
-    /// sleep floor stays decoupled from the slice cap. Online SGD runs
-    /// FP shift 8 plus learn shift 11 with grad max 64us plus weight
-    /// bound 524288 plus nudge max 250us, so one train step moves at
-    /// most 8us and one nudge never holds past one quarter quantum. The
-    /// model stays at 32B with task at 72B.
+    /// exceed plus learnable tolerance within outer 0 to 256us plus
+    /// learnable Emax within outer 64us to 1ms used only for the
+    /// guarantee with base capacity 1024. Queues hold 1024 local plus
+    /// 16 node plus machine plus reject with ids in the 0x5100 region.
+    /// Hints hold 8192 flat rows with period plus weight and no timer
+    /// wait. Preempt needs 100us margin plus 100us tail strictly with a
+    /// floor at 100us and one kick per wait gated on eligibility. Fairness
+    /// bounds lag at 2ms with vruntime plus virtual deadline pacing queue
+    /// order. Stats hold 20 counters at 160B with preempt kicks plus
+    /// skipped plus RED rejects plus reclaims plus ML hits plus total plus
+    /// clamped. Adaptive shrinks by exceed right 3 capped 1ms on late else
+    /// grows by slack right 3 capped 1ms on early with clamp to 10us plus
+    /// 1ms without changing virtual time. Latency caps the slice at 100us
+    /// plus the key at now plus max 4ms else slice plus 100us with RED on
+    /// the original deadline. Latency vetoes sleeps below 20us toward batch
+    /// with unknown open, so the sleep floor stays decoupled from the slice
+    /// cap. Online SGD runs FP shift 8 plus learn shift 11 with grad max
+    /// 64us plus weight bound 524288 plus nudge max 250us plus accuracy
+    /// hit 64us, so one train step moves at most 8us and one nudge never
+    /// holds past one quarter quantum. The model stays at 48B version 1
+    /// with task at 72B.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -812,13 +894,61 @@ impl Config {
         if crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64 != D_LAT_NS {
             bail!("d lat header bad");
         }
-        if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 136 {
+        if RED_TOL_MIN_NS != 0 {
+            bail!("red tol floor bad");
+        }
+        if RED_TOL_MAX_NS != 256_000 {
+            bail!("red tol outer bad");
+        }
+        if RED_EMAX_MIN_NS != 64_000 {
+            bail!("red emax floor bad");
+        }
+        if RED_EMAX_MAX_NS != 1_000_000 {
+            bail!("red emax outer bad");
+        }
+        if RED_TOL_NS != 64_000 {
+            bail!("red tol default bad");
+        }
+        if RED_EMAX_NS != 256_000 {
+            bail!("red emax default bad");
+        }
+        if RED_TOL_NS > RED_TOL_MAX_NS {
+            bail!("red tol default outer bad");
+        }
+        if RED_EMAX_NS < RED_EMAX_MIN_NS || RED_EMAX_NS > RED_EMAX_MAX_NS {
+            bail!("red emax default outer bad");
+        }
+        if ML_MODEL_VERSION != 1 {
+            bail!("ml version bad");
+        }
+        if ML_ACC_HIT_NS != 64_000 {
+            bail!("ml hit bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_RED_TOL_MIN_NS as u64 != RED_TOL_MIN_NS {
+            bail!("red tol floor header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_RED_TOL_MAX_NS as u64 != RED_TOL_MAX_NS {
+            bail!("red tol outer header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_RED_EMAX_MIN_NS as u64 != RED_EMAX_MIN_NS {
+            bail!("red emax floor header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_RED_EMAX_MAX_NS as u64 != RED_EMAX_MAX_NS {
+            bail!("red emax outer header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_ML_MODEL_VERSION as u64 != ML_MODEL_VERSION as u64 {
+            bail!("ml version header bad");
+        }
+        if crate::bpf_intf::flow_consts_FLOW_ML_ACC_HIT_NS as u64 != ML_ACC_HIT_NS {
+            bail!("ml hit header bad");
+        }
+        if std::mem::size_of::<crate::bpf_intf::flow_sched_stats>() != 160 {
             bail!("stats size bad");
         }
         if std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() != 72 {
             bail!("task size bad");
         }
-        if std::mem::size_of::<crate::bpf_intf::flow_online_model>() != 32 {
+        if std::mem::size_of::<crate::bpf_intf::flow_online_model>() != 48 {
             bail!("ml size bad");
         }
         Ok(())
@@ -1059,14 +1189,44 @@ mod tests {
             LAT_SLEEP_MIN_NS
         );
         assert_eq!(crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64, D_LAT_NS);
+        assert_eq!(RED_TOL_MIN_NS, 0);
+        assert_eq!(RED_TOL_MAX_NS, 256_000);
+        assert_eq!(RED_EMAX_MIN_NS, 64_000);
+        assert_eq!(RED_EMAX_MAX_NS, 1_000_000);
+        assert_eq!(ML_MODEL_VERSION, 1);
+        assert_eq!(ML_ACC_HIT_NS, 64_000);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_MIN_NS as u64,
+            RED_TOL_MIN_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_MAX_NS as u64,
+            RED_TOL_MAX_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_MIN_NS as u64,
+            RED_EMAX_MIN_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_MAX_NS as u64,
+            RED_EMAX_MAX_NS
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_ML_MODEL_VERSION as u64,
+            ML_MODEL_VERSION as u64
+        );
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_ML_ACC_HIT_NS as u64,
+            ML_ACC_HIT_NS
+        );
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            136
+            160
         );
         assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_online_model>(),
-            32
+            48
         );
     }
 
@@ -1401,21 +1561,96 @@ mod tests {
     }
 
     #[test]
-    /// Task stays at 72B with the model at 32B plus stats at 136B.
+    /// Task stays at 72B with the model at 48B plus stats at 160B.
     fn abi_sizes_stay_pinned() {
         assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 72);
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_online_model>(),
-            32
+            48
         );
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            136
+            160
         );
         assert_eq!(RED_EMAX_NS, 256_000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
             RED_EMAX_NS
         );
+        assert_eq!(RED_TOL_MIN_NS, 0);
+        assert_eq!(RED_TOL_MAX_NS, 256_000);
+        assert_eq!(RED_EMAX_MIN_NS, 64_000);
+        assert_eq!(RED_EMAX_MAX_NS, 1_000_000);
+        assert_eq!(ML_MODEL_VERSION, 1);
+        assert_eq!(ML_ACC_HIT_NS, 64_000);
+    }
+
+    #[test]
+    /// Learnable RED bounds clamp to their outers with defaults.
+    #[allow(clippy::assertions_on_constants)]
+    fn learnable_red_bounds_match_intf_h() {
+        assert_eq!(RED_TOL_NS, 64_000);
+        assert_eq!(RED_EMAX_NS, 256_000);
+        assert_eq!(RED_TOL_MIN_NS, 0);
+        assert_eq!(RED_TOL_MAX_NS, 256_000);
+        assert_eq!(RED_EMAX_MIN_NS, 64_000);
+        assert_eq!(RED_EMAX_MAX_NS, 1_000_000);
+        // Tolerance keeps zero plus caps at 256us.
+        assert_eq!(red_tol_clamp(0), 0);
+        assert_eq!(red_tol_clamp(64_000), 64_000);
+        assert_eq!(red_tol_clamp(300_000), 256_000);
+        assert_eq!(red_tol_clamp(u64::MAX), 256_000);
+        // Critical keeps zero with no learned slack.
+        assert_eq!(red_tol_eff(64_000, true), 0);
+        assert_eq!(red_tol_eff(0, true), 0);
+        assert_eq!(red_tol_eff(64_000, false), 64_000);
+        assert_eq!(red_tol_eff(300_000, false), 256_000);
+        assert_eq!(red_tol_eff(0, false), 0);
+        // Emax floors at 64us plus caps at 1ms.
+        assert_eq!(red_emax_clamp(0), 64_000);
+        assert_eq!(red_emax_clamp(64_000), 64_000);
+        assert_eq!(red_emax_clamp(256_000), 256_000);
+        assert_eq!(red_emax_clamp(2_000_000), 1_000_000);
+        assert_eq!(red_emax_clamp(u64::MAX), 1_000_000);
+        // Defaults sit inside their outers.
+        assert!(RED_TOL_NS <= RED_TOL_MAX_NS);
+        assert!(RED_EMAX_NS >= RED_EMAX_MIN_NS && RED_EMAX_NS <= RED_EMAX_MAX_NS);
+    }
+
+    #[test]
+    /// Accuracy hits at 64us with zero on no samples plus clamp.
+    fn ml_accuracy_matches_intf_h() {
+        assert_eq!(ML_ACC_HIT_NS, 64_000);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_ML_ACC_HIT_NS as u64,
+            ML_ACC_HIT_NS
+        );
+        // Inside the window hits with bounds inclusive.
+        assert!(ml_is_hit(0));
+        assert!(ml_is_hit(64_000));
+        assert!(ml_is_hit(-64_000));
+        assert!(ml_is_hit(10_000));
+        // Past the window misses.
+        assert!(!ml_is_hit(64_001));
+        assert!(!ml_is_hit(-64_001));
+        assert!(!ml_is_hit(1_000_000));
+        // Ratio reads hits over total with zero on no samples.
+        assert_eq!(ml_accuracy(0, 0), 0.0);
+        assert_eq!(ml_accuracy(7, 10), 0.7);
+        assert_eq!(ml_accuracy(10, 10), 1.0);
+        assert_eq!(ml_accuracy(0, 10), 0.0);
+        assert_eq!(ml_accuracy(11, 10), 1.0);
+        assert!(
+            (crate::stats::Metrics {
+                ml_hits: 7,
+                ml_total: 10,
+                ..Default::default()
+            }
+            .accuracy()
+                - 0.7)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(crate::stats::Metrics::default().accuracy(), 0.0);
     }
 }

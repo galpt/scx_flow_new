@@ -8,7 +8,8 @@
 //! with no extra sysfs use, so the page stays cheap beside the slice.
 //! A dashboard poll costs 3N BPF map reads for N online CPUs: N for
 //! the stats sum plus N for the on CPU gauge plus N for the per CPU
-//! cards, with one alloc and no sysfs on poll.
+//! cards, with one alloc and no sysfs on poll. Accuracy reads hits over
+//! total in 0.0 to 1.0 with higher better plus zero on no samples.
 
 use std::mem::MaybeUninit;
 use std::os::fd::AsFd;
@@ -50,6 +51,9 @@ impl<'a> Scheduler<'a> {
         let mut preempt_skipped = 0u64;
         let mut red_rejects = 0u64;
         let mut red_reclaims = 0u64;
+        let mut ml_hits = 0u64;
+        let mut ml_total = 0u64;
+        let mut ml_clamped = 0u64;
         for &id in self.online_cpus.iter() {
             let s = self.read_stats(id as usize);
             total_runtime = total_runtime.saturating_add(s.total_runtime);
@@ -67,6 +71,9 @@ impl<'a> Scheduler<'a> {
             preempt_skipped = preempt_skipped.saturating_add(s.preempt_skipped);
             red_rejects = red_rejects.saturating_add(s.red_rejects);
             red_reclaims = red_reclaims.saturating_add(s.red_reclaims);
+            ml_hits = ml_hits.saturating_add(s.ml_hits);
+            ml_total = ml_total.saturating_add(s.ml_total);
+            ml_clamped = ml_clamped.saturating_add(s.ml_clamped);
         }
         stats::Metrics {
             on_cpu: self.count_on_cpu(),
@@ -89,6 +96,9 @@ impl<'a> Scheduler<'a> {
             preempt_skipped,
             red_rejects,
             red_reclaims,
+            ml_hits,
+            ml_total,
+            ml_clamped,
         }
     }
 
@@ -113,6 +123,9 @@ impl<'a> Scheduler<'a> {
             preempt_skipped: 0,
             red_rejects: 0,
             red_reclaims: 0,
+            ml_hits: 0,
+            ml_total: 0,
+            ml_clamped: 0,
         };
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             return zero;
@@ -170,8 +183,8 @@ impl<'a> Scheduler<'a> {
     /// online count. SMT comes from the cached init
     /// flags with no sysfs use on poll and stays display only. Offline
     /// stays out, so per CPU count matches the cached online count.
-    /// Version plus timestamp plus topology plus train count join the
-    /// counters for the page plus the log.
+    /// Version plus timestamp plus topology plus train count plus accuracy
+    /// join the counters for the page plus the log.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
         for (rank, &id) in self.online_cpus.iter().enumerate() {
@@ -188,25 +201,35 @@ impl<'a> Scheduler<'a> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|v| v.as_nanos().min(u64::MAX as u128) as u64)
             .unwrap_or(0);
+        let metrics = self.get_metrics();
+        let accuracy = metrics.accuracy();
+        let hits = metrics.ml_hits;
+        let total = metrics.ml_total;
+        let clamped = metrics.ml_clamped;
         stats::WebMetrics {
-            stats: self.get_metrics(),
+            stats: metrics,
             per_cpu,
             version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_ns,
             topology: self.topology.clone(),
             ml_updates: self.read_ml_updates(),
+            ml_accuracy: accuracy,
+            ml_hits: hits,
+            ml_total: total,
+            ml_clamped: clamped,
         }
     }
 
     /// Read the train count with zero on miss.
     /// The model row holds five weights plus bias plus clamp plus count
-    /// in 32B, so the count sits at byte 28 with no extra map. A miss
-    /// reads zero with no trap, so old kernels plus missing rows still
-    /// serve the page. Costs one map read per poll with no sysfs use.
+    /// plus version plus learnable RED bounds plus reserve in 48B, so the
+    /// count sits at byte 28 with no extra map. A miss reads zero with no
+    /// trap, so old kernels plus missing rows still serve the page. Costs
+    /// one map read per poll with no sysfs use.
     pub(crate) fn read_ml_updates(&self) -> u64 {
         let fd = self.skel.maps.ml_online_model_stor.as_fd().as_raw_fd();
         let key = 0u32;
-        let mut buf = MaybeUninit::<[u8; 32]>::zeroed();
+        let mut buf = MaybeUninit::<[u8; 48]>::zeroed();
         let ret = unsafe {
             libbpf_rs::libbpf_sys::bpf_map_lookup_elem(
                 fd,

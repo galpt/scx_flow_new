@@ -50,8 +50,10 @@ fn jt(v: &Value) -> String {
 
 /* Merged dashboard object for one snapshot. */
 /* Full log with version plus timestamp plus topology plus stats */
-/* plus per CPU plus train count. Same object serves stats polling */
-/* plus snapshot download on loopback with no new exposure. */
+/* plus per CPU plus train count plus accuracy plus ML counters. Same */
+/* object serves stats polling plus snapshot download on loopback with */
+/* no new exposure. Top-level ML keys mirror the stats sums for cheap */
+/* UI reads with no nested walk. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -60,6 +62,10 @@ fn merged(snap: &WebMetrics) -> Value {
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
         "ml_updates": snap.ml_updates,
+        "ml_accuracy": snap.ml_accuracy,
+        "ml_hits": snap.ml_hits,
+        "ml_total": snap.ml_total,
+        "ml_clamped": snap.ml_clamped,
     })
 }
 
@@ -158,7 +164,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Merged keeps the six live keys with no stale keys. */
+    /* Merged keeps the ten live keys with no stale keys. */
     #[test]
     fn merged_keeps_live_keys() {
         let snap = WebMetrics::default();
@@ -169,7 +175,11 @@ mod tests {
         assert!(v.get("timestamp_ns").is_some());
         assert!(v.get("topology").is_some());
         assert!(v.get("ml_updates").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
+        assert!(v.get("ml_accuracy").is_some());
+        assert!(v.get("ml_hits").is_some());
+        assert!(v.get("ml_total").is_some());
+        assert!(v.get("ml_clamped").is_some());
+        assert_eq!(v.as_object().map(|o| o.len()), Some(10));
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
     }
@@ -186,21 +196,30 @@ mod tests {
         assert_eq!(m.stats.preempt_skipped, 0);
         assert_eq!(m.stats.red_rejects, 0);
         assert_eq!(m.stats.red_reclaims, 0);
+        assert_eq!(m.stats.ml_hits, 0);
+        assert_eq!(m.stats.ml_total, 0);
+        assert_eq!(m.stats.ml_clamped, 0);
+        assert_eq!(m.stats.accuracy(), 0.0);
         assert!(m.per_cpu.is_empty());
         assert_eq!(m.version, "4.7.0");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
         assert_eq!(m.ml_updates, 0);
+        assert_eq!(m.ml_accuracy, 0.0);
+        assert_eq!(m.ml_hits, 0);
+        assert_eq!(m.ml_total, 0);
+        assert_eq!(m.ml_clamped, 0);
         let old = "{\"id\":1,\"running_pid\":5,\"slice_ns\":2000000}";
         let card: crate::stats::PerCpuMetrics = serde_json::from_str(old).unwrap();
         assert_eq!(card.id, 1);
         assert!(!card.smt);
         assert_eq!(card.running_pid, 5);
         let v = merged(&m);
-        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(10));
         let back: WebMetrics = serde_json::from_value(v).unwrap();
         assert_eq!(back.stats.on_cpu, 1);
         assert_eq!(back.version, "4.7.0");
+        assert_eq!(back.ml_accuracy, 0.0);
     }
 
     /* Full snapshot round trips through JSON with live counters. */
@@ -226,6 +245,9 @@ mod tests {
                 preempt_skipped: 2,
                 red_rejects: 1,
                 red_reclaims: 1,
+                ml_hits: 7,
+                ml_total: 10,
+                ml_clamped: 2,
             },
             per_cpu: vec![
                 crate::stats::PerCpuMetrics {
@@ -245,6 +267,10 @@ mod tests {
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "cpus=4 seeded".to_string(),
             ml_updates: 7,
+            ml_accuracy: 0.7,
+            ml_hits: 7,
+            ml_total: 10,
+            ml_clamped: 2,
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("local_moves"));
@@ -260,6 +286,11 @@ mod tests {
         assert!(txt.contains("preempt_skipped"));
         assert!(txt.contains("red_rejects"));
         assert!(txt.contains("red_reclaims"));
+        assert!(txt.contains("ml_hits"));
+        assert!(txt.contains("ml_total"));
+        assert!(txt.contains("ml_clamped"));
+        assert!(txt.contains("ml_accuracy"));
+        assert!(txt.contains("ml_updates"));
         assert!(txt.contains("slice_ns"));
         assert!(txt.contains("running_pid"));
         assert!(txt.contains("\"smt\":false"));
@@ -292,6 +323,10 @@ mod tests {
         assert_eq!(back.stats.preempt_skipped, 2);
         assert_eq!(back.stats.red_rejects, 1);
         assert_eq!(back.stats.red_reclaims, 1);
+        assert_eq!(back.stats.ml_hits, 7);
+        assert_eq!(back.stats.ml_total, 10);
+        assert_eq!(back.stats.ml_clamped, 2);
+        assert!((back.stats.accuracy() - 0.7).abs() < 1e-9);
         assert_eq!(back.per_cpu.len(), 2);
         assert!(!back.per_cpu[0].smt);
         assert!(back.per_cpu[1].smt);
@@ -301,8 +336,16 @@ mod tests {
         assert_eq!(back.version, "4.7.0");
         assert_eq!(back.topology, "cpus=4 seeded");
         assert_eq!(back.ml_updates, 7);
+        assert!((back.ml_accuracy - 0.7).abs() < 1e-9);
+        assert_eq!(back.ml_hits, 7);
+        assert_eq!(back.ml_total, 10);
+        assert_eq!(back.ml_clamped, 2);
         let v = merged(&snap);
-        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(10));
+        assert!(v.get("ml_accuracy").is_some());
+        assert!(v.get("ml_hits").is_some());
+        assert!(v.get("ml_total").is_some());
+        assert!(v.get("ml_clamped").is_some());
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
     }
@@ -351,6 +394,10 @@ mod tests {
         assert!(html.contains("id=\"preempt-skipped\""));
         assert!(html.contains("id=\"red-rejects\""));
         assert!(html.contains("id=\"red-reclaims\""));
+        assert!(html.contains("id=\"ml-hits\""));
+        assert!(html.contains("id=\"ml-total\""));
+        assert!(html.contains("id=\"ml-clamped\""));
+        assert!(html.contains("id=\"ml-accuracy\""));
         assert!(html.contains("on_cpu"));
         assert!(html.contains("total_runtime"));
         assert!(html.contains("uptime_ns"));
@@ -362,6 +409,10 @@ mod tests {
         assert!(html.contains("preempt_skipped"));
         assert!(html.contains("red_rejects"));
         assert!(html.contains("red_reclaims"));
+        assert!(html.contains("ml_hits"));
+        assert!(html.contains("ml_total"));
+        assert!(html.contains("ml_clamped"));
+        assert!(html.contains("ml_accuracy"));
         assert!(!html.contains("over_moves"));
         assert!(!html.contains("over-moves"));
         assert!(!html.contains("\"parks\""));
@@ -443,5 +494,25 @@ mod tests {
         assert!(!html.contains("localStorage"));
         assert!(html.contains("/api/stats"));
         assert!(html.contains("slice_ns"));
+    }
+
+    /* Dashboard shows ML accuracy with range plus effect note. */
+    #[test]
+    fn dashboard_shows_ml_accuracy() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("id=\"ml-accuracy\""));
+        assert!(html.contains("id=\"ml-hits\""));
+        assert!(html.contains("ml_accuracy"));
+        assert!(html.contains("0.0-1.0") || html.contains("0.0–1.0"));
+        assert!(html.contains("higher better"));
+        assert!(html.contains("preempt") || html.contains("classification"));
+    }
+
+    /* Summary names ML accuracy in the running line. */
+    #[test]
+    fn dashboard_summary_names_ml_accuracy() {
+        let html = include_str!("../../ui/index.html");
+        assert!(html.contains("ML accuracy"));
+        assert!(html.contains("Flow is running"));
     }
 }
