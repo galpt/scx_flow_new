@@ -103,6 +103,14 @@ struct {
 } ml_online_model_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
+/* Hoisted RED bounds snapshot per enqueue with no per-tail threading. */
+/* The enqueue top fills both through one control lookup, then the reject */
+/* path reads them with no second lookup, so one fetch covers miss plus */
+/* open plus pinned with no stack spill. Races across CPUs still hold */
+/* clamped values within outer 0 to 256us plus 64us to 1ms, so the check */
+/* stays safe with outer bounds still checked. */
+volatile u64 flow_red_tol_cache;
+volatile u64 flow_red_emax_cache;
 /* Includes run in dependency order with maps plus helpers before */
 /* callers, so stats plus cgroup plus vtime plus weight plus ml control */
 /* plus edf come first, then placement plus timer plus preempt plus */

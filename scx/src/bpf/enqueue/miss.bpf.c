@@ -82,8 +82,7 @@ static __noinline bool flow_enqueue_miss(struct task_struct *p,
 	/* skip aging in the miss count, so urgency returns at once with no */
 	/* starvation. */
 	flow_count_miss(tctx);
-	m_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now, avg);
-	tctx->wait_at = now;
+	m_sleep = flow_take_sleep(tctx, now, avg);
 	ndl = flow_pred_deadline(now, avg, dev, hint);
 	__sync_lock_test_and_set(&tctx->deadline, ndl);
 	__sync_lock_test_and_set(&tctx->slice_ns,

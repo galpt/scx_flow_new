@@ -64,6 +64,16 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	if (!m)
 		return 0;
 
+	/* Gate the dot when untrained, so boot plus idle paths keep the */
+	/* deterministic baseline with no fill plus dot cost. Zero trains */
+	/* means weights plus bias still read zero with no shift, so the */
+	/* score would read zero anyway with no behavior change. Version */
+	/* past 1 also gates, so legacy rows never nudge with bounds. */
+	if (READ_ONCE(m->update_count) == 0)
+		return 0;
+	if (READ_ONCE(m->version) != (u32)FLOW_ML_MODEL_VERSION)
+		return 0;
+
 	/* Burst caps at the quantum match train through the shared fill, */
 	/* so infer never saturates past the train range on huge inputs. */
 	/* Lag stays within plus or minus 2ms via the lag bound plus share */

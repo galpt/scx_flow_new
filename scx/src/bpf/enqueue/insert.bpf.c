@@ -56,6 +56,31 @@ static __always_inline void flow_overflow_insert(struct task_struct *p, u64 enq_
  * batch, so the earliest key wins in every tier. Like fair.c, the
  * earliest key wins, unlike rt.c, no fixed priority holds.
  */
+/**
+ * flow_take_sleep - true sleep plus wait stamp in one shared copy.
+ * @tctx: task state with wait stamp to read plus overwrite.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos for the gap minus burst.
+ *
+ * Isolates the true gap as now minus wait minus burst with wrap safety,
+ * then stamps wait to now, so queue plus run never look like sleep and
+ * later reads see one snapshot. Shares one sleep plus store copy, so
+ * miss plus open plus pinned keep no inline growth and the same gap.
+ *
+ * Outlined with noinline to keep verifier headroom on the enqueue path.
+ *
+ * Returns: sleep time in nanos, zero when unknown.
+ */
+static __noinline u64 flow_take_sleep(struct flow_task_ctx *tctx, u64 now,
+	u64 avg)
+{
+	u64 sleep;
+	if (!tctx)
+		return 0;
+	sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now, avg);
+	tctx->wait_at = now;
+	return sleep;
+}
 static __always_inline void flow_tier_insert_hint(struct task_struct *p,
 	s32 cpu, u64 vtime, u64 now, s32 local_q, s32 node_q)
 {
@@ -300,28 +325,13 @@ static __noinline bool flow_enqueue_reject(struct task_struct *p,
 	return true;
 }
 /**
- * struct flow_pinned_tail - pinned args for the outlined pinned path.
- * @tctx: task state with vruntime plus deadline plus predictor.
- * @sel: selected CPU hint, negative falls back to first allowed.
- * @is_reenq: true reuses the stored hint plus weight without a lookup.
- * @now: current time in nanos.
- * @enq_flags: enqueue flags threaded to the reject insert.
- *
- * Bundles the pinned state plus hint plus time plus flags, so the outlined
- * pinned path takes one pointer like the scan plus enqueue tails.
- */
-struct flow_pinned_tail {
-	struct flow_task_ctx *tctx;
-	s32 sel;
-	bool is_reenq;
-	u64 now;
-	u64 enq_flags;
-};
-/**
  * flow_enqueue_pinned - enqueue one pinned task in tier order.
  * @p: task to enqueue, pinned to one CPU without a scan.
- * @t: pinned tail with state plus hint plus time plus flags, read once
- * by the caller.
+ * @tctx: task state with vruntime plus deadline plus predictor.
+ * @sel: selected CPU hint, negative falls back to first allowed.
+ * @now: current time in nanos.
+ * @enq_flags: enqueue flags threaded to the reject insert plus requeue
+ * pace derived from REENQ plus LAST with no extra arg.
  *
  * Pinned tasks wait in a tier queue with wait set and one idle kick.
  * Homeless pins without a live CPU wait in the value ordered reject queue
@@ -331,19 +341,16 @@ struct flow_pinned_tail {
  * target minimum minus 2ms like open tasks, and a past deadline counts
  * one miss before the fresh deadline, so pins track lag plus overload
  * without stale reuse. The tier keeps mask wins on drain, so a pinned
- * task still meets only its allowed CPU.
+ * task still meets only its allowed CPU. Takes scalars with no tail
+ * struct, so the verifier tracks registers with no stack spill.
  *
  * Outlined with noinline to keep verifier headroom and the cold pinned
  * path leaves the open path with the same order.
  */
 static __noinline void flow_enqueue_pinned(struct task_struct *p,
-	const struct flow_pinned_tail *t)
+	struct flow_task_ctx *tctx, s32 sel, u64 now, u64 enq_flags)
 {
-	struct flow_task_ctx *tctx = t->tctx;
-	s32 sel = t->sel;
-	bool is_reenq = t->is_reenq;
-	u64 now = t->now;
-	u64 enq_flags = t->enq_flags;
+	bool is_reenq = !!(enq_flags & (SCX_ENQ_REENQ | SCX_ENQ_LAST));
 	s32 pc = flow_pick_target(p, sel);
 	u32 ph;
 	u32 phint_w = (u32)FLOW_WEIGHT_BASE;
@@ -399,17 +406,14 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	/* now minus wait minus burst, and in-tier keys cap at now plus one */
 	/* period for the starvation bound. */
 	if (pmiss) {
-		u64 pm_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
-		    pavg);
+		u64 pm_sleep = flow_take_sleep(tctx, now, pavg);
 		pin_sleep_hold = pm_sleep;
-		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		pvt = flow_make_fair(tctx, pdl, phint_w, pm_sleep);
 		pvt = flow_enqueue_cap_key(pvt, now);
 	} else if (!is_reenq) {
-		u64 p_old_wait = READ_ONCE(tctx->wait_at);
-		u64 p_sleep = flow_sleep_ns(p_old_wait, now, pavg);
+		u64 p_sleep = flow_take_sleep(tctx, now, pavg);
 		bool p_is_lat;
 		u32 p_pre;
 		u32 p_slice;
@@ -431,11 +435,9 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		have_pin = true;
 		pin_sleep_hold = p_sleep;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
-			tctx->wait_at = now;
 			pvt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
 		} else {
 			u64 p_dl;
-			tctx->wait_at = now;
 			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
 			p_vt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
 			if (p_is_lat) {
@@ -447,10 +449,8 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		}
 		pvt = flow_enqueue_cap_key(pvt, now);
 	} else {
-		u64 pr_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
-		    pavg);
+		u64 pr_sleep = flow_take_sleep(tctx, now, pavg);
 		pin_sleep_hold = pr_sleep;
-		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 		pvt = flow_make_fair(tctx, pdl, phint_w, pr_sleep);

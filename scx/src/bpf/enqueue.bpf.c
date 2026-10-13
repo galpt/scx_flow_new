@@ -189,21 +189,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_lock_test_and_set(&tctx->slice_ns,
 			    (u32)FLOW_QUANTUM_NS);
 	}
+	/* Snapshot both RED bounds once per enqueue through one control */
+	/* lookup, so miss plus open plus pinned share one fetch with no */
+	/* second lookup and the same admit order. The snapshot globals */
+	/* hold clamped values, so the reject path reads them with no */
+	/* extra clamp and outer safety stays checked at the snapshot. */
+	flow_ml_red_cache();
 	/* Pinned tasks wait in a tier queue with wait set and one idle kick. */
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
-	/* The pinned wait runs Outlined with no order change, so the open */
-	/* path keeps verifier headroom with the same fair time plus miss */
-	/* plus clamp plus kick. */
+	/* The pinned wait runs Outlined on scalars with no tail struct, so */
+	/* the open path keeps verifier headroom with the same fair time */
+	/* plus miss plus clamp plus kick and no stack spill. */
 	if (unlikely(pinned)) {
-		struct flow_pinned_tail tail = {
-			.tctx = tctx,
-			.sel = sel,
-			.is_reenq = is_reenq,
-			.now = now,
-			.enq_flags = enq_flags,
-		};
-		flow_enqueue_pinned(p, &tail);
+		flow_enqueue_pinned(p, tctx, sel, now, enq_flags);
 		return;
 	}
 	cpu = flow_pick_target(p, sel);

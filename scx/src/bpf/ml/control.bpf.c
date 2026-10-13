@@ -70,6 +70,41 @@ static __noinline u64 flow_ml_red_emax_ns(void)
 	return flow_red_emax_clamp(v);
 }
 /**
+ * flow_ml_red_cache - snapshot both RED bounds in one lookup.
+ *
+ * Reads the model once with version 1 else both defaults, clamps
+ * tolerance to outer 0 to 256us plus Emax to outer 64us to 1ms, then
+ * stores both to the enqueue snapshot globals, so miss plus open plus
+ * pinned share one fetch with no second lookup and no tail threading.
+ * A zero tolerance stays zero with no default fill, so explicit zero
+ * keeps zero slack with outer safety still checked.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so the enqueue top keeps one fetch with no inline growth.
+ */
+static __noinline void flow_ml_red_cache(void)
+{
+	u32 key = 0;
+	struct flow_online_model *m;
+	u64 tol;
+	u64 emax;
+	m = bpf_map_lookup_elem(&ml_online_model_stor, &key);
+	if (!m) {
+		flow_red_tol_cache = (u64)FLOW_RED_TOL_NS;
+		flow_red_emax_cache = (u64)FLOW_RED_EMAX_NS;
+		return;
+	}
+	if (READ_ONCE(m->version) != (u32)FLOW_ML_MODEL_VERSION) {
+		flow_red_tol_cache = (u64)FLOW_RED_TOL_NS;
+		flow_red_emax_cache = (u64)FLOW_RED_EMAX_NS;
+		return;
+	}
+	tol = flow_red_tol_clamp((u64)READ_ONCE(m->red_tol_ns));
+	emax = flow_red_emax_clamp((u64)READ_ONCE(m->red_emax_ns));
+	flow_red_tol_cache = tol;
+	flow_red_emax_cache = emax;
+}
+/**
  * struct flow_ml_feat - capped features for one train plus infer step.
  * @avg: burst average capped at the 1ms quantum.
  * @dev: burst deviation capped at the 1ms quantum.

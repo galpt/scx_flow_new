@@ -85,8 +85,7 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 	/* never look like sleep. In-tier keys cap at now plus one period, */
 	/* so far keys never starve past the bound. */
 	if (!is_reenq) {
-		u64 old_wait = READ_ONCE(tctx->wait_at);
-		u64 lat_sleep = flow_sleep_ns(old_wait, now, avg);
+		u64 lat_sleep = flow_take_sleep(tctx, now, avg);
 		bool is_lat;
 		u32 pre_slice;
 		u32 lat_slice;
@@ -108,12 +107,10 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		out->sleep_ns = lat_sleep;
 		out->is_fresh = true;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
-			tctx->wait_at = now;
 			vtime = flow_make_fair(tctx, deadline, hint_w,
 			    lat_sleep);
 		} else {
 			u64 lat_dl;
-			tctx->wait_at = now;
 			__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
 			lat_vt = flow_make_fair(tctx, deadline, hint_w,
 			    lat_sleep);
@@ -127,8 +124,7 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		vtime = flow_enqueue_cap_key(vtime, now);
 		out->vtime = vtime;
 	} else {
-		u64 re_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
-		    avg);
+		u64 re_sleep = flow_take_sleep(tctx, now, avg);
 		u64 vtime;
 		/* Strict slice before the key without stale reuse. A slice */
 		/* rotation holds the stored charge else inherits the quantum */
@@ -145,7 +141,6 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		out->is_lat = flow_enqueue_is_lat(avg, dev, hint, re_sleep,
 		    flow_task_effective_weight(READ_ONCE(tctx->weight),
 		    hint_w));
-		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 		/* Strict EDF key from the virtual deadline plus the EDF */
