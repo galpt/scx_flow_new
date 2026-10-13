@@ -109,11 +109,11 @@ volatile u64 nr_node_ids;
 #include "timer.bpf.c"
 #include "preempt.bpf.c"
 #include "select_cpu.bpf.c"
+#include "ml/online_sgd.bpf.c"
+#include "ml/nudge.bpf.c"
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"
 #include "lifecycle.bpf.c"
-#include "ml/online_sgd.bpf.c"
-#include "ml/nudge.bpf.c"
 /**
  * flow_init - create queues plus seed CPU state.
  *

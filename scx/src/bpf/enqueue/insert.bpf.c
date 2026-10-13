@@ -99,36 +99,56 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
 /**
- * flow_make_fair - strict EDF key from task state plus deadline plus hint.
+ * flow_make_fair - strict EDF key from task state plus deadline plus hint plus now.
  * @tctx: task state with vruntime plus weight plus slice.
  * @deadline: absolute EDF deadline in nanos.
  * @hint_w: hint share with base for neutral.
+ * @now: current time in nanos for the wrap-safe sleep input.
  *
  * Reads vruntime plus weight plus slice once and stacks the effective
  * share of task times hint over 128, so pinned plus miss plus open
  * paths share one divide copy with the same order. The slice holds
  * the dynamic remaining clamp on fresh waits else the held charge on
  * misses, so near deadlines earn near virtual times with no band jump.
+ * Forwards the real wrap-safe sleep from wait plus now plus avg with
+ * never a zero stub, then applies the in-kernel ML nudge within plus
+ * or minus 250us with saturation, so one nudge never holds past one
+ * quarter quantum. RED cost stays on the pre-clamp slice before this
+ * nudge with no order change, and a missing model fails closed to
+ * zero with the deterministic shift-3 EMA baseline owning order.
  *
- * Returns: strict key as the earlier of deadline plus virtual deadline.
+ * Returns: strict key as the earlier of deadline plus nudged virtual deadline.
  *
  * Outlined with noinline to keep verifier headroom and pinned plus miss
  * plus open paths share one divide copy with no inline growth.
  */
 static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
-	u64 deadline, u32 hint_w)
+	u64 deadline, u32 hint_w, u64 now)
 {
 	u64 vr = READ_ONCE(tctx->vruntime);
 	u32 sl = READ_ONCE(tctx->slice_ns);
 	u32 task_w = READ_ONCE(tctx->weight);
 	u32 eff;
 	u64 vd;
+	u64 sleep_ns;
+	s64 nudge;
 	if (task_w == 0)
 		task_w = (u32)FLOW_WEIGHT_BASE;
 	eff = flow_task_effective_weight(task_w, hint_w);
 	if (sl == 0)
 		sl = (u32)FLOW_QUANTUM_NS;
 	vd = flow_virt_deadline(vr, (u64)sl, eff);
+	/* Real wrap-safe sleep input with never a zero stub. */
+	sleep_ns = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
+	    READ_ONCE(tctx->avg_ns));
+	/* Bounded in-kernel nudge with H4 fail closed to zero. */
+	nudge = flow_ml_deadline_nudge(tctx, sleep_ns, eff);
+	if (nudge < 0) {
+		u64 abs_nudge = (u64)(-nudge);
+		vd = vd > abs_nudge ? vd - abs_nudge : 0;
+	} else {
+		vd = flow_sat_add(vd, (u64)nudge);
+	}
 	return flow_edf_key(deadline, vd);
 }
 /**
@@ -260,7 +280,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w);
+		pvt = flow_make_fair(tctx, pdl, phint_w, now);
 		{
 			u64 pbound0 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (pvt != 0 && pbound0 != (u64)~0ULL &&
@@ -290,12 +310,12 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		have_pin = true;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
 			tctx->wait_at = now;
-			pvt = flow_make_fair(tctx, pdl, phint_w);
+			pvt = flow_make_fair(tctx, pdl, phint_w, now);
 		} else {
 			u64 p_dl;
 			tctx->wait_at = now;
 			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
-			p_vt = flow_make_fair(tctx, pdl, phint_w);
+			p_vt = flow_make_fair(tctx, pdl, phint_w, now);
 			if (p_is_lat) {
 				p_dl = flow_lat_deadline(now, p_slice);
 				pvt = flow_edf_key(p_vt, p_dl);
@@ -313,7 +333,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w);
+		pvt = flow_make_fair(tctx, pdl, phint_w, now);
 		{
 			u64 pbound2 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (pvt != 0 && pbound2 != (u64)~0ULL &&

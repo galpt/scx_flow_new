@@ -147,6 +147,23 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* minimum folds forward best effort with no regression past a */
 	/* concurrent win. */
 	flow_count_runtime(delta);
+	/* In-kernel online train for both runnable plus completion. */
+	/* Runs when delta holds past zero with the real wrap-safe sleep */
+	/* from wait plus now plus avg plus the effective share, so the */
+	/* fixed point step learns every counted segment with no adapt */
+	/* gate plus no credit gate plus no order change. A missing model */
+	/* fails closed with no update, so the shift-3 EMA baseline owns */
+	/* deadline math with no stall. */
+	if (delta > 0) {
+		u64 tr_wait = READ_ONCE(tctx->wait_at);
+		u64 tr_avg = (u64)READ_ONCE(tctx->avg_ns);
+		u64 tr_sleep = flow_sleep_ns(tr_wait, now, tr_avg);
+		u32 tr_task_w = READ_ONCE(tctx->weight);
+		u32 tr_hint_w = READ_ONCE(tctx->hint_w);
+		u32 tr_eff = flow_task_effective_weight(tr_task_w,
+		    tr_hint_w);
+		flow_ml_train_step(tctx, delta, tr_sleep, tr_eff);
+	}
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);

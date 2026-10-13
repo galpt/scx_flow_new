@@ -27,13 +27,13 @@
  * priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
- * copy and no inline growth. Unused until Phase 4 wires the enqueue
- * hook, so the attribute keeps the build clean.
+ * copy and no inline growth. Wired in Phase 4 from the enqueue hook
+ * with H4 fail closed to zero on missing state.
  *
  * Returns: clamped nudge in nanos from minus 250us to 250us, zero on
  * missing state.
  */
-static __noinline __attribute__((unused)) s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
+static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	u64 sleep_ns, u32 eff_w)
 {
 	u32 key = 0;

@@ -33,10 +33,10 @@
  * paces learning, unlike rt.c, no fixed priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
- * copy and no inline growth. Unused until Phase 4 wires the stopping
- * plus enqueue hooks, so the attribute keeps the build clean.
+ * copy and no inline growth. Wired in Phase 4 from stopping plus
+ * enqueue with H4 fail closed on missing state.
  */
-static __noinline __attribute__((unused)) void flow_ml_train_step(const struct flow_task_ctx *tctx,
+static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	u64 actual_delta, u64 sleep_ns, u32 eff_w)
 {
 	u32 key = 0;

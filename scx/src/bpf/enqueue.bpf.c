@@ -279,7 +279,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* urgency returns at once with no starvation. */
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-		nvt = flow_make_fair(tctx, ndl, hint_w);
+		nvt = flow_make_fair(tctx, ndl, hint_w, now);
 		{
 			u64 mbound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (nvt != 0 && mbound != (u64)~0ULL &&
@@ -363,12 +363,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		have_open = true;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
 			tctx->wait_at = now;
-			vtime = flow_make_fair(tctx, deadline, hint_w);
+			vtime = flow_make_fair(tctx, deadline, hint_w, now);
 		} else {
 			u64 lat_dl;
 			tctx->wait_at = now;
 			__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
-			lat_vt = flow_make_fair(tctx, deadline, hint_w);
+			lat_vt = flow_make_fair(tctx, deadline, hint_w, now);
 			if (is_lat) {
 				lat_dl = flow_lat_deadline(now, lat_slice);
 				vtime = flow_edf_key(lat_vt, lat_dl);
@@ -400,7 +400,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		/* cgroup plus task weights shape fairness together. In-tier */
 		/* keys cap at now plus one period, so far keys never starve */
 		/* past the bound. */
-		vtime = flow_make_fair(tctx, deadline, hint_w);
+		vtime = flow_make_fair(tctx, deadline, hint_w, now);
 		{
 			u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (vtime != 0 && bound != (u64)~0ULL &&
