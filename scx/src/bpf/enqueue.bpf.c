@@ -273,7 +273,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u64 nvt;
 		u32 msl;
 		bool mcrit;
-		u64 mex;
 		u64 m_sleep;
 		flow_count_miss(tctx);
 		m_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now, avg);
@@ -294,12 +293,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			    !flow_time_before(nvt, mbound) && nvt != mbound)
 				nvt = mbound;
 		}
-		/* RED on the miss rejoin with the same O(1) newcomer check. A zero */
-		/* exceed, a critical exceed, or a newcomer that fails the victim */
-		/* test admits at once, else the newcomer rejects to the value */
-		/* ordered queue. Tolerance aids only the guarantee without shaping */
-		/* the key. A full O(n) least value scan stays a noted alternative, */
-		/* so the verifier keeps one pass. Critical follows the unified */
+		/* RED on the miss rejoin with the same O(1) newcomer check through */
+		/* the shared outlined helper, so a reject needs cost past the */
+		/* learnable Emax plus cost past the exceed with no critical. */
+		/* Tolerance aids only the guarantee without shaping the key. */
+		/* A full O(n) least value scan stays a noted alternative, so */
+		/* the verifier keeps one pass. Critical follows the unified */
 		/* latency, so RED and slice agree. */
 		msl = READ_ONCE(tctx->slice_ns);
 		{
@@ -310,18 +309,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			meff0 = flow_task_effective_weight(mtw0, hint_w);
 			mcrit = flow_is_lat(avg, dev, hint, m_sleep, 0, meff0);
 		}
-		mex = flow_red_newcomer_exceed(ndl, now, avg, msl, mcrit);
-		if (mex && !mcrit) {
+		if (flow_red_should_reject(ndl, now, avg, msl, mcrit)) {
 			u32 mtw = READ_ONCE(tctx->weight);
 			u32 meff = flow_task_effective_weight(mtw, hint_w);
-			u64 mcost = flow_red_cost(avg, msl);
-			if (!flow_red_victim_ok(ndl, ndl, mcost, mex,
-			    mcrit)) {
-				flow_tier_insert(p, cpu, nvt, now);
-				flow_count_admit();
-				flow_kick_idle_allowed(p, sel);
-				return;
-			}
 			flow_count_red_reject();
 			flow_overflow_insert(p, enq_flags,
 			    flow_red_value(meff, mcrit));
@@ -422,19 +412,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 				vtime = bound;
 		}
 	}
-	/* RED admission with residual plus exceed plus tolerance used only */
-	/* here. A zero exceed, a critical exceed, or a newcomer that fails */
-	/* the victim test admits at once, else the newcomer rejects to the */
-	/* value ordered queue outside dispatch. The deadline bounds the check */
-	/* without shaping vruntime. Critical follows the unified latency and */
-	/* cost uses the pre-clamp slice for fresh waits, so RED and slice */
-	/* agree. A full O(n) least value scan stays a noted alternative, so */
-	/* the verifier keeps one pass. */
+	/* RED admission through the shared outlined helper. A reject needs */
+	/* cost past the learnable Emax plus cost past the exceed with no */
+	/* critical, else the newcomer admits to the tier path. The deadline */
+	/* bounds the check without shaping vruntime. Critical follows the */
+	/* unified latency and cost uses the pre-clamp slice for fresh */
+	/* waits, so RED and slice agree. A full O(n) least value scan stays */
+	/* a noted alternative, so the verifier keeps one pass. */
 	{
 		u32 csl = READ_ONCE(tctx->slice_ns);
 		bool ccrit;
 		u32 cost_sl;
-		u64 cex;
 		if (have_open) {
 			ccrit = open_is_lat;
 			if (!(enq_flags & SCX_ENQ_PREEMPT))
@@ -451,20 +439,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			ccrit = flow_is_lat(avg, dev, hint, c_sleep, 0, ceff0);
 			cost_sl = csl;
 		}
-		cex = flow_red_newcomer_exceed(deadline, now, avg, cost_sl,
-		    ccrit);
-		if (cex && !ccrit) {
+		if (flow_red_should_reject(deadline, now, avg, cost_sl,
+		    ccrit)) {
 			u32 ctw = READ_ONCE(tctx->weight);
 			u32 ceff = flow_task_effective_weight(ctw, hint_w);
-			u64 ccost = flow_red_cost(avg, cost_sl);
-			if (flow_red_victim_ok(deadline, deadline, ccost,
-			    cex, ccrit)) {
-				flow_count_red_reject();
-				flow_overflow_insert(p, enq_flags,
-				    flow_red_value(ceff, ccrit));
-				flow_kick_idle_allowed(p, sel);
-				return;
-			}
+			flow_count_red_reject();
+			flow_overflow_insert(p, enq_flags,
+			    flow_red_value(ceff, ccrit));
+			flow_kick_idle_allowed(p, sel);
+			return;
 		}
 	}
 	/* Every tier plus bypass join counts one admit without double */

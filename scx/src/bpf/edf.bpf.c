@@ -249,6 +249,56 @@ static __always_inline bool flow_red_victim_ok(u64 v_deadline,
 	return true;
 }
 /**
+ * flow_red_should_reject - test one newcomer for RED reject.
+ * @deadline: newcomer absolute deadline in nanos.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos, zero for no history.
+ * @slice: stored slice in nanos, zero for no history.
+ * @is_crit: true marks latency-critical via the unified latency test
+ * with zero tolerance, false for hard batch.
+ *
+ * Costs burst else slice else quantum once, tolerates the learnable
+ * value within outer 0 to 256us defaulting to 64us for hard batch
+ * only, then checks cost past the learnable Emax within outer 64us
+ * to 1ms defaulting to 256us plus cost past the exceed. Latency-critical
+ * keeps zero tolerance with no learned slack, so ML owns the input
+ * with outer safety still checked. Callers test the newcomer itself
+ * as the O(1) victim without a scan, so a full least value scan stays
+ * a noted alternative. Like fair.c, the bound paces order, unlike
+ * rt.c, no fixed priority holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so miss plus open plus pinned share the same tol plus Emax
+ * logic with no inline growth.
+ *
+ * Returns: true when the newcomer should reject to the value ordered
+ * queue, else false for admit.
+ */
+static __noinline bool flow_red_should_reject(u64 deadline, u64 now,
+	u64 avg, u32 slice, bool is_crit)
+{
+	u64 cost = flow_red_cost(avg, slice);
+	u64 learned = flow_ml_red_tol_ns();
+	u64 tol = flow_red_tol_eff(learned, is_crit);
+	s64 resid = flow_red_residual(deadline, now, cost);
+	u64 exceed = flow_red_exceed(resid, tol);
+	u64 emax;
+	if (exceed == 0)
+		return false;
+	if (is_crit)
+		return false;
+	if (deadline == 0)
+		return false;
+	emax = flow_ml_red_emax_ns();
+	if (cost <= emax)
+		return false;
+	if (cost <= exceed)
+		return false;
+	/* Newcomer tests itself, so the deadline order holds with no */
+	/* before check past equality. */
+	return true;
+}
+/**
  * flow_red_reclaim_ok - test reclaim from one global credit.
  * @saved: global completer credit in nanos from completions.
  * @exceed: head exceeding time in nanos.

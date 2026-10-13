@@ -344,17 +344,15 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 				pvt = pbound2;
 		}
 	}
-	/* RED on the pinned join with the same O(1) newcomer check. A zero */
-	/* exceed, a critical exceed, or a newcomer that fails the victim test */
-	/* admits to the tier, else the newcomer rejects to the value ordered */
-	/* queue without a tier wait. Tolerance aids only the guarantee without */
-	/* shaping the key. Critical follows the unified latency and cost uses */
-	/* the pre-clamp slice for fresh waits. */
+	/* RED on the pinned join through the shared outlined helper, so a */
+	/* reject needs cost past the learnable Emax plus cost past the */
+	/* exceed with no critical. Tolerance aids only the guarantee */
+	/* without shaping the key. Critical follows the unified latency */
+	/* and cost uses the pre-clamp slice for fresh waits. */
 	{
 		u32 psl = READ_ONCE(tctx->slice_ns);
 		bool pcrit;
 		u32 pcost_sl;
-		u64 pex;
 		if (have_pin) {
 			pcrit = pin_is_lat;
 			if (!(enq_flags & SCX_ENQ_PREEMPT))
@@ -380,27 +378,10 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			    peff0);
 			pcost_sl = psl;
 		}
-		pex = flow_red_newcomer_exceed(pdl, now, pavg, pcost_sl,
-		    pcrit);
-		if (pex && !pcrit) {
+		if (flow_red_should_reject(pdl, now, pavg, pcost_sl,
+		    pcrit)) {
 			u32 ptw = READ_ONCE(tctx->weight);
 			u32 peff = flow_task_effective_weight(ptw, phint_w);
-			u64 pcost = flow_red_cost(pavg, pcost_sl);
-			if (!flow_red_victim_ok(pdl, pdl, pcost, pex,
-			    pcrit)) {
-				if (flow_cpu_ok(p, pc)) {
-					flow_tier_insert(p, pc, pvt, now);
-					flow_count_admit();
-					flow_kick_idle_allowed(p, sel);
-					return;
-				}
-				flow_gate_reject();
-				tctx->wait_at = now;
-				flow_overflow_insert(p, enq_flags,
-				    flow_red_value(peff, pcrit));
-				flow_kick_idle_allowed(p, sel);
-				return;
-			}
 			flow_count_red_reject();
 			flow_overflow_insert(p, enq_flags,
 			    flow_red_value(peff, pcrit));
