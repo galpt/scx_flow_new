@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the flow scheduler at 4.8.13.
+ * Shared constants and helpers for the flow scheduler at 4.8.14.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one value ordered
@@ -18,18 +18,24 @@
  * millisecond. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
  * escalation plus skip aging, and a zero slice inherits the 1ms
- * quantum. A global completer credit at or past 256us reclaims one
- * value ordered reject with positive laxity plus the same key or a
- * strictly after key with a single move, so overload drains without
- * starving the tiers. A miss counts when wall time passes the deadline, and
- * the miss rejoins a tier queue with a fresh deadline plus a direct
- * kick without waiting. Placement takes the slowest sufficient CPU among
- * the allowed set that can meet the deadline, so light work never
- * takes a fast CPU that other work needs. Hints from the flat view
- * tune the period plus the weight, and no group or pool shapes order.
- * Each stop feeds the burst predictor average plus deviation with
- * shift updates, so later deadlines track recent bursts without a
- * table walk. See select_cpu.bpf.c for placement and enqueue.bpf.c for the
+ * quantum. A global completer credit at or past the learnable Emax
+ * reclaims one value ordered reject with positive laxity plus the
+ * same key or a strictly after key with a single move, so overload
+ * drains without starving the tiers. A miss counts when wall time
+ * passes the deadline, and the miss rejoins a tier queue with a fresh
+ * deadline plus a direct kick without waiting. Placement takes the
+ * slowest sufficient CPU among the allowed set that can meet the
+ * deadline, so light work never takes a fast CPU that other work
+ * needs. Hints from the flat view tune the period plus the weight,
+ * and no group or pool shapes order. Each stop feeds the burst
+ * predictor average plus deviation with shift updates, so later
+ * deadlines track recent bursts without a table walk. ML owns
+ * admit plus drop plus kick plus placement through learnable inputs
+ * with outer safety bounds still checked, so the nudge shapes the
+ * fair key plus learnable RED bounds gate overload with PRIQ only.
+ * Accuracy counts hits over total in BPF with a 64us hit window, so
+ * the snapshot reads 0.0 to 1.0 with higher better. See
+ * select_cpu.bpf.c for placement and enqueue.bpf.c for the
  * deadline choice plus dispatch.bpf.c for the tier scans and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
  * charge plus the miss count.
@@ -180,12 +186,16 @@ enum flow_consts {
 	/* reject, and a victim cost at or below this bound keeps the */
 	/* newcomer with no swap. A capped latency slice at 100us never */
 	/* passes, so latency never pays as victim. The bound caps */
-	/* lateness with no share shaping. */
+	/* lateness with no share shaping. At 4.8.14 the bound is the */
+	/* default for the learnable Emax within outer 64us to 1ms, so */
+	/* the model value clamps to that outer with this default on miss. */
 	FLOW_RED_EMAX_NS = 256000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
 	/* for hard tasks only, so critical tasks keep zero tolerance */
 	/* with no late run. Tolerance aids the guarantee with no order */
-	/* shaping. */
+	/* shaping. At 4.8.14 the bound is the default for the learnable */
+	/* tolerance within outer 0 to 256us, so the model value clamps */
+	/* to that outer with this default on miss. */
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Adaptive grow step of 64us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
@@ -253,6 +263,29 @@ enum flow_consts {
 	/* fair.c, the bound paces order, unlike rt.c, no fixed priority */
 	/* holds. */
 	FLOW_ML_NUDGE_MAX_NS = 250000ULL,
+	/* Online model version at 1 for 4.8.14. Marks the 48B layout with */
+	/* learnable RED bounds, so a zero row reads as legacy with */
+	/* defaults and never drives a learnable path. */
+	FLOW_ML_MODEL_VERSION = 1ULL,
+	/* ML accuracy hit window of 64us with no knob. Counts a hit when */
+	/* the absolute burst error stays at or below this window, so */
+	/* accuracy reads hits over total in 0.0 to 1.0 with higher better. */
+	FLOW_ML_ACC_HIT_NS = 64000ULL,
+	/* RED tolerance outer floor of 0 with no knob. Holds the learnable */
+	/* lower bound, so zero tolerance stays valid with no clamp. */
+	FLOW_RED_TOL_MIN_NS = 0ULL,
+	/* RED tolerance outer ceiling of 256us with no knob. Caps the */
+	/* learnable tolerance, so one learned value never holds past the */
+	/* default Emax with no storm. */
+	FLOW_RED_TOL_MAX_NS = 256000ULL,
+	/* RED Emax outer floor of 64us with no knob. Holds the learnable */
+	/* lower bound, so one learned value never drops past the victim */
+	/* gate with no bypass. */
+	FLOW_RED_EMAX_MIN_NS = 64000ULL,
+	/* RED Emax outer ceiling of 1ms with no knob. Caps the learnable */
+	/* Emax, so one learned value never holds past one quantum with */
+	/* no storm. */
+	FLOW_RED_EMAX_MAX_NS = 1000000ULL,
 };
 /* Static dispatch tier order. Local plus node plus machine plus overflow */
 /* plus steal drain in fair order through the kernel priority queues with */
@@ -299,8 +332,8 @@ enum flow_consts {
 /* clamp streak at the slice floor plus ceiling with saturation, so a stuck */
 /* slice shows its bound. Adapt delta holds the last saved execution in */
 /* nanos per task for debug, while the global completer credit funds */
-/* reclaim, so a completion with delta at or past 256us reclaims one */
-/* reject. */
+/* reclaim, so a completion with delta at or past the learnable Emax */
+/* reclaims one reject. */
 /* Like fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
 /* C holds burst else slice else quantum, and V holds weight with zero */
 /* mapped to 128, so the slice adapts while virtual time stays untouched. */
@@ -359,17 +392,24 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
-/* Online model at 32B with five weights plus bias plus clamp plus count. */
+/* Online model at 48B with five weights plus bias plus clamp plus count */
+/* plus version plus learnable RED bounds plus reserve. */
 /* W_avg holds the avg_ns gain, w_dev the dev_ns gain, w_lag the vlag */
 /* gain, w_sleep the sleep_ns gain, w_weight the eff_w gain, each in Q24.8 */
 /* fixed point scaled with FP_SHIFT 8, bias holds the base term, each */
 /* clamped to plus or minus 524288 with saturation, so one train step */
 /* never wraps. Max_clamp_ns holds the nudge limit with 250000 for the */
 /* bound, update_count holds the saturating train count with no wrap. */
-/* Zero means no training yet, so the dot product reads zero with no */
-/* shift and the nudge returns zero. Like fair.c, the weights pace order, */
-/* unlike rt.c, no fixed priority holds. Runs with integer shifts only, */
-/* so the verifier stays small. */
+/* Version holds 1 at 4.8.14 with zero for legacy miss, so a zero row */
+/* fails closed to defaults with no learnable drive. Red_tol_ns holds */
+/* the learnable tolerance defaulting to 64000 within outer 0 to 256us, */
+/* red_emax_ns holds the learnable Emax defaulting to 256000 within */
+/* outer 64us to 1ms, each clamped to its outer with defaults on miss, */
+/* so ML owns admit plus drop with outer safety still checked. Reserved */
+/* holds zero for alignment with no use. Zero means no training yet, so */
+/* the dot product reads zero with no shift and the nudge returns zero. */
+/* Like fair.c, the weights pace order, unlike rt.c, no fixed priority */
+/* holds. Runs with integer shifts only, so the verifier stays small. */
 struct flow_online_model {
 	s32 w_avg;
 	s32 w_dev;
@@ -379,10 +419,14 @@ struct flow_online_model {
 	s32 bias;
 	s32 max_clamp_ns;
 	u32 update_count;
+	u32 version;
+	u32 red_tol_ns;
+	u32 red_emax_ns;
+	u32 reserved;
 };
-/* Scheduler counters with 17 fields. Reject plus reclaim moves count */
+/* Scheduler counters with 20 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail without an extra map, so stats stay at */
-/* 136B. Overflow plus steal moves count in the local bucket. Rejects plus */
+/* 160B. Overflow plus steal moves count in the local bucket. Rejects plus */
 /* on CPU stay frozen at zero in BPF snapshot-counted for wire compat only */
 /* without a BPF writer, while real rejects count in gate plus RED rejects. */
 /* Readers must use gate_rejects for drops plus red_rejects for overload, */
@@ -390,7 +434,9 @@ struct flow_online_model {
 /* where Term equals completions stay counters only without queues, so */
 /* misses plus completions record history. Preempt kicks count busy preempts */
 /* sent, and preempt skipped counts every suppressed hold by margin, tail, */
-/* and eligibility. Counters run without a knob. */
+/* and eligibility. Ml_hits plus ml_total count accuracy with a 64us hit */
+/* window and ml_clamped counts nudge saturations, each saturating with */
+/* no wrap. Counters run without a knob. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -409,6 +455,9 @@ struct flow_sched_stats {
 	u64 preempt_skipped;
 	u64 red_rejects;
 	u64 red_reclaims;
+	u64 ml_hits;
+	u64 ml_total;
+	u64 ml_clamped;
 };
 /* Task state holds vruntime plus deadline plus stamps plus predictor */
 /* plus lag plus weight plus slice plus hint plus misses plus adapt */
@@ -421,12 +470,13 @@ _Static_assert(sizeof(struct flow_cpu_state) == 16,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 17 counters in 136 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 136,
-	"stats stay at 136B");
-/* Online model holds five weights plus bias plus clamp plus count in 32 bytes. */
-_Static_assert(sizeof(struct flow_online_model) == 32,
-	"ml model stays at 32B");
+/* Stats hold 20 counters in 160 bytes. */
+_Static_assert(sizeof(struct flow_sched_stats) == 160,
+	"stats stay at 160B");
+/* Online model holds five weights plus bias plus clamp plus count plus */
+/* version plus learnable RED bounds plus reserve in 48 bytes. */
+_Static_assert(sizeof(struct flow_online_model) == 48,
+	"ml model stays at 48B");
 /* Queue count holds local plus node plus machine plus overflow. */
 /* Steal reuses peer locals without a new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
@@ -835,7 +885,9 @@ static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
  * @is_crit: true when latency critical with no tolerance.
  *
  * Tolerance aids the guarantee only with no order shaping. Critical tasks keep zero, hard tasks
- * keep 64us, so the check stays strict for urgent work.
+ * keep 64us, so the check stays strict for urgent work. At 4.8.14 this
+ * is the default for the learnable path with outer 0 to 256us still
+ * checked on the learned value.
  *
  * Returns: tolerance in nanos, zero for critical.
  */
@@ -844,6 +896,75 @@ static __always_inline u64 flow_red_tol(bool is_crit)
 	if (is_crit)
 		return 0;
 	return (u64)FLOW_RED_TOL_NS;
+}
+/**
+ * flow_red_tol_clamp - clamp one learnable tolerance to its outer.
+ * @v: raw learned tolerance in nanos.
+ *
+ * Caps to outer 0 to 256us with no divide, so one learned value never
+ * holds past the default Emax with no storm. Zero stays valid with no
+ * default fill, so an explicit zero keeps zero tolerance.
+ *
+ * Returns: clamped tolerance in nanos from 0 to 256us.
+ */
+static __always_inline u64 flow_red_tol_clamp(u64 v)
+{
+	if (v > (u64)FLOW_RED_TOL_MAX_NS)
+		return (u64)FLOW_RED_TOL_MAX_NS;
+	return v;
+}
+/**
+ * flow_red_emax_clamp - clamp one learnable Emax to its outer.
+ * @v: raw learned Emax in nanos.
+ *
+ * Caps to outer 64us to 1ms with no divide, so one learned value never
+ * drops past the victim gate nor holds past one quantum. Values below
+ * the floor rise to 64us and values past the top fall to 1ms.
+ *
+ * Returns: clamped Emax in nanos from 64us to 1ms.
+ */
+static __always_inline u64 flow_red_emax_clamp(u64 v)
+{
+	if (v < (u64)FLOW_RED_EMAX_MIN_NS)
+		return (u64)FLOW_RED_EMAX_MIN_NS;
+	if (v > (u64)FLOW_RED_EMAX_MAX_NS)
+		return (u64)FLOW_RED_EMAX_MAX_NS;
+	return v;
+}
+/**
+ * flow_red_tol_eff - effective tolerance from learnable plus critical.
+ * @learned: clamped learnable tolerance in nanos from the model.
+ * @is_crit: true when latency critical with no tolerance.
+ *
+ * Critical tasks keep zero with no learned slack, so urgent work stays
+ * strict while hard tasks take the clamped learned value. Outer safety
+ * stays checked at the caller clamp, so ML owns the input with bounds.
+ *
+ * Returns: effective tolerance in nanos, zero for critical.
+ */
+static __always_inline u64 flow_red_tol_eff(u64 learned, bool is_crit)
+{
+	if (is_crit)
+		return 0;
+	return flow_red_tol_clamp(learned);
+}
+/**
+ * flow_ml_is_hit - test one burst error against the 64us hit window.
+ * @err: signed raw error as actual minus predicted in nanos.
+ *
+ * A hit holds when the absolute error stays at or below 64us, so
+ * accuracy reads hits over total with higher better. Runs with one
+ * compare each way and no divide.
+ *
+ * Returns: true on hit, else false.
+ */
+static __always_inline bool flow_ml_is_hit(s64 err)
+{
+	if (err > (s64)FLOW_ML_ACC_HIT_NS)
+		return false;
+	if (err < -((s64)FLOW_ML_ACC_HIT_NS))
+		return false;
+	return true;
 }
 /**
  * flow_red_residual - residual time from deadline plus cost.

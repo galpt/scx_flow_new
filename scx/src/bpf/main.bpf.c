@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.13.
+ * Flow scheduler BPF core at 4.8.14.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
@@ -86,12 +86,14 @@ struct {
 	__type(key, u32);
 	__type(value, u64);
 } reclaim_credit_stor SEC(".maps");
-/* Global online model with five weights plus bias plus clamp plus count. */
-/* One 32B row holds the fixed point SGD state with zero for no */
+/* Global online model with five weights plus bias plus clamp plus count */
+/* plus version plus learnable RED bounds plus reserve. */
+/* One 48B row holds the fixed point SGD state with zero for no */
 /* training, so the dot product reads zero with no shift and the nudge */
-/* returns zero. Updates use atomics with bound 524288, the nudge clamps */
-/* to plus or minus 250us, and the task state stays at 72B with integer */
-/* arithmetic. */
+/* returns zero. Version seeds 1 with tol at 64us plus Emax at 256us, */
+/* each clamped to its outer on read. Updates use atomics with bound */
+/* 524288, the nudge clamps to plus or minus 250us, and the task state */
+/* stays at 72B with integer arithmetic. */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
@@ -101,15 +103,16 @@ struct {
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 /* Includes run in dependency order with maps plus helpers before */
-/* callers, so stats plus cgroup plus vtime plus weight plus edf come */
-/* first, then placement plus timer plus preempt plus select, then the */
-/* online model before enqueue plus dispatch plus lifecycle. The ml */
-/* pair sits before its two callers with no extra map, so the verifier */
-/* sees one fixed path with no forward use. */
+/* callers, so stats plus cgroup plus vtime plus weight plus ml control */
+/* plus edf come first, then placement plus timer plus preempt plus */
+/* select, then the online model before enqueue plus dispatch plus */
+/* lifecycle. The ml trio sits before its callers with no extra map, so */
+/* the verifier sees one fixed path with no forward use. */
 #include "stats.bpf.c"
 #include "cgroup.bpf.c"
 #include "vtime.bpf.c"
 #include "weight.bpf.c"
+#include "ml/control.bpf.c"
 #include "edf.bpf.c"
 #include "task_placement.bpf.c"
 #include "timer.bpf.c"
@@ -220,6 +223,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			m->bias = 0;
 			m->max_clamp_ns = 0;
 			m->update_count = 0;
+			m->version = (u32)FLOW_ML_MODEL_VERSION;
+			m->red_tol_ns = (u32)FLOW_RED_TOL_NS;
+			m->red_emax_ns = (u32)FLOW_RED_EMAX_NS;
+			m->reserved = 0;
 		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {

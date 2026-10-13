@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Deadline nudge for the flow scheduler.
+ * Deadline nudge for the flow scheduler at 4.8.14.
  *
  * Holds the inference dot product that maps task features through the
  * global online model to one capped correction with integer shifts
  * only. The score sums avg plus dev plus vlag plus sleep plus eff_w
  * times their weights with FP_SHIFT 8 plus bias, then clamps to plus
  * or minus 250us, so one nudge never holds past one quarter quantum.
- * A missing row or a null task fails closed to zero,
- * so the deterministic shift-3 EMA baseline owns deadline math.
- * Runs with shifts plus 64-bit multiplies, so the verifier stays small.
+ * Each saturation counts one clamped event with no wrap, so the
+ * snapshot tracks how often the model hits its outer. ML shapes the
+ * fair key that drives admit plus drop plus kick plus placement with
+ * PRIQ only plus outer safety still checked. A missing row or a null
+ * task fails closed to zero, so the deterministic shift-3 EMA baseline
+ * owns deadline math. Runs with shifts plus 64-bit multiplies, so the
+ * verifier stays small.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -21,13 +25,16 @@
  *
  * Forms the fixed point score plus bias with FP_SHIFT 8, reads the
  * stored max clamp with fail closed to 250us when the row holds zero
- * or past 250us, then clamps the score to that bound. Train caps
- * inputs at the quantum plus clamps gradients, so weights stay small
- * with no wrap, while this infer keeps the original shifts with the
- * 250us bound holding saturation with no extra branch. A cross-task
- * row stays global by design with the bound plus fail closed keeping
- * one task from holding another past one quarter quantum. Like fair.c,
- * the nudge paces order, unlike rt.c, no fixed priority holds.
+ * or past 250us, then clamps the score to that bound with one clamped
+ * count on saturation. Train caps inputs at the quantum plus clamps
+ * gradients, so weights stay small with no wrap, while this infer keeps
+ * the original shifts with the 250us bound holding saturation with no
+ * extra branch. A cross-task row stays global by design with the bound
+ * plus fail closed keeping one task from holding another past one
+ * quarter quantum. The shaped fair key drives placement plus kick with
+ * outer margin plus tail still checked, so ML owns the input with
+ * bounds. Like fair.c, the nudge paces order, unlike rt.c, no fixed
+ * priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
  * copy. Called from the enqueue path; returns zero when state missing.
@@ -66,9 +73,13 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	if (max_nudge <= 0 || max_nudge > (s64)FLOW_ML_NUDGE_MAX_NS)
 		max_nudge = (s64)FLOW_ML_NUDGE_MAX_NS;
 
-	if (score > max_nudge)
+	if (score > max_nudge) {
+		flow_count_ml_clamped();
 		return max_nudge;
-	if (score < -max_nudge)
+	}
+	if (score < -max_nudge) {
+		flow_count_ml_clamped();
 		return -max_nudge;
+	}
 	return score;
 }

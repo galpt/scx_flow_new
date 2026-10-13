@@ -278,10 +278,11 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	if (likely(queued <= 0))
 		return 0;
 	credit = flow_credit_peek();
-	/* Skip the walk when tiers hold work plus credit stays short, */
-	/* since aged heads still need funding with no fallback. Tiers-empty */
-	/* keeps the walk with no reserve, so zero credit never idles work. */
-	if (!tiers_empty && credit < (u64)FLOW_RED_EMAX_NS)
+	/* Skip the walk when tiers hold work plus credit stays short of the */
+	/* learnable Emax, since aged heads still need funding with no */
+	/* fallback. Tiers-empty keeps the walk with no reserve, so zero */
+	/* credit never idles work with outer safety still checked. */
+	if (!tiers_empty && credit < flow_ml_red_emax_ns())
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {

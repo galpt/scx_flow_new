@@ -8,8 +8,8 @@
  * plus tolerance used only for the guarantee. The deadline bounds the
  * check without shaping vruntime. A zero exceed admits at once, a
  * critical exceed admits without a swap, else the newcomer itself is
- * tested as the O(1) victim with cost past 256us plus cost past the
- * exceed plus never critical, else the newcomer admits and a full least
+ * tested as the O(1) victim with cost past the learnable Emax plus
+ * cost past the exceed plus never critical, else the newcomer admits and a full least
  * value scan stays a noted alternative. Queue order uses the strict EDF
  * key of the earlier of the two times in three PRIQ tiers (local plus
  * node plus machine) plus value ordered reject plus steal for five total

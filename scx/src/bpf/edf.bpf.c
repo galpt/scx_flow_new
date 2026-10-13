@@ -179,8 +179,8 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * Newcomer-pays trades exact victim choice for a single check with
  * tiers-empty reclaim covering starvation below. The reject queue stays
  * value ordered outside dispatch, and a global saved credit at or past
- * 256us reclaims one head with positive laxity. Runs under the caller
- * without a lock here, so the verifier stays small.
+ * the learnable Emax reclaims one head with positive laxity. Runs under
+ * the caller without a lock here, so the verifier stays small.
  */
 /**
  * flow_red_newcomer_exceed - exceeding time of one newcomer.
@@ -190,9 +190,12 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
  * @slice: stored slice in nanos, zero for no history.
  * @is_crit: true marks critical with zero tolerance.
  *
- * Costs burst else slice else quantum, tolerates 64us for hard only,
- * then residuals deadline minus now minus cost with wrap safety.
- * Tolerance aids only the guarantee with no order shaping.
+ * Costs burst else slice else quantum, tolerates the learnable value
+ * within outer 0 to 256us defaulting to 64us for hard only, then
+ * residuals deadline minus now minus cost with wrap safety. Critical
+ * keeps zero with no learned slack, so ML owns the input with outer
+ * safety still checked. Tolerance aids only the guarantee with no
+ * order shaping.
  *
  * Returns: exceeding time in nanos, zero when guaranteed.
  */
@@ -200,7 +203,8 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
 	u64 now, u64 avg, u32 slice, bool is_crit)
 {
 	u64 cost = flow_red_cost(avg, slice);
-	u64 tol = flow_red_tol(is_crit);
+	u64 learned = flow_ml_red_tol_ns();
+	u64 tol = flow_red_tol_eff(learned, is_crit);
 	s64 resid = flow_red_residual(deadline, now, cost);
 	return flow_red_exceed(resid, tol);
 }
@@ -212,25 +216,28 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * @exceed: newcomer exceeding time in nanos, zero fails closed.
  * @v_crit: true marks a critical victim that never rejects.
  *
- * Victim needs cost past 256us plus cost past the exceed plus deadline
- * at or before the newcomer, so only work ahead of the overload pays.
- * Callers test the newcomer itself as the O(1) victim without a scan,
- * so a full least value scan stays a noted alternative. A critical
- * victim never passes. A capped latency slice at 100us never passes
- * the 256us bound, so latency never pays as victim.
+ * Victim needs cost past the learnable Emax within outer 64us to 1ms
+ * defaulting to 256us plus cost past the exceed plus deadline at or
+ * before the newcomer, so only work ahead of the overload pays with
+ * outer safety still checked. Callers test the newcomer itself as the
+ * O(1) victim without a scan, so a full least value scan stays a noted
+ * alternative. A critical victim never passes. A capped latency slice
+ * at 100us never passes the 64us floor, so latency never pays as
+ * victim.
  *
  * Returns: true when the victim may cover the exceed.
  */
 static __always_inline bool flow_red_victim_ok(u64 v_deadline,
 	u64 n_deadline, u64 v_cost, u64 exceed, bool v_crit)
 {
+	u64 emax = flow_ml_red_emax_ns();
 	if (exceed == 0)
 		return false;
 	if (v_crit)
 		return false;
 	if (v_deadline == 0 || n_deadline == 0)
 		return false;
-	if (v_cost <= (u64)FLOW_RED_EMAX_NS)
+	if (v_cost <= emax)
 		return false;
 	if (v_cost <= exceed)
 		return false;
@@ -244,16 +251,18 @@ static __always_inline bool flow_red_victim_ok(u64 v_deadline,
  * @exceed: head exceeding time in nanos.
  * @laxity: head laxity in nanos, zero means no room.
  *
- * Reclaims when the global credit passes 256us and covers the head
- * exceed with positive laxity. The global credit funds the retry
- * without shaping shares.
+ * Reclaims when the global credit passes the learnable Emax within
+ * outer 64us to 1ms defaulting to 256us and covers the head exceed
+ * with positive laxity. The global credit funds the retry without
+ * shaping shares with outer safety still checked.
  *
  * Returns: true when the head may rejoin.
  */
 static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 	u64 laxity)
 {
-	if (saved < (u64)FLOW_RED_EMAX_NS)
+	u64 emax = flow_ml_red_emax_ns();
+	if (saved < emax)
 		return false;
 	if (laxity == 0)
 		return false;
@@ -265,9 +274,9 @@ static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 /* Stopping adds the unused cost minus delta on completions with */
 /* saturation at 1s, so one completion funds a later retry without */
 /* keeping a task pointer. Dispatch peeks this credit for the head check */
-/* and reserves the exceed else 256us before a move, so the completer */
-/* delta funds the retry without using head state. Compare and swap */
-/* retries stop at four, so a lost race only delays one pass. */
+/* and reserves the exceed else the learnable Emax before a move, so the */
+/* completer delta funds the retry without using head state. Compare and */
+/* swap retries stop at four, so a lost race only delays one pass. */
 /* Add one saved delta to the global reclaim credit with saturation. */
 static __always_inline void flow_credit_add(u64 delta)
 {
@@ -300,27 +309,29 @@ static __always_inline u64 flow_credit_peek(void)
 	return READ_ONCE(*slot);
 }
 /* Consume one reclaim funding with floor at zero. */
-/* Takes the exceed when past zero else 256us, so a zero exceed still */
-/* spends the bound. Fails closed when short without spending, so a lost */
-/* compare and swap race retries up to four times then delays one pass. */
-/* The reclaim caller reserves before the move and falls back without */
-/* reserve when tiers hold no work, so the consume stays strict while the */
-/* reclaim keeps one move per pass. */
+/* Takes the exceed when past zero else the learnable Emax, so a zero */
+/* exceed still spends the bound with outer 64us to 1ms still checked. */
+/* Fails closed when short without spending, so a lost compare and swap */
+/* race retries up to four times then delays one pass. The reclaim caller */
+/* reserves before the move and falls back without reserve when tiers hold */
+/* no work, so the consume stays strict while the reclaim keeps one move */
+/* per pass. */
 static __always_inline bool flow_credit_consume(u64 exceed)
 {
 	u32 key = 0;
 	u64 *slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
 	s32 i;
+	u64 emax = flow_ml_red_emax_ns();
 	if (!slot)
 		return false;
 	bpf_for(i, 0, 4) {
 		u64 cur = READ_ONCE(*slot);
-		u64 need = exceed ? exceed : (u64)FLOW_RED_EMAX_NS;
+		u64 need = exceed ? exceed : emax;
 		u64 nxt;
 		u64 old;
 		if (cur < need)
 			return false;
-		if (cur < (u64)FLOW_RED_EMAX_NS)
+		if (cur < emax)
 			return false;
 		nxt = cur - need;
 		old = __sync_val_compare_and_swap(slot, cur, nxt);

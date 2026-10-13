@@ -18,7 +18,7 @@
  * unlike rt.c, no fixed priority holds. C holds burst else slice else
  * quantum, and V holds weight with zero mapped to 128, so the slice adapts
  * while virtual time stays untouched. A global saved credit at or past
- * 256us reclaims one value ordered reject with positive laxity plus same
+ * the learnable Emax reclaims one value ordered reject with positive laxity plus same
  * key or strictly after with a single move. A runnable preempt-like yield
  * with history plus tail left and no wall miss keeps start plus cur minus
  * now, else a yield before one quantum keeps the unused remainder only
@@ -390,8 +390,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			tctx->adapt_delta = cs;
 		}
 		/* Reclaim runs in dispatch from the global credit at or past */
-		/* 256us with tiers-empty fallback plus aged cover past one */
-		/* period, so this path records only without walking RCU here. */
+		/* the learnable Emax with tiers-empty fallback plus aged cover */
+		/* past one period, so this path records only without walking */
 		/* The global credit funds the retry without shaping shares. */
 		/* Dispatch scans at most eight value ordered rejects with */
 		/* positive laxity plus same key or strictly after plus mask wins, */
