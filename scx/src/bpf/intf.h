@@ -1912,4 +1912,91 @@ static __always_inline void flow_ml_clamp_one(s32 *addr)
 	old = __sync_val_compare_and_swap(addr, cur, nxt);
 	(void)old;
 }
+/* Forward task type for the enqueue tails without pulling kernel headers. */
+/* The BPF build already holds the full task view through common, while */
+/* the host bindings keep this opaque, so the dispatcher still calls with */
+/* no extra include. */
+struct task_struct;
+/**
+ * struct flow_miss_tail - miss-rejoin args for the outlined miss path.
+ * @tctx: task state with vruntime plus deadline plus predictor.
+ * @cpu: live target CPU for the tier rejoin.
+ * @sel: selected CPU hint for the idle kick.
+ * @now: current time in nanos.
+ * @enq_flags: enqueue flags threaded to the reject insert.
+ * @hint: flat period hint in micros, zero for no hint.
+ * @hint_w: hint share with base for neutral.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ *
+ * Bundles the miss state plus hint plus time plus flags, so the outlined
+ * miss path takes one pointer like the pinned plus place plus kick tails
+ * with no stack args and no order change.
+ */
+struct flow_miss_tail {
+	struct flow_task_ctx *tctx;
+	s32 cpu;
+	s32 sel;
+	u64 now;
+	u64 enq_flags;
+	u32 hint;
+	u32 hint_w;
+	u64 avg;
+	u64 dev;
+};
+/**
+ * struct flow_open_tail - open compute args for the outlined open path.
+ * @tctx: task state with vruntime plus weight plus slice.
+ * @deadline: fresh predicted deadline already stored by the caller.
+ * @now: current time in nanos.
+ * @enq_flags: enqueue flags with preempt keeping the stored slice.
+ * @hint: flat period hint in micros, zero for no hint.
+ * @hint_w: hint share with base for neutral.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_reenq: true reuses the stored slice with inherit else recomputes.
+ *
+ * Bundles the open state plus deadline plus time plus flags, so the
+ * outlined fresh plus requeue compute takes one pointer with no stack
+ * args and the same order.
+ */
+struct flow_open_tail {
+	struct flow_task_ctx *tctx;
+	u64 deadline;
+	u64 now;
+	u64 enq_flags;
+	u32 hint;
+	u32 hint_w;
+	u64 avg;
+	u64 dev;
+	bool is_reenq;
+};
+/**
+ * struct flow_open_out - open compute out fields for RED plus place plus kick.
+ * @vtime: strict fair time capped at now plus one period.
+ * @pre_slice: dynamic slice before the latency clamp, zero on requeue.
+ * @sleep_ns: true sleep gap read before the wait overwrite.
+ * @is_lat: unified latency for RED plus slice agreement.
+ * @is_fresh: true for fresh waits else false for requeues.
+ *
+ * Carries the fair time plus the RED cost plus the kick sleep in one
+ * struct, so the dispatcher keeps one shared RED admit plus one
+ * eligibility plus one place plus kick with no second compute.
+ */
+struct flow_open_out {
+	u64 vtime;
+	u32 pre_slice;
+	u64 sleep_ns;
+	bool is_lat;
+	bool is_fresh;
+};
+/* Outlined miss-rejoin plus open compute shared by the enqueue dispatcher. */
+/* The miss path rejoins self-contained with RED plus tier plus kick, while */
+/* the open path computes fresh plus requeue into out fields for the shared */
+/* RED plus place plus kick, so the verifier keeps one copy each with no */
+/* inline growth and the same order plus the same counts. */
+static __noinline bool flow_enqueue_miss(struct task_struct *p,
+	const struct flow_miss_tail *t);
+static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
+	struct flow_open_out *out);
 #endif

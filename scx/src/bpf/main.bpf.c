@@ -107,8 +107,10 @@ volatile u64 nr_node_ids;
 /* callers, so stats plus cgroup plus vtime plus weight plus ml control */
 /* plus edf come first, then placement plus timer plus preempt plus */
 /* select, then the online model before enqueue plus dispatch plus */
-/* lifecycle. The ml trio sits before its callers with no extra map, so */
-/* the verifier sees one fixed path with no forward use. */
+/* lifecycle. Enqueue splits into target plus insert plus miss plus open */
+/* plus kick before the dispatcher, so the miss plus open tails share one */
+/* copy each with no forward use. The ml trio sits before its callers */
+/* with no extra map, so the verifier sees one fixed path with no forward use. */
 #include "stats.bpf.c"
 #include "cgroup.bpf.c"
 #include "vtime.bpf.c"
