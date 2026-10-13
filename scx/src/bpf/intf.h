@@ -18,7 +18,7 @@
  * millisecond. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
  * escalation plus skip aging, and a zero slice inherits the 1ms
- * quantum. A global completer credit at or past the learnable Emax
+ * quantum. A global completer credit at or past the fixed 256us Emax
  * reclaims one value ordered reject with positive laxity plus the
  * same key or a strictly after key with a single move, so overload
  * drains without starving the tiers. A miss counts when wall time
@@ -28,18 +28,19 @@
  * deadline, so light work never takes a fast CPU that other work
  * needs. Hints from the flat view tune the period plus the weight,
  * and no group or pool shapes order. Each stop feeds the burst
- * predictor average plus deviation with shift updates, so later
- * deadlines track recent bursts without a table walk. ML owns
- * admit plus drop plus kick through learnable inputs with outer
- * safety bounds still checked, so the nudge shapes the fair key for
- * tier plus kick while placement tests the deadline plus drain and
- * learnable RED bounds gate overload with PRIQ only for tiers. The
+ * predictor average plus deviation with up plus down shifts, so later
+ * deadlines track recent bursts without a table walk. The average
+ * rises fast with shift 3 plus falls slow with shift 4, the deviation
+ * widens fast with shift 2 plus narrows slow with shift 3, and the
+ * period adds average plus deviation plus half deviation margin, so
+ * stable bursts keep tight deadlines while ragged bursts hold margin.
+ * The fair key stays math-only with no nudge, so tier plus kick ride
+ * the strict key while placement tests the deadline plus drain and
+ * fixed RED bounds gate overload with PRIQ only for tiers. The
  * direct plus exiting LOCAL_ON queue stays terminal FIFO outside
  * PRIQ order with no tier rank. Hard means batch non-latency while
  * critical means latency-critical via the unified latency test, so
- * tolerance aids hard only. Accuracy counts hits over total in BPF
- * with a 64us hit window observability-only with no closed-loop gate,
- * so the snapshot reads 0.0 to 1.0 with higher better. See
+ * tolerance aids hard only. See
  * select_cpu.bpf.c for placement and enqueue.bpf.c for the
  * deadline choice plus dispatch.bpf.c for the tier scans and
  * lifecycle.bpf.c for the miss count and timer.bpf.c for the leftover
@@ -191,17 +192,13 @@ enum flow_consts {
 	/* reject, and a victim cost at or below this bound keeps the */
 	/* newcomer with no swap. A capped latency slice at 100us never */
 	/* passes, so latency never pays as victim. The bound caps */
-	/* lateness with no share shaping. At 4.8.14 the bound is the */
-	/* default for the learnable Emax within outer 64us to 1ms, so */
-	/* the model value clamps to that outer with this default on miss. */
+	/* lateness with no share shaping. */
 	FLOW_RED_EMAX_NS = 256000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
 	/* for hard batch only scoped to non-latency, so latency-critical */
 	/* keeps zero tolerance with no late run. Tolerance aids the */
-	/* guarantee with no order shaping. At 4.8.14 the bound is the */
-	/* default for the learnable tolerance within outer 0 to 256us, */
-	/* so the model value clamps to that outer with this default on */
-	/* miss plus reclaim shares the same learnable path. */
+	/* guarantee with no order shaping. Reclaim shares the same fixed */
+	/* path, so admit plus reclaim agree. */
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Adaptive grow step of 64us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
@@ -222,6 +219,39 @@ enum flow_consts {
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	FLOW_ADAPT_PROP_SHIFT = 3ULL,
+	/* Proportional deadband shift of 5 with no knob. Holds one */
+	/* thirty-second of the base as the quiet band, so timer jitter */
+	/* plus one tick never hunts the slice with shifts only. Exceed */
+	/* plus slack at or below the band hold the clamped slice. */
+	FLOW_ADAPT_DEADBAND_SHIFT = 5ULL,
+	/* Proportional deadband floor of 8us with no knob. Keeps the */
+	/* quiet band above one tick on small slices, so a 10us base still */
+	/* holds a real band with no divide. */
+	FLOW_ADAPT_DEADBAND_MIN_NS = 8000ULL,
+	/* Half-damp shift of 1 with no knob. Halves the capped step once, */
+	/* so one correction moves at most one quarter base with shifts */
+	/* only and ringing halves each stop with no divide. */
+	FLOW_ADAPT_DAMP_SHIFT = 1ULL,
+	/* Predictor rise shift of 3 with no knob. Moves the average one */
+	/* eighth toward a larger sample with shifts only, so bursts grow */
+	/* fast with no divide. */
+	FLOW_PRED_UP_SHIFT = 3ULL,
+	/* Predictor fall shift of 4 with no knob. Moves the average one */
+	/* sixteenth toward a smaller sample with shifts only, so bursts */
+	/* decay slow with no cliff. */
+	FLOW_PRED_DOWN_SHIFT = 4ULL,
+	/* Deviation widen shift of 2 with no knob. Moves the deviation one */
+	/* quarter toward a larger error with shifts only, so ragged bursts */
+	/* gain margin fast with no divide. */
+	FLOW_PRED_DEV_UP_SHIFT = 2ULL,
+	/* Deviation narrow shift of 3 with no knob. Moves the deviation one */
+	/* eighth toward a smaller error with shifts only, so stable bursts */
+	/* keep margin without a snap. */
+	FLOW_PRED_DEV_DOWN_SHIFT = 3ULL,
+	/* Deviation margin shift of 1 with no knob. Adds half deviation to */
+	/* the period with shifts only, so the deadline holds average plus */
+	/* one and a half deviation with no divide and no wrap. */
+	FLOW_PRED_DEV_MARGIN_SHIFT = 1ULL,
 	/* Latency slice cap of 100us with no knob. Caps the dynamic slice */
 	/* plus the carryover plus the adapt step for latency work, so */
 	/* urgent wakeups rotate each tenth quantum with no extra hold. */
@@ -244,54 +274,6 @@ enum flow_consts {
 	/* extra hold. Like fair.c, the bound paces order, unlike rt.c, no */
 	/* fixed priority holds. */
 	FLOW_D_LAT_NS = 4000000ULL,
-	/* Online SGD fixed point shift of 8 with no knob. Scales one */
-	/* Q8 feature multiply back to real nanos, so integer arithmetic runs */
-	/* in BPF with shifts only. Like fair.c, the shift paces learning, */
-	/* unlike rt.c, no fixed priority holds. */
-	FLOW_ML_FP_SHIFT = 8ULL,
-	/* Online SGD learn shift of 11 with no knob. Maps one clamped */
-	/* gradient to one eighth through the residual 3 after the fixed */
-	/* point shift, so no divide runs in BPF with shifts only. */
-	FLOW_ML_LEARN_SHIFT = 11ULL,
-	/* Online SGD gradient max of 64us with no knob. Clamps the signed */
-	/* error plus the fixed point gradient, so one train step moves at */
-	/* most 8us with no storm. Like fair.c, the bound paces learning, */
-	/* unlike rt.c, no fixed priority holds. */
-	FLOW_ML_GRAD_MAX_NS = 64000ULL,
-	/* Online SGD weight bound of 524288 with no knob. Clamps each */
-	/* weight to plus or minus this raw value in nanos, so the model */
-	/* never wraps with saturation. The bound holds twice the nudge */
-	/* max, so the nudge clamp stays active with no dead code. */
-	FLOW_ML_WEIGHT_BOUND = 524288ULL,
-	/* Online deadline nudge max of 250us with no knob. Clamps the */
-	/* signed correction to plus or minus this value, so one nudge */
-	/* never holds past one quarter quantum with no storm. Like */
-	/* fair.c, the bound paces order, unlike rt.c, no fixed priority */
-	/* holds. */
-	FLOW_ML_NUDGE_MAX_NS = 250000ULL,
-	/* Online model version at 1 for 4.8.14. Marks the 48B layout with */
-	/* learnable RED bounds, so a zero row reads as legacy with */
-	/* defaults and never drives a learnable path. */
-	FLOW_ML_MODEL_VERSION = 1ULL,
-	/* ML accuracy hit window of 64us with no knob. Counts a hit when */
-	/* the absolute burst error stays at or below this window, so */
-	/* accuracy reads hits over total in 0.0 to 1.0 with higher better. */
-	FLOW_ML_ACC_HIT_NS = 64000ULL,
-	/* RED tolerance outer floor of 0 with no knob. Holds the learnable */
-	/* lower bound, so zero tolerance stays valid with no clamp. */
-	FLOW_RED_TOL_MIN_NS = 0ULL,
-	/* RED tolerance outer ceiling of 256us with no knob. Caps the */
-	/* learnable tolerance, so one learned value never holds past the */
-	/* default Emax with no storm. */
-	FLOW_RED_TOL_MAX_NS = 256000ULL,
-	/* RED Emax outer floor of 64us with no knob. Holds the learnable */
-	/* lower bound, so one learned value never drops past the victim */
-	/* gate with no bypass. */
-	FLOW_RED_EMAX_MIN_NS = 64000ULL,
-	/* RED Emax outer ceiling of 1ms with no knob. Caps the learnable */
-	/* Emax, so one learned value never holds past one quantum with */
-	/* no storm. */
-	FLOW_RED_EMAX_MAX_NS = 1000000ULL,
 };
 /* Static dispatch tier order. Local plus node plus machine plus overflow */
 /* plus steal drain in fair order through the kernel priority queues with */
@@ -338,7 +320,7 @@ enum flow_consts {
 /* clamp streak at the slice floor plus ceiling with saturation, so a stuck */
 /* slice shows its bound. Adapt delta holds the last saved execution in */
 /* nanos per task for debug, while the global completer credit funds */
-/* reclaim, so a completion with delta at or past the learnable Emax */
+/* reclaim, so a completion with delta at or past the fixed 256us Emax */
 /* reclaims one reject. */
 /* Like fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
 /* C holds burst else slice else quantum, and V holds weight with zero */
@@ -398,51 +380,17 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
-/* Online model at 48B with five weights plus bias plus clamp plus count */
-/* plus version plus learnable RED bounds plus reserve. */
-/* W_avg holds the avg_ns gain, w_dev the dev_ns gain, w_lag the vlag */
-/* gain, w_sleep the sleep_ns gain, w_weight the eff_w gain, each in Q24.8 */
-/* fixed point scaled with FP_SHIFT 8, bias holds the base term, each */
-/* clamped to plus or minus 524288 with saturation, so one train step */
-/* never wraps. Max_clamp_ns holds the nudge limit with 250000 for the */
-/* bound, update_count holds the saturating train count with no wrap. */
-/* Version holds 1 at 4.8.14 with zero for legacy miss, so a zero row */
-/* fails closed to defaults with no learnable drive. Red_tol_ns holds */
-/* the learnable tolerance defaulting to 64000 within outer 0 to 256us, */
-/* red_emax_ns holds the learnable Emax defaulting to 256000 within */
-/* outer 64us to 1ms, each clamped to its outer with defaults on miss, */
-/* so ML owns admit plus drop with outer safety still checked. Reserved */
-/* holds zero for alignment with no use. Zero means no training yet, so */
-/* the dot product reads zero with no shift and the nudge returns zero. */
-/* Like fair.c, the weights pace order, unlike rt.c, no fixed priority */
-/* holds. Runs with integer shifts only, so the verifier stays small. */
-struct flow_online_model {
-	s32 w_avg;
-	s32 w_dev;
-	s32 w_lag;
-	s32 w_sleep;
-	s32 w_weight;
-	s32 bias;
-	s32 max_clamp_ns;
-	u32 update_count;
-	u32 version;
-	u32 red_tol_ns;
-	u32 red_emax_ns;
-	u32 reserved;
-};
-/* Scheduler counters with 20 fields. Reject plus reclaim moves count */
+/* Scheduler counters with 17 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail without an extra map, so stats stay at */
-/* 160B. Overflow plus steal moves count in the local bucket. Rejects plus */
-/* on CPU stay frozen at zero in BPF snapshot-counted for wire compat only */
-/* without a BPF writer, while real rejects count in gate plus RED rejects. */
-/* Readers must use gate_rejects for drops plus red_rejects for overload, */
-/* and the snapshot counts live pids for the on CPU gauge. Miss plus Term */
-/* where Term equals completions stay counters only without queues, so */
-/* misses plus completions record history. Preempt kicks count busy preempts */
-/* sent, and preempt skipped counts every suppressed hold by margin, tail, */
-/* and eligibility. Ml_hits plus ml_total count accuracy with a 64us hit */
-/* window and ml_clamped counts nudge saturations, each saturating with */
-/* no wrap. Counters run without a knob. */
+/* 136B. Overflow plus steal moves count in the local bucket. Rejects plus */
+/* on CPU stay frozen at zero for wire compat only without a BPF writer, */
+/* while real rejects count in gate plus RED rejects. Readers must use */
+/* gate_rejects for drops plus red_rejects for overload, and the snapshot */
+/* counts live pids for the on CPU gauge. Miss plus Term where Term equals */
+/* completions stay counters only without queues, so misses plus completions */
+/* record history. Preempt kicks count busy preempts sent, and preempt */
+/* skipped counts every suppressed hold by margin, tail, and eligibility. */
+/* Counters run without a knob. */
 struct flow_sched_stats {
 	u64 on_cpu;
 	u64 total_runtime;
@@ -461,9 +409,6 @@ struct flow_sched_stats {
 	u64 preempt_skipped;
 	u64 red_rejects;
 	u64 red_reclaims;
-	u64 ml_hits;
-	u64 ml_total;
-	u64 ml_clamped;
 };
 /* Task state holds vruntime plus deadline plus stamps plus predictor */
 /* plus lag plus weight plus slice plus hint plus misses plus adapt */
@@ -476,13 +421,10 @@ _Static_assert(sizeof(struct flow_cpu_state) == 16,
 /* Topology view holds sibling plus node in 8 bytes. */
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
-/* Stats hold 20 counters in 160 bytes. */
-_Static_assert(sizeof(struct flow_sched_stats) == 160,
-	"stats stay at 160B");
-/* Online model holds five weights plus bias plus clamp plus count plus */
-/* version plus learnable RED bounds plus reserve in 48 bytes. */
-_Static_assert(sizeof(struct flow_online_model) == 48,
-	"ml model stays at 48B");
+/* Stats hold 17 counters in 136 bytes. Rejects plus on CPU stay frozen */
+/* at zero for wire compat only with no BPF writer. */
+_Static_assert(sizeof(struct flow_sched_stats) == 136,
+	"stats stay at 136B");
 /* Queue count holds local plus node plus machine plus overflow. */
 /* Steal reuses peer locals without a new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
@@ -706,20 +648,19 @@ static __always_inline u64 flow_virt_deadline(u64 ve,
 	return flow_sat_add(ve, flow_scaled_delta(request, weight));
 }
 /**
- * flow_fair_vtime - fair queue key from deadline plus virtual time.
+ * flow_edf_key - strict EDF sort key from deadline plus virtual time.
  * @deadline: absolute EDF deadline in nanos, zero for no order.
  * @vd: virtual deadline in nanos, zero for no order.
  *
  * The EDF deadline caps latency while the virtual deadline paces
  * fairness, so urgent tasks still win while hogs fall behind. A zero
  * deadline means no EDF order yet, so the virtual deadline rules. The
- * signed diff picks the earlier time with wrap safety. Kept alongside
- * flow_edf_key as the same strict key by design and this name serves fair
- * voice while the alias serves EDF voice with one shared copy.
+ * signed diff picks the earlier time with wrap safety, so the closest
+ * deadline always wins without a band jump.
  *
  * Returns: earlier of @deadline plus @vd in nanos.
  */
-static __always_inline u64 flow_fair_vtime(u64 deadline,
+static __always_inline u64 flow_edf_key(u64 deadline,
 	u64 vd)
 {
 	if (deadline == 0)
@@ -729,24 +670,6 @@ static __always_inline u64 flow_fair_vtime(u64 deadline,
 	if (flow_time_before(vd, deadline))
 		return vd;
 	return deadline;
-}
-/**
- * flow_edf_key - strict EDF sort key from deadline plus virtual time.
- * @deadline: absolute EDF deadline in nanos, zero for no order.
- * @vd: virtual deadline in nanos, zero for no order.
- *
- * The strict key is the earlier of the two times with wrap safety,
- * so the closest deadline always wins without a band jump. Alias of
- * flow_fair_vtime kept for EDF voice with one shared copy and sort-key
- * callers use this name while fair-time callers use the other with the
- * same result.
- *
- * Returns: earlier of @deadline plus @vd in nanos.
- */
-static __always_inline u64 flow_edf_key(u64 deadline,
-	u64 vd)
-{
-	return flow_fair_vtime(deadline, vd);
 }
 /**
  * flow_remaining_ns - saturated time left until the deadline.
@@ -893,9 +816,8 @@ static __always_inline u64 flow_red_cost(u64 avg, u32 slice)
  *
  * Tolerance aids the guarantee only with no order shaping. Hard batch
  * keeps 64us while latency-critical keeps zero, so the check stays
- * strict for urgent work with no separate class past latency. At
- * 4.8.14 this is the default for the learnable path with outer 0 to
- * 256us still checked on the learned value via tol_eff.
+ * strict for urgent work with no separate class past latency. Admit
+ * plus reclaim share this fixed path, so both agree.
  *
  * Returns: tolerance in nanos, zero for latency-critical.
  */
@@ -904,78 +826,6 @@ static __always_inline u64 flow_red_tol(bool is_crit)
 	if (is_crit)
 		return 0;
 	return (u64)FLOW_RED_TOL_NS;
-}
-/**
- * flow_red_tol_clamp - clamp one learnable tolerance to its outer.
- * @v: raw learned tolerance in nanos.
- *
- * Caps to outer 0 to 256us with no divide, so one learned value never
- * holds past the default Emax with no storm. Zero stays valid with no
- * default fill, so an explicit zero keeps zero tolerance.
- *
- * Returns: clamped tolerance in nanos from 0 to 256us.
- */
-static __always_inline u64 flow_red_tol_clamp(u64 v)
-{
-	if (v > (u64)FLOW_RED_TOL_MAX_NS)
-		return (u64)FLOW_RED_TOL_MAX_NS;
-	return v;
-}
-/**
- * flow_red_emax_clamp - clamp one learnable Emax to its outer.
- * @v: raw learned Emax in nanos.
- *
- * Caps to outer 64us to 1ms with no divide, so one learned value never
- * drops past the victim gate nor holds past one quantum. Values below
- * the floor rise to 64us and values past the top fall to 1ms.
- *
- * Returns: clamped Emax in nanos from 64us to 1ms.
- */
-static __always_inline u64 flow_red_emax_clamp(u64 v)
-{
-	if (v < (u64)FLOW_RED_EMAX_MIN_NS)
-		return (u64)FLOW_RED_EMAX_MIN_NS;
-	if (v > (u64)FLOW_RED_EMAX_MAX_NS)
-		return (u64)FLOW_RED_EMAX_MAX_NS;
-	return v;
-}
-/**
- * flow_red_tol_eff - effective tolerance from learnable plus critical.
- * @learned: clamped learnable tolerance in nanos from the model.
- * @is_crit: true when latency-critical via the unified latency test
- * with no tolerance, false for hard batch.
- *
- * Latency-critical keeps zero with no learned slack, so urgent work
- * stays strict while hard batch takes the clamped learned value
- * within 0 to 256us. Admit plus reclaim share this helper, so both
- * agree with no separate class past latency. Outer safety stays
- * checked at the caller clamp, so ML owns the input with bounds.
- *
- * Returns: effective tolerance in nanos, zero for latency-critical.
- */
-static __always_inline u64 flow_red_tol_eff(u64 learned, bool is_crit)
-{
-	if (is_crit)
-		return 0;
-	return flow_red_tol_clamp(learned);
-}
-/**
- * flow_ml_is_hit - test one burst error against the 64us hit window.
- * @err: signed raw error as actual minus predicted in nanos.
- *
- * A hit holds when the absolute error stays at or below 64us, so
- * accuracy reads hits over total with higher better. Runs with one
- * compare each way and no divide.
- *
- * Returns: true on hit, else false.
- */
-static __always_inline bool flow_ml_is_hit(s64 err)
-{
-	if (err > (s64)FLOW_ML_ACC_HIT_NS)
-		return false;
-	if (err < -((s64)FLOW_ML_ACC_HIT_NS))
-		return false;
-	return true;
 }
 /**
  * flow_red_residual - residual time from deadline plus cost.
@@ -1129,6 +979,23 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
 	return (u32)s;
 }
 /**
+ * flow_adapt_deadband - quiet band for one base slice.
+ * @base: clamped base slice in nanos from 10us to 1ms.
+ *
+ * Takes the larger of base shifted right by DEADBAND_SHIFT plus the 8us
+ * floor, so small slices keep a real band while large slices scale with
+ * shifts only and no divide.
+ *
+ * Returns: deadband in nanos.
+ */
+static __always_inline u64 flow_adapt_deadband(u64 base)
+{
+	u64 band = base >> FLOW_ADAPT_DEADBAND_SHIFT;
+	if (band < (u64)FLOW_ADAPT_DEADBAND_MIN_NS)
+		return (u64)FLOW_ADAPT_DEADBAND_MIN_NS;
+	return band;
+}
+/**
  * flow_adapt_prop - proportional slice from exceed plus slack with clamp.
  * @cur: stored slice in nanos, zero inherits the quantum.
  * @exceed: lateness in nanos, now minus expiring deadline else zero.
@@ -1137,9 +1004,12 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. An exceed shrinks by exceed shifted right by SHIFT, a slack
  * grows by slack shifted right by SHIFT, each capped at 1ms plus half
- * of base with shifts only. Clamps to 10us plus 1ms, so one step never stalls nor holds the
- * CPU. An on-time stop with both zero holds the clamped slice. Exceed
- * wins when both hold. Virtual time
+ * of base then halved once more by the damp shift, so one step moves
+ * at most one quarter base with shifts only. Exceed plus slack at or
+ * below the proportional deadband hold the clamped slice with no hunt,
+ * so timer jitter never rings. Clamps to 10us plus 1ms, so one step
+ * never stalls nor holds the CPU. An on-time stop with both zero holds
+ * the clamped slice. Exceed wins when both hold. Virtual time
  * stays untouched, RED never writes the slice, and the caller keeps the
  * carry gate first on the same expiring deadline. Latency callers re-clamp
  * the result to 100us past the 1ms step, so one shift never holds past
@@ -1151,14 +1021,23 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 	u64 slack)
 {
 	u64 base = (u64)flow_slice_inherit(cur);
+	u64 band = flow_adapt_deadband(base);
 	u64 step;
 	u64 nxt;
 	if (exceed) {
+		if (exceed <= band) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
 		step = exceed >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
 		if (step > (base >> 1))
 			step = base >> 1;
+		step >>= FLOW_ADAPT_DAMP_SHIFT;
 		if (step == 0) {
 			if (base < (u64)FLOW_SLICE_MIN_NS)
 				return (u32)FLOW_SLICE_MIN_NS;
@@ -1176,11 +1055,19 @@ static __always_inline u32 flow_adapt_prop(u32 cur, u64 exceed,
 		return (u32)nxt;
 	}
 	if (slack) {
+		if (slack <= band) {
+			if (base < (u64)FLOW_SLICE_MIN_NS)
+				return (u32)FLOW_SLICE_MIN_NS;
+			if (base > (u64)FLOW_QUANTUM_NS)
+				return (u32)FLOW_QUANTUM_NS;
+			return (u32)base;
+		}
 		step = slack >> FLOW_ADAPT_PROP_SHIFT;
 		if (step > (u64)FLOW_ADAPT_PROP_MAX_NS)
 			step = (u64)FLOW_ADAPT_PROP_MAX_NS;
 		if (step > (base >> 1))
 			step = base >> 1;
+		step >>= FLOW_ADAPT_DAMP_SHIFT;
 		if (step == 0) {
 			if (base < (u64)FLOW_SLICE_MIN_NS)
 				return (u32)FLOW_SLICE_MIN_NS;
@@ -1325,14 +1212,15 @@ static __always_inline u64 flow_pred_clamp(u64 v)
 	return v;
 }
 /**
- * flow_pred_avg - updated burst average with shift 3.
+ * flow_pred_avg - updated burst average with up plus down shifts.
  * @avg: old average in nanos, zero for no history.
  * @delta: new sample in nanos.
  *
  * A zero average means no history, so the first sample sets the
- * average at once. Later samples move one eighth toward the new
- * delta with shifts only, so the verifier keeps no divide. The
- * result clamps to 1ns to 1s, so a spike never wraps.
+ * average at once. Rises move one eighth with UP_SHIFT 3 while falls
+ * move one sixteenth with DOWN_SHIFT 4, so bursts grow fast plus decay
+ * slow with shifts only and no divide. The result clamps to 1ns to 1s,
+ * so a spike never wraps.
  *
  * Returns: updated average in nanos.
  */
@@ -1346,28 +1234,28 @@ static __always_inline u64 flow_pred_avg(u64 avg,
 	if (avg == 0)
 		return d;
 	if (d > avg) {
-		diff = (d - avg) >> 3;
+		diff = (d - avg) >> FLOW_PRED_UP_SHIFT;
 		return flow_pred_clamp(flow_sat_add(avg,
 		    diff));
 	}
-	diff = (avg - d) >> 3;
+	diff = (avg - d) >> FLOW_PRED_DOWN_SHIFT;
 	if (diff > avg)
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(avg - diff);
 }
 /**
- * flow_pred_dev - updated burst deviation with shift 2.
+ * flow_pred_dev - updated burst deviation with up plus down shifts.
  * @dev: old deviation in nanos, zero for no history.
  * @avg: new average in nanos from flow_pred_avg, zero for no history.
  * @delta: new sample in nanos.
  *
  * Tracks the absolute error between delta and the new average with
- * one quarter steps, so a stable burst keeps a small margin while a
- * ragged burst widens the deadline with no jump. Callers pass the new
- * average from flow_pred_avg, so the margin tracks the fresh mean. A
- * zero deviation means no history, so the first value takes the max of
- * error and new average quarter as the floor. The result clamps the
- * same way with no divide and shifts stay at 2.
+ * widen shift 2 plus narrow shift 3, so a stable burst keeps a small
+ * margin while a ragged burst widens fast with no jump. Callers pass
+ * the new average from flow_pred_avg, so the margin tracks the fresh
+ * mean. A zero deviation means no history, so the first value takes
+ * the max of error and new average quarter as the floor. The result
+ * clamps the same way with no divide.
  *
  * Returns: updated deviation in nanos.
  */
@@ -1392,24 +1280,25 @@ static __always_inline u64 flow_pred_dev(u64 dev,
 		return err;
 	}
 	if (err > dev) {
-		diff = (err - dev) >> 2;
+		diff = (err - dev) >> FLOW_PRED_DEV_UP_SHIFT;
 		return flow_pred_clamp(flow_sat_add(dev,
 		    diff));
 	}
-	diff = (dev - err) >> 2;
+	diff = (dev - err) >> FLOW_PRED_DEV_DOWN_SHIFT;
 	if (diff > dev)
 		return (u64)FLOW_PRED_MIN_NS;
 	return flow_pred_clamp(dev - diff);
 }
 /**
- * flow_pred_period - predicted period from average plus deviation.
+ * flow_pred_period - predicted period from average plus margin dev.
  * @avg: burst average in nanos, zero for no history.
  * @dev: burst deviation in nanos.
  *
  * A zero average means no history, so the default period of 80ms
- * applies. Later periods add average plus deviation with saturation,
- * so a stable burst keeps a tight deadline while a ragged burst holds
- * margin with no wrap past 1s.
+ * applies. Later periods add average plus deviation plus half deviation
+ * with saturation, so a stable burst keeps a tight deadline while a
+ * ragged burst holds one and a half deviation margin with no wrap past
+ * 1s and shifts only.
  *
  * Returns: predicted period in nanos.
  */
@@ -1417,9 +1306,12 @@ static __always_inline u64 flow_pred_period(u64 avg,
 	u64 dev)
 {
 	u64 sum;
+	u64 margin;
 	if (avg == 0)
 		return (u64)FLOW_PERIOD_NS;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	sum = flow_sat_add(avg, dev);
+	sum = flow_sat_add(sum, margin);
 	if (sum == (u64)~0ULL)
 		return (u64)FLOW_PRED_MAX_NS;
 	return flow_pred_clamp(sum);
@@ -1456,9 +1348,10 @@ static __always_inline u64 flow_pred_deadline(u64 now,
  * @dev: burst deviation in nanos.
  *
  * A zero average means no history, so the task counts as batch with
- * probation. Later tasks add average plus deviation with saturation, so
- * a short predicted burst within one quantum stays critical while a long
- * burst paces at slice expiry. Uses the quantum without a new map.
+ * probation. Later tasks add average plus deviation plus half deviation
+ * margin with saturation, so a short predicted burst within one quantum
+ * stays critical while a long burst paces at slice expiry. Uses the
+ * quantum without a new map.
  *
  * Returns: true when latency-critical, else false.
  */
@@ -1466,9 +1359,12 @@ static __always_inline bool flow_lat_crit(u64 avg,
 	u64 dev)
 {
 	u64 pred;
+	u64 margin;
 	if (avg == 0)
 		return false;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
 	if (pred == (u64)~0ULL)
 		return false;
 	return pred <= (u64)FLOW_QUANTUM_NS;
@@ -1499,22 +1395,24 @@ static __always_inline u32 flow_slice_lat_clamp(u32 slice,
  * @is_crit: true forces the ULL ceiling for critical work.
  *
  * Like fair.c, the tier paces service, unlike rt.c, no fixed priority
- * holds. Adds average plus deviation with saturation, so a stable burst
- * keeps a tight tier while a ragged burst holds margin. Critical work
- * plus a prediction at or below 50us earns the ULL ceiling, then 100us
- * plus 500us plus 1ms plus 5ms bound LL plus MLL plus NL plus ENL, else
- * the 20ms ceiling holds throughput. Fresh waits cap the dynamic slice
- * by this ceiling capped at 1ms, so audio plus UI plus IPC plus desktop
- * pace tightly with no extra hold, while bulk still rotates each
- * quantum. Six latency ceilings name burst sizes apart from five
- * dispatch tiers.
+ * holds. Adds average plus deviation plus half deviation margin with
+ * saturation, so a stable burst keeps a tight tier while a ragged burst
+ * holds margin. Critical work plus a prediction at or below 50us earns
+ * the ULL ceiling, then 100us plus 500us plus 1ms plus 5ms bound LL plus
+ * MLL plus NL plus ENL, else the 20ms ceiling holds throughput. Fresh
+ * waits cap the dynamic slice by this ceiling capped at 1ms, so audio
+ * plus UI plus IPC plus desktop pace tightly with no extra hold, while
+ * bulk still rotates each quantum. Six latency ceilings name burst
+ * sizes apart from five dispatch tiers.
  *
  * Returns: tier ceiling in nanos from 50us to 20ms.
  */
 static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
 	bool is_crit)
 {
+	u64 margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	u64 pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
 	if (is_crit || pred <= (u64)FLOW_SLICE_ULL_NS)
 		return (u32)FLOW_SLICE_ULL_NS;
 	if (pred <= (u64)FLOW_SLICE_LL_NS)
@@ -1603,10 +1501,13 @@ static __always_inline bool flow_lat_crit_ext(u64 avg,
 	u32 eff_w)
 {
 	u64 pred;
+	u64 margin;
 	u64 hint_ns;
 	if (avg == 0)
 		return false;
+	margin = dev >> FLOW_PRED_DEV_MARGIN_SHIFT;
 	pred = flow_sat_add(avg, dev);
+	pred = flow_sat_add(pred, margin);
 	if (pred == (u64)~0ULL)
 		return false;
 	if (pred > (u64)FLOW_QUANTUM_NS)
@@ -1800,117 +1701,6 @@ static __always_inline u32 flow_wrap_idx(u64 base, u32 n)
 	if (flow_is_pow2((u64)n))
 		return (u32)(base & ((u64)n - 1ULL));
 	return (u32)(base % (u64)n);
-}
-/**
- * flow_ml_cap_burst - cap burst input for the online model.
- * @v: raw burst in nanos.
- *
- * Caps at the 1ms quantum, so a huge burst never saturates the dot
- * product to the error clip on every step. Keeps the fixed point
- * multiply in range with no wrap, so one train step still moves
- * small with shifts only.
- *
- * Returns: capped burst in nanos from 0 to 1ms.
- */
-static __always_inline u64 flow_ml_cap_burst(u64 v)
-{
-	if (v > (u64)FLOW_QUANTUM_NS)
-		return (u64)FLOW_QUANTUM_NS;
-	return v;
-}
-/**
- * flow_ml_cap_lag - cap lag input for the online model.
- * @v: raw lag in nanos as a signed bound.
- *
- * Caps at plus or minus the 1ms quantum, so a stale lag never
- * saturates the dot product with no storm. Keeps the sign with
- * no divide, so the correction still tracks direction.
- *
- * Returns: capped lag from minus 1ms to 1ms.
- */
-static __always_inline s32 flow_ml_cap_lag(s32 v)
-{
-	s32 bound = (s32)FLOW_QUANTUM_NS;
-	if (v > bound)
-		return bound;
-	if (v < -bound)
-		return -bound;
-	return v;
-}
-/**
- * flow_ml_cap_w - cap share input for the online model.
- * @w: effective share from 1 to 16384.
- *
- * Caps at the top bound, so a huge share never saturates the dot
- * product with no wrap. Keeps the neutral 128 plus range with
- * no extra map, so heavy shares still read heavy.
- *
- * Returns: capped share from 1 to 16384.
- */
-static __always_inline u32 flow_ml_cap_w(u32 w)
-{
-	if (w < (u32)FLOW_WEIGHT_MIN)
-		return (u32)FLOW_WEIGHT_MIN;
-	if (w > (u32)FLOW_WEIGHT_MAX)
-		return (u32)FLOW_WEIGHT_MAX;
-	return w;
-}
-/**
- * flow_ml_grad_s32 - clamp one gradient into s32 range.
- * @g: raw gradient in s64.
- *
- * Clamps to plus or minus 32767, so the cast to s32 never truncates
- * with no wrap. Keeps one train step small with no storm, so the
- * weight clamp below stays best effort with no tear.
- *
- * Returns: clamped gradient from minus 32767 to 32767.
- */
-static __always_inline s32 flow_ml_grad_s32(s64 g)
-{
-	if (g > 32767)
-		return 32767;
-	if (g < -32767)
-		return -32767;
-	return (s32)g;
-}
-/**
- * flow_ml_clamp_one - clamp one weight with CAS plus one retry.
- * @addr: weight cell to clamp, null drops.
- *
- * Reads once then swaps only when past plus or minus 524288, so a
- * concurrent fetch and add win keeps the winner with no lost clamp.
- * Retries the swap once on a lost race with a fresh read, then leaves
- * the next train to fold the bound with no stall. Runs with no lock
- * plus no loop past two tries, so the verifier stays small.
- */
-static __always_inline void flow_ml_clamp_one(s32 *addr)
-{
-	s32 cur;
-	s32 nxt;
-	s32 old;
-	if (!addr)
-		return;
-	cur = READ_ONCE(*addr);
-	if (cur > (s32)FLOW_ML_WEIGHT_BOUND)
-		nxt = (s32)FLOW_ML_WEIGHT_BOUND;
-	else if (cur < -((s32)FLOW_ML_WEIGHT_BOUND))
-		nxt = -((s32)FLOW_ML_WEIGHT_BOUND);
-	else
-		return;
-	old = __sync_val_compare_and_swap(addr, cur, nxt);
-	if (old == cur)
-		return;
-	/* One retry on a lost race with a fresh read, so a concurrent */
-	/* add that still holds past the bound folds at once. */
-	cur = READ_ONCE(*addr);
-	if (cur > (s32)FLOW_ML_WEIGHT_BOUND)
-		nxt = (s32)FLOW_ML_WEIGHT_BOUND;
-	else if (cur < -((s32)FLOW_ML_WEIGHT_BOUND))
-		nxt = -((s32)FLOW_ML_WEIGHT_BOUND);
-	else
-		return;
-	old = __sync_val_compare_and_swap(addr, cur, nxt);
-	(void)old;
 }
 /* Forward task type for the enqueue tails without pulling kernel headers. */
 /* The BPF build already holds the full task view through common, while */

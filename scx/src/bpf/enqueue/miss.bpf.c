@@ -10,8 +10,7 @@
  * with no dynamic recompute, then rejoins via the same tier escalation
  * re-derived with the fresh deadline, so urgency returns at once with
  * no starvation. RED uses the same O(1) newcomer check through the
- * shared outlined helper, so a reject needs cost past the learnable
- * Emax plus cost past the exceed with no critical. Tolerance aids only
+ * shared outlined helper, so a reject needs cost past the fixed 256us Emax plus cost past the exceed with no critical. Tolerance aids only
  * the guarantee without shaping the key. A full O(n) least value scan
  * stays a noted alternative, so the verifier keeps one pass. Critical
  * follows the unified latency, so RED and slice agree. Like fair.c,
@@ -87,13 +86,13 @@ static __noinline bool flow_enqueue_miss(struct task_struct *p,
 	__sync_lock_test_and_set(&tctx->deadline, ndl);
 	__sync_lock_test_and_set(&tctx->slice_ns,
 	    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-	nvt = flow_make_fair(tctx, ndl, hint_w, m_sleep);
+	nvt = flow_make_fair(tctx, ndl, hint_w);
 	/* In-tier keys cap at now plus one period through the shared */
 	/* helper, so far keys never starve past the bound. */
 	nvt = flow_enqueue_cap_key(nvt, now);
 	/* RED on the miss rejoin with the same O(1) newcomer check through */
 	/* the shared outlined helper, so a reject needs cost past the */
-	/* learnable Emax plus cost past the exceed with no critical. */
+	/* fixed 256us Emax plus cost past the exceed with no critical. */
 	/* Tolerance aids only the guarantee without shaping the key. */
 	/* A full O(n) least value scan stays a noted alternative, so */
 	/* the verifier keeps one pass. Critical follows the unified */

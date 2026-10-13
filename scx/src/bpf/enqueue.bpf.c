@@ -8,7 +8,7 @@
  * plus tolerance used only for the guarantee. The deadline bounds the
  * check without shaping vruntime. A zero exceed admits at once, a
  * critical exceed admits without a swap, else the newcomer itself is
- * tested as the O(1) victim with cost past the learnable Emax plus
+ * tested as the O(1) victim with cost past the fixed 256us Emax plus
  * cost past the exceed plus never critical, else the newcomer admits and a full least
  * value scan stays a noted alternative. Queue order uses the strict EDF
  * key of the earlier of the two times in three PRIQ tiers (local plus
@@ -26,9 +26,10 @@
  * with wait set and one idle kick, else the reject queue on overload.
  * Exiting tasks run at once on the task CPU without queueing. The gate
  * runs first for all other arrivals, so a stale CPU or a moved task fails
- * closed with one counter. The predictor average plus deviation shape
- * later deadlines with shift updates from stopping, so short bursts earn
- * tight deadlines without a table walk. Vruntime advances by scaled
+ * closed with one counter. The predictor average rises fast with shift 3
+ * plus falls slow with shift 4 and the deviation widens fast with shift 2
+ * plus narrows slow with shift 3 plus half deviation margin from stopping,
+ * so short bursts earn tight deadlines without a table walk. Vruntime advances by scaled
  * service with one divide, and the CPU minimum folds forward on every
  * charge, so fairness tracks service without a table. Every tier join
  * counts one admit and every RED overload counts one RED reject without
@@ -189,12 +190,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			__sync_lock_test_and_set(&tctx->slice_ns,
 			    (u32)FLOW_QUANTUM_NS);
 	}
-	/* Snapshot both RED bounds once per enqueue through one control */
-	/* lookup, so miss plus open plus pinned share one fetch with no */
-	/* second lookup and the same admit order. The snapshot globals */
-	/* hold clamped values, so the reject path reads them with no */
-	/* extra clamp and outer safety stays checked at the snapshot. */
-	flow_ml_red_cache();
 	/* Pinned tasks wait in a tier queue with wait set and one idle kick. */
 	/* Pinning is rare, so it stays unlikely. The tier keeps mask wins */
 	/* on drain, so a pinned task still meets only its allowed CPU. */
@@ -303,7 +298,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		vtime = open_out.vtime;
 	}
 	/* RED admission through the shared outlined helper. A reject needs */
-	/* cost past the learnable Emax plus cost past the exceed with no */
+	/* cost past the fixed 256us Emax plus cost past the exceed with no */
 	/* critical, else the newcomer admits to the tier path. The deadline */
 	/* bounds the check without shaping vruntime. Critical follows the */
 	/* unified latency and cost uses the pre-clamp slice for fresh */

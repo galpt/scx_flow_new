@@ -107,13 +107,11 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		out->sleep_ns = lat_sleep;
 		out->is_fresh = true;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
-			vtime = flow_make_fair(tctx, deadline, hint_w,
-			    lat_sleep);
+			vtime = flow_make_fair(tctx, deadline, hint_w);
 		} else {
 			u64 lat_dl;
 			__sync_lock_test_and_set(&tctx->slice_ns, lat_slice);
-			lat_vt = flow_make_fair(tctx, deadline, hint_w,
-			    lat_sleep);
+			lat_vt = flow_make_fair(tctx, deadline, hint_w);
 			if (is_lat) {
 				lat_dl = flow_lat_deadline(now, lat_slice);
 				vtime = flow_edf_key(lat_vt, lat_dl);
@@ -151,7 +149,7 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		/* cgroup plus task weights shape fairness together. In-tier */
 		/* keys cap at now plus one period through the shared helper, */
 		/* so far keys never starve past the bound. */
-		vtime = flow_make_fair(tctx, deadline, hint_w, re_sleep);
+		vtime = flow_make_fair(tctx, deadline, hint_w);
 		vtime = flow_enqueue_cap_key(vtime, now);
 		out->vtime = vtime;
 	}

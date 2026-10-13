@@ -192,33 +192,3 @@ static __always_inline void flow_count_red_reclaim(u32 n)
 		return;
 	__sync_fetch_and_add(&row->red_reclaims, (u64)n);
 }
-/* Count one ML accuracy sample with saturation on the local row. */
-/* Total bumps on every train with a hit bump when the absolute burst */
-/* error stays at or below 64us, so accuracy reads hits over total in */
-/* 0.0 to 1.0 with higher better. Each counter saturates at max with no */
-/* wrap, so a huge train count clamps instead of wrapping. */
-static __always_inline void flow_count_ml_sample(bool is_hit)
-{
-	struct flow_sched_stats *row = flow_stat_row();
-	if (!row)
-		return;
-	if (READ_ONCE(row->ml_total) != (u64)~0ULL)
-		__sync_fetch_and_add(&row->ml_total, 1);
-	if (is_hit) {
-		if (READ_ONCE(row->ml_hits) == (u64)~0ULL)
-			return;
-		__sync_fetch_and_add(&row->ml_hits, 1);
-	}
-}
-/* Count one ML clamp event with saturation on the local row. */
-/* Runs on each nudge saturation at the 250us bound, so the counter */
-/* tracks how often the model output hits its outer with no wrap. */
-static __always_inline void flow_count_ml_clamped(void)
-{
-	struct flow_sched_stats *row = flow_stat_row();
-	if (!row)
-		return;
-	if (READ_ONCE(row->ml_clamped) == (u64)~0ULL)
-		return;
-	__sync_fetch_and_add(&row->ml_clamped, 1);
-}

@@ -122,54 +122,38 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
 /**
- * flow_make_fair - strict EDF key from task state plus deadline plus hint plus sleep.
+ * flow_make_fair - strict EDF key from task state plus deadline plus hint.
  * @tctx: task state with vruntime plus weight plus slice.
  * @deadline: absolute EDF deadline in nanos.
  * @hint_w: hint share with base for neutral.
- * @sleep_ns: caller sleep from wait plus now plus avg read before the wait overwrite.
  *
  * Reads vruntime plus weight plus slice once and stacks the effective
  * share of task times hint over 128, so pinned, miss, and open paths
  * share one divide copy with the same order. The slice holds the dynamic
  * remaining clamp on fresh waits else the held charge on misses, so near
- * deadlines earn near virtual times without a band jump. Takes the real
- * wrap-safe sleep from the caller without a zero stub, then applies the
- * in-kernel ML nudge within plus or minus 250us over burst capped
- * inputs with saturation, so one nudge never holds past one quarter
- * quantum and train plus infer agree on bursts. RED cost stays on the
- * pre-clamp slice before this nudge, and a missing model fails closed to zero
- * with the deterministic shift-3 EMA baseline owning order. The nudged
- * key drives tier plus kick while placement tests the deadline, so
- * accuracy stays observability-only.
+ * deadlines earn near virtual times without a band jump. RED cost stays
+ * on the pre-clamp slice, so admit plus order agree. The strict key
+ * drives tier plus kick while placement tests the deadline.
  *
- * Returns: strict key as the earlier of deadline plus nudged virtual deadline.
+ * Returns: strict key as the earlier of deadline plus virtual deadline.
  *
  * Outlined with noinline to keep verifier headroom and pinned plus miss
  * plus open paths share one divide copy.
  */
 static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
-	u64 deadline, u32 hint_w, u64 sleep_ns)
+	u64 deadline, u32 hint_w)
 {
 	u64 vr = READ_ONCE(tctx->vruntime);
 	u32 sl = READ_ONCE(tctx->slice_ns);
 	u32 task_w = READ_ONCE(tctx->weight);
 	u32 eff;
 	u64 vd;
-	s64 nudge;
 	if (task_w == 0)
 		task_w = (u32)FLOW_WEIGHT_BASE;
 	eff = flow_task_effective_weight(task_w, hint_w);
 	if (sl == 0)
 		sl = (u32)FLOW_QUANTUM_NS;
 	vd = flow_virt_deadline(vr, (u64)sl, eff);
-	/* Capped in-kernel nudge returns zero when state missing. */
-	nudge = flow_ml_deadline_nudge(tctx, sleep_ns, eff);
-	if (nudge < 0) {
-		u64 abs_nudge = (u64)(-nudge);
-		vd = vd > abs_nudge ? vd - abs_nudge : 0;
-	} else {
-		vd = flow_sat_add(vd, (u64)nudge);
-	}
 	return flow_edf_key(deadline, vd);
 }
 /**
@@ -279,7 +263,7 @@ struct flow_reject_tail {
  * @t: reject tail with state plus deadline plus time plus flags.
  *
  * Runs the shared O(1) newcomer check through the outlined helper, so
- * a reject needs cost past the learnable Emax plus cost past the
+ * a reject needs cost past the fixed 256us Emax plus cost past the
  * exceed with no critical. A reject joins the value ordered queue with
  * one idle kick, else admits with no insert. Queue order uses value
  * without shaping vruntime. Like fair.c, the earliest key wins,
@@ -410,7 +394,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		pin_sleep_hold = pm_sleep;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w, pm_sleep);
+		pvt = flow_make_fair(tctx, pdl, phint_w);
 		pvt = flow_enqueue_cap_key(pvt, now);
 	} else if (!is_reenq) {
 		u64 p_sleep = flow_take_sleep(tctx, now, pavg);
@@ -435,11 +419,11 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		have_pin = true;
 		pin_sleep_hold = p_sleep;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
-			pvt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
+			pvt = flow_make_fair(tctx, pdl, phint_w);
 		} else {
 			u64 p_dl;
 			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
-			p_vt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
+			p_vt = flow_make_fair(tctx, pdl, phint_w);
 			if (p_is_lat) {
 				p_dl = flow_lat_deadline(now, p_slice);
 				pvt = flow_edf_key(p_vt, p_dl);
@@ -453,11 +437,11 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		pin_sleep_hold = pr_sleep;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w, pr_sleep);
+		pvt = flow_make_fair(tctx, pdl, phint_w);
 		pvt = flow_enqueue_cap_key(pvt, now);
 	}
 	/* RED on the pinned join through the shared outlined helper, so a */
-	/* reject needs cost past the learnable Emax plus cost past the */
+	/* reject needs cost past the fixed 256us Emax plus cost past the */
 	/* exceed with no critical. Tolerance aids only the guarantee */
 	/* without shaping the key. Critical follows the unified latency */
 	/* through the shared test and cost uses the pre-clamp slice for */

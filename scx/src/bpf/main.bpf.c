@@ -4,12 +4,12 @@
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
- * stats rows, the perf level rows, and the online model row. Init creates one local queue
- * per CPU plus one shared queue per node plus one machine queue plus
- * one value ordered reject queue, and it fails loudly on over bound counts. Ops
- * split across per logic files with maps plus init plus exit plus the
- * ops table only here. Hotplug needs a restart, and the watchdog stays
- * at 20 seconds.
+ * stats rows, the perf level rows, and the reclaim credit row. Init
+ * creates one local queue per CPU plus one shared queue per node plus
+ * one machine queue plus one value ordered reject queue, and it fails
+ * loudly on over bound counts. Ops split across per logic files with
+ * maps plus init plus exit plus the ops table only here. Hotplug needs
+ * a restart, and the watchdog stays at 20 seconds.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -86,51 +86,23 @@ struct {
 	__type(key, u32);
 	__type(value, u64);
 } reclaim_credit_stor SEC(".maps");
-/* Global online model with five weights plus bias plus clamp plus count */
-/* plus version plus learnable RED bounds plus reserve. */
-/* One 48B row holds the fixed point SGD state with weights plus bias */
-/* at zero for no training, so the dot product reads zero with no shift */
-/* and the nudge returns zero. Version seeds 1 with tol at 64us plus */
-/* Emax at 256us plus max clamp at 250us, each clamped to its outer on */
-/* read. Updates use atomics with bound 524288, the nudge clamps to */
-/* plus or minus 250us, and the task state stays at 72B with integer */
-/* arithmetic. */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct flow_online_model);
-} ml_online_model_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
-/* Hoisted RED bounds snapshot per enqueue with no per-tail threading. */
-/* The enqueue top fills both through one control lookup, then the reject */
-/* path reads them with no second lookup, so one fetch covers miss plus */
-/* open plus pinned with no stack spill. Races across CPUs still hold */
-/* clamped values within outer 0 to 256us plus 64us to 1ms, so the check */
-/* stays safe with outer bounds still checked. */
-volatile u64 flow_red_tol_cache;
-volatile u64 flow_red_emax_cache;
 /* Includes run in dependency order with maps plus helpers before */
-/* callers, so stats plus cgroup plus vtime plus weight plus ml control */
-/* plus edf come first, then placement plus timer plus preempt plus */
-/* select, then the online model before enqueue plus dispatch plus */
-/* lifecycle. Enqueue splits into target plus insert plus miss plus open */
-/* plus kick before the dispatcher, so the miss plus open tails share one */
-/* copy each with no forward use. The ml trio sits before its callers */
-/* with no extra map, so the verifier sees one fixed path with no forward use. */
+/* callers, so stats plus cgroup plus vtime plus weight plus edf come */
+/* first, then placement plus timer plus preempt plus select, then */
+/* enqueue plus dispatch plus lifecycle. Enqueue splits into target plus */
+/* insert plus miss plus open plus kick before the dispatcher, so the */
+/* miss plus open tails share one copy each with no forward use. */
 #include "stats.bpf.c"
 #include "cgroup.bpf.c"
 #include "vtime.bpf.c"
 #include "weight.bpf.c"
-#include "ml/control.bpf.c"
 #include "edf.bpf.c"
 #include "task_placement.bpf.c"
 #include "timer.bpf.c"
 #include "preempt.bpf.c"
 #include "select_cpu.bpf.c"
-#include "ml/online_sgd.bpf.c"
-#include "ml/nudge.bpf.c"
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"
 #include "lifecycle.bpf.c"
@@ -138,9 +110,9 @@ volatile u64 flow_red_emax_cache;
  * flow_init - create queues plus seed CPU state.
  *
  * Creates one local queue per CPU plus one node queue per node plus
- * one machine queue plus one value ordered reject queue. Seeds per CPU state plus
- * capacity rows plus the online model row, then derives the node count from
- * the seeded view.
+ * one machine queue plus one value ordered reject queue. Seeds per CPU
+ * state plus capacity rows, then derives the node count from the seeded
+ * view.
  * Fails loudly on over bound counts with no partial attach.
  *
  * Returns: 0 on success, negative errno on failure.
@@ -220,27 +192,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		cp = bpf_map_lookup_elem(&cap_stor, &key);
 		if (cp)
 			cp->units = (u32)FLOW_CAP_BASE;
-	}
-	{
-		u32 key = 0;
-		struct flow_online_model *m;
-		m = bpf_map_lookup_elem(&ml_online_model_stor, &key);
-		if (m) {
-			m->w_avg = 0;
-			m->w_dev = 0;
-			m->w_lag = 0;
-			m->w_sleep = 0;
-			m->w_weight = 0;
-			m->bias = 0;
-			/* Seed the nudge bound at 250us, so the infer clamp */
-			/* holds without relying on the zero fail-closed path. */
-			m->max_clamp_ns = (s32)FLOW_ML_NUDGE_MAX_NS;
-			m->update_count = 0;
-			m->version = (u32)FLOW_ML_MODEL_VERSION;
-			m->red_tol_ns = (u32)FLOW_RED_TOL_NS;
-			m->red_emax_ns = (u32)FLOW_RED_EMAX_NS;
-			m->reserved = 0;
-		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 local;

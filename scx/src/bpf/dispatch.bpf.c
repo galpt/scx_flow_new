@@ -215,20 +215,19 @@ static __noinline bool flow_reclaim_key_ok(struct flow_task_ctx *rctx,
  * @tiers_empty: true when local plus node plus machine hold no work.
  *
  * Skips the walk when tiers hold work plus credit stays short of the
- * learnable Emax within outer 64us to 1ms, since aged heads still need
- * funding with no fallback. Tiers-empty keeps the walk with no
- * reserve, so zero credit never idles work with outer safety still
- * checked.
+ * fixed 256us Emax, since aged heads still need funding with no
+ * fallback. Tiers-empty keeps the walk with no reserve, so zero credit
+ * never idles work.
  *
  * Outlined with noinline to keep verifier headroom with one shared
- * copy, so the dispatch pass keeps one Emax fetch with no inline
+ * copy, so the dispatch pass keeps one fixed read with no inline
  * growth.
  *
  * Returns: true when the caller skips the walk, else false.
  */
 static __noinline bool flow_reclaim_early_skip(u64 credit, bool tiers_empty)
 {
-	if (!tiers_empty && credit < flow_ml_red_emax_ns())
+	if (!tiers_empty && credit < (u64)FLOW_RED_EMAX_NS)
 		return true;
 	return false;
 }
@@ -237,15 +236,14 @@ static __noinline bool flow_reclaim_early_skip(u64 credit, bool tiers_empty)
  * @t: reclaim tail with state plus task plus target plus time plus credit
  * plus gate, read once by the caller.
  *
- * Checks laxity with the learnable tolerance plus tiers-empty plus
+ * Checks laxity with the fixed 64us tolerance plus tiers-empty plus
  * aged cover plus key freshness plus mask plus credit with reserve,
- * so the loop keeps one call. Hard takes the clamped model value
- * while latency-critical keeps zero, so reclaim agrees with admit.
- * Tiers-empty heads with positive laxity fall back without reserve
- * while funded heads reserve before the move, so zero credit never
- * idles queued work. Aged heads past one period pass even when tiers
- * hold work. A stale key, a foreign mask, or a lost reserve fails
- * closed to the next candidate.
+ * so the loop keeps one call. Hard takes 64us while latency-critical
+ * keeps zero, so reclaim agrees with admit. Tiers-empty heads with
+ * positive laxity fall back without reserve while funded heads reserve
+ * before the move, so zero credit never idles queued work. Aged heads
+ * past one period pass even when tiers hold work. A stale key, a
+ * foreign mask, or a lost reserve fails closed to the next candidate.
  *
  * Returns: true when the caller may move the candidate.
  *
@@ -288,10 +286,9 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 		rcrit = flow_is_lat(ravg, rdev, rhint, 0, 0, reff);
 	}
 	rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
-	/* Reclaim shares the learnable tolerance with admit, so hard */
-	/* takes the clamped model value within 0 to 256us while */
-	/* latency-critical keeps zero with no learned slack. */
-	rtol = flow_red_tol_eff(flow_ml_red_tol_ns(), rcrit);
+	/* Reclaim shares the fixed 64us tolerance with admit, so hard */
+	/* takes 64us while latency-critical keeps zero. */
+	rtol = flow_red_tol(rcrit);
 	rres = flow_red_residual(rdl, now, rcost);
 	rexc = flow_red_exceed(rres, rtol);
 	rlax = flow_red_laxity(rdl, now, rcost);
@@ -365,10 +362,9 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		return 0;
 	credit = flow_credit_peek();
 	/* Skip the walk when tiers hold work plus credit stays short of the */
-	/* learnable Emax through the shared helper, since aged heads still */
-	/* need funding with no fallback. Tiers-empty keeps the walk with no */
-	/* reserve, so zero credit never idles work with outer safety still */
-	/* checked. */
+	/* fixed 256us Emax through the shared helper, since aged heads */
+	/* still need funding with no fallback. Tiers-empty keeps the walk */
+	/* with no reserve, so zero credit never idles work. */
 	if (flow_reclaim_early_skip(credit, tiers_empty))
 		return 0;
 	bpf_rcu_read_lock();

@@ -169,90 +169,24 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
 /*
  * RED guarantee core for the flow scheduler.
  *
- * Holds the residual and exceeding time with tolerance used
+ * Holds the residual and exceeding time with fixed tolerance used
  * only for the guarantee. The deadline bounds the check without
- * shaping vruntime. A newcomer with zero exceed
- * passes at once, else the newcomer itself is tested as the O(1)
- * victim with cost past the exceed plus deadline at or before
- * itself plus never critical, else the newcomer admits. A full least
- * value scan stays a noted alternative, so the verifier keeps one pass.
- * Newcomer-pays trades exact victim choice for a single check with
- * tiers-empty reclaim covering starvation below. The reject queue stays
- * value ordered outside dispatch, and a global saved credit at or past
- * the learnable Emax reclaims one head with positive laxity. Runs under
- * the caller without a lock here, so the verifier stays small.
+ * shaping vruntime. A newcomer with zero exceed passes at once, else
+ * the newcomer itself is tested as the O(1) victim with cost past the
+ * fixed 256us Emax plus cost past the exceed plus never critical, else
+ * the newcomer admits. A full least value scan stays a noted
+ * alternative, so the verifier keeps one pass. Newcomer-pays trades
+ * exact victim choice for a single check with tiers-empty reclaim
+ * covering starvation below. The reject queue stays value ordered
+ * outside dispatch, and a global saved credit at or past the fixed
+ * 256us Emax reclaims one head with positive laxity. Runs under the
+ * caller without a lock here, so the verifier stays small.
  */
-/**
- * flow_red_newcomer_exceed - exceeding time of one newcomer.
- * @deadline: newcomer absolute deadline in nanos.
- * @now: current time in nanos.
- * @avg: burst average in nanos, zero for no history.
- * @slice: stored slice in nanos, zero for no history.
- * @is_crit: true marks latency-critical via the unified latency test
- * with zero tolerance, false for hard batch.
- *
- * Costs burst else slice else quantum, tolerates the learnable value
- * within outer 0 to 256us defaulting to 64us for hard batch only,
- * then residuals deadline minus now minus cost with wrap safety.
- * Latency-critical keeps zero with no learned slack, so ML owns the
- * input with outer safety still checked and no separate class holds
- * past latency. Tolerance aids only the guarantee with no order
- * shaping. Admit plus reclaim share this path.
- *
- * Returns: exceeding time in nanos, zero when guaranteed.
- */
-static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
-	u64 now, u64 avg, u32 slice, bool is_crit)
-{
-	u64 cost = flow_red_cost(avg, slice);
-	u64 learned = flow_ml_red_tol_ns();
-	u64 tol = flow_red_tol_eff(learned, is_crit);
-	s64 resid = flow_red_residual(deadline, now, cost);
-	return flow_red_exceed(resid, tol);
-}
-/**
- * flow_red_victim_ok - test one victim for one exceed.
- * @v_deadline: victim deadline in nanos, zero fails closed.
- * @n_deadline: newcomer deadline in nanos, zero fails closed.
- * @v_cost: victim remaining cost in nanos.
- * @exceed: newcomer exceeding time in nanos, zero fails closed.
- * @v_crit: true marks a latency-critical victim via the unified test
- * that never rejects, false for hard batch.
- *
- * Victim needs cost past the learnable Emax within outer 64us to 1ms
- * defaulting to 256us plus cost past the exceed plus deadline at or
- * before the newcomer, so only work ahead of the overload pays with
- * outer safety still checked. Callers test the newcomer itself as the
- * O(1) victim without a scan, so a full least value scan stays a noted
- * alternative. A latency-critical victim never passes with no separate
- * class past latency. A capped latency slice at 100us never passes
- * the 64us floor, so latency never pays as victim.
- *
- * Returns: true when the victim may cover the exceed.
- */
-static __always_inline bool flow_red_victim_ok(u64 v_deadline,
-	u64 n_deadline, u64 v_cost, u64 exceed, bool v_crit)
-{
-	u64 emax = flow_ml_red_emax_ns();
-	if (exceed == 0)
-		return false;
-	if (v_crit)
-		return false;
-	if (v_deadline == 0 || n_deadline == 0)
-		return false;
-	if (v_cost <= emax)
-		return false;
-	if (v_cost <= exceed)
-		return false;
-	if (flow_time_before(n_deadline, v_deadline))
-		return false;
-	return true;
-}
 /**
  * flow_red_gate - shared victim gate for one newcomer cost.
  * @cost: remaining worst cost in nanos from burst else slice.
  * @exceed: newcomer exceeding time in nanos, zero admits at once.
- * @emax: learnable Emax in nanos within outer 64us to 1ms.
+ * @emax: fixed Emax in nanos at 256us.
  * @is_crit: true marks latency-critical that never rejects.
  * @deadline: newcomer absolute deadline, zero admits at once.
  *
@@ -286,18 +220,14 @@ static __always_inline bool flow_red_gate(u64 cost, u64 exceed, u64 emax,
  * @is_crit: true marks latency-critical via the unified latency test
  * with zero tolerance, false for hard batch.
  *
- * Costs burst else slice else quantum once, tolerates the hoisted
- * snapshot within outer 0 to 256us for hard batch only, then shares
- * the gate below. The enqueue top snapshots both bounds through one
- * control lookup, so this path reads the snapshot with no second
- * lookup and the same admit order. Latency-critical keeps zero with
- * no learned slack, so ML owns the input with outer safety still
- * checked. Like fair.c, the bound paces order, unlike rt.c, no fixed
- * priority holds.
+ * Costs burst else slice else quantum once, tolerates the fixed 64us
+ * for hard batch only, then shares the gate below. Latency-critical
+ * keeps zero with no slack. Like fair.c, the bound paces order, unlike
+ * rt.c, no fixed priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
- * copy, so miss plus open plus pinned share one snapshot read with
- * no inline growth.
+ * copy, so miss plus open plus pinned share one read with no inline
+ * growth.
  *
  * Returns: true when the newcomer should reject to the value ordered
  * queue, else false for admit.
@@ -306,14 +236,13 @@ static __noinline bool flow_red_should_reject(u64 deadline, u64 now,
 	u64 avg, u32 slice, bool is_crit)
 {
 	u64 cost = flow_red_cost(avg, slice);
-	u64 tol = flow_red_tol_eff(flow_red_tol_cache, is_crit);
-	u64 emax = flow_red_emax_cache;
+	u64 tol = flow_red_tol(is_crit);
+	u64 emax = (u64)FLOW_RED_EMAX_NS;
 	s64 resid = flow_red_residual(deadline, now, cost);
 	u64 exceed = flow_red_exceed(resid, tol);
 	/* Newcomer tests itself, so the deadline order holds with no */
 	/* before check past equality. Shares the gate with reclaim, so */
-	/* both agree with one copy. Snapshot holds clamped values, so */
-	/* no extra clamp runs here with outer safety already checked. */
+	/* both agree with one copy. */
 	return flow_red_gate(cost, exceed, emax, is_crit, deadline);
 }
 /**
@@ -322,17 +251,16 @@ static __noinline bool flow_red_should_reject(u64 deadline, u64 now,
  * @exceed: head exceeding time in nanos.
  * @laxity: head laxity in nanos, zero means no room.
  *
- * Reclaims when the global credit passes the learnable Emax within
- * outer 64us to 1ms defaulting to 256us and covers the head exceed
- * with positive laxity. The global credit funds the retry without
- * shaping shares with outer safety still checked.
+ * Reclaims when the global credit passes the fixed 256us Emax and
+ * covers the head exceed with positive laxity. The global credit funds
+ * the retry without shaping shares.
  *
  * Returns: true when the head may rejoin.
  */
 static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 	u64 laxity)
 {
-	u64 emax = flow_ml_red_emax_ns();
+	u64 emax = (u64)FLOW_RED_EMAX_NS;
 	if (saved < emax)
 		return false;
 	if (laxity == 0)
@@ -345,7 +273,7 @@ static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 /* Stopping adds the unused cost minus delta on completions with */
 /* saturation at 1s, so one completion funds a later retry without */
 /* keeping a task pointer. Dispatch peeks this credit for the head check */
-/* and reserves the exceed else the learnable Emax before a move, so the */
+/* and reserves the exceed else the fixed 256us Emax before a move, so the */
 /* completer delta funds the retry without using head state. Compare and */
 /* swap retries stop at four, so a lost race only delays one pass. */
 /* Add one saved delta to the global reclaim credit with saturation. */
@@ -380,19 +308,18 @@ static __always_inline u64 flow_credit_peek(void)
 	return READ_ONCE(*slot);
 }
 /* Consume one reclaim funding with floor at zero. */
-/* Takes the exceed when past zero else the learnable Emax, so a zero */
-/* exceed still spends the bound with outer 64us to 1ms still checked. */
-/* Fails closed when short without spending, so a lost compare and swap */
-/* race retries up to four times then delays one pass. The reclaim caller */
-/* reserves before the move and falls back without reserve when tiers hold */
-/* no work, so the consume stays strict while the reclaim keeps one move */
-/* per pass. */
+/* Takes the exceed when past zero else the fixed 256us Emax, so a zero */
+/* exceed still spends the bound. Fails closed when short without */
+/* spending, so a lost compare and swap race retries up to four times */
+/* then delays one pass. The reclaim caller reserves before the move and */
+/* falls back without reserve when tiers hold no work, so the consume */
+/* stays strict while the reclaim keeps one move per pass. */
 static __always_inline bool flow_credit_consume(u64 exceed)
 {
 	u32 key = 0;
 	u64 *slot = bpf_map_lookup_elem(&reclaim_credit_stor, &key);
 	s32 i;
-	u64 emax = flow_ml_red_emax_ns();
+	u64 emax = (u64)FLOW_RED_EMAX_NS;
 	if (!slot)
 		return false;
 	bpf_for(i, 0, 4) {

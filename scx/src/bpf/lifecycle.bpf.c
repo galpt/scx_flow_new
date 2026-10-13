@@ -7,18 +7,20 @@
  * the on CPU gauge. Stopping claims the start once, charges the raw
  * segment to total runtime, advances vruntime by the scaled delta, folds
  * the CPU minimum forward, then feeds the burst predictor average plus
- * deviation from the same delta with shifts, then resumes a preempt-like
- * head with start plus cur minus now clamped to 10us plus 100us for
- * latency else 1ms with inherit on bad start plus end else carries the
- * latency-critical slice up to one quantum clamped to 10us plus 1ms else
- * adapts proportionally by exceed SHIFT capped 1ms shrink on late else
- * slack SHIFT capped 1ms grow on early with clamp to 10us plus 1ms and latency grow to
- * 100us without changing virtual time, then counts one requeue per
- * runnable stop else one completion. Like fair.c, vruntime paces order,
- * unlike rt.c, no fixed priority holds. C holds burst else slice else
- * quantum, and V holds weight with zero mapped to 128, so the slice adapts
- * while virtual time stays untouched. A global saved credit at or past
- * the learnable Emax reclaims one value ordered reject with positive laxity plus same
+ * deviation from the same delta with up plus down shifts plus half
+ * deviation margin, then resumes a preempt-like head with start plus cur
+ * minus now clamped to 10us plus 100us for latency else 1ms with inherit
+ * on bad start plus end else carries the latency-critical slice up to one
+ * quantum clamped to 10us plus 1ms else adapts proportionally by exceed
+ * SHIFT capped 1ms plus half then halved shrink on late else slack SHIFT
+ * capped 1ms plus half then halved grow on early with deadband hold plus
+ * clamp to 10us plus 1ms and latency grow to 100us without changing
+ * virtual time, then counts one requeue per runnable stop else one
+ * completion. Like fair.c, vruntime paces order, unlike rt.c, no fixed
+ * priority holds. C holds burst else slice else quantum, and V holds
+ * weight with zero mapped to 128, so the slice adapts while virtual time
+ * stays untouched. A global saved credit at or past the fixed 256us Emax
+ * reclaims one value ordered reject with positive laxity plus same
  * key or strictly after with a single move. A runnable preempt-like yield
  * with history plus tail left and no wall miss keeps start plus cur minus
  * now, else a yield before one quantum keeps the unused remainder only
@@ -207,36 +209,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	else
 		delta = now - start;
 	/* Every segment counts raw time while vruntime counts scaled time. */
-	/* The predictor average plus deviation update from the same */
-	/* delta with shifts only plus a first deviation floor at average */
-	/* quarter, so later deadlines track recent bursts with no extra */
-	/* walk. A zero delta keeps the predictor with no train, so a */
-	/* backward clock never pulls the average to 1ns. The vruntime */
-	/* advance uses the effective share of task times stored hint over */
-	/* 128 with no divide and no lookup, so heavy tasks move slowly */
-	/* while light tasks move quickly with no neutral cliff. The CPU */
-	/* minimum folds forward best effort with no regression past a */
-	/* concurrent win. */
+	/* The predictor average rises fast with shift 3 plus falls slow */
+	/* with shift 4, and the deviation widens fast with shift 2 plus */
+	/* narrows slow with shift 3, plus a first deviation floor at */
+	/* average quarter, so later deadlines track recent bursts with no */
+	/* extra walk. A zero delta keeps the predictor, so a backward clock */
+	/* never pulls the average to 1ns. The vruntime advance uses the */
+	/* effective share of task times stored hint over 128 with no divide */
+	/* and no lookup, so heavy tasks move slowly while light tasks move */
+	/* quickly with no neutral cliff. The CPU minimum folds forward best */
+	/* effort with no regression past a concurrent win. */
 	flow_count_runtime(delta);
-	/* In-kernel online train for runnable and completion. Runs on one */
-	/* eighth of stops picked by pid plus time hash when delta passes */
-	/* zero with the real wrap-safe sleep from wait plus now plus avg */
-	/* plus the effective share, so the fixed point step samples */
-	/* without changing order. A missing model fails closed without an */
-	/* update, so the shift-3 EMA baseline owns deadline math. The pid */
-	/* hash spreads samples across tasks with no per CPU map, so a */
-	/* batched clock never trains the same task eight times in a row. */
-	if (delta > 0 &&
-	    ((((now >> 4) ^ (u64)(u32)p->pid) & 7ULL) == 0)) {
-		u64 tr_wait = READ_ONCE(tctx->wait_at);
-		u64 tr_avg = (u64)READ_ONCE(tctx->avg_ns);
-		u64 tr_sleep = flow_sleep_ns(tr_wait, now, tr_avg);
-		u32 tr_task_w = READ_ONCE(tctx->weight);
-		u32 tr_hint_w = READ_ONCE(tctx->hint_w);
-		u32 tr_eff = flow_task_effective_weight(tr_task_w,
-		    tr_hint_w);
-		flow_ml_train_step(tctx, delta, tr_sleep, tr_eff);
-	}
 	if (delta) {
 		u64 avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 dev = (u64)READ_ONCE(tctx->dev_ns);
@@ -267,11 +250,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* deadline plus predictor slack still holds critical, so short */
 	/* bursts earn a nearer virtual deadline without an extra slice. All */
 	/* other stops adapt proportionally with exceed right 3 capped 1ms */
-	/* plus half of base shrink on late else slack right 3 capped 1ms */
-	/* plus half of base grow on early with clamp */
-	/* to 10us plus 1ms without changing virtual time, so the slice tracks */
-	/* recent runs with shifts only. The same expiring deadline feeds */
-	/* exceed plus slack, and the carry gate runs first. */
+	/* plus half of base then halved grow on late else slack right 3 */
+	/* capped 1ms plus half of base then halved grow on early with */
+	/* deadband hold plus clamp to 10us plus 1ms without changing virtual */
+	/* time, so the slice tracks recent runs with shifts only. The same */
+	/* expiring deadline feeds exceed plus slack, and the carry gate runs */
+	/* first. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* C holds burst else slice else quantum, and V holds weight with */
 	/* zero mapped to 128. Exiting plus completion paths skip the carry */
@@ -418,16 +402,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			};
 			flow_stop_commit(&commit);
 			/* Reclaim runs in dispatch from the global credit at or past */
-			/* the learnable Emax with tiers-empty fallback plus aged cover */
-			/* past one period, so this path records only without walking */
-			/* The global credit funds the retry without shaping shares. */
-			/* Dispatch scans at most eight value ordered rejects with */
-			/* positive laxity plus same key or strictly after plus mask wins, */
-			/* so strict order holds with a single move. Zero service */
-			/* completions fund nothing, so only a real delta with a trained */
-			/* predictor adds credit. Credit reuses the committed delta, */
-			/* so funding agrees with the stored value with no second */
-			/* cost pass. */
+			/* the fixed 256us Emax with tiers-empty fallback plus aged */
+			/* cover past one period, so this path records only without */
+			/* walking. The global credit funds the retry without shaping */
+			/* shares. Dispatch scans at most eight value ordered rejects */
+			/* with positive laxity plus same key or strictly after plus */
+			/* mask wins, so strict order holds with a single move. Zero */
+			/* service completions fund nothing, so only a real delta with */
+			/* a fresh predictor adds credit. Credit reuses the committed */
+			/* delta, so funding agrees with the stored value with no */
+			/* second cost pass. */
 			if (delta > 0 && have_pred)
 				flow_credit_add((u64)READ_ONCE(tctx->adapt_delta));
 		}
