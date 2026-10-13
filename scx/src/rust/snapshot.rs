@@ -164,13 +164,14 @@ impl<'a> Scheduler<'a> {
 
     /// Dashboard snapshot with raw counters plus live pid cards.
     /// Counters stay raw with no deltas and the on CPU gauge counts live
-    /// pids with the pid view. Costs 3N map reads for N online CPUs: N
+    /// pids with the pid view. Costs 3N plus 1 map reads for N online CPUs: N
     /// for the stats sum via get_metrics plus N for the gauge plus N for
-    /// the cards, with one alloc sized to the online count. SMT comes from the cached init
+    /// the cards plus 1 for the train count, with one alloc sized to the
+    /// online count. SMT comes from the cached init
     /// flags with no sysfs use on poll and stays display only. Offline
     /// stays out, so per CPU count matches the cached online count.
-    /// Version plus timestamp plus topology join the counters for the
-    /// page plus the log.
+    /// Version plus timestamp plus topology plus train count join the
+    /// counters for the page plus the log.
     pub(crate) fn get_web_metrics(&self) -> stats::WebMetrics {
         let mut per_cpu = Vec::with_capacity(self.online_cpus.len());
         for (rank, &id) in self.online_cpus.iter().enumerate() {
@@ -193,7 +194,31 @@ impl<'a> Scheduler<'a> {
             version: env!("CARGO_PKG_VERSION").to_string(),
             timestamp_ns,
             topology: self.topology.clone(),
+            ml_updates: self.read_ml_updates(),
         }
+    }
+
+    /// Read the train count with zero on miss.
+    /// The model row holds five weights plus bias plus clamp plus count
+    /// in 32B, so the count sits at byte 28 with no extra map. A miss
+    /// reads zero with no trap, so old kernels plus missing rows still
+    /// serve the page. Costs one map read per poll with no sysfs use.
+    pub(crate) fn read_ml_updates(&self) -> u64 {
+        let fd = self.skel.maps.ml_online_model_stor.as_fd().as_raw_fd();
+        let key = 0u32;
+        let mut buf = MaybeUninit::<[u8; 32]>::zeroed();
+        let ret = unsafe {
+            libbpf_rs::libbpf_sys::bpf_map_lookup_elem(
+                fd,
+                &key as *const _ as *const std::ffi::c_void,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+            )
+        };
+        if ret != 0 {
+            return 0;
+        }
+        let buf = unsafe { buf.assume_init() };
+        u32::from_ne_bytes([buf[28], buf[29], buf[30], buf[31]]) as u64
     }
 }
 
@@ -201,17 +226,18 @@ impl<'a> Scheduler<'a> {
 mod tests {
     /// Poll cost in BPF map reads for N online CPUs.
     /// Dashboard polls read N for the stats sum via get_metrics plus N
-    /// for the on CPU gauge plus N for the per CPU cards, so the total
-    /// stays 3N with one alloc and no sysfs on poll.
+    /// for the on CPU gauge plus N for the per CPU cards plus 1 for the
+    /// train count, so the total stays 3N plus 1 with one alloc and no
+    /// sysfs on poll.
     fn snapshot_reads(n: usize) -> usize {
-        n.saturating_mul(3)
+        n.saturating_mul(3).saturating_add(1)
     }
 
     #[test]
-    fn poll_cost_is_three_n() {
-        assert_eq!(snapshot_reads(0), 0);
-        assert_eq!(snapshot_reads(1), 3);
-        assert_eq!(snapshot_reads(4), 12);
+    fn poll_cost_is_three_n_plus_one() {
+        assert_eq!(snapshot_reads(0), 1);
+        assert_eq!(snapshot_reads(1), 4);
+        assert_eq!(snapshot_reads(4), 13);
         // One alloc holds N cards with no extra walk.
         let per_cpu = Vec::<u32>::with_capacity(4);
         assert!(per_cpu.capacity() >= 4);

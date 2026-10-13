@@ -128,6 +128,10 @@ pub struct WebMetrics {
     /// One line topology summary for the page.
     #[serde(default)]
     pub topology: String,
+    /// Train steps from the online model with zero on miss.
+    /// Display only with no placement use plus zero on old JSON.
+    #[serde(default)]
+    pub ml_updates: u64,
 }
 
 /// Stats printer loop for the monitor flag.

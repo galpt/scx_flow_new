@@ -50,8 +50,8 @@ fn jt(v: &Value) -> String {
 
 /* Merged dashboard object for one snapshot. */
 /* Full log with version plus timestamp plus topology plus stats */
-/* plus per CPU. Same object serves stats polling plus snapshot */
-/* download on loopback with no new exposure. */
+/* plus per CPU plus train count. Same object serves stats polling */
+/* plus snapshot download on loopback with no new exposure. */
 fn merged(snap: &WebMetrics) -> Value {
     json!({
         "version": snap.version.clone(),
@@ -59,6 +59,7 @@ fn merged(snap: &WebMetrics) -> Value {
         "topology": snap.topology.clone(),
         "stats": jv(&snap.stats),
         "per_cpu": jv(&snap.per_cpu),
+        "ml_updates": snap.ml_updates,
     })
 }
 
@@ -157,7 +158,7 @@ pub fn start(rx: Receiver<WebMetrics>, shutdown: Arc<AtomicBool>) {
 mod tests {
     use super::*;
 
-    /* Merged keeps the five live keys with no stale keys. */
+    /* Merged keeps the six live keys with no stale keys. */
     #[test]
     fn merged_keeps_live_keys() {
         let snap = WebMetrics::default();
@@ -167,7 +168,8 @@ mod tests {
         assert!(v.get("version").is_some());
         assert!(v.get("timestamp_ns").is_some());
         assert!(v.get("topology").is_some());
-        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert!(v.get("ml_updates").is_some());
+        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
     }
@@ -188,13 +190,14 @@ mod tests {
         assert_eq!(m.version, "4.7.0");
         assert_eq!(m.timestamp_ns, 0);
         assert_eq!(m.topology, "");
+        assert_eq!(m.ml_updates, 0);
         let old = "{\"id\":1,\"running_pid\":5,\"slice_ns\":2000000}";
         let card: crate::stats::PerCpuMetrics = serde_json::from_str(old).unwrap();
         assert_eq!(card.id, 1);
         assert!(!card.smt);
         assert_eq!(card.running_pid, 5);
         let v = merged(&m);
-        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
         let back: WebMetrics = serde_json::from_value(v).unwrap();
         assert_eq!(back.stats.on_cpu, 1);
         assert_eq!(back.version, "4.7.0");
@@ -241,6 +244,7 @@ mod tests {
             version: "4.7.0".to_string(),
             timestamp_ns: 1_700_000_000_000_000_000,
             topology: "cpus=4 seeded".to_string(),
+            ml_updates: 7,
         };
         let txt = serde_json::to_string(&snap).unwrap();
         assert!(txt.contains("local_moves"));
@@ -263,6 +267,7 @@ mod tests {
         assert!(txt.contains("version"));
         assert!(txt.contains("topology"));
         assert!(txt.contains("timestamp_ns"));
+        assert!(txt.contains("ml_updates"));
         assert!(!txt.contains("steal_moves"));
         assert!(!txt.contains("slot_moves"));
         assert!(!txt.contains("throttled_ns"));
@@ -295,8 +300,9 @@ mod tests {
         assert_eq!(back.per_cpu[1].id, 1);
         assert_eq!(back.version, "4.7.0");
         assert_eq!(back.topology, "cpus=4 seeded");
+        assert_eq!(back.ml_updates, 7);
         let v = merged(&snap);
-        assert_eq!(v.as_object().map(|o| o.len()), Some(5));
+        assert_eq!(v.as_object().map(|o| o.len()), Some(6));
         assert!(v.get("governor").is_none());
         assert!(v.get("energy").is_none());
     }

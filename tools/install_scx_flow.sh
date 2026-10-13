@@ -142,6 +142,18 @@ case "${WS}" in
         exit 1
         ;;
 esac
+# Reverify just before the remove, so a swapped symlink plus a raced
+# path never cleans outside the allowlist with no stale check.
+if [ -L "${WS}" ]; then
+    echo "refusing a symlinked workspace path" >&2
+    exit 1
+fi
+case "${WS}" in
+    /tmp/opencode | /tmp/opencode/*)
+        echo "refusing to clean /tmp/opencode" >&2
+        exit 1
+        ;;
+esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
 rm -rf -- "${WS}"
 mkdir -p -- "${WS}"
@@ -150,6 +162,13 @@ git init -q "${WS}"
 git -C "${WS}" remote add origin "${UPSTREAM}"
 if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
     echo "fetch failed, check network access to ${UPSTREAM}" >&2
+    exit 1
+fi
+# Reverify the fetched head matches the pinned ref, so a moved ref
+# plus a short fetch never checks out unpinned code with no silent drift.
+got_ref="$(git -C "${WS}" rev-parse FETCH_HEAD)"
+if [ "${got_ref}" != "${SCX_REF}" ]; then
+    echo "ref mismatch: got ${got_ref} want ${SCX_REF}" >&2
     exit 1
 fi
 git -C "${WS}" checkout FETCH_HEAD
