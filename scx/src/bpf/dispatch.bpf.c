@@ -222,7 +222,13 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 		return false;
 	if (!flow_mask_ok(cpu, q))
 		return false;
+	/* Aged heads still need funding, so continuous tier load never */
+	/* drains rejects without credit with no overload bypass. */
+	/* Tiers-empty heads with positive laxity fall back without reserve, */
+	/* so zero credit never idles queued work. */
 	funded = flow_red_reclaim_ok(credit, rexc, rlax);
+	if (!tiers_empty && !funded)
+		return false;
 	if (funded) {
 		if (!flow_credit_consume(rexc))
 			return false;
@@ -238,17 +244,18 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
  * @tiers_empty: true when local plus node plus machine hold no work.
  *
  * Scans at most eight value ordered rejects with one RCU walk, so the
- * check stays cheap. Funded heads reserve credit before the move with a
- * recheck to the next candidate on a lost race, while tiers-empty heads
- * with positive laxity fall back without reserve so zero credit never
- * idles queued work. Aged heads past one period reclaim even when tiers
- * hold work, so continuous tier load never parks rejects and the bypass
- * veto never deadlocks. Non reclaimable, stale, and foreign entries skip
- * to the next candidate, so one bad head never stalls the queue. The
- * credit funds the retry without using head state. The greatest value
- * still wins among reclaimable entries. Tiers-empty gating plus one move
- * per pass plus the one period age bound keep starvation capped and PRIQ
- * tiers never wait behind rejects past the age bound.
+ * check stays cheap with no overload stall. Funded heads reserve credit
+ * before the move with a recheck to the next candidate on a lost race,
+ * while tiers-empty heads with positive laxity fall back without reserve
+ * so zero credit never idles queued work. Aged heads past one period
+ * reclaim when funded even while tiers hold work, so continuous tier
+ * load still needs credit with no bypass. Non reclaimable, stale, and
+ * foreign entries skip to the next candidate, so one bad head never
+ * stalls the queue. The credit funds the retry without using head
+ * state. The greatest value still wins among reclaimable entries.
+ * Tiers-empty gating plus one move per pass plus the one period age
+ * bound keep starvation capped and PRIQ tiers never wait behind
+ * rejects past the age bound.
  *
  * Returns: one on move else zero.
  *
@@ -271,6 +278,11 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 	if (likely(queued <= 0))
 		return 0;
 	credit = flow_credit_peek();
+	/* Skip the walk when tiers hold work plus credit stays short, */
+	/* since aged heads still need funding with no fallback. Tiers-empty */
+	/* keeps the walk with no reserve, so zero credit never idles work. */
+	if (!tiers_empty && credit < (u64)FLOW_RED_EMAX_NS)
+		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {
 		struct flow_task_ctx *rctx;
