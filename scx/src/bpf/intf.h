@@ -202,13 +202,13 @@ enum flow_consts {
 	FLOW_RED_TOL_NS = 64000ULL,
 	/* Adaptive grow step of 64us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
-	/* still decode with no behavior change. */
+	/* still decode with no behavior change, whitelisted with no use. */
 	/* Like fair.c, the step paces service, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_GROW_NS = 64000ULL,
 	/* Adaptive shrink step of 128us frozen for wire compat only. */
 	/* Kept with no use after the proportional law, so old headers */
-	/* still decode with no behavior change. */
+	/* still decode with no behavior change, whitelisted with no use. */
 	/* Like fair.c, the step tracks load, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_SHRINK_NS = 128000ULL,
@@ -383,7 +383,7 @@ struct flow_hint {
 /* Scheduler counters with 17 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail without an extra map, so stats stay at */
 /* 136B. Overflow plus steal moves count in the local bucket. Rejects plus */
-/* on CPU stay frozen at zero for wire compat only without a BPF writer, */
+/* on CPU stay frozen at zero whitelisted for wire compat only without a BPF writer, */
 /* while real rejects count in gate plus RED rejects. Readers must use */
 /* gate_rejects for drops plus red_rejects for overload, and the snapshot */
 /* counts live pids for the on CPU gauge. Miss plus Term where Term equals */
@@ -422,7 +422,8 @@ _Static_assert(sizeof(struct flow_cpu_state) == 16,
 _Static_assert(sizeof(struct flow_topo) == 8,
 	"topology view stays at 8B");
 /* Stats hold 17 counters in 136 bytes. Rejects plus on CPU stay frozen */
-/* at zero for wire compat only with no BPF writer. */
+/* at zero for wire compat only with no BPF writer, whitelisted so old */
+/* readers still decode with no behavior change. */
 _Static_assert(sizeof(struct flow_sched_stats) == 136,
 	"stats stay at 136B");
 /* Queue count holds local plus node plus machine plus overflow. */
@@ -436,12 +437,12 @@ _Static_assert(FLOW_MAX_DSQS ==
 _Static_assert(FLOW_PERIOD_NS == 4 * FLOW_SLICE_MAX_NS,
 	"period stays four times slice max");
 _Static_assert(FLOW_SLICE_MIN_NS < FLOW_SLICE_ULL_NS &&
-	FLOW_SLICE_ULL_NS <= FLOW_SLICE_LL_NS &&
+	FLOW_SLICE_ULL_NS < FLOW_SLICE_LL_NS &&
 	FLOW_SLICE_LL_NS < FLOW_SLICE_MLL_NS &&
 	FLOW_SLICE_MLL_NS < FLOW_SLICE_NL_NS &&
 	FLOW_SLICE_NL_NS < FLOW_SLICE_ENL_NS &&
 	FLOW_SLICE_ENL_NS < FLOW_SLICE_MAX_NS,
-	"tier order stays 10us to 20ms");
+	"tier order stays 50us to 20ms plus 10us floor");
 /**
  * flow_time_before - test time order with wrap safety.
  * @a: first time in nanos.
@@ -1486,7 +1487,7 @@ static __always_inline u64 flow_lat_deadline(u64 now,
  *
  * Like fair.c, the test paces service, unlike rt.c, no fixed priority
  * holds. Newcomers with no history stay batch with probation, so only
- * trained bursts earn latency. Each signal vetoes only toward batch with
+ * observed bursts earn latency. Each signal vetoes only toward batch with
  * quantum-relative bounds using shifts only, so unknown sleep, clamp, and
  * share fail open. A predicted burst past one quantum vetoes, a hint
  * period past one quantum vetoes, a short sleep below 20us vetoes, an

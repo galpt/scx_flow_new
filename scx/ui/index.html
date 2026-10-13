@@ -473,7 +473,7 @@
     /* The tldr names the running count with RED rejects plus reclaims. */
     /* The explanation walks joins plus moves plus admission plus misses */
     /* plus RED plus preempt with fixed 64us tolerance plus 256us Emax and */
-    /* six tiers 10us to 20ms. Live pid count from the per CPU cards. */
+    /* six tiers 50us to 20ms plus 10us floor. Live pid count from the per CPU cards. */
     /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
       var n = 0;
@@ -518,7 +518,7 @@
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
           'no tasks have been placed yet. RED keeps 64us tolerance ' +
-          'with 256us Emax and six tiers pace 10us to 20ms.';
+          'with 256us Emax and six tiers pace 50us to 20ms plus 10us floor.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
           ' tasks with RED rejects ' + fmt(redrej) +
@@ -537,7 +537,7 @@
           ' and RED rejects ' + fmt(redrej) +
           ' with reclaims ' + fmt(redrec) +
           ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
-          '10us to 20ms.';
+          '50us to 20ms plus 10us floor.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -555,7 +555,7 @@
           ' and RED rejects ' + fmt(redrej) +
           ' with reclaims ' + fmt(redrec) +
           ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
-          '10us to 20ms.';
+          '50us to 20ms plus 10us floor.';
       }
       return { tldr: tldr, explanation: explanation };
     }

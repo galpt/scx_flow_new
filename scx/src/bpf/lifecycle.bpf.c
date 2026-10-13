@@ -29,7 +29,8 @@
  * completion past the deadline counts one miss without a kick, since the
  * task already left the CPU. Miss plus Term where Term equals completions
  * stay counters only, so misses plus completions record history. Frozen
- * rejects plus on CPU plus overflow hold wire compat without a BPF writer.
+ * rejects plus on CPU plus overflow hold wire compat without a BPF writer,
+ * whitelisted with readers using gate plus RED plus live pids.
  * Enable clears vruntime plus deadline plus stamps plus predictor plus lag
  * plus weight plus slice plus hint plus hint weight plus misses plus adapt
  * miss plus sat plus delta, and Disable plus exit clear without charging,
@@ -227,8 +228,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		u32 hint_w = READ_ONCE(tctx->hint_w);
 		u32 eff_w;
 		u64 n_avg = flow_pred_avg(avg, delta);
-		/* Deviation trains from the new average, so a fresh mean */
-		/* shapes the margin at once with no lagging bound. */
+		/* Deviation updates from the observed delta with the new average, */
+		/* so a fresh mean shapes the margin at once with no lagging bound. */
 		u64 n_dev = flow_pred_dev(dev, n_avg, delta);
 		u64 vrun = READ_ONCE(tctx->vruntime);
 		u64 n_vrun;

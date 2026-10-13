@@ -58,10 +58,10 @@ pub const RED_EMAX_NS: u64 = 256_000;
 /// fixed value shared by admit plus reclaim.
 pub const RED_TOL_NS: u64 = 64_000;
 /// Adaptive grow step in nanos at 64us frozen for wire compat only.
-/// Kept with no use after the proportional law.
+/// Whitelisted with no use after the proportional law.
 pub const ADAPT_GROW_NS: u64 = 64_000;
 /// Adaptive shrink step in nanos at 128us frozen for wire compat only.
-/// Kept with no use after the proportional law.
+/// Whitelisted with no use after the proportional law.
 pub const ADAPT_SHRINK_NS: u64 = 128_000;
 /// Proportional adapt cap in nanos at 1ms. Caps one shift step.
 pub const ADAPT_PROP_MAX_NS: u64 = 1_000_000;
@@ -547,7 +547,7 @@ impl Config {
     /// Fresh waits clamp remaining time to the 10us floor plus the 1ms
     /// ceiling with misses holding else flooring only. Tiers pace at
     /// 50us plus 100us plus 500us plus 1ms plus 5ms with a 20ms
-    /// ceiling, so throughput holds room with no starvation.
+    /// ceiling plus a 10us floor, so throughput holds room with no starvation.
     /// Dispatch moves at most one hint threaded move per tier capped
     /// by remaining slots with visits capped at 8 per pass shared across
     /// five tiers with steal window 4 to 8 plus BSF
@@ -727,7 +727,7 @@ impl Config {
             bail!("slice max bad");
         }
         if !(SLICE_MIN_NS < SLICE_ULL_NS
-            && SLICE_ULL_NS <= SLICE_LL_NS
+            && SLICE_ULL_NS < SLICE_LL_NS
             && SLICE_LL_NS < SLICE_MLL_NS
             && SLICE_MLL_NS < SLICE_NL_NS
             && SLICE_NL_NS < SLICE_ENL_NS
