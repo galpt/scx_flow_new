@@ -143,12 +143,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	/* concurrent win. */
 	flow_count_runtime(delta);
 	/* In-kernel online train for runnable and completion. Runs on one */
-	/* eighth of stops picked by now low bits when delta passes zero with */
-	/* the real wrap-safe sleep from wait plus now plus avg plus the */
-	/* effective share, so the fixed point step samples without changing */
-	/* order. A missing model fails closed without an update, so the */
-	/* shift-3 EMA baseline owns deadline math. */
-	if (delta > 0 && ((now & 7ULL) == 0)) {
+	/* eighth of stops picked by pid plus time hash when delta passes */
+	/* zero with the real wrap-safe sleep from wait plus now plus avg */
+	/* plus the effective share, so the fixed point step samples */
+	/* without changing order. A missing model fails closed without an */
+	/* update, so the shift-3 EMA baseline owns deadline math. The pid */
+	/* hash spreads samples across tasks with no per CPU map, so a */
+	/* batched clock never trains the same task eight times in a row. */
+	if (delta > 0 &&
+	    ((((now >> 4) ^ (u64)(u32)p->pid) & 7ULL) == 0)) {
 		u64 tr_wait = READ_ONCE(tctx->wait_at);
 		u64 tr_avg = (u64)READ_ONCE(tctx->avg_ns);
 		u64 tr_sleep = flow_sleep_ns(tr_wait, now, tr_avg);

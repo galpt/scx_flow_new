@@ -62,7 +62,7 @@ Mask check caps inversion with fail open. Each move checks the CPU mask and pick
 
 ### Staleness
 
-Staleness heals retrain plus fold. Stop feeds average deviation plus credit with train on one eighth of stops picked by now low bits. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` and limited to half per stop on late else grow `slack>>3` capped `1ms` and limited to half per stop on early. Misses stay lifetime, adapt window. Reclaim `256us` fallback when tiers hold no work. Stopping train time holds queue plus run minus burst, not true sleep, with enqueue inference using the true gap before wait overwrite. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals retrain plus fold. Stop feeds average deviation plus credit with train on one eighth of stops picked by pid plus time hash. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` and limited to half per stop on late else grow `slack>>3` capped `1ms` and limited to half per stop on early. Misses stay lifetime, adapt window. Reclaim `256us` fallback when tiers hold no work. Stopping train time holds queue plus run minus burst, not true sleep, with enqueue inference using the true gap before wait overwrite. See `src/bpf/lifecycle.bpf.c`.
 
 ### Latency
 
@@ -74,7 +74,7 @@ Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with
 
 ### Learning
 
-Learning trains one global `32B` model with fixed point SGD plus a capped nudge trained on one eighth of stops picked by now low bits with no per CPU map. Train clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus clamps each weight to `524288` with atomics, so one step moves at most `8us`. Nudge clamps the dot score to `250us` with fail closed and caller sleep read before wait overwrite, so one correction never holds past one quarter quantum with the task at `72B`. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c`.
+Learning trains one global `32B` model with fixed point SGD plus a capped nudge trained on one eighth of stops picked by pid plus time hash with no per CPU map. Train caps burst plus lag plus share at the quantum plus clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus s32 clamp plus CAS at `524288` with saturation, so one step stays small. Nudge caps inputs the same way plus clamps the dot score to `250us` with fail closed and caller sleep read before wait overwrite, so one correction never holds past one quarter quantum with the task at `72B`. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c`.
 
 ## Code map
 
