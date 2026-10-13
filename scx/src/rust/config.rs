@@ -554,9 +554,8 @@ impl Config {
     /// four disjoint past SSF eight for twelve unique peers on hosts
     /// with at least twelve CPUs with node-local phases plus drain plus
     /// minimum plus id tiebreak, and RED admits with residual plus
-    /// exceed plus learnable tolerance within outer 0 to 256us plus
-    /// learnable Emax within outer 64us to 1ms used only for the
-    /// guarantee with base capacity 1024. Queues hold 1024 local plus
+    /// exceed plus fixed 64us tolerance plus fixed 256us Emax used only
+    /// for the guarantee with base capacity 1024. Queues hold 1024 local plus
     /// 16 node plus machine plus reject with ids in the 0x5100 region.
     /// Hints hold 8192 flat rows with period plus weight and no timer
     /// wait. Preempt needs 100us margin plus 100us tail strictly with a
