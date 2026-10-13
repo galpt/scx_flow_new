@@ -111,7 +111,8 @@ pub const PREEMPT_TAIL_NS: u64 = 100_000;
 const DEF_QUANTUM_NS: u64 = QUANTUM_NS;
 
 /// Mirror of flow_adapt_prop in intf.h for host tests.
-/// Shifts only with no divide, capped at 1ms, clamped 10us to 1ms.
+/// Shifts only without a divide, capped at 1ms plus half of base,
+/// clamped 10us to 1ms.
 /// An exceed shrinks, a slack grows, both zero holds, exceed wins.
 #[cfg(test)]
 pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
@@ -131,6 +132,9 @@ pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
         if step > ADAPT_PROP_MAX_NS {
             step = ADAPT_PROP_MAX_NS;
         }
+        if step > (base >> 1) {
+            step = base >> 1;
+        }
         if step == 0 {
             return clamp(base);
         }
@@ -143,6 +147,9 @@ pub fn adapt_prop(cur: u32, exceed: u64, slack: u64) -> u32 {
         let mut step = slack >> ADAPT_PROP_SHIFT;
         if step > ADAPT_PROP_MAX_NS {
             step = ADAPT_PROP_MAX_NS;
+        }
+        if step > (base >> 1) {
+            step = base >> 1;
         }
         if step == 0 {
             return clamp(base);
@@ -167,6 +174,7 @@ pub fn slice_lat_clamp(slice: u32, is_lat: bool) -> u32 {
 /// tier while ragged bursts hold margin with no wrap. Critical forces
 /// ULL, then 50us plus 100us plus 500us plus 1ms plus 5ms bound ULL
 /// plus LL plus MLL plus NL plus ENL, else 20ms holds throughput.
+/// Host-test mirror only at 4.8.13 with no BPF slice caller.
 #[cfg(test)]
 pub fn classify_tier(avg: u64, dev: u64, is_crit: bool) -> u32 {
     let pred = avg.saturating_add(dev);
@@ -236,8 +244,8 @@ pub fn sgd_clip_weight(w: i32) -> i32 {
 }
 
 /// Mirror of flow_red_cost in intf.h for host tests.
-/// Costs burst else slice else quantum clamped to 10us plus 1ms, so
-/// the guarantee bounds with no share shaping.
+/// Costs burst else slice else quantum clamped to 10us plus 1ms, so the
+/// guarantee holds without shaping shares.
 #[cfg(test)]
 pub fn red_cost(avg: u64, slice: u32) -> u64 {
     if avg != 0 {
@@ -264,7 +272,7 @@ pub fn red_cost(avg: u64, slice: u32) -> u64 {
 
 /// Mirror of flow_lat_deadline in intf.h for host tests.
 /// Takes max 4ms else slice plus margin with saturation, then adds now
-/// with saturation for ns accuracy with no divide.
+/// with saturation for ns accuracy without a divide.
 #[cfg(test)]
 pub fn lat_deadline(now: u64, slice: u32) -> u64 {
     let need = (slice as u64).saturating_add(PREEMPT_MARGIN_NS);
@@ -273,11 +281,10 @@ pub fn lat_deadline(now: u64, slice: u32) -> u64 {
 }
 
 /// Mirror of flow_lat_crit_ext in intf.h for host tests.
-/// Advisory veto toward batch with 20us sleep floor plus
-/// quantum-relative bounds plus no divide, so unknown sleep plus clamp
-/// plus share fail open with no stall. The sleep floor stays decoupled
-/// from the 100us slice cap. Newcomers with no history stay batch with
-/// probation.
+/// Advisory veto toward batch with 20us sleep floor plus quantum-relative
+/// bounds using shifts only, so unknown sleep, clamp, and share fail open.
+/// The sleep floor stays decoupled from the 100us slice cap. Newcomers with
+/// no history stay batch with probation.
 #[cfg(test)]
 pub fn lat_crit_ext(
     avg: u64,
@@ -492,7 +499,7 @@ impl Config {
     /// ceiling with misses holding else flooring only. Tiers pace at
     /// 50us plus 100us plus 500us plus 1ms plus 5ms with a 20ms
     /// ceiling, so throughput holds room with no starvation.
-    /// Dispatch moves at most one hint threaded move per tier bounded
+    /// Dispatch moves at most one hint threaded move per tier capped
     /// by remaining slots with visits capped at 8 per pass shared across
     /// five tiers with steal window 4 to 8 plus BSF
     /// four disjoint past SSF eight for twelve unique peers on hosts
@@ -508,15 +515,15 @@ impl Config {
     /// Stats hold 17 counters at 136B with preempt kicks plus skipped
     /// plus RED rejects plus reclaims. Adaptive shrinks by exceed right 3
     /// capped 1ms on late else grows by slack right 3 capped 1ms on
-    /// early with clamp to 10us plus 1ms and no virtual change. Latency
+    /// early with clamp to 10us plus 1ms without changing virtual time. Latency
     /// caps the slice at 100us plus the key at now plus max 4ms else
     /// slice plus 100us with RED on the original deadline. Latency
     /// vetoes sleeps below 20us toward batch with unknown open, so the
     /// sleep floor stays decoupled from the slice cap. Online SGD runs
     /// FP shift 8 plus learn shift 11 with grad max 64us plus weight
     /// bound 524288 plus nudge max 250us, so one train step moves at
-    /// most 8us with no storm and one nudge never holds past one
-    /// quarter quantum. The model stays at 32B with task at 72B.
+    /// most 8us and one nudge never holds past one quarter quantum. The
+    /// model stays at 32B with task at 72B.
     pub fn validate(&self) -> Result<()> {
         if self.quantum_ns != QUANTUM_NS {
             bail!("quantum bad {}", self.quantum_ns);
@@ -1018,8 +1025,8 @@ mod tests {
         assert_eq!(adapt_prop(1_000_000, 8_000, 0), 999_000);
         // Slack 1.6us grows 200ns with shift 3 only.
         assert_eq!(adapt_prop(500_000, 0, 1_600), 500_200);
-        // Huge exceed caps at 1ms shrink to the floor.
-        assert_eq!(adapt_prop(1_000_000, 10_000_000, 0), 10_000);
+        // Huge exceed caps at half of base to 500k without flooring at once.
+        assert_eq!(adapt_prop(1_000_000, 10_000_000, 0), 500_000);
         // Mid exceed 2ms shrinks 250us with shift 3 only.
         assert_eq!(adapt_prop(1_000_000, 2_000_000, 0), 750_000);
         // Huge slack caps at 1ms grow clamped to 1ms.
@@ -1030,7 +1037,7 @@ mod tests {
         assert_eq!(adapt_prop(500_000, 0, 0), 500_000);
         // Zero slice inherits the quantum then shrinks.
         assert_eq!(adapt_prop(0, 8_000, 0), 999_000);
-        // Tiny exceed below 8ns holds with no divide.
+        // Tiny exceed below 8ns holds without a divide.
         assert_eq!(adapt_prop(500_000, 7, 0), 500_000);
         // Early 500 plus 700 slack 200 grows 25ns.
         assert_eq!(adapt_prop(500_000, 0, 200), 500_025);
@@ -1042,13 +1049,13 @@ mod tests {
     }
 
     #[test]
-    /// RED costs the pre-clamp slice with no post-clamp underestimate.
+    /// RED costs the pre-clamp slice without a post-clamp underestimate.
     fn red_uses_pre_clamp_not_post() {
         // Fresh 1ms pre-clamp caps to 100us for latency slice.
         let pre = 1_000_000;
         let post = slice_lat_clamp(pre, true);
         assert_eq!(post, 100_000);
-        // RED still costs the 1ms pre-clamp with no underestimate.
+        // RED still costs the 1ms pre-clamp without an underestimate.
         assert_eq!(red_cost(0, pre), 1_000_000);
         assert_eq!(red_cost(0, post), 100_000);
         assert!(red_cost(0, pre) > red_cost(0, post));
@@ -1199,22 +1206,22 @@ mod tests {
     }
 
     #[test]
-    /// Miss plus skip plus period stays intentional with no drift.
+    /// Miss plus skip plus period stay fixed without drift.
     fn miss_skip_period_are_intentional() {
         // Misses stay lifetime: newcomers with no history stay batch.
         assert!(!is_lat(0, 0, 0, 0, 0, 0));
-        // Skips count every hold: lat to lat fails closed by design.
+        // Skips count every hold: lat to lat fails closed.
         assert!(!preempt_ok(
             1_000_000, 2_000_000, 500_000, 500_000, 1_000_000, true, true
         ));
-        // Period caps in-tier keys at now plus one period by design.
+        // Period caps in-tier keys at now plus one period.
         assert_eq!(PERIOD_NS, 80_000_000);
         assert_eq!(PERIOD_NS, 4 * SLICE_MAX_NS);
         const _: () = assert!(D_LAT_NS < PERIOD_NS);
     }
 
     #[test]
-    /// Tier ceilings map predicted bursts with no divide.
+    /// Tier ceilings map predicted bursts without a divide.
     fn classify_tier_matches_intf_h() {
         const _: () = assert!(SLICE_ULL_NS < SLICE_MLL_NS);
         const _: () = assert!(SLICE_MLL_NS < SLICE_NL_NS);
@@ -1265,7 +1272,7 @@ mod tests {
         // Inside the bound keeps the score.
         assert_eq!(nudge_clamp(100_000, 250_000), 100_000);
         assert_eq!(nudge_clamp(-100_000, 250_000), -100_000);
-        // Past the bound clamps with no storm.
+        // Past the bound clamps.
         assert_eq!(nudge_clamp(300_000, 250_000), 250_000);
         assert_eq!(nudge_clamp(-300_000, 250_000), -250_000);
         // Zero plus past max fail closed to 250us.
@@ -1296,7 +1303,7 @@ mod tests {
         // Error inside 64us keeps the value.
         assert_eq!(sgd_clip_err(10_000), 10_000);
         assert_eq!(sgd_clip_err(-10_000), -10_000);
-        // Past 64us clamps with no storm.
+        // Past 64us clamps.
         assert_eq!(sgd_clip_err(100_000), 64_000);
         assert_eq!(sgd_clip_err(-100_000), -64_000);
         // Weights inside the bound keep the value.

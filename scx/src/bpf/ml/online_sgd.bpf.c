@@ -33,8 +33,8 @@
  * paces learning, unlike rt.c, no fixed priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
- * copy and no inline growth. Wired in Phase 4 from stopping plus
- * enqueue with H4 fail closed on missing state.
+ * copy. Called from stopping and enqueue; returns without an update
+ * when state missing.
  */
 static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	u64 actual_delta, u64 sleep_ns, u32 eff_w)

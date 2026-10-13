@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * EDF deadline plus eligibility plus hoisted drain for the core.
+ * EDF deadline plus eligibility plus drain for the core.
  *
- * Holds the burst predictor plus the absolute deadline plus the fair
- * key plus the eligibility gate. Every task earns a deadline from the
+ * Holds the burst predictor, the absolute deadline, the fair
+ * key, and the eligibility gate. Every task earns a deadline from the
  * predictor else the hint period, and queue order uses the earlier of
  * deadline plus virtual deadline with a 2ms lag bound. Eligibility
  * gates every kick, so hogs pace while lagging tasks wake. Drain sums
- * local plus node with saturation, so a busy node holds the local tier
- * with no wait. Hoisted depths feed the same drain with no second poll,
- * so enqueue bypass plus tier escalation share one read. Runs under the
- * caller with no lock.
+ * local plus node with saturation, so a busy node keeps the local tier
+ * without waiting. Depths read once feed the same drain, so enqueue
+ * bypass and tier escalation share one read. Runs under the caller.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -42,7 +41,7 @@ static __always_inline u64 flow_drain_ns(u64 dsq)
 		return (u64)~0ULL;
 	return depth * (u64)FLOW_QUANTUM_NS;
 }
-/* Drain nanos from a hoisted queued hint with no kfunc. */
+/* Drain nanos from a saved queued hint without a kfunc. */
 /* Non-positive hints read zero with no boost. Saturates on wrap, so a */
 /* huge depth clamps instead of wrapping to an idle view. */
 static __always_inline u64 flow_drain_from_q(s32 n)
@@ -56,9 +55,9 @@ static __always_inline u64 flow_drain_from_q(s32 n)
 	return depth * (u64)FLOW_QUANTUM_NS;
 }
 /**
- * flow_cpu_drain_hint - combined drain from hoisted local plus node.
- * @local_q: hoisted own local depth, non-positive means empty.
- * @node_q: hoisted node depth, non-positive means empty.
+ * flow_cpu_drain_hint - combined drain from saved local plus node.
+ * @local_q: saved own local depth, non-positive means empty.
+ * @node_q: saved node depth, non-positive means empty.
  *
  * Sums both drains with saturation and no kfunc, so a busy node holds
  * the local tier with no wait on the same reads as the bypass gate.
@@ -144,15 +143,15 @@ static __noinline bool flow_cpu_meets(u32 cpu,
 	return flow_ready_before(ready, deadline);
 }
 /**
- * flow_cpu_meets_fair_hint - test fair time against hoisted drain.
- * @local_q: hoisted own local depth, non-positive means empty.
- * @node_q: hoisted node depth, non-positive means empty.
+ * flow_cpu_meets_fair_hint - test fair time against saved drain.
+ * @local_q: saved own local depth, non-positive means empty.
+ * @node_q: saved node depth, non-positive means empty.
  * @vtime: fair time, zero meets all.
  * @now: current time in nanos.
  *
- * Mirrors the drain check for the fair key with no kfunc, so the bypass
- * plus the tier choice share one hoist with the same order. A zero fair
- * time means no fair order yet, so the check passes with no gate.
+ * Mirrors the drain check for the fair key without a kfunc, so the bypass
+ * plus the tier choice share one read with the same order. A zero fair
+ * time means no fair order yet, so the check passes.
  *
  * Returns: true when the drain finishes before @vtime.
  */
@@ -170,19 +169,18 @@ static __always_inline bool flow_cpu_meets_fair_hint(s32 local_q,
 /*
  * RED guarantee core for the flow scheduler.
  *
- * Holds the residual plus exceeding time with tolerance used
- * only for the guarantee. The deadline bounds the check with no
- * vruntime shaping. A newcomer with zero exceed
- * passes at once, else the newcomer itself is tested as the bounded
- * O(1) victim with cost past the exceed plus deadline at or before
+ * Holds the residual and exceeding time with tolerance used
+ * only for the guarantee. The deadline bounds the check without
+ * shaping vruntime. A newcomer with zero exceed
+ * passes at once, else the newcomer itself is tested as the O(1)
+ * victim with cost past the exceed plus deadline at or before
  * itself plus never critical, else the newcomer admits. A full least
- * value scan stays a noted alternative with no knob here, so the
- * verifier keeps one pass with no walk. Newcomer-pays trades exact
- * victim choice for bounded admission with starvation bounded by the
- * tiers-empty reclaim below. The reject queue stays value
- * ordered outside dispatch, and a global saved credit at or past 128us
- * reclaims one head with positive laxity. Runs under the caller with
- * no lock and no RCU walk here, so the verifier stays small.
+ * value scan stays a noted alternative, so the verifier keeps one pass.
+ * Newcomer-pays trades exact victim choice for a single check with
+ * tiers-empty reclaim covering starvation below. The reject queue stays
+ * value ordered outside dispatch, and a global saved credit at or past
+ * 256us reclaims one head with positive laxity. Runs under the caller
+ * without a lock here, so the verifier stays small.
  */
 /**
  * flow_red_newcomer_exceed - exceeding time of one newcomer.
@@ -214,13 +212,12 @@ static __always_inline u64 flow_red_newcomer_exceed(u64 deadline,
  * @exceed: newcomer exceeding time in nanos, zero fails closed.
  * @v_crit: true marks a critical victim that never rejects.
  *
- * Victim needs cost past 128us plus cost past the exceed plus deadline
+ * Victim needs cost past 256us plus cost past the exceed plus deadline
  * at or before the newcomer, so only work ahead of the overload pays.
- * Callers test the newcomer itself as the bounded O(1) victim with no
- * scan, so a full least value scan stays a noted alternative with no
- * knob here. A critical victim never passes with no swap. A capped
- * latency slice at 100us never passes the 128us bound, so latency
- * never pays as victim.
+ * Callers test the newcomer itself as the O(1) victim without a scan,
+ * so a full least value scan stays a noted alternative. A critical
+ * victim never passes. A capped latency slice at 100us never passes
+ * the 256us bound, so latency never pays as victim.
  *
  * Returns: true when the victim may cover the exceed.
  */
@@ -247,9 +244,9 @@ static __always_inline bool flow_red_victim_ok(u64 v_deadline,
  * @exceed: head exceeding time in nanos.
  * @laxity: head laxity in nanos, zero means no room.
  *
- * Reclaims when the global credit reaches past 128us plus covers the
- * head exceed with positive laxity with no scan here. The global credit
- * funds the retry with no share shaping.
+ * Reclaims when the global credit passes 256us and covers the head
+ * exceed with positive laxity. The global credit funds the retry
+ * without shaping shares.
  *
  * Returns: true when the head may rejoin.
  */
@@ -264,13 +261,13 @@ static __always_inline bool flow_red_reclaim_ok(u64 saved, u64 exceed,
 		return false;
 	return true;
 }
-/* Global reclaim credit from completer saved deltas with no knob. */
+/* Global reclaim credit from completer saved deltas. */
 /* Stopping adds the unused cost minus delta on completions with */
-/* saturation at 1s, so one completion funds a later retry with no */
-/* task pointer. Dispatch peeks this credit for the head check and */
-/* reserves the exceed else 128us before a move, so the completer delta */
-/* funds the retry with no head state use. Compare and swap retries */
-/* bound at four keep best effort races to a one pass delay with no loss. */
+/* saturation at 1s, so one completion funds a later retry without */
+/* keeping a task pointer. Dispatch peeks this credit for the head check */
+/* and reserves the exceed else 256us before a move, so the completer */
+/* delta funds the retry without using head state. Compare and swap */
+/* retries stop at four, so a lost race only delays one pass. */
 /* Add one saved delta to the global reclaim credit with saturation. */
 static __always_inline void flow_credit_add(u64 delta)
 {
@@ -303,12 +300,12 @@ static __always_inline u64 flow_credit_peek(void)
 	return READ_ONCE(*slot);
 }
 /* Consume one reclaim funding with floor at zero. */
-/* Takes the exceed when past zero else 128us, so a zero exceed still */
-/* spends the bound with no free retry. Fails closed when short with no */
-/* spend, so a lost compare and swap race retries up to four times then */
-/* delays one pass. The reclaim caller reserves before the move and */
-/* falls back without reserve when tiers hold no work, so the consume */
-/* stays strict while the reclaim stays bounded at one move per pass. */
+/* Takes the exceed when past zero else 256us, so a zero exceed still */
+/* spends the bound. Fails closed when short without spending, so a lost */
+/* compare and swap race retries up to four times then delays one pass. */
+/* The reclaim caller reserves before the move and falls back without */
+/* reserve when tiers hold no work, so the consume stays strict while the */
+/* reclaim keeps one move per pass. */
 static __always_inline bool flow_credit_consume(u64 exceed)
 {
 	u32 key = 0;

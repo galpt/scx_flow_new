@@ -10,7 +10,7 @@ The goal is to test strict order with prediction in the kernel and see if short 
 
 ### How it works?
 
-Arrivals pass a gate first, then pass RED with residual plus exceed plus tolerance for the guarantee alone. A zero exceed admits, a critical exceed admits with no swap, else a bounded O(1) newcomer test still decides. Each CPU takes the earliest key it may run. See `src/bpf/enqueue.bpf.c` and `src/bpf/dispatch.bpf.c`.
+Arrivals pass a gate first, then pass RED with residual plus exceed plus tolerance for the guarantee alone. A zero exceed admits, a critical exceed admits without a swap, else an O(1) newcomer test still decides. Each CPU takes the earliest key it may run. See `src/bpf/enqueue.bpf.c` and `src/bpf/dispatch.bpf.c`.
 
 ## Typical Use Cases
 
@@ -22,7 +22,7 @@ Arrivals pass a gate first, then pass RED with residual plus exceed plus toleran
 
 ### Queues
 
-Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains five tiers with move capped by slots and 8 visits plus reclaim when empty plus aged past period. Reject stays value ordered outside dispatch with overflow name for wire compat. See `src/bpf/intf.h`.
+Local plus node plus machine plus reject hold tasks across 1042 queues. Each pass drains three PRIQ tiers (local plus node plus machine) plus value ordered reject plus steal for five total with move capped by slots and 8 visits plus reclaim when empty plus aged past period. Reject stays value ordered outside dispatch with overflow name for wire compat. See `src/bpf/intf.h`.
 
 ### Keys
 
@@ -30,11 +30,11 @@ Each strict key sets queue rank with vruntime pacing via lag bounds. Predictor s
 
 ### Admission
 
-RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `256us` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for bounded O(1) admission and tiers-empty plus aged reclaim bounds starvation with no drop. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
+RED checks residual from deadline minus cost plus tolerance of zero for critical else `64us`. Newcomer victim needs cost past `256us` plus past exceed plus never critical, else admits. Newcomer-pays trades choice for single-check admission and tiers-empty plus aged reclaim caps starvation without dropping. See `src/bpf/edf.bpf.c` and `src/rust/config.rs`.
 
 ### Gates
 
-A gate runs first so tasks and CPUs wait. Exiting work runs at once with no wait and no gate. Fails join the value ordered reject queue with no leak. Drain stays gated with mask wins. Eligibility gates every kick, so hogs pace while lagging tasks still wake. See `src/bpf/cgroup.bpf.c`.
+A gate runs first so tasks and CPUs wait. Exiting work runs at once without waiting. Fails join the value ordered reject queue without leaking. Drain stays gated with mask wins. Eligibility gates every kick, so hogs pace while lagging tasks still wake. See `src/bpf/cgroup.bpf.c`.
 
 ### Reporting
 
@@ -42,7 +42,7 @@ Flags `--stats`, `--monitor`, and `--no-webui` show counters as text or page at 
 
 ### Fairness
 
-Strict order holds the earlier of deadline plus virtual deadline in each queue. Vruntime advances by slice over weight with lag clamp. Sleepers gain one slice of boost with no storm. Adaptive steps change the slice with no virtual change. Hierarchy stays flat with no share past weight. See `src/bpf/intf.h`.
+Strict order holds the earlier of deadline plus virtual deadline in each queue. Vruntime advances by slice over weight with lag clamp. Sleepers gain one slice of boost. Adaptive steps change the slice without changing virtual time. Hierarchy stays flat. See `src/bpf/intf.h`.
 
 ### Weights
 
@@ -54,15 +54,15 @@ Locality stays with per-CPU plus per-node queues. Select takes prev idle, then w
 
 ### Contention
 
-Contention stays bounded with 8 visits per pass across five tiers. Each tier moves task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves reject when tiers hold no work plus aged past period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
+One pass stays capped with 8 visits per pass across five tiers. Each tier moves task by slots. Steal scans 4 to 8 peers node-local first. Reclaim moves reject when tiers hold no work plus aged past period. Twelve peers cover one percent on 1024 CPUs. See `src/bpf/dispatch.bpf.c`.
 
 ### Inversion
 
-Mask wins bound inversion with fail open. Each move checks the CPU mask and picks time first, so heads skip to the next task and tier. Reject stays outside dispatch with reclaim on same key or after. Local on stays terminal at three sites with no global use. See `src/bpf/dispatch.bpf.c`.
+Mask check caps inversion with fail open. Each move checks the CPU mask and picks time first, so heads skip to the next task and tier. Reject stays outside dispatch with reclaim on same key or after. Local on stays terminal at three sites. See `src/bpf/dispatch.bpf.c`.
 
 ### Staleness
 
-Staleness heals retrain plus fold. Stop feeds average deviation plus credit. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` on late else grow `slack>>3` capped `1ms` on early. Misses stay lifetime, adapt window. Reclaim `256us` fallback when tiers hold no work. See `src/bpf/lifecycle.bpf.c`.
+Staleness heals retrain plus fold. Stop feeds average deviation plus credit with train on one eighth of stops picked by now low bits. Yields carry `10us` plus `1ms` when critical plus wall meets, else shrink `exceed>>3` capped `1ms` and limited to half per stop on late else grow `slack>>3` capped `1ms` and limited to half per stop on early. Misses stay lifetime, adapt window. Reclaim `256us` fallback when tiers hold no work. Stopping train time holds queue plus run minus burst, not true sleep, with enqueue inference using the true gap before wait overwrite. See `src/bpf/lifecycle.bpf.c`.
 
 ### Latency
 
@@ -70,11 +70,11 @@ Latency caps slice at `100us` plus key at now plus max `4ms` else slice plus `10
 
 ### Tiers
 
-Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with a `20ms` ceiling under an `80ms` period. Predicted burst maps avg plus dev to the ceiling with critical forced to `50us`, so audio plus UI plus IPC plus desktop plus bulk work hold room with no starve. Like fair.c, tiers pace service with no fixed hold. See `src/bpf/intf.h` plus `src/rust/config.rs`.
+Tiers pace bursts at `50us` plus `100us` plus `500us` plus `1ms` plus `5ms` with a `20ms` ceiling under an `80ms` period. Predicted burst maps avg plus dev to the ceiling with critical forced to `50us`, so audio plus UI plus IPC plus desktop plus bulk work hold room without starving. Tier helper stays host-test mirror only without a BPF slice caller; BPF slices use dynamic remaining plus `100us` latency clamp. Like fair.c, tiers pace service with no fixed hold. See `src/bpf/intf.h` plus `src/rust/config.rs`.
 
 ### Learning
 
-Learning trains one global `32B` model with fixed point SGD plus a bounded nudge. Train clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus clamps each weight to `524288` with atomics, so one step moves at most `8us`. Nudge clamps the dot score to `250us` with fail closed, so one correction never holds past one quarter quantum with the task at `72B`. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c`.
+Learning trains one global `32B` model with fixed point SGD plus a capped nudge trained on one eighth of stops picked by now low bits with no per CPU map. Train clips error to `64us` plus steps each weight with shift `11` from shift `8` features plus clamps each weight to `524288` with atomics, so one step moves at most `8us`. Nudge clamps the dot score to `250us` with fail closed and caller sleep read before wait overwrite, so one correction never holds past one quarter quantum with the task at `72B`. See `src/bpf/ml/online_sgd.bpf.c` plus `src/bpf/ml/nudge.bpf.c`.
 
 ## Code map
 
