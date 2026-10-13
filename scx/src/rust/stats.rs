@@ -24,7 +24,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 /// Counters with placement, admission, and miss detail.
-/// BPF holds 20 counters, Rust adds display-only uptime for 21.
+/// BPF holds 17 counters, Rust adds display-only uptime for 18.
 pub struct Metrics {
     #[stat(desc = "Tasks now on a CPU")]
     #[serde(default)]
@@ -84,15 +84,6 @@ pub struct Metrics {
     #[stat(desc = "RED reclaims from the value ordered queue")]
     #[serde(default)]
     pub red_reclaims: u64,
-    #[stat(desc = "ML burst hits within 64us")]
-    #[serde(default)]
-    pub ml_hits: u64,
-    #[stat(desc = "ML train samples for accuracy")]
-    #[serde(default)]
-    pub ml_total: u64,
-    #[stat(desc = "ML nudge saturations at 250us")]
-    #[serde(default)]
-    pub ml_clamped: u64,
 }
 
 /// One card of the per CPU grid.
@@ -121,9 +112,6 @@ pub struct PerCpuMetrics {
 /// Counters stay raw with the on CPU gauge plus the live pid view.
 /// The run loop pushes one per poll and the web thread keeps the
 /// newest behind a lock for the page plus the JSON routes.
-/// Accuracy reads hits over total in 0.0 to 1.0 with higher better
-/// plus zero on no samples, so the page tracks ML quality with no
-/// extra poll.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WebMetrics {
     /// Scheduler wide counters with raw values.
@@ -140,23 +128,6 @@ pub struct WebMetrics {
     /// One line topology summary for the page.
     #[serde(default)]
     pub topology: String,
-    /// Train steps from the online model with zero on miss.
-    /// Display only with no placement use plus zero on old JSON.
-    #[serde(default)]
-    pub ml_updates: u64,
-    /// ML accuracy as hits over total in 0.0 to 1.0 with higher better.
-    /// Zero on no samples plus zero on old JSON with no extra poll.
-    #[serde(default)]
-    pub ml_accuracy: f64,
-    /// ML hits summed from the per CPU rows with zero on old JSON.
-    #[serde(default)]
-    pub ml_hits: u64,
-    /// ML samples summed from the per CPU rows with zero on old JSON.
-    #[serde(default)]
-    pub ml_total: u64,
-    /// ML clamps summed from the per CPU rows with zero on old JSON.
-    #[serde(default)]
-    pub ml_clamped: u64,
 }
 
 /// Stats printer loop for the monitor flag.
@@ -191,27 +162,12 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
 }
 
 impl Metrics {
-    /// ML accuracy as hits over total in 0.0 to 1.0 with higher better.
-    /// Zero on no samples, so an untrained model reads zero with no
-    /// divide by zero. Clamps to 1.0 with no wrap.
-    pub fn accuracy(&self) -> f64 {
-        if self.ml_total == 0 {
-            return 0.0;
-        }
-        let v = self.ml_hits as f64 / self.ml_total as f64;
-        if !v.is_finite() {
-            return 0.0;
-        }
-        v.clamp(0.0, 1.0)
-    }
-
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
             "[{}] run={} runtime_ns={} uptime_ns={} ins={} req={} done={} \
              local={} node={} machine={} kick={} adm={} rej={} \
-             miss={} gate={} pkick={} pskip={} redrej={} redrec={} \
-             mlhits={} mltotal={} mlclamp={} mlacc={:.4}",
+             miss={} gate={} pkick={} pskip={} redrej={} redrec={}",
             crate::SCHEDULER_NAME,
             self.on_cpu,
             self.total_runtime,
@@ -231,10 +187,6 @@ impl Metrics {
             self.preempt_skipped,
             self.red_rejects,
             self.red_reclaims,
-            self.ml_hits,
-            self.ml_total,
-            self.ml_clamped,
-            self.accuracy(),
         )?;
         Ok(())
     }
@@ -261,9 +213,6 @@ impl Metrics {
             preempt_skipped: self.preempt_skipped.wrapping_sub(rhs.preempt_skipped),
             red_rejects: self.red_rejects.wrapping_sub(rhs.red_rejects),
             red_reclaims: self.red_reclaims.wrapping_sub(rhs.red_reclaims),
-            ml_hits: self.ml_hits.wrapping_sub(rhs.ml_hits),
-            ml_total: self.ml_total.wrapping_sub(rhs.ml_total),
-            ml_clamped: self.ml_clamped.wrapping_sub(rhs.ml_clamped),
         }
     }
 }

@@ -374,22 +374,7 @@
           RED reclaims:</span>
           <span class="stat-value" id="red-reclaims">0</span>
         </div>
-        <div><span style="color:var(--text-muted)">
-          ML hits:</span>
-          <span class="stat-value" id="ml-hits">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          ML total:</span>
-          <span class="stat-value" id="ml-total">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          ML clamped:</span>
-          <span class="stat-value" id="ml-clamped">0</span>
-        </div>
-        <div><span style="color:var(--text-muted)">
-          ML accuracy (0.0-1.0, higher better):</span>
-          <span class="stat-value" id="ml-accuracy">0</span>
-        </div>
+
       </div>
     </div>
 
@@ -484,12 +469,12 @@
       }).join('');
     }
 
-    /* Summary prose built from the live gauges plus ML accuracy. */
-    /* The tldr names the running count with ML accuracy. The */
-    /* explanation walks joins plus moves plus admission plus misses */
-    /* plus accuracy in 0.0-1.0 higher better observability-only with */
-    /* no preempt on accuracy alone. Live pid count from the per CPU */
-    /* cards. Counts cards with a nonzero pid with no gauge use. */
+    /* Summary prose built from the live gauges plus RED plus tiers. */
+    /* The tldr names the running count with RED rejects plus reclaims. */
+    /* The explanation walks joins plus moves plus admission plus misses */
+    /* plus RED plus preempt with fixed 64us tolerance plus 256us Emax and */
+    /* six tiers 10us to 20ms. Live pid count from the per CPU cards. */
+    /* Counts cards with a nonzero pid with no gauge use. */
     function livePids(perCpu) {
       var n = 0;
       var i;
@@ -510,16 +495,6 @@
       return raw;
     }
 
-    /* ML accuracy as a fixed string in 0.0-1.0. Clamps with no NaN, */
-    /* so an untrained model reads 0.0000 with higher better. */
-    function fmtAcc(x) {
-      var v = Number(x) || 0;
-      if (!isFinite(v)) v = 0;
-      if (v < 0) v = 0;
-      if (v > 1) v = 1;
-      return v.toFixed(4);
-    }
-
     function buildSummary(s) {
       var onCpu = s.on_cpu || 0;
       var ins = s.inserts || 0;
@@ -536,24 +511,18 @@
       var pskip = s.preempt_skipped || 0;
       var redrej = s.red_rejects || 0;
       var redrec = s.red_reclaims || 0;
-      var mhits = s.ml_hits || 0;
-      var mtotal = s.ml_total || 0;
-      var mclamp = s.ml_clamped || 0;
-      var acc = s.ml_accuracy;
-      if (acc === undefined || acc === null) acc = 0;
-      acc = fmtAcc(acc);
       var placed = ins + req;
       var shared = node + machine;
       var tldr, explanation;
       if (!placed && !onCpu) {
         tldr = 'Flow is idle and waiting for work.';
         explanation = 'As you can see from the gauges, ' +
-          'no tasks have been placed yet. ML accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, observability-only ' +
-          'with no preempt on accuracy alone.';
+          'no tasks have been placed yet. RED keeps 64us tolerance ' +
+          'with 256us Emax and six tiers pace 10us to 20ms.';
       } else if (onCpu > 0) {
         tldr = 'Flow is running ' + fmt(onCpu) +
-          ' tasks with ML accuracy ' + acc + '.';
+          ' tasks with RED rejects ' + fmt(redrej) +
+          ' and reclaims ' + fmt(redrec) + '.';
         explanation = 'As you can see from the gauges, ' +
           'joins cover ' + fmt(placed) +
           ' with completions ' + fmt(done) +
@@ -567,12 +536,8 @@
           ' with skipped ' + fmt(pskip) +
           ' and RED rejects ' + fmt(redrej) +
           ' with reclaims ' + fmt(redrec) +
-          ' and ML hits ' + fmt(mhits) +
-          ' over total ' + fmt(mtotal) +
-          ' with clamped ' + fmt(mclamp) +
-          ' and accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, observability-only ' +
-          'with no preempt on accuracy alone.';
+          ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
+          '10us to 20ms.';
       } else {
         tldr = 'Flow placed ' + fmt(placed) +
           ' tasks and is now idle.';
@@ -589,12 +554,8 @@
           ' with skipped ' + fmt(pskip) +
           ' and RED rejects ' + fmt(redrej) +
           ' with reclaims ' + fmt(redrec) +
-          ' and ML hits ' + fmt(mhits) +
-          ' over total ' + fmt(mtotal) +
-          ' with clamped ' + fmt(mclamp) +
-          ' and accuracy ' + acc +
-          ' in range 0.0-1.0, higher better, observability-only ' +
-          'with no preempt on accuracy alone.';
+          ' at fixed 64us tolerance plus 256us Emax with six tiers ' +
+          '10us to 20ms.';
       }
       return { tldr: tldr, explanation: explanation };
     }
@@ -620,27 +581,6 @@
       /* never drift past the cards on a raced poll. The capped gauge */
       /* stays in the title for diagnosis with no extra read. */
       disp.on_cpu = live;
-      /* Top-level ML keys mirror the stats sums with accuracy first, so */
-      /* the summary reads one value with no nested walk. Falls back to */
-      /* the stats ratio when the top level holds no number. */
-      {
-        var accTop = data.ml_accuracy;
-        var hitsTop = data.ml_hits;
-        var totalTop = data.ml_total;
-        var clampTop = data.ml_clamped;
-        if (typeof accTop !== 'number') {
-          var h = (s.ml_hits || 0);
-          var t = (s.ml_total || 0);
-          accTop = t ? (h / t) : 0;
-        }
-        if (typeof hitsTop !== 'number') hitsTop = s.ml_hits || 0;
-        if (typeof totalTop !== 'number') totalTop = s.ml_total || 0;
-        if (typeof clampTop !== 'number') clampTop = s.ml_clamped || 0;
-        disp.ml_accuracy = accTop;
-        disp.ml_hits = hitsTop;
-        disp.ml_total = totalTop;
-        disp.ml_clamped = clampTop;
-      }
       var summary = buildSummary(disp);
       el('summary-tldr').textContent = summary.tldr;
       el('summary-explanation').textContent =
@@ -694,19 +634,6 @@
         fmt(s.red_rejects || 0);
       el('red-reclaims').textContent =
         fmt(s.red_reclaims || 0);
-      el('ml-hits').textContent =
-        fmt(s.ml_hits !== undefined ? s.ml_hits : (data.ml_hits || 0));
-      el('ml-total').textContent =
-        fmt(s.ml_total !== undefined ? s.ml_total : (data.ml_total || 0));
-      el('ml-clamped').textContent =
-        fmt(s.ml_clamped !== undefined ? s.ml_clamped : (data.ml_clamped || 0));
-      {
-        var accRaw = (data.ml_accuracy !== undefined) ? data.ml_accuracy :
-          (s.ml_accuracy !== undefined ? s.ml_accuracy : 0);
-        el('ml-accuracy').textContent = fmtAcc(accRaw);
-        el('ml-accuracy').title = 'range 0.0-1.0, higher better, ' +
-          'observability-only with no preempt on accuracy alone';
-      }
 
       renderCoreCards(data);
     }

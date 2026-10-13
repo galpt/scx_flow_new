@@ -238,7 +238,7 @@ impl<'a> Scheduler<'a> {
         }
         let m = self.get_metrics();
         info!(
-            "exit ins={} req={} done={} local={} node={} machine={} kick={} adm={} rej={} miss={} gate={} pkick={} pskip={} redrej={} redrec={} mlhits={} mltotal={} mlclamp={} mlacc={:.4} runtime={} oncpu={}",
+            "exit ins={} req={} done={} local={} node={} machine={} kick={} adm={} rej={} miss={} gate={} pkick={} pskip={} redrej={} redrec={} runtime={} oncpu={}",
             m.inserts,
             m.requeues,
             m.completions,
@@ -254,10 +254,6 @@ impl<'a> Scheduler<'a> {
             m.preempt_skipped,
             m.red_rejects,
             m.red_reclaims,
-            m.ml_hits,
-            m.ml_total,
-            m.ml_clamped,
-            m.accuracy(),
             m.total_runtime,
             m.on_cpu,
         );
@@ -390,37 +386,25 @@ mod tests {
     }
 
     #[test]
-    fn sched_stats_size_is_160() {
+    fn sched_stats_size_is_136() {
         assert_eq!(
             std::mem::size_of::<crate::bpf_intf::flow_sched_stats>(),
-            160
+            136
         );
     }
 
     #[test]
-    fn ml_model_size_is_48_versioned() {
+    fn fixed_red_matches_header() {
         assert_eq!(
-            std::mem::size_of::<crate::bpf_intf::flow_online_model>(),
-            48
+            crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64,
+            crate::config::RED_TOL_NS
         );
+        assert_eq!(crate::config::RED_TOL_NS, 64_000);
         assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_ML_MODEL_VERSION as u64,
-            crate::config::ML_MODEL_VERSION as u64
+            crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64,
+            crate::config::RED_EMAX_NS
         );
-        assert_eq!(crate::config::ML_MODEL_VERSION, 1);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_ML_ACC_HIT_NS as u64,
-            crate::config::ML_ACC_HIT_NS
-        );
-        assert_eq!(crate::config::ML_ACC_HIT_NS, 64_000);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_RED_TOL_MIN_NS as u64,
-            crate::config::RED_TOL_MIN_NS
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_RED_TOL_MAX_NS as u64,
-            crate::config::RED_TOL_MAX_NS
-        );
+        assert_eq!(crate::config::RED_EMAX_NS, 256_000);
     }
 
     #[test]
