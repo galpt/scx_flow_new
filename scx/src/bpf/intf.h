@@ -432,6 +432,18 @@ _Static_assert(sizeof(struct flow_online_model) == 32,
 _Static_assert(FLOW_MAX_DSQS ==
 	FLOW_MAX_CPUS + FLOW_MAX_NODES + 2,
 	"dsq count stays local plus node plus two");
+/* Period holds four max slices, so a 20ms hold never starves past one */
+/* period with no extra timer. Six latency ceilings name burst sizes, */
+/* while five dispatch tiers name queues, so the counts differ by design. */
+_Static_assert(FLOW_PERIOD_NS == 4 * FLOW_SLICE_MAX_NS,
+	"period stays four times slice max");
+_Static_assert(FLOW_SLICE_MIN_NS < FLOW_SLICE_ULL_NS &&
+	FLOW_SLICE_ULL_NS <= FLOW_SLICE_LL_NS &&
+	FLOW_SLICE_LL_NS < FLOW_SLICE_MLL_NS &&
+	FLOW_SLICE_MLL_NS < FLOW_SLICE_NL_NS &&
+	FLOW_SLICE_NL_NS < FLOW_SLICE_ENL_NS &&
+	FLOW_SLICE_ENL_NS < FLOW_SLICE_MAX_NS,
+	"tier order stays 10us to 20ms");
 /**
  * flow_time_before - test time order with wrap safety.
  * @a: first time in nanos.
@@ -1360,11 +1372,12 @@ static __always_inline u32 flow_slice_lat_clamp(u32 slice,
  * selection uses the dynamic remaining clamp plus the 100us latency
  * clamp, so this helper shapes no slice here. Wiring to slice selection
  * stays deferred without an extra map, and host tests keep the kernel
- * and the host agreed.
+ * and the host agreed. Six latency ceilings name burst sizes, while
+ * five dispatch tiers name queues, so the counts differ by design.
  *
  * Returns: tier ceiling in nanos from 50us to 20ms.
  */
-static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
+static __always_inline __attribute__((unused)) u32 flow_classify_latency_tier(u64 avg, u64 dev,
 	bool is_crit)
 {
 	u64 pred = flow_sat_add(avg, dev);

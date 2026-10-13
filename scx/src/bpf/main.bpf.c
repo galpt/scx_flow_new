@@ -100,6 +100,12 @@ struct {
 } ml_online_model_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
+/* Includes run in dependency order with maps plus helpers before */
+/* callers, so stats plus cgroup plus vtime plus weight plus edf come */
+/* first, then placement plus timer plus preempt plus select, then the */
+/* online model before enqueue plus dispatch plus lifecycle. The ml */
+/* pair sits before its two callers with no extra map, so the verifier */
+/* sees one fixed path with no forward use. */
 #include "stats.bpf.c"
 #include "cgroup.bpf.c"
 #include "vtime.bpf.c"
@@ -173,6 +179,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (want > (u64)FLOW_MAX_NODES)
 			want = (u64)FLOW_MAX_NODES;
 		nr_node_ids = want;
+		/* Bound the queue count at init, so local plus node plus */
+		/* machine plus reject never passes 1042 with no wrap. */
+		if (n + want + 2 > (u64)FLOW_MAX_DSQS) {
+			scx_bpf_error("dsq count over bound");
+			return -E2BIG;
+		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		struct flow_cpu_state *st;

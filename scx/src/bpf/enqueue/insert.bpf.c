@@ -97,11 +97,10 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
 	flow_tier_insert_hint(p, cpu, vtime, now, local_q, node_q);
 }
 /**
- * flow_make_fair - strict EDF key from task state plus deadline plus hint plus now plus sleep.
+ * flow_make_fair - strict EDF key from task state plus deadline plus hint plus sleep.
  * @tctx: task state with vruntime plus weight plus slice.
  * @deadline: absolute EDF deadline in nanos.
  * @hint_w: hint share with base for neutral.
- * @now: current time in nanos for the virtual deadline.
  * @sleep_ns: caller sleep from wait plus now plus avg read before the wait overwrite.
  *
  * Reads vruntime plus weight plus slice once and stacks the effective
@@ -121,7 +120,7 @@ static __always_inline void flow_tier_insert(struct task_struct *p, s32 cpu, u64
  * plus open paths share one divide copy.
  */
 static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
-	u64 deadline, u32 hint_w, u64 now, u64 sleep_ns)
+	u64 deadline, u32 hint_w, u64 sleep_ns)
 {
 	u64 vr = READ_ONCE(tctx->vruntime);
 	u32 sl = READ_ONCE(tctx->slice_ns);
@@ -129,7 +128,6 @@ static __noinline u64 flow_make_fair(struct flow_task_ctx *tctx,
 	u32 eff;
 	u64 vd;
 	s64 nudge;
-	(void)now;
 	if (task_w == 0)
 		task_w = (u32)FLOW_WEIGHT_BASE;
 	eff = flow_task_effective_weight(task_w, hint_w);
@@ -277,7 +275,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w, now, pm_sleep);
+		pvt = flow_make_fair(tctx, pdl, phint_w, pm_sleep);
 		{
 			u64 pbound0 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (pvt != 0 && pbound0 != (u64)~0ULL &&
@@ -308,12 +306,12 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		pin_sleep_hold = p_sleep;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
 			tctx->wait_at = now;
-			pvt = flow_make_fair(tctx, pdl, phint_w, now, p_sleep);
+			pvt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
 		} else {
 			u64 p_dl;
 			tctx->wait_at = now;
 			__sync_lock_test_and_set(&tctx->slice_ns, p_slice);
-			p_vt = flow_make_fair(tctx, pdl, phint_w, now, p_sleep);
+			p_vt = flow_make_fair(tctx, pdl, phint_w, p_sleep);
 			if (p_is_lat) {
 				p_dl = flow_lat_deadline(now, p_slice);
 				pvt = flow_edf_key(p_vt, p_dl);
@@ -334,7 +332,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
-		pvt = flow_make_fair(tctx, pdl, phint_w, now, pr_sleep);
+		pvt = flow_make_fair(tctx, pdl, phint_w, pr_sleep);
 		{
 			u64 pbound2 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
 			if (pvt != 0 && pbound2 != (u64)~0ULL &&

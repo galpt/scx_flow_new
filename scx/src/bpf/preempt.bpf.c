@@ -24,10 +24,11 @@
 /* skipped count. The enqueue path calls this helper after the */
 /* eligibility check, so eligibility stays outside here with one minimum */
 /* read per wait. Equal arrivals pace without an extra kick, so no tie */
-/* assert runs. RED cost uses burst else pre-clamp slice else quantum for */
-/* the guarantee, while this tail uses start plus stored slice for the */
-/* leftover. The two differ without sharing a write: RED covers admission, */
-/* tail covers preempt with the same 10us plus 1ms clamp. */
+/* assert runs. RED cost covers the newcomer on burst else pre-clamp */
+/* slice else quantum, while this tail covers the occupant on start */
+/* plus stored slice. The inputs differ by task on purpose with no */
+/* shared write, and both clamp to 10us plus 1ms, so admission plus */
+/* preempt agree on the same bounds. */
 /* Mirrored in config.rs preempt_ok for host tests, so the kernel and */
 /* the host agree. */
 static __always_inline bool flow_preempt_ok(u64 arr_key,
