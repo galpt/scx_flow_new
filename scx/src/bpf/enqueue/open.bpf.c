@@ -87,8 +87,6 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 	if (!is_reenq) {
 		u64 old_wait = READ_ONCE(tctx->wait_at);
 		u64 lat_sleep = flow_sleep_ns(old_wait, now, avg);
-		u32 lat_task_w = READ_ONCE(tctx->weight);
-		u32 lat_eff = 0;
 		bool is_lat;
 		u32 pre_slice;
 		u32 lat_slice;
@@ -97,11 +95,10 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		/* No stable uclamp field in this task view, so fail open to */
 		/* zero without an extra map, and the ext helper keeps the veto */
 		/* for callers that thread a real clamp. Probation holds through */
-		/* both helpers, so newcomers stay batch. */
-		if (lat_task_w == 0)
-			lat_task_w = (u32)FLOW_WEIGHT_BASE;
-		lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
-		is_lat = flow_is_lat(avg, dev, hint, lat_sleep, 0, lat_eff);
+		/* both helpers, so newcomers stay batch. Latency shares one */
+		/* copy with miss plus pinned, so the open path keeps headroom. */
+		is_lat = flow_enqueue_is_lat(avg, dev, hint, lat_sleep,
+		    READ_ONCE(tctx->weight), hint_w);
 		pre_slice = flow_slice_for(deadline, now);
 		pre_slice = flow_slice_tier_cap(pre_slice, avg, dev, is_lat);
 		lat_slice = flow_slice_lat_clamp(pre_slice, is_lat);
@@ -126,12 +123,7 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 				vtime = lat_vt;
 			}
 		}
-		{
-			u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-			if (vtime != 0 && bound != (u64)~0ULL &&
-			    !flow_time_before(vtime, bound) && vtime != bound)
-				vtime = bound;
-		}
+		vtime = flow_enqueue_cap_key(vtime, now);
 		out->vtime = vtime;
 	} else {
 		u64 re_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
@@ -147,17 +139,10 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		out->is_fresh = false;
 		out->pre_slice = 0;
 		/* RED latency for the requeue uses the same unified test on */
-		/* the same gap, so RED and slice agree with no second wait */
-		/* read at the caller. */
-		{
-			u32 rtw0 = READ_ONCE(tctx->weight);
-			u32 reff0;
-			if (rtw0 == 0)
-				rtw0 = (u32)FLOW_WEIGHT_BASE;
-			reff0 = flow_task_effective_weight(rtw0, hint_w);
-			out->is_lat = flow_is_lat(avg, dev, hint, re_sleep,
-			    0, reff0);
-		}
+		/* the same gap through the shared helper, so RED and slice */
+		/* agree with no second wait read at the caller. */
+		out->is_lat = flow_enqueue_is_lat(avg, dev, hint, re_sleep,
+		    READ_ONCE(tctx->weight), hint_w);
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
@@ -167,15 +152,10 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		/* two paces order with latency still capped by the deadline. */
 		/* The effective share stacks task times hint over 128, so */
 		/* cgroup plus task weights shape fairness together. In-tier */
-		/* keys cap at now plus one period, so far keys never starve */
-		/* past the bound. */
+		/* keys cap at now plus one period through the shared helper, */
+		/* so far keys never starve past the bound. */
 		vtime = flow_make_fair(tctx, deadline, hint_w, re_sleep);
-		{
-			u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-			if (vtime != 0 && bound != (u64)~0ULL &&
-			    !flow_time_before(vtime, bound) && vtime != bound)
-				vtime = bound;
-		}
+		vtime = flow_enqueue_cap_key(vtime, now);
 		out->vtime = vtime;
 	}
 }

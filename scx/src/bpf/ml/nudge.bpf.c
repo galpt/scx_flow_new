@@ -53,13 +53,9 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 {
 	u32 key = 0;
 	struct flow_online_model *m;
+	struct flow_ml_feat feat;
 	s64 score = 0;
 	s64 max_nudge;
-	u64 c_avg;
-	u64 c_dev;
-	s32 c_lag;
-	u64 c_sleep;
-	u32 c_w;
 
 	if (!tctx)
 		return 0;
@@ -68,27 +64,15 @@ static __noinline s64 flow_ml_deadline_nudge(const struct flow_task_ctx *tctx,
 	if (!m)
 		return 0;
 
-	/* Burst caps at the quantum match train, so infer never saturates */
-	/* past the train range on huge inputs. Lag stays within plus or */
-	/* minus 2ms via the lag bound plus share stays within 1 to 16384 */
-	/* via the effective helper, so no extra cap keeps the verifier */
-	/* under one million with train plus infer agreeing on bursts. */
-	c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
-	c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
-	c_lag = READ_ONCE(tctx->vlag);
-	c_sleep = flow_ml_cap_burst(sleep_ns);
-	c_w = eff_w;
-	score += ((s64)(c_avg >> 4) *
-	    (s64)READ_ONCE(m->w_avg)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)(c_dev >> 4) *
-	    (s64)READ_ONCE(m->w_dev)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)c_lag *
-	    (s64)READ_ONCE(m->w_lag)) >> FLOW_ML_FP_SHIFT;
-	score += ((s64)(c_sleep >> 4) *
-	    (s64)READ_ONCE(m->w_sleep)) >> (FLOW_ML_FP_SHIFT - 4);
-	score += ((s64)c_w *
-	    (s64)READ_ONCE(m->w_weight)) >> FLOW_ML_FP_SHIFT;
-	score += (s64)READ_ONCE(m->bias);
+	/* Burst caps at the quantum match train through the shared fill, */
+	/* so infer never saturates past the train range on huge inputs. */
+	/* Lag stays within plus or minus 2ms via the lag bound plus share */
+	/* stays within 1 to 16384 via the effective helper, so no extra */
+	/* cap keeps the verifier under one million with train plus infer */
+	/* agreeing on bursts. Reuses the same feat plus score as train */
+	/* with no second dot copy. */
+	flow_ml_feat(tctx, sleep_ns, eff_w, &feat);
+	score = flow_ml_score(&feat, m);
 
 	max_nudge = (s64)READ_ONCE(m->max_clamp_ns);
 	if (max_nudge <= 0 || max_nudge > (s64)FLOW_ML_NUDGE_MAX_NS)

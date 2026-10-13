@@ -144,6 +144,95 @@ struct flow_reclaim_tail {
 	bool tiers_empty;
 };
 /**
+ * flow_reclaim_is_aged - test one reject wait past one period.
+ * @wait_at: last wait stamp in nanos, zero means unknown.
+ * @now: current time in nanos.
+ *
+ * Ages past one period with wrap safety, so continuous tier load still
+ * needs credit past the age bound with no bypass. A zero stamp, a stamp
+ * at now, or a future stamp never counts as aged with no stall.
+ * Like fair.c, the bound paces reclaim, unlike rt.c, no fixed priority
+ * holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so the reclaim check keeps one age with no inline growth.
+ *
+ * Returns: true when aged past one period, else false.
+ */
+static __noinline bool flow_reclaim_is_aged(u64 wait_at, u64 now)
+{
+	u64 age;
+	if (wait_at == 0 || wait_at == now)
+		return false;
+	if (flow_time_before(now, wait_at))
+		return false;
+	age = now - wait_at;
+	return age > (u64)FLOW_PERIOD_NS;
+}
+/**
+ * flow_reclaim_key_ok - test one reject key still fresh.
+ * @rctx: reject task state with vruntime plus slice plus weight.
+ * @rdl: reject absolute deadline in nanos.
+ * @now: current time in nanos.
+ *
+ * Rebuilds the strict key as the earlier of deadline plus virtual
+ * deadline with the effective share, so a stale key fails closed to
+ * the next candidate with no move. A key at now stays fresh with no
+ * stall. Like fair.c, the earliest key wins, unlike rt.c, no fixed
+ * priority holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so the reclaim check keeps one key with no inline growth.
+ *
+ * Returns: true when fresh, else false on stale state.
+ */
+static __noinline bool flow_reclaim_key_ok(struct flow_task_ctx *rctx,
+	u64 rdl, u64 now)
+{
+	u64 rvtime;
+	u64 vr;
+	u64 sl;
+	u32 tw;
+	u32 hw;
+	u32 eff;
+	u64 vd;
+	if (!rctx)
+		return false;
+	vr = READ_ONCE(rctx->vruntime);
+	sl = (u64)READ_ONCE(rctx->slice_ns);
+	tw = READ_ONCE(rctx->weight);
+	hw = READ_ONCE(rctx->hint_w);
+	eff = flow_task_effective_weight(tw, hw);
+	vd = flow_virt_deadline(vr, sl, eff);
+	rvtime = flow_edf_key(rdl, vd);
+	if (rvtime != now && flow_time_before(rvtime, now))
+		return false;
+	return true;
+}
+/**
+ * flow_reclaim_early_skip - test whether the reclaim walk skips early.
+ * @credit: saved global reclaim credit, read once by the caller.
+ * @tiers_empty: true when local plus node plus machine hold no work.
+ *
+ * Skips the walk when tiers hold work plus credit stays short of the
+ * learnable Emax within outer 64us to 1ms, since aged heads still need
+ * funding with no fallback. Tiers-empty keeps the walk with no
+ * reserve, so zero credit never idles work with outer safety still
+ * checked.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so the dispatch pass keeps one Emax fetch with no inline
+ * growth.
+ *
+ * Returns: true when the caller skips the walk, else false.
+ */
+static __noinline bool flow_reclaim_early_skip(u64 credit, bool tiers_empty)
+{
+	if (!tiers_empty && credit < flow_ml_red_emax_ns())
+		return true;
+	return false;
+}
+/**
  * flow_reclaim_candidate_ok - test one reject for reclaim plus reserve.
  * @t: reclaim tail with state plus task plus target plus time plus credit
  * plus gate, read once by the caller.
@@ -178,10 +267,7 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 	s64 rres;
 	u64 rexc;
 	u64 rlax;
-	u64 rvtime;
-	u64 rwait;
 	bool rcrit;
-	bool is_aged = false;
 	bool funded;
 	if (!rctx || !q)
 		return false;
@@ -211,21 +297,14 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 	rlax = flow_red_laxity(rdl, now, rcost);
 	if (rlax == 0)
 		return false;
-	rwait = READ_ONCE(rctx->wait_at);
-	if (rwait != 0 && rwait != now &&
-	    !flow_time_before(now, rwait)) {
-		u64 age = now - rwait;
-		if (age > (u64)FLOW_PERIOD_NS)
-			is_aged = true;
-	}
-	if (!tiers_empty && !is_aged)
+	/* Aged cover past one period through the shared helper, so PRIQ */
+	/* tiers never wait behind rejects past the age bound. */
+	if (!tiers_empty &&
+	    !flow_reclaim_is_aged(READ_ONCE(rctx->wait_at), now))
 		return false;
-	rvtime = flow_edf_key(rdl,
-	    flow_virt_deadline(READ_ONCE(rctx->vruntime),
-	    (u64)READ_ONCE(rctx->slice_ns),
-	    flow_task_effective_weight(READ_ONCE(rctx->weight),
-	    READ_ONCE(rctx->hint_w))));
-	if (rvtime != now && flow_time_before(rvtime, now))
+	/* Key freshness through the shared helper, so an earlier key never */
+	/* waits behind a rejoin with a stale key failing closed. */
+	if (!flow_reclaim_key_ok(rctx, rdl, now))
 		return false;
 	if (!flow_mask_ok(cpu, q))
 		return false;
@@ -286,10 +365,11 @@ static __noinline u32 flow_reject_reclaim_one(s32 cpu, u32 *visits, u64 now,
 		return 0;
 	credit = flow_credit_peek();
 	/* Skip the walk when tiers hold work plus credit stays short of the */
-	/* learnable Emax, since aged heads still need funding with no */
-	/* fallback. Tiers-empty keeps the walk with no reserve, so zero */
-	/* credit never idles work with outer safety still checked. */
-	if (!tiers_empty && credit < flow_ml_red_emax_ns())
+	/* learnable Emax through the shared helper, since aged heads still */
+	/* need funding with no fallback. Tiers-empty keeps the walk with no */
+	/* reserve, so zero credit never idles work with outer safety still */
+	/* checked. */
+	if (flow_reclaim_early_skip(credit, tiers_empty))
 		return 0;
 	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, q, flow_overflow_dsq(), 0) {

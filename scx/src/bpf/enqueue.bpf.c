@@ -309,23 +309,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	/* bounds the check without shaping vruntime. Critical follows the */
 	/* unified latency and cost uses the pre-clamp slice for fresh */
 	/* waits, so RED and slice agree. A full O(n) least value scan stays */
-	/* a noted alternative, so the verifier keeps one pass. */
+	/* a noted alternative, so the verifier keeps one pass. Shares one */
+	/* copy with miss plus pinned, so the dispatcher stays thin. */
 	{
 		u32 csl = READ_ONCE(tctx->slice_ns);
 		bool ccrit = open_out.is_lat;
 		u32 cost_sl = csl;
+		struct flow_reject_tail rej;
 		if (open_out.is_fresh && !(enq_flags & SCX_ENQ_PREEMPT))
 			cost_sl = open_out.pre_slice;
-		if (flow_red_should_reject(deadline, now, avg, cost_sl,
-		    ccrit)) {
-			u32 ctw = READ_ONCE(tctx->weight);
-			u32 ceff = flow_task_effective_weight(ctw, hint_w);
-			flow_count_red_reject();
-			flow_overflow_insert(p, enq_flags,
-			    flow_red_value(ceff, ccrit));
-			flow_kick_idle_allowed(p, sel);
+		rej.tctx = tctx;
+		rej.deadline = deadline;
+		rej.now = now;
+		rej.avg = avg;
+		rej.slice = cost_sl;
+		rej.is_lat = ccrit;
+		rej.hint_w = hint_w;
+		rej.enq_flags = enq_flags;
+		rej.sel = sel;
+		if (flow_enqueue_reject(p, &rej))
 			return;
-		}
 	}
 	/* Every tier plus bypass join counts one admit without double */
 	/* counting, so the counters track joins while tier queues hold */

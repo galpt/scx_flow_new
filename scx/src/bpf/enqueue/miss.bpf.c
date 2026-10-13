@@ -89,36 +89,33 @@ static __noinline bool flow_enqueue_miss(struct task_struct *p,
 	__sync_lock_test_and_set(&tctx->slice_ns,
 	    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 	nvt = flow_make_fair(tctx, ndl, hint_w, m_sleep);
-	{
-		u64 mbound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-		if (nvt != 0 && mbound != (u64)~0ULL &&
-		    !flow_time_before(nvt, mbound) && nvt != mbound)
-			nvt = mbound;
-	}
+	/* In-tier keys cap at now plus one period through the shared */
+	/* helper, so far keys never starve past the bound. */
+	nvt = flow_enqueue_cap_key(nvt, now);
 	/* RED on the miss rejoin with the same O(1) newcomer check through */
 	/* the shared outlined helper, so a reject needs cost past the */
 	/* learnable Emax plus cost past the exceed with no critical. */
 	/* Tolerance aids only the guarantee without shaping the key. */
 	/* A full O(n) least value scan stays a noted alternative, so */
 	/* the verifier keeps one pass. Critical follows the unified */
-	/* latency, so RED and slice agree. */
+	/* latency through the shared test, so RED and slice agree. */
 	msl = READ_ONCE(tctx->slice_ns);
+	mcrit = flow_enqueue_is_lat(avg, dev, hint, m_sleep,
+	    READ_ONCE(tctx->weight), hint_w);
 	{
-		u32 mtw0 = READ_ONCE(tctx->weight);
-		u32 meff0;
-		if (mtw0 == 0)
-			mtw0 = (u32)FLOW_WEIGHT_BASE;
-		meff0 = flow_task_effective_weight(mtw0, hint_w);
-		mcrit = flow_is_lat(avg, dev, hint, m_sleep, 0, meff0);
-	}
-	if (flow_red_should_reject(ndl, now, avg, msl, mcrit)) {
-		u32 mtw = READ_ONCE(tctx->weight);
-		u32 meff = flow_task_effective_weight(mtw, hint_w);
-		flow_count_red_reject();
-		flow_overflow_insert(p, enq_flags,
-		    flow_red_value(meff, mcrit));
-		flow_kick_idle_allowed(p, sel);
-		return true;
+		struct flow_reject_tail rej = {
+			.tctx = tctx,
+			.deadline = ndl,
+			.now = now,
+			.avg = avg,
+			.slice = msl,
+			.is_lat = mcrit,
+			.hint_w = hint_w,
+			.enq_flags = enq_flags,
+			.sel = sel,
+		};
+		if (flow_enqueue_reject(p, &rej))
+			return true;
 	}
 	flow_tier_insert(p, cpu, nvt, now);
 	flow_count_admit();

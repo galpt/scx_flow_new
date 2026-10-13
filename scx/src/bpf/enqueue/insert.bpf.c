@@ -173,6 +173,135 @@ static __noinline void flow_clamp_to_min(struct flow_task_ctx *tctx,
 		__sync_val_compare_and_swap(&tctx->vruntime, cur, floor);
 }
 /**
+ * flow_enqueue_cap_key - cap one fair key at now plus one period.
+ * @vtime: strict fair time from the EDF key, zero keeps zero.
+ * @now: current time in nanos.
+ *
+ * Caps far keys at now plus one period with saturation, so far keys
+ * never starve past the bound while placement tests the deadline.
+ * Like fair.c, the cap paces service, unlike rt.c, no fixed priority
+ * holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so miss plus open plus pinned share the same bound with no
+ * inline growth.
+ *
+ * Returns: capped key in nanos.
+ */
+static __noinline u64 flow_enqueue_cap_key(u64 vtime, u64 now)
+{
+	u64 bound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
+	if (vtime != 0 && bound != (u64)~0ULL &&
+	    !flow_time_before(vtime, bound) && vtime != bound)
+		vtime = bound;
+	return vtime;
+}
+/**
+ * flow_enqueue_is_lat - unified latency for one wait from stored fields.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @hint: flat period hint in micros, zero for no hint.
+ * @sleep_ns: true sleep gap from the caller wrap-safe helper.
+ * @task_w: task base share, zero maps to neutral.
+ * @hint_w: hint share, zero maps to neutral.
+ *
+ * Stacks task times hint over 128 then runs the unified base plus ext
+ * test with probation, so newcomers stay batch with no stored bit and
+ * RED plus slice agree on the same gap. Like fair.c, the test paces
+ * service, unlike rt.c, no fixed priority holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so miss plus open plus pinned share the same test with no
+ * inline growth.
+ *
+ * Returns: true when latency holds, else false for batch.
+ */
+static __noinline bool flow_enqueue_is_lat(u64 avg, u64 dev, u32 hint,
+	u64 sleep_ns, u32 task_w, u32 hint_w)
+{
+	u32 tw = task_w ? task_w : (u32)FLOW_WEIGHT_BASE;
+	u32 eff = flow_task_effective_weight(tw, hint_w);
+	return flow_is_lat(avg, dev, hint, sleep_ns, 0, eff);
+}
+/**
+ * struct flow_reject_tail - RED reject args for the shared reject path.
+ * @tctx: task state with weight for the value order.
+ * @deadline: newcomer absolute deadline in nanos.
+ * @now: current time in nanos.
+ * @avg: burst average in nanos, zero for no history.
+ * @slice: cost slice in nanos for the RED check.
+ * @is_lat: unified latency for the RED check.
+ * @hint_w: hint share with base for neutral.
+ * @enq_flags: enqueue flags threaded to the reject insert.
+ * @sel: selected CPU hint for the idle kick.
+ *
+ * Bundles the RED state plus time plus flags, so the shared reject
+ * takes one pointer like the miss plus open tails with no stack args
+ * and the same order.
+ */
+struct flow_reject_tail {
+	struct flow_task_ctx *tctx;
+	u64 deadline;
+	u64 now;
+	u64 avg;
+	u32 slice;
+	bool is_lat;
+	u32 hint_w;
+	u64 enq_flags;
+	s32 sel;
+};
+/**
+ * flow_enqueue_reject - RED reject one newcomer to the value queue.
+ * @p: task to reject, passed to the reject insert.
+ * @t: reject tail with state plus deadline plus time plus flags.
+ *
+ * Runs the shared O(1) newcomer check through the outlined helper, so
+ * a reject needs cost past the learnable Emax plus cost past the
+ * exceed with no critical. A reject joins the value ordered queue with
+ * one idle kick, else admits with no insert. Queue order uses value
+ * without shaping vruntime. Like fair.c, the earliest key wins,
+ * unlike rt.c, no fixed priority holds.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so miss plus open plus pinned share the same reject with no
+ * inline growth and the same counts.
+ *
+ * Returns: true when rejected with insert plus kick, else false.
+ */
+static __noinline bool flow_enqueue_reject(struct task_struct *p,
+	const struct flow_reject_tail *t)
+{
+	struct flow_task_ctx *tctx;
+	u64 deadline;
+	u64 now;
+	u64 avg;
+	u32 slice;
+	bool is_lat;
+	u32 hint_w;
+	if (!p || !t)
+		return false;
+	tctx = t->tctx;
+	if (!tctx)
+		return false;
+	deadline = t->deadline;
+	now = t->now;
+	avg = t->avg;
+	slice = t->slice;
+	is_lat = t->is_lat;
+	hint_w = t->hint_w;
+	if (!flow_red_should_reject(deadline, now, avg, slice, is_lat))
+		return false;
+	{
+		u32 tw = READ_ONCE(tctx->weight);
+		u32 eff = flow_task_effective_weight(tw, hint_w);
+		flow_count_red_reject();
+		flow_overflow_insert(p, t->enq_flags,
+		    flow_red_value(eff, is_lat));
+		flow_kick_idle_allowed(p, t->sel);
+	}
+	return true;
+}
+/**
  * struct flow_pinned_tail - pinned args for the outlined pinned path.
  * @tctx: task state with vruntime plus deadline plus predictor.
  * @sel: selected CPU hint, negative falls back to first allowed.
@@ -279,28 +408,20 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
 		pvt = flow_make_fair(tctx, pdl, phint_w, pm_sleep);
-		{
-			u64 pbound0 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-			if (pvt != 0 && pbound0 != (u64)~0ULL &&
-			    !flow_time_before(pvt, pbound0) && pvt != pbound0)
-				pvt = pbound0;
-		}
+		pvt = flow_enqueue_cap_key(pvt, now);
 	} else if (!is_reenq) {
 		u64 p_old_wait = READ_ONCE(tctx->wait_at);
 		u64 p_sleep = flow_sleep_ns(p_old_wait, now, pavg);
-		u32 p_task_w = READ_ONCE(tctx->weight);
-		u32 p_eff = 0;
 		bool p_is_lat;
 		u32 p_pre;
 		u32 p_slice;
 		u64 p_vt;
 		/* No stable uclamp field in this task view, so fail open to */
 		/* zero without an extra map, and probation holds through both */
-		/* helpers, so newcomers stay batch. */
-		if (p_task_w == 0)
-			p_task_w = (u32)FLOW_WEIGHT_BASE;
-		p_eff = flow_task_effective_weight(p_task_w, phint_w);
-		p_is_lat = flow_is_lat(pavg, pdev, ph, p_sleep, 0, p_eff);
+		/* helpers, so newcomers stay batch. Shares the latency copy */
+		/* with miss plus open. */
+		p_is_lat = flow_enqueue_is_lat(pavg, pdev, ph, p_sleep,
+		    READ_ONCE(tctx->weight), phint_w);
 		p_pre = flow_slice_for(pdl, now);
 		p_pre = flow_slice_tier_cap(p_pre, pavg, pdev, p_is_lat);
 		p_slice = flow_slice_lat_clamp(p_pre, p_is_lat);
@@ -323,12 +444,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 				pvt = p_vt;
 			}
 		}
-		{
-			u64 pbound = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-			if (pvt != 0 && pbound != (u64)~0ULL &&
-			    !flow_time_before(pvt, pbound) && pvt != pbound)
-				pvt = pbound;
-		}
+		pvt = flow_enqueue_cap_key(pvt, now);
 	} else {
 		u64 pr_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
 		    pavg);
@@ -337,57 +453,42 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
 		pvt = flow_make_fair(tctx, pdl, phint_w, pr_sleep);
-		{
-			u64 pbound2 = flow_sat_add(now, (u64)FLOW_PERIOD_NS);
-			if (pvt != 0 && pbound2 != (u64)~0ULL &&
-			    !flow_time_before(pvt, pbound2) && pvt != pbound2)
-				pvt = pbound2;
-		}
+		pvt = flow_enqueue_cap_key(pvt, now);
 	}
 	/* RED on the pinned join through the shared outlined helper, so a */
 	/* reject needs cost past the learnable Emax plus cost past the */
 	/* exceed with no critical. Tolerance aids only the guarantee */
 	/* without shaping the key. Critical follows the unified latency */
-	/* and cost uses the pre-clamp slice for fresh waits. */
+	/* through the shared test and cost uses the pre-clamp slice for */
+	/* fresh waits. */
 	{
 		u32 psl = READ_ONCE(tctx->slice_ns);
 		bool pcrit;
 		u32 pcost_sl;
+		struct flow_reject_tail rej;
 		if (have_pin) {
 			pcrit = pin_is_lat;
 			if (!(enq_flags & SCX_ENQ_PREEMPT))
 				pcost_sl = pin_pre;
 			else
 				pcost_sl = psl;
-		} else if (pmiss) {
-			u32 ptw0 = READ_ONCE(tctx->weight);
-			u32 peff0;
-			if (ptw0 == 0)
-				ptw0 = (u32)FLOW_WEIGHT_BASE;
-			peff0 = flow_task_effective_weight(ptw0, phint_w);
-			pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0,
-			    peff0);
-			pcost_sl = psl;
 		} else {
-			u32 ptw0 = READ_ONCE(tctx->weight);
-			u32 peff0;
-			if (ptw0 == 0)
-				ptw0 = (u32)FLOW_WEIGHT_BASE;
-			peff0 = flow_task_effective_weight(ptw0, phint_w);
-			pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0,
-			    peff0);
+			pcrit = flow_enqueue_is_lat(pavg, pdev, ph,
+			    pin_sleep_hold, READ_ONCE(tctx->weight),
+			    phint_w);
 			pcost_sl = psl;
 		}
-		if (flow_red_should_reject(pdl, now, pavg, pcost_sl,
-		    pcrit)) {
-			u32 ptw = READ_ONCE(tctx->weight);
-			u32 peff = flow_task_effective_weight(ptw, phint_w);
-			flow_count_red_reject();
-			flow_overflow_insert(p, enq_flags,
-			    flow_red_value(peff, pcrit));
-			flow_kick_idle_allowed(p, sel);
+		rej.tctx = tctx;
+		rej.deadline = pdl;
+		rej.now = now;
+		rej.avg = pavg;
+		rej.slice = pcost_sl;
+		rej.is_lat = pcrit;
+		rej.hint_w = phint_w;
+		rej.enq_flags = enq_flags;
+		rej.sel = sel;
+		if (flow_enqueue_reject(p, &rej))
 			return;
-		}
 	}
 	if (flow_cpu_ok(p, pc)) {
 		flow_tier_insert(p, pc, pvt, now);
@@ -402,7 +503,8 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		if (ptw == 0)
 			ptw = (u32)FLOW_WEIGHT_BASE;
 		peff = flow_task_effective_weight(ptw, phint_w);
-		pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0, peff);
+		pcrit = flow_enqueue_is_lat(pavg, pdev, ph, pin_sleep_hold,
+		    ptw, phint_w);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags,

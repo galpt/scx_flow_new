@@ -54,6 +54,7 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 {
 	u32 key = 0;
 	struct flow_online_model *m;
+	struct flow_ml_feat feat;
 	s64 pred = 0;
 	s64 err;
 	s64 grad;
@@ -68,31 +69,15 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	if (!m)
 		return;
 
-	/* Fixed point dot product over burst capped inputs with FP_SHIFT 8. */
-	/* Burst caps keep a huge avg plus dev plus sleep from saturating */
-	/* the score to the error clip on every step, while lag stays */
-	/* within plus or minus 2ms via the lag bound plus share stays */
-	/* within 1 to 16384 via the effective helper with no extra cap, */
-	/* so train plus infer agree on bursts with three caps keeping the */
-	/* enqueue verifier under one million. */
-	{
-		u64 c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
-		u64 c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
-		s32 c_lag = READ_ONCE(tctx->vlag);
-		u64 c_sleep = flow_ml_cap_burst(sleep_ns);
-		u32 c_w = eff_w;
-		pred += ((s64)(c_avg >> 4) *
-		    (s64)READ_ONCE(m->w_avg)) >> (FLOW_ML_FP_SHIFT - 4);
-		pred += ((s64)(c_dev >> 4) *
-		    (s64)READ_ONCE(m->w_dev)) >> (FLOW_ML_FP_SHIFT - 4);
-		pred += ((s64)c_lag *
-		    (s64)READ_ONCE(m->w_lag)) >> FLOW_ML_FP_SHIFT;
-		pred += ((s64)(c_sleep >> 4) *
-		    (s64)READ_ONCE(m->w_sleep)) >> (FLOW_ML_FP_SHIFT - 4);
-		pred += ((s64)c_w *
-		    (s64)READ_ONCE(m->w_weight)) >> FLOW_ML_FP_SHIFT;
-		pred += (s64)READ_ONCE(m->bias);
-	}
+	/* One shared fill feeds the dot plus the gradients, so the second */
+	/* capping pass drops with no behavior change. Burst caps keep a */
+	/* huge avg plus dev plus sleep from saturating the score to the */
+	/* error clip on every step, while lag stays within plus or minus */
+	/* 2ms via the lag bound plus share stays within 1 to 16384 via */
+	/* the effective helper with no extra cap, so train plus infer */
+	/* agree on bursts with one shared fill keeping the verifier small. */
+	flow_ml_feat(tctx, sleep_ns, eff_w, &feat);
+	pred = flow_ml_score(&feat, m);
 
 	if (pred < (s64)FLOW_SLICE_MIN_NS)
 		pred = (s64)FLOW_SLICE_MIN_NS;
@@ -118,29 +103,24 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	else if (err < -((s64)FLOW_ML_GRAD_MAX_NS))
 		err = -((s64)FLOW_ML_GRAD_MAX_NS);
 
-	/* Atomic SGD updates over burst capped inputs with LEARN_SHIFT 11. */
+	/* Atomic SGD updates over the shared fill with LEARN_SHIFT 11. */
 	/* The s32 clamp keeps the cast with no truncate, so a huge */
 	/* burst never wraps the weight add with lag plus share already */
 	/* bounded with no extra cap. */
 	{
-		u64 c_avg = flow_ml_cap_burst((u64)READ_ONCE(tctx->avg_ns));
-		u64 c_dev = flow_ml_cap_burst((u64)READ_ONCE(tctx->dev_ns));
-		s32 c_lag = READ_ONCE(tctx->vlag);
-		u64 c_sleep = flow_ml_cap_burst(sleep_ns);
-		u32 c_w = eff_w;
-		grad = (err * (s64)(c_avg >> 6)) >> FLOW_ML_LEARN_SHIFT;
+		grad = (err * (s64)(feat.avg >> 6)) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_avg, flow_ml_grad_s32(grad));
 
-		grad = (err * (s64)(c_dev >> 6)) >> FLOW_ML_LEARN_SHIFT;
+		grad = (err * (s64)(feat.dev >> 6)) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_dev, flow_ml_grad_s32(grad));
 
-		grad = (err * ((s64)c_lag >> 4)) >> FLOW_ML_LEARN_SHIFT;
+		grad = (err * ((s64)feat.lag >> 4)) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_lag, flow_ml_grad_s32(grad));
 
-		grad = (err * (s64)(c_sleep >> 6)) >> FLOW_ML_LEARN_SHIFT;
+		grad = (err * (s64)(feat.sleep >> 6)) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_sleep, flow_ml_grad_s32(grad));
 
-		grad = (err * (s64)c_w) >> FLOW_ML_LEARN_SHIFT;
+		grad = (err * (s64)feat.w) >> FLOW_ML_LEARN_SHIFT;
 		__sync_fetch_and_add(&m->w_weight, flow_ml_grad_s32(grad));
 
 		grad = err >> FLOW_ML_LEARN_SHIFT;
@@ -182,66 +162,7 @@ static __noinline void flow_ml_train_step(const struct flow_task_ctx *tctx,
 	/* 64us to 1ms with no storm. The asymmetric step needs near 80% */
 	/* hits to hold steady, so weak accuracy drifts to the outer with */
 	/* safety still checked. Legacy rows with version past 1 skip with */
-	/* no write, so old headers never drive the bounds. */
-	{
-		u32 ver = READ_ONCE(m->version);
-		if (ver == (u32)FLOW_ML_MODEL_VERSION) {
-			bool hit = acc_hit;
-			u64 tol_cur = (u64)READ_ONCE(m->red_tol_ns);
-			u64 emax_cur = (u64)READ_ONCE(m->red_emax_ns);
-			u64 tol_nxt;
-			u64 emax_nxt;
-			u32 tol_old;
-			u32 emax_old;
-			tol_cur = flow_red_tol_clamp(tol_cur);
-			emax_cur = flow_red_emax_clamp(emax_cur);
-			if (hit) {
-				tol_nxt = tol_cur > (u64)FLOW_RED_TOL_NS ?
-				    tol_cur - 16ULL : tol_cur < (u64)FLOW_RED_TOL_NS ?
-				    tol_cur + 16ULL : tol_cur;
-				emax_nxt = emax_cur > (u64)FLOW_RED_EMAX_NS ?
-				    emax_cur - 64ULL : emax_cur < (u64)FLOW_RED_EMAX_NS ?
-				    emax_cur + 64ULL : emax_cur;
-			} else {
-				tol_nxt = flow_red_tol_clamp(flow_sat_add(tol_cur, 64ULL));
-				emax_nxt = flow_red_emax_clamp(flow_sat_add(emax_cur, 256ULL));
-			}
-			tol_nxt = flow_red_tol_clamp(tol_nxt);
-			emax_nxt = flow_red_emax_clamp(emax_nxt);
-			tol_old = __sync_val_compare_and_swap(&m->red_tol_ns,
-			    (u32)tol_cur, (u32)tol_nxt);
-			if (tol_old != (u32)tol_cur) {
-				tol_cur = (u64)READ_ONCE(m->red_tol_ns);
-				tol_cur = flow_red_tol_clamp(tol_cur);
-				if (hit) {
-					tol_nxt = tol_cur > (u64)FLOW_RED_TOL_NS ?
-					    tol_cur - 16ULL : tol_cur < (u64)FLOW_RED_TOL_NS ?
-					    tol_cur + 16ULL : tol_cur;
-				} else {
-					tol_nxt = flow_red_tol_clamp(flow_sat_add(tol_cur, 64ULL));
-				}
-				tol_nxt = flow_red_tol_clamp(tol_nxt);
-				tol_old = __sync_val_compare_and_swap(&m->red_tol_ns,
-				    (u32)tol_cur, (u32)tol_nxt);
-				(void)tol_old;
-			}
-			emax_old = __sync_val_compare_and_swap(&m->red_emax_ns,
-			    (u32)emax_cur, (u32)emax_nxt);
-			if (emax_old != (u32)emax_cur) {
-				emax_cur = (u64)READ_ONCE(m->red_emax_ns);
-				emax_cur = flow_red_emax_clamp(emax_cur);
-				if (hit) {
-					emax_nxt = emax_cur > (u64)FLOW_RED_EMAX_NS ?
-					    emax_cur - 64ULL : emax_cur < (u64)FLOW_RED_EMAX_NS ?
-					    emax_cur + 64ULL : emax_cur;
-				} else {
-					emax_nxt = flow_red_emax_clamp(flow_sat_add(emax_cur, 256ULL));
-				}
-				emax_nxt = flow_red_emax_clamp(emax_nxt);
-				emax_old = __sync_val_compare_and_swap(&m->red_emax_ns,
-				    (u32)emax_cur, (u32)emax_nxt);
-				(void)emax_old;
-			}
-		}
-	}
+	/* no write, so old headers never drive the bounds. Outlined with */
+	/* no extra inline growth. */
+	flow_ml_drift(m, acc_hit);
 }

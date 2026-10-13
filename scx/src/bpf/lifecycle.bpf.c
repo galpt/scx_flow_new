@@ -91,6 +91,82 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p,
 	(void)p;
 	(void)deq_flags;
 }
+/**
+ * struct flow_stop_tail - stopping commit args for the outlined commit.
+ * @tctx: task state with slice plus adapt miss plus sat plus delta.
+ * @slice: new slice in nanos to store.
+ * @miss: true counts one adapt miss else clears the streak.
+ * @sat_hi: saturation ceiling with 100us for latency else 1ms.
+ * @cost_avg: burst average for the RED cost, zero for no history.
+ * @cost_slice: stored slice for the RED cost.
+ * @delta: raw service in nanos of the stopping segment.
+ *
+ * Bundles the adapt plus carry commit, so the four stopping paths share
+ * one store with no inline growth and the same order.
+ */
+struct flow_stop_tail {
+	struct flow_task_ctx *tctx;
+	u32 slice;
+	bool miss;
+	u32 sat_hi;
+	u64 cost_avg;
+	u32 cost_slice;
+	u64 delta;
+};
+/**
+ * flow_stop_commit - commit one stopping slice plus adapt plus delta.
+ * @t: stop tail with state plus slice plus miss plus ceiling plus cost
+ * plus delta, read once by the caller.
+ *
+ * Stores the slice, folds the adapt miss streak with saturation at
+ * 0xffff, folds the clamp streak at the floor plus ceiling, then saves
+ * the unused cost minus delta for the global credit with no wrap. Like
+ * fair.c, the step paces service, unlike rt.c, no fixed priority
+ * holds. Virtual time stays untouched.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so resume plus carry plus adapt share the same commit with no
+ * inline growth.
+ */
+static __noinline void flow_stop_commit(const struct flow_stop_tail *t)
+{
+	struct flow_task_ctx *tctx;
+	u32 slice;
+	bool miss;
+	u32 sat_hi;
+	u64 ccost;
+	u64 csaved;
+	u32 cs;
+	if (!t)
+		return;
+	tctx = t->tctx;
+	if (!tctx)
+		return;
+	slice = t->slice;
+	miss = t->miss;
+	sat_hi = t->sat_hi;
+	__sync_lock_test_and_set(&tctx->slice_ns, slice);
+	if (miss) {
+		u16 mm = READ_ONCE(tctx->adapt_miss);
+		if (mm < 0xffffU)
+			tctx->adapt_miss = mm + 1;
+	} else {
+		tctx->adapt_miss = 0;
+	}
+	{
+		u16 sat = READ_ONCE(tctx->adapt_sat);
+		if (slice == (u32)FLOW_SLICE_MIN_NS || slice == sat_hi) {
+			if (sat < 0xffffU)
+				tctx->adapt_sat = sat + 1;
+		} else {
+			tctx->adapt_sat = 0;
+		}
+	}
+	ccost = flow_red_cost(t->cost_avg, t->cost_slice);
+	csaved = ccost > t->delta ? ccost - t->delta : 0;
+	cs = csaved > 0xffffffffULL ? 0xffffffffU : (u32)csaved;
+	tctx->adapt_delta = cs;
+}
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 	bool runnable)
 {
@@ -251,57 +327,42 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			    pre_cur);
 			u32 rem_cap = stop_is_lat ?
 			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
-			__sync_lock_test_and_set(&tctx->slice_ns, rem);
-			tctx->adapt_miss = 0;
-			{
-				u16 sat = READ_ONCE(tctx->adapt_sat);
-				if (rem == (u32)FLOW_SLICE_MIN_NS ||
-				    rem == rem_cap) {
-					if (sat < 0xffffU)
-						tctx->adapt_sat = sat + 1;
-				} else {
-					tctx->adapt_sat = 0;
-				}
-			}
-			{
-				u64 ccost = flow_red_cost(have_pred ? n_avg_keep : 0,
-				    pre_cur);
-				u64 csaved = ccost > delta ? ccost - delta : 0;
-				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
-				    (u32)csaved;
-				tctx->adapt_delta = cs;
-			}
+			/* Resume plus carry plus adapt commit through the */
+			/* shared helper, so the four stores share one copy */
+			/* with no behavior change. */
+			struct flow_stop_tail commit = {
+				.tctx = tctx,
+				.slice = rem,
+				.miss = false,
+				.sat_hi = rem_cap,
+				.cost_avg = have_pred ? n_avg_keep : 0,
+				.cost_slice = pre_cur,
+				.delta = delta,
+			};
+			flow_stop_commit(&commit);
 		} else if (!wmiss && have_pred && delta > 0 &&
 		    delta < (u64)FLOW_QUANTUM_NS && stop_is_lat) {
 			u32 carry = flow_carry_for(delta);
 			u32 lat_cap = stop_is_lat ?
 			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			struct flow_stop_tail commit;
 			carry = flow_slice_lat_clamp(carry, stop_is_lat);
-			__sync_lock_test_and_set(&tctx->slice_ns, carry);
-			tctx->adapt_miss = 0;
-			{
-				u16 sat = READ_ONCE(tctx->adapt_sat);
-				if (carry == (u32)FLOW_SLICE_MIN_NS ||
-				    carry == lat_cap) {
-					if (sat < 0xffffU)
-						tctx->adapt_sat = sat + 1;
-				} else {
-					tctx->adapt_sat = 0;
-				}
-			}
-			{
-				u64 ccost = flow_red_cost(n_avg_keep, pre_cur);
-				u64 csaved = ccost > delta ? ccost - delta : 0;
-				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
-				    (u32)csaved;
-				tctx->adapt_delta = cs;
-			}
+			commit.tctx = tctx;
+			commit.slice = carry;
+			commit.miss = false;
+			commit.sat_hi = lat_cap;
+			commit.cost_avg = n_avg_keep;
+			commit.cost_slice = pre_cur;
+			commit.delta = delta;
+			flow_stop_commit(&commit);
 		} else {
 			u32 cur = READ_ONCE(tctx->slice_ns);
 			u64 exceed = 0;
 			u64 slack = 0;
 			u32 nxt;
 			bool m = wmiss;
+			u32 sat_hi;
+			struct flow_stop_tail commit;
 			if (exp_dl != 0) {
 				if (m)
 					exceed = now - exp_dl;
@@ -311,34 +372,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 			nxt = flow_adapt_prop(cur, exceed, slack);
 			if (stop_is_lat)
 				nxt = flow_slice_lat_clamp(nxt, true);
-			__sync_lock_test_and_set(&tctx->slice_ns, nxt);
-			if (m) {
-				u16 mm = READ_ONCE(tctx->adapt_miss);
-				if (mm < 0xffffU)
-					tctx->adapt_miss = mm + 1;
-			} else {
-				tctx->adapt_miss = 0;
-			}
-			{
-				u16 sat = READ_ONCE(tctx->adapt_sat);
-				u32 sat_hi = stop_is_lat ?
-				    (u32)FLOW_SLICE_LAT_NS :
-				    (u32)FLOW_QUANTUM_NS;
-				if (nxt == (u32)FLOW_SLICE_MIN_NS ||
-				    nxt == sat_hi) {
-					if (sat < 0xffffU)
-						tctx->adapt_sat = sat + 1;
-				} else {
-					tctx->adapt_sat = 0;
-				}
-			}
-			{
-				u64 ccost = flow_red_cost(have_pred ? n_avg_keep : 0, cur);
-				u64 csaved = ccost > delta ? ccost - delta : 0;
-				u32 cs = csaved > 0xffffffffULL ? 0xffffffffU :
-				    (u32)csaved;
-				tctx->adapt_delta = cs;
-			}
+			sat_hi = stop_is_lat ?
+			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
+			commit.tctx = tctx;
+			commit.slice = nxt;
+			commit.miss = m;
+			commit.sat_hi = sat_hi;
+			commit.cost_avg = have_pred ? n_avg_keep : 0;
+			commit.cost_slice = cur;
+			commit.delta = delta;
+			flow_stop_commit(&commit);
 		}
 	} else {
 		/* Completion adapt without carry and without a kick. An exceed */
@@ -361,45 +404,33 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		nxt = flow_adapt_prop(cur, exceed, slack);
 		if (stop_is_lat)
 			nxt = flow_slice_lat_clamp(nxt, true);
-		u64 ccost;
-		u64 csaved;
-		__sync_lock_test_and_set(&tctx->slice_ns, nxt);
-		if (cmiss) {
-			u16 m = READ_ONCE(tctx->adapt_miss);
-			if (m < 0xffffU)
-				tctx->adapt_miss = m + 1;
-		} else {
-			tctx->adapt_miss = 0;
-		}
 		{
-			u16 sat = READ_ONCE(tctx->adapt_sat);
 			u32 sat_hi = stop_is_lat ?
 			    (u32)FLOW_SLICE_LAT_NS : (u32)FLOW_QUANTUM_NS;
-			if (nxt == (u32)FLOW_SLICE_MIN_NS ||
-			    nxt == sat_hi) {
-				if (sat < 0xffffU)
-					tctx->adapt_sat = sat + 1;
-			} else {
-				tctx->adapt_sat = 0;
-			}
+			struct flow_stop_tail commit = {
+				.tctx = tctx,
+				.slice = nxt,
+				.miss = cmiss,
+				.sat_hi = sat_hi,
+				.cost_avg = have_pred ? n_avg_keep : 0,
+				.cost_slice = cur,
+				.delta = delta,
+			};
+			flow_stop_commit(&commit);
+			/* Reclaim runs in dispatch from the global credit at or past */
+			/* the learnable Emax with tiers-empty fallback plus aged cover */
+			/* past one period, so this path records only without walking */
+			/* The global credit funds the retry without shaping shares. */
+			/* Dispatch scans at most eight value ordered rejects with */
+			/* positive laxity plus same key or strictly after plus mask wins, */
+			/* so strict order holds with a single move. Zero service */
+			/* completions fund nothing, so only a real delta with a trained */
+			/* predictor adds credit. Credit reuses the committed delta, */
+			/* so funding agrees with the stored value with no second */
+			/* cost pass. */
+			if (delta > 0 && have_pred)
+				flow_credit_add((u64)READ_ONCE(tctx->adapt_delta));
 		}
-		ccost = flow_red_cost(have_pred ? n_avg_keep : 0, cur);
-		csaved = ccost > delta ? ccost - delta : 0;
-		{
-			u32 cs = csaved > 0xffffffffULL ? 0xffffffffU : (u32)csaved;
-			tctx->adapt_delta = cs;
-		}
-		/* Reclaim runs in dispatch from the global credit at or past */
-		/* the learnable Emax with tiers-empty fallback plus aged cover */
-		/* past one period, so this path records only without walking */
-		/* The global credit funds the retry without shaping shares. */
-		/* Dispatch scans at most eight value ordered rejects with */
-		/* positive laxity plus same key or strictly after plus mask wins, */
-		/* so strict order holds with a single move. Zero service */
-		/* completions fund nothing, so only a real delta with a trained */
-		/* predictor adds credit. */
-		if (delta > 0 && have_pred)
-			flow_credit_add(csaved);
 	}
 	/* The pid view clears when owned. The snapshot counts live pids for */
 	/* the on CPU gauge. */
