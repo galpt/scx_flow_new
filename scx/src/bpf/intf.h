@@ -1394,6 +1394,34 @@ static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
 	return (u32)FLOW_SLICE_MAX_NS;
 }
 /**
+ * flow_slice_tier_cap - cap one dynamic slice by the predicted tier.
+ * @pre: dynamic slice in nanos from the remaining clamp.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_lat: true forces the ULL ceiling for critical work.
+ *
+ * Caps the tier at the 1ms quantum, so small bursts pace tightly while
+ * bulk still rotates each quantum with no extra hold. The 5ms plus
+ * 20ms ceilings cap here too, so throughput never holds past one
+ * quantum on fresh waits.
+ *
+ * Outlined with noinline to keep verifier headroom with one shared
+ * copy, so open plus pinned share the same tier logic with no inline
+ * growth.
+ *
+ * Returns: capped slice in nanos from 10us to 1ms.
+ */
+static __noinline u32 flow_slice_tier_cap(u32 pre, u64 avg, u64 dev,
+	bool is_lat)
+{
+	u32 tier = flow_classify_latency_tier(avg, dev, is_lat);
+	if (tier > (u32)FLOW_QUANTUM_NS)
+		tier = (u32)FLOW_QUANTUM_NS;
+	if (pre > tier)
+		pre = tier;
+	return pre;
+}
+/**
  * flow_lat_deadline - latency deadline from now plus slice plus margin.
  * @now: current time in nanos.
  * @slice: clamped slice in nanos.

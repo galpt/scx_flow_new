@@ -362,17 +362,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		lat_eff = flow_task_effective_weight(lat_task_w, hint_w);
 		is_lat = flow_is_lat(avg, dev, hint, lat_sleep, 0, lat_eff);
 		pre_slice = flow_slice_for(deadline, now);
-		/* Tier caps the dynamic slice at 1ms, so small bursts pace */
-		/* tightly while bulk still rotates each quantum with no */
-		/* extra hold. The 5ms plus 20ms ceilings cap here too, so */
-		/* throughput never holds past one quantum on fresh waits. */
-		{
-			u32 tier = flow_classify_latency_tier(avg, dev, is_lat);
-			if (tier > (u32)FLOW_QUANTUM_NS)
-				tier = (u32)FLOW_QUANTUM_NS;
-			if (pre_slice > tier)
-				pre_slice = tier;
-		}
+		pre_slice = flow_slice_tier_cap(pre_slice, avg, dev, is_lat);
 		lat_slice = flow_slice_lat_clamp(pre_slice, is_lat);
 		open_is_lat = is_lat;
 		open_pre = pre_slice;

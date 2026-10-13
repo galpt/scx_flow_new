@@ -299,16 +299,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		p_eff = flow_task_effective_weight(p_task_w, phint_w);
 		p_is_lat = flow_is_lat(pavg, pdev, ph, p_sleep, 0, p_eff);
 		p_pre = flow_slice_for(pdl, now);
-		/* Tier caps the dynamic slice at 1ms like the open path, so */
-		/* pinned fresh waits pace the same with no extra hold. */
-		{
-			u32 p_tier = flow_classify_latency_tier(pavg, pdev,
-			    p_is_lat);
-			if (p_tier > (u32)FLOW_QUANTUM_NS)
-				p_tier = (u32)FLOW_QUANTUM_NS;
-			if (p_pre > p_tier)
-				p_pre = p_tier;
-		}
+		p_pre = flow_slice_tier_cap(p_pre, pavg, pdev, p_is_lat);
 		p_slice = flow_slice_lat_clamp(p_pre, p_is_lat);
 		pin_is_lat = p_is_lat;
 		pin_pre = p_pre;
