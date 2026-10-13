@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Shared constants and helpers for the flow scheduler at 4.8.12.
+ * Shared constants and helpers for the flow scheduler at 4.8.13.
  *
  * The scheduler keeps one local queue per CPU plus one shared queue
  * per node plus one shared queue per machine plus one value ordered
@@ -18,7 +18,7 @@
  * millisecond. A miss holds the stored slice else floors it to 10us
  * with a fresh deadline plus a tier rejoin rederived through the same
  * escalation plus skip aging, and a zero slice inherits the 1ms
- * quantum. A global completer credit at or past 128us reclaims one
+ * quantum. A global completer credit at or past 256us reclaims one
  * value ordered reject with positive laxity plus the same key or a
  * strictly after key with one bounded move, so overload drains without
  * starving the tiers. A miss counts when wall time passes the deadline, and
@@ -70,10 +70,41 @@ enum flow_consts {
 	/* pace tightly with no zero slice. Misses hold else floor here, */
 	/* and a zero slice inherits the ceiling. */
 	FLOW_SLICE_MIN_NS = 10000ULL,
-	/* Default period of 16ms with no knob. Holds sixteen slices, */
-	/* so a fully used task still leaves room for one wait plus */
-	/* one retry inside the period. */
-	FLOW_PERIOD_NS = 16000000ULL,
+	/* Ultra-low latency boundary of 50us with no knob. Caps the T1 tier, */
+	/* so audio plus frame pacing bursts pace tightly with no extra hold. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_ULL_NS = 50000ULL,
+	/* Low latency boundary of 100us with no knob. Caps the T2 tier, so */
+	/* compositor plus UI bursts rotate each tenth quantum with no hold. */
+	/* Matches the latency slice cap, so urgent wakeups keep one bound. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_LL_NS = 100000ULL,
+	/* Medium-low latency boundary of 500us with no knob. Caps the T3 */
+	/* tier, so IPC plus microservice bursts hold margin with no storm. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_MLL_NS = 500000ULL,
+	/* Normal latency boundary of 1ms with no knob. Caps the T4 tier at */
+	/* one quantum, so desktop plus worker bursts rotate each quantum. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_NL_NS = 1000000ULL,
+	/* Extended normal latency boundary of 5ms with no knob. Caps the T5 */
+	/* tier, so bulk I/O plus build bursts hold room with no starve. */
+	/* Like fair.c, the bound paces service, unlike rt.c, no fixed */
+	/* priority holds. */
+	FLOW_SLICE_ENL_NS = 5000000ULL,
+	/* Dynamic slice ceiling of 20ms with no knob. Caps the T6 tier plus */
+	/* the multi-tier spectrum, so throughput bursts hold room with an */
+	/* 80ms period guarding starvation. Like fair.c, the ceiling paces */
+	/* service, unlike rt.c, no fixed priority holds. */
+	FLOW_SLICE_MAX_NS = 20000000ULL,
+	/* Default period of 80ms with no knob. Holds four 20ms slices, */
+	/* so a fully used throughput task still leaves room for waits plus */
+	/* retries inside the period with no starvation under 20ms holds. */
+	FLOW_PERIOD_NS = 80000000ULL,
 	/* Predictor bounds with no knob. Holds 1ns to 1s, so a huge */
 	/* burst clamps instead of wrapping to a short deadline. */
 	FLOW_PRED_MIN_NS = 1ULL,
@@ -144,13 +175,13 @@ enum flow_consts {
 	/* within this distance of the CPU minimum, so sleepers gain no */
 	/* more than one extra slice of boost with no storm. */
 	FLOW_VLAG_MAX_NS = 2000000ULL,
-	/* RED bound of 128us with no knob. Caps the maximum exceeding */
+	/* RED bound of 256us with no knob. Caps the maximum exceeding */
 	/* time, so a global credit at or past this bound reclaims one */
 	/* reject, and a victim cost at or below this bound keeps the */
 	/* newcomer with no swap. A capped latency slice at 100us never */
 	/* passes, so latency never pays as victim. The bound caps */
 	/* lateness with no share shaping. */
-	FLOW_RED_EMAX_NS = 128000ULL,
+	FLOW_RED_EMAX_NS = 256000ULL,
 	/* RED tolerance of 64us with no knob. Holds the guarantee slack */
 	/* for hard tasks only, so critical tasks keep zero tolerance */
 	/* with no late run. Tolerance aids the guarantee with no order */
@@ -168,10 +199,10 @@ enum flow_consts {
 	/* Like fair.c, the step tracks load, unlike rt.c, no fixed priority holds. */
 	/* Clamps with the slice floor plus ceiling. */
 	FLOW_ADAPT_SHRINK_NS = 128000ULL,
-	/* Proportional adapt cap of 256us with no knob. Caps one shift */
-	/* step, so a huge exceed plus slack moves at most one quarter */
-	/* slice with no storm. Exceed shrinks, slack grows, both shift 3. */
-	FLOW_ADAPT_PROP_MAX_NS = 256000ULL,
+	/* Proportional adapt cap of 1ms with no knob. Caps one shift */
+	/* step, so a huge exceed plus slack moves at most one quantum */
+	/* with no storm. Exceed shrinks, slack grows, both shift 3. */
+	FLOW_ADAPT_PROP_MAX_NS = 1000000ULL,
 	/* Proportional adapt shift of 3 with no knob. Maps exceed plus */
 	/* slack to one eighth with shifts only, so no divide runs in BPF. */
 	FLOW_ADAPT_PROP_SHIFT = 3ULL,
@@ -182,8 +213,8 @@ enum flow_consts {
 	/* priority holds. Clamps with the slice floor plus ceiling. The */
 	/* cap equals the preempt tail, so a latency head at the cap never */
 	/* passes the tail gate and floors with no resume. Adapt steps cap */
-	/* at 256us then re-clamp here, so one shift never holds past the */
-	/* cap. RED Emax stays at 128us past the cap, so a capped latency */
+	/* at 1ms then re-clamp here, so one shift never holds past the */
+	/* cap. RED Emax stays at 256us past the cap, so a capped latency */
 	/* slice never pays as victim with no swap. */
 	FLOW_SLICE_LAT_NS = 100000ULL,
 	/* Latency sleep floor of 20us with no knob. Vetoes only sleeps */
@@ -250,7 +281,7 @@ enum flow_consts {
 /* stuck slice shows its bound with no extra map. Adapt delta holds the */
 /* last saved execution in nanos per task for debug, while the global */
 /* completer credit funds reclaim, so a completion with delta at or */
-/* past 128us reclaims one reject with no scan. */
+/* past 256us reclaims one reject with no scan. */
 /* Like fair.c, vruntime paces order, unlike rt.c, no fixed priority holds. */
 /* C holds burst else slice else quantum with no knob, and V holds */
 /* weight with zero mapped to 128, so the slice adapts while virtual */
@@ -916,13 +947,13 @@ static __always_inline __attribute__((unused)) u32 flow_adapt_down(u32 cur)
  *
  * Like fair.c, the step paces service, unlike rt.c, no fixed priority
  * holds. An exceed shrinks by exceed shifted right by SHIFT, a slack
- * grows by slack shifted right by SHIFT, each capped at 256us with
+ * grows by slack shifted right by SHIFT, each capped at 1ms with
  * shifts only and no divide. Clamps to 10us plus 1ms, so one step never stalls nor
  * holds the CPU. An on-time stop with both zero holds the clamped slice.
  * Exceed wins when both hold with no wrap. Virtual time stays untouched,
  * RED never writes the slice, and the caller keeps the carry gate first
  * on the same expiring deadline. Latency callers re-clamp the result to
- * 100us past the 256us step, so one shift never holds past the cap.
+ * 100us past the 1ms step, so one shift never holds past the cap.
  *
  * Returns: adapted slice in nanos from 10us to 1ms.
  */
@@ -1068,7 +1099,7 @@ static __always_inline u64 flow_deadline_at(u64 now,
  * flow_task_period - period for one task from hint else default.
  * @hint_us: flat period hint in micros, zero for no hint.
  *
- * A zero hint means no hint, so the default period of 16ms applies.
+ * A zero hint means no hint, so the default period of 80ms applies.
  * The hint converts from micros to nanos with saturation, so a huge
  * hint clamps instead of wrapping to a short period.
  *
@@ -1183,7 +1214,7 @@ static __always_inline u64 flow_pred_dev(u64 dev,
  * @avg: burst average in nanos, zero for no history.
  * @dev: burst deviation in nanos.
  *
- * A zero average means no history, so the default period of 16ms
+ * A zero average means no history, so the default period of 80ms
  * applies. Later periods add average plus deviation with saturation,
  * so a stable burst keeps a tight deadline while a ragged burst holds
  * margin with no wrap past 1s.
@@ -1209,7 +1240,7 @@ static __always_inline u64 flow_pred_period(u64 avg,
  * @hint_us: flat period hint in micros, zero for no hint.
  *
  * A zero average means no history, so the hint period applies with
- * the default of 16ms when the hint is zero. Later wakeups add the
+ * the default of 80ms when the hint is zero. Later wakeups add the
  * predicted period with saturation, so a huge now clamps instead of
  * wrapping to the front. Fair order via kernel priority queue holds
  * the earlier of this deadline plus the virtual deadline, so the
@@ -1269,6 +1300,38 @@ static __always_inline u32 flow_slice_lat_clamp(u32 slice,
 	if (is_lat && slice > (u32)FLOW_SLICE_LAT_NS)
 		return (u32)FLOW_SLICE_LAT_NS;
 	return slice;
+}
+/**
+ * flow_classify_latency_tier - tier ceiling from predicted burst.
+ * @avg: burst average in nanos, zero for no history.
+ * @dev: burst deviation in nanos.
+ * @is_crit: true forces the ULL ceiling for critical work.
+ *
+ * Like fair.c, the tier paces service, unlike rt.c, no fixed priority
+ * holds. Adds average plus deviation with saturation, so a stable burst
+ * keeps a tight tier while a ragged burst holds margin with no wrap.
+ * Critical work plus a prediction at or below 50us earns the ULL
+ * ceiling, then 100us plus 500us plus 1ms plus 5ms bound LL plus MLL
+ * plus NL plus ENL, else the 20ms ceiling holds throughput with no
+ * extra map plus no divide plus no knob.
+ *
+ * Returns: tier ceiling in nanos from 50us to 20ms.
+ */
+static __always_inline u32 flow_classify_latency_tier(u64 avg, u64 dev,
+	bool is_crit)
+{
+	u64 pred = flow_sat_add(avg, dev);
+	if (is_crit || pred <= (u64)FLOW_SLICE_ULL_NS)
+		return (u32)FLOW_SLICE_ULL_NS;
+	if (pred <= (u64)FLOW_SLICE_LL_NS)
+		return (u32)FLOW_SLICE_LL_NS;
+	if (pred <= (u64)FLOW_SLICE_MLL_NS)
+		return (u32)FLOW_SLICE_MLL_NS;
+	if (pred <= (u64)FLOW_SLICE_NL_NS)
+		return (u32)FLOW_SLICE_NL_NS;
+	if (pred <= (u64)FLOW_SLICE_ENL_NS)
+		return (u32)FLOW_SLICE_ENL_NS;
+	return (u32)FLOW_SLICE_MAX_NS;
 }
 /**
  * flow_lat_deadline - latency deadline from now plus slice plus margin.
