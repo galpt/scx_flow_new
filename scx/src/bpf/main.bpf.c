@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core at 4.8.12.
+ * Flow scheduler BPF core at 4.8.13.
  *
  * Maps hold task state, CPU pid plus cursor plus minimum rows, the
  * topology view, the capacity view, the flat hint rows, the per CPU
- * stats rows, and the perf level rows. Init creates one local queue
+ * stats rows, the perf level rows, and the online model row. Init creates one local queue
  * per CPU plus one shared queue per node plus one machine queue plus
  * one value ordered reject queue, and it fails loudly on over bound counts. Ops
  * split across per logic files with maps plus init plus exit plus the
@@ -86,6 +86,18 @@ struct {
 	__type(key, u32);
 	__type(value, u64);
 } reclaim_credit_stor SEC(".maps");
+/* Global online model with five weights plus bias plus clamp plus count. */
+/* One 32B row holds the fixed point SGD state with zero for no */
+/* training, so the dot product reads zero with no shift and the nudge */
+/* returns zero. Updates use atomics with bound 524288, the nudge clamps */
+/* to plus or minus 250us, and the task state stays at 72B with integer */
+/* arithmetic. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct flow_online_model);
+} ml_online_model_stor SEC(".maps");
 volatile u64 nr_cpu_ids;
 volatile u64 nr_node_ids;
 #include "stats.bpf.c"
@@ -100,12 +112,15 @@ volatile u64 nr_node_ids;
 #include "enqueue.bpf.c"
 #include "dispatch.bpf.c"
 #include "lifecycle.bpf.c"
+#include "ml/online_sgd.bpf.c"
+#include "ml/nudge.bpf.c"
 /**
  * flow_init - create queues plus seed CPU state.
  *
  * Creates one local queue per CPU plus one node queue per node plus
  * one machine queue plus one value ordered reject queue. Seeds per CPU state plus
- * capacity rows, then derives the node count from the seeded view.
+ * capacity rows plus the online model row, then derives the node count from
+ * the seeded view.
  * Fails loudly on over bound counts with no partial attach.
  *
  * Returns: 0 on success, negative errno on failure.
@@ -179,6 +194,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		cp = bpf_map_lookup_elem(&cap_stor, &key);
 		if (cp)
 			cp->units = (u32)FLOW_CAP_BASE;
+	}
+	{
+		u32 key = 0;
+		struct flow_online_model *m;
+		m = bpf_map_lookup_elem(&ml_online_model_stor, &key);
+		if (m) {
+			m->w_avg = 0;
+			m->w_dev = 0;
+			m->w_lag = 0;
+			m->w_sleep = 0;
+			m->w_weight = 0;
+			m->bias = 0;
+			m->max_clamp_ns = 0;
+			m->update_count = 0;
+		}
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 local;

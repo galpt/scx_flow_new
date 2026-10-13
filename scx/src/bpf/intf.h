@@ -228,6 +228,31 @@ enum flow_consts {
 	/* extra hold. Like fair.c, the bound paces order, unlike rt.c, no */
 	/* fixed priority holds. */
 	FLOW_D_LAT_NS = 4000000ULL,
+	/* Online SGD fixed point shift of 8 with no knob. Scales one */
+	/* Q8 feature multiply back to real nanos, so integer arithmetic runs */
+	/* in BPF with shifts only. Like fair.c, the shift paces learning, */
+	/* unlike rt.c, no fixed priority holds. */
+	FLOW_ML_FP_SHIFT = 8ULL,
+	/* Online SGD learn shift of 11 with no knob. Maps one clamped */
+	/* gradient to one eighth through the residual 3 after the fixed */
+	/* point shift, so no divide runs in BPF with shifts only. */
+	FLOW_ML_LEARN_SHIFT = 11ULL,
+	/* Online SGD gradient max of 64us with no knob. Clamps the signed */
+	/* error plus the fixed point gradient, so one train step moves at */
+	/* most 8us with no storm. Like fair.c, the bound paces learning, */
+	/* unlike rt.c, no fixed priority holds. */
+	FLOW_ML_GRAD_MAX_NS = 64000ULL,
+	/* Online SGD weight bound of 524288 with no knob. Clamps each */
+	/* weight to plus or minus this raw value in nanos, so the model */
+	/* never wraps with saturation. The bound holds twice the nudge */
+	/* max, so the nudge clamp stays active with no dead code. */
+	FLOW_ML_WEIGHT_BOUND = 524288ULL,
+	/* Online deadline nudge max of 250us with no knob. Clamps the */
+	/* signed correction to plus or minus this value, so one nudge */
+	/* never holds past one quarter quantum with no storm. Like */
+	/* fair.c, the bound paces order, unlike rt.c, no fixed priority */
+	/* holds. */
+	FLOW_ML_NUDGE_MAX_NS = 250000ULL,
 };
 /* Static dispatch tier order with no reorder. Local plus node plus */
 /* machine plus overflow plus steal drain in fair order through the */
@@ -342,6 +367,27 @@ struct flow_hint {
 	u32 period_us;
 	u32 weight;
 };
+/* Online model at 32B with five weights plus bias plus clamp plus count. */
+/* W_avg holds the avg_ns gain, w_dev the dev_ns gain, w_lag the vlag */
+/* gain, w_sleep the sleep_ns gain, w_weight the eff_w gain, each in Q24.8 */
+/* fixed point scaled with FP_SHIFT 8, bias holds the base term, each */
+/* clamped to plus or minus 524288 with saturation, so one train step */
+/* never wraps. Max_clamp_ns holds the nudge limit with 250000 for the */
+/* bound, update_count holds the saturating train count with no wrap. */
+/* Zero means no training yet, so the dot product reads zero with no */
+/* shift and the nudge returns zero. Like fair.c, the weights pace order, */
+/* unlike rt.c, no fixed priority holds. Runs with integer shifts only, */
+/* so the verifier stays small. */
+struct flow_online_model {
+	s32 w_avg;
+	s32 w_dev;
+	s32 w_lag;
+	s32 w_sleep;
+	s32 w_weight;
+	s32 bias;
+	s32 max_clamp_ns;
+	u32 update_count;
+};
 /* Scheduler counters with 17 fields. Reject plus reclaim moves count */
 /* RED overload plus reclaim detail with no extra map, so stats stay at */
 /* 136B. Overflow plus steal moves count in the local bucket with no new */
@@ -388,6 +434,9 @@ _Static_assert(sizeof(struct flow_topo) == 8,
 /* Stats hold 17 counters in 136 bytes. */
 _Static_assert(sizeof(struct flow_sched_stats) == 136,
 	"stats stay at 136B");
+/* Online model holds five weights plus bias plus clamp plus count in 32 bytes. */
+_Static_assert(sizeof(struct flow_online_model) == 32,
+	"ml model stays at 32B");
 /* Queue count holds local plus node plus machine plus overflow. */
 /* Steal reuses peer locals with no new queue, so the count stays. */
 _Static_assert(FLOW_MAX_DSQS ==
