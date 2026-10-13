@@ -367,7 +367,7 @@ mod tests {
             crate::config::PERIOD_NS,
             crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64
         );
-        assert_eq!(crate::config::PERIOD_NS, 16_000_000);
+        assert_eq!(crate::config::PERIOD_NS, 80_000_000);
     }
 
     #[test]
