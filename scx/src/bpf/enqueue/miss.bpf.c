@@ -100,8 +100,17 @@ static __noinline bool flow_enqueue_miss(struct task_struct *p,
 	/* the verifier keeps one pass. Critical follows the unified */
 	/* latency through the shared test, so RED and slice agree. */
 	msl = READ_ONCE(tctx->slice_ns);
-	mcrit = flow_enqueue_is_lat(avg, dev, hint, m_sleep,
-	    READ_ONCE(tctx->weight), hint_w);
+	{
+		struct flow_lat_tail lat = {
+			.avg = avg,
+			.dev = dev,
+			.hint = hint,
+			.sleep_ns = m_sleep,
+			.task_w = READ_ONCE(tctx->weight),
+			.hint_w = hint_w,
+		};
+		mcrit = flow_enqueue_is_lat(&lat);
+	}
 	{
 		struct flow_reject_tail rej = {
 			.tctx = tctx,
