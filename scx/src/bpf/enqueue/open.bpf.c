@@ -97,17 +97,9 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		/* for callers that thread a real clamp. Probation holds through */
 		/* both helpers, so newcomers stay batch. Latency shares one */
 		/* copy with miss plus pinned, so the open path keeps headroom. */
-		{
-			struct flow_lat_tail lat = {
-				.avg = avg,
-				.dev = dev,
-				.hint = hint,
-				.sleep_ns = lat_sleep,
-				.task_w = READ_ONCE(tctx->weight),
-				.hint_w = hint_w,
-			};
-			is_lat = flow_enqueue_is_lat(&lat);
-		}
+		is_lat = flow_enqueue_is_lat(avg, dev, hint, lat_sleep,
+		    flow_task_effective_weight(READ_ONCE(tctx->weight),
+		    hint_w));
 		pre_slice = flow_slice_for(deadline, now);
 		pre_slice = flow_slice_tier_cap(pre_slice, avg, dev, is_lat);
 		lat_slice = flow_slice_lat_clamp(pre_slice, is_lat);
@@ -150,17 +142,9 @@ static __noinline void flow_enqueue_open(const struct flow_open_tail *t,
 		/* RED latency for the requeue uses the same unified test on */
 		/* the same gap through the shared helper, so RED and slice */
 		/* agree with no second wait read at the caller. */
-		{
-			struct flow_lat_tail lat = {
-				.avg = avg,
-				.dev = dev,
-				.hint = hint,
-				.sleep_ns = re_sleep,
-				.task_w = READ_ONCE(tctx->weight),
-				.hint_w = hint_w,
-			};
-			out->is_lat = flow_enqueue_is_lat(&lat);
-		}
+		out->is_lat = flow_enqueue_is_lat(avg, dev, hint, re_sleep,
+		    flow_task_effective_weight(READ_ONCE(tctx->weight),
+		    hint_w));
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));

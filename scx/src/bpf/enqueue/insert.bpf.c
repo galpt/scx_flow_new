@@ -197,34 +197,18 @@ static __noinline u64 flow_enqueue_cap_key(u64 vtime, u64 now)
 	return vtime;
 }
 /**
- * struct flow_lat_tail - latency args for the shared latency test.
+ * flow_enqueue_is_lat - unified latency for one wait from stored fields.
  * @avg: burst average in nanos, zero for no history.
  * @dev: burst deviation in nanos.
  * @hint: flat period hint in micros, zero for no hint.
  * @sleep_ns: true sleep gap from the caller wrap-safe helper.
- * @task_w: task base share, zero maps to neutral.
- * @hint_w: hint share, zero maps to neutral.
+ * @eff: effective share from task times hint over 128.
  *
- * Bundles the wait state plus shares, so the shared latency test
- * takes one pointer like the miss plus open tails with no stack args
- * and the same order.
- */
-struct flow_lat_tail {
-	u64 avg;
-	u64 dev;
-	u32 hint;
-	u64 sleep_ns;
-	u32 task_w;
-	u32 hint_w;
-};
-/**
- * flow_enqueue_is_lat - unified latency for one wait from stored fields.
- * @t: latency tail with burst plus hint plus sleep plus shares.
- *
- * Stacks task times hint over 128 then runs the unified base plus ext
- * test with probation, so newcomers stay batch with no stored bit and
- * RED plus slice agree on the same gap. Like fair.c, the test paces
- * service, unlike rt.c, no fixed priority holds.
+ * Runs the unified base plus ext test with probation, so newcomers
+ * stay batch with no stored bit and RED plus slice agree on the same
+ * gap. The caller stacks task times hint over 128, so the shared
+ * test stays at five args with no stack spill. Like fair.c, the test
+ * paces service, unlike rt.c, no fixed priority holds.
  *
  * Outlined with noinline to keep verifier headroom with one shared
  * copy, so miss plus open plus pinned share the same test with no
@@ -232,26 +216,9 @@ struct flow_lat_tail {
  *
  * Returns: true when latency holds, else false for batch.
  */
-static __noinline bool flow_enqueue_is_lat(const struct flow_lat_tail *t)
+static __noinline bool flow_enqueue_is_lat(u64 avg, u64 dev, u32 hint,
+	u64 sleep_ns, u32 eff)
 {
-	u64 avg;
-	u64 dev;
-	u32 hint;
-	u64 sleep_ns;
-	u32 task_w;
-	u32 hint_w;
-	u32 tw;
-	u32 eff;
-	if (!t)
-		return false;
-	avg = t->avg;
-	dev = t->dev;
-	hint = t->hint;
-	sleep_ns = t->sleep_ns;
-	task_w = t->task_w;
-	hint_w = t->hint_w;
-	tw = task_w ? task_w : (u32)FLOW_WEIGHT_BASE;
-	eff = flow_task_effective_weight(tw, hint_w);
 	return flow_is_lat(avg, dev, hint, sleep_ns, 0, eff);
 }
 /**
@@ -447,21 +414,15 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		u32 p_pre;
 		u32 p_slice;
 		u64 p_vt;
+		u32 p_eff;
 		/* No stable uclamp field in this task view, so fail open to */
 		/* zero without an extra map, and probation holds through both */
 		/* helpers, so newcomers stay batch. Shares the latency copy */
 		/* with miss plus open. */
-		{
-			struct flow_lat_tail lat = {
-				.avg = pavg,
-				.dev = pdev,
-				.hint = ph,
-				.sleep_ns = p_sleep,
-				.task_w = READ_ONCE(tctx->weight),
-				.hint_w = phint_w,
-			};
-			p_is_lat = flow_enqueue_is_lat(&lat);
-		}
+		p_eff = flow_task_effective_weight(READ_ONCE(tctx->weight),
+		    phint_w);
+		p_is_lat = flow_enqueue_is_lat(pavg, pdev, ph, p_sleep,
+		    p_eff);
 		p_pre = flow_slice_for(pdl, now);
 		p_pre = flow_slice_tier_cap(p_pre, pavg, pdev, p_is_lat);
 		p_slice = flow_slice_lat_clamp(p_pre, p_is_lat);
@@ -513,15 +474,10 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			else
 				pcost_sl = psl;
 		} else {
-			struct flow_lat_tail lat = {
-				.avg = pavg,
-				.dev = pdev,
-				.hint = ph,
-				.sleep_ns = pin_sleep_hold,
-				.task_w = READ_ONCE(tctx->weight),
-				.hint_w = phint_w,
-			};
-			pcrit = flow_enqueue_is_lat(&lat);
+			u32 p_eff = flow_task_effective_weight(
+			    READ_ONCE(tctx->weight), phint_w);
+			pcrit = flow_enqueue_is_lat(pavg, pdev, ph,
+			    pin_sleep_hold, p_eff);
 			pcost_sl = psl;
 		}
 		rej.tctx = tctx;
@@ -549,17 +505,8 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		if (ptw == 0)
 			ptw = (u32)FLOW_WEIGHT_BASE;
 		peff = flow_task_effective_weight(ptw, phint_w);
-		{
-			struct flow_lat_tail lat = {
-				.avg = pavg,
-				.dev = pdev,
-				.hint = ph,
-				.sleep_ns = pin_sleep_hold,
-				.task_w = ptw,
-				.hint_w = phint_w,
-			};
-			pcrit = flow_enqueue_is_lat(&lat);
-		}
+		pcrit = flow_enqueue_is_lat(pavg, pdev, ph, pin_sleep_hold,
+		    peff);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags,
