@@ -84,6 +84,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	bool open_is_lat = false;
 	u32 open_pre = 0;
 	bool have_open = false;
+	u64 re_sleep_hold = 0;
+	bool have_re = false;
 	/* Requeue plus last slice expiry bypass the cgroup hint read plus */
 	/* the occupant preempt lookup, so slice rotation stays cheap. The */
 	/* stored hint plus hint weight in the task state carry the period */
@@ -215,9 +217,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		u32 hw = READ_ONCE(tctx->weight);
 		u32 hw_hint = READ_ONCE(tctx->hint_w);
 		u32 hhint = READ_ONCE(tctx->hint_us);
+		u64 h_avg = (u64)READ_ONCE(tctx->avg_ns);
+		u64 h_dev = (u64)READ_ONCE(tctx->dev_ns);
+		u64 h_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
+		    h_avg);
 		u32 heff = flow_task_effective_weight(hw, hw_hint);
-		bool hcrit = flow_is_lat((u64)READ_ONCE(tctx->avg_ns),
-		    (u64)READ_ONCE(tctx->dev_ns), hhint, 0, 0, heff);
+		bool hcrit = flow_is_lat(h_avg, h_dev, hhint, h_sleep, 0,
+		    heff);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags, flow_red_value(heff, hcrit));
@@ -301,7 +307,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 			if (mtw0 == 0)
 				mtw0 = (u32)FLOW_WEIGHT_BASE;
 			meff0 = flow_task_effective_weight(mtw0, hint_w);
-			mcrit = flow_is_lat(avg, dev, hint, 0, 0, meff0);
+			mcrit = flow_is_lat(avg, dev, hint, m_sleep, 0, meff0);
 		}
 		mex = flow_red_newcomer_exceed(ndl, now, avg, msl, mcrit);
 		if (mex && !mcrit) {
@@ -386,6 +392,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 	} else {
 		u64 re_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
 		    avg);
+		re_sleep_hold = re_sleep;
+		have_re = true;
 		tctx->wait_at = now;
 		/* Strict slice before the key without stale reuse. A slice */
 		/* rotation holds the stored charge else inherits the quantum */
@@ -433,10 +441,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p,
 		} else {
 			u32 ctw0 = READ_ONCE(tctx->weight);
 			u32 ceff0;
+			u64 c_sleep = have_re ? re_sleep_hold : 0;
 			if (ctw0 == 0)
 				ctw0 = (u32)FLOW_WEIGHT_BASE;
 			ceff0 = flow_task_effective_weight(ctw0, hint_w);
-			ccrit = flow_is_lat(avg, dev, hint, 0, 0, ceff0);
+			ccrit = flow_is_lat(avg, dev, hint, c_sleep, 0, ceff0);
 			cost_sl = csl;
 		}
 		cex = flow_red_newcomer_exceed(deadline, now, avg, cost_sl,

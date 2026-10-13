@@ -227,6 +227,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	bool pin_is_lat = false;
 	u32 pin_pre = 0;
 	bool have_pin = false;
+	u64 pin_sleep_hold = 0;
 	if (is_reenq) {
 		ph = READ_ONCE(tctx->hint_us);
 		phint_w = READ_ONCE(tctx->hint_w);
@@ -272,6 +273,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	if (pmiss) {
 		u64 pm_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
 		    pavg);
+		pin_sleep_hold = pm_sleep;
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_miss_hold(READ_ONCE(tctx->slice_ns)));
@@ -303,6 +305,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		pin_is_lat = p_is_lat;
 		pin_pre = p_pre;
 		have_pin = true;
+		pin_sleep_hold = p_sleep;
 		if (enq_flags & SCX_ENQ_PREEMPT) {
 			tctx->wait_at = now;
 			pvt = flow_make_fair(tctx, pdl, phint_w, now, p_sleep);
@@ -327,6 +330,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 	} else {
 		u64 pr_sleep = flow_sleep_ns(READ_ONCE(tctx->wait_at), now,
 		    pavg);
+		pin_sleep_hold = pr_sleep;
 		tctx->wait_at = now;
 		__sync_lock_test_and_set(&tctx->slice_ns,
 		    flow_slice_inherit(READ_ONCE(tctx->slice_ns)));
@@ -361,7 +365,8 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			if (ptw0 == 0)
 				ptw0 = (u32)FLOW_WEIGHT_BASE;
 			peff0 = flow_task_effective_weight(ptw0, phint_w);
-			pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff0);
+			pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0,
+			    peff0);
 			pcost_sl = psl;
 		} else {
 			u32 ptw0 = READ_ONCE(tctx->weight);
@@ -369,7 +374,8 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 			if (ptw0 == 0)
 				ptw0 = (u32)FLOW_WEIGHT_BASE;
 			peff0 = flow_task_effective_weight(ptw0, phint_w);
-			pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff0);
+			pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0,
+			    peff0);
 			pcost_sl = psl;
 		}
 		pex = flow_red_newcomer_exceed(pdl, now, pavg, pcost_sl,
@@ -413,7 +419,7 @@ static __noinline void flow_enqueue_pinned(struct task_struct *p,
 		if (ptw == 0)
 			ptw = (u32)FLOW_WEIGHT_BASE;
 		peff = flow_task_effective_weight(ptw, phint_w);
-		pcrit = flow_is_lat(pavg, pdev, ph, 0, 0, peff);
+		pcrit = flow_is_lat(pavg, pdev, ph, pin_sleep_hold, 0, peff);
 		flow_gate_reject();
 		tctx->wait_at = now;
 		flow_overflow_insert(p, enq_flags,

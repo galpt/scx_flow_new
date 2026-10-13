@@ -192,6 +192,9 @@ static __noinline bool flow_reclaim_candidate_ok(const struct flow_reclaim_tail 
 		if (rtw == 0)
 			rtw = (u32)FLOW_WEIGHT_BASE;
 		reff = flow_task_effective_weight(rtw, rhw);
+		/* Queue wait is not sleep, so the reclaim check passes zero */
+		/* sleep with probation, while enqueue checks pass the true */
+		/* gap read before the wait overwrite. */
 		rcrit = flow_is_lat(ravg, rdev, rhint, 0, 0, reff);
 	}
 	rcost = flow_red_cost(ravg, READ_ONCE(rctx->slice_ns));
