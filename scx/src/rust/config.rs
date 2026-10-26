@@ -625,89 +625,89 @@ impl Config {
         if HINT_MAX != 8192 {
             bail!("hint bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS as u64 != QUANTUM_NS {
+        if crate::bpf_intf::flow_consts_FLOW_QUANTUM_NS != QUANTUM_NS {
             bail!("quantum header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_MIN_NS as u64 != SLICE_MIN_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_MIN_NS != SLICE_MIN_NS {
             bail!("slice floor header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PERIOD_NS as u64 != PERIOD_NS {
+        if crate::bpf_intf::flow_consts_FLOW_PERIOD_NS != PERIOD_NS {
             bail!("period header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS as u64 != PRED_MIN_NS {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_MIN_NS != PRED_MIN_NS {
             bail!("pred floor bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_MAX_NS as u64 != PRED_MAX_NS {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_MAX_NS != PRED_MAX_NS {
             bail!("pred ceiling bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MIN as u64 != WEIGHT_MIN as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MIN != WEIGHT_MIN as u64 {
             bail!("weight floor bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE as u64 != WEIGHT_BASE as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_BASE != WEIGHT_BASE as u64 {
             bail!("weight base bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX as u64 != WEIGHT_MAX as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_WEIGHT_MAX != WEIGHT_MAX as u64 {
             bail!("weight top bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_CAP_BASE as u64 != CAP_BASE as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_CAP_BASE != CAP_BASE as u64 {
             bail!("cap base bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64 != HINT_MAX {
+        if crate::bpf_intf::flow_consts_FLOW_HINT_MAX != HINT_MAX {
             bail!("hint header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS as u64 != PREEMPT_MARGIN_NS {
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_MARGIN_NS != PREEMPT_MARGIN_NS {
             bail!("margin bad");
         }
         if PREEMPT_MARGIN_NS != 100_000 {
             bail!("margin bounds bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS as u64 != PREEMPT_TAIL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_PREEMPT_TAIL_NS != PREEMPT_TAIL_NS {
             bail!("tail bad");
         }
         if PREEMPT_TAIL_NS != 100_000 {
             bail!("tail bounds bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS as u64 != 2_000_000 {
+        if crate::bpf_intf::flow_consts_FLOW_VLAG_MAX_NS != 2_000_000 {
             bail!("lag bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS as u64 != 1042 {
+        if crate::bpf_intf::flow_consts_FLOW_MAX_DSQS != 1042 {
             bail!("dsq count bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT as u64 != 8 {
+        if crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT != 8 {
             bail!("visit bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_PEERS as u64 != 4
-            || crate::bpf_intf::flow_consts_FLOW_STEAL_MAX_PEERS as u64 != 8
+        if crate::bpf_intf::flow_consts_FLOW_STEAL_MIN_PEERS != 4
+            || crate::bpf_intf::flow_consts_FLOW_STEAL_MAX_PEERS != 8
         {
             bail!("steal window bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64 != 4 {
+        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS != 4 {
             bail!("bsf bound bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS as u64
-            > crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT as u64
+        if crate::bpf_intf::flow_consts_FLOW_BSF_MAX_PEERS
+            > crate::bpf_intf::flow_consts_FLOW_DISPATCH_MAX_VISIT
         {
             bail!("bsf over visit bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_OVERFLOW as u64 != 0x5A01 {
+        if crate::bpf_intf::flow_consts_FLOW_OVERFLOW != 0x5A01 {
             bail!("overflow id bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS as u64 != RED_EMAX_NS {
+        if crate::bpf_intf::flow_consts_FLOW_RED_EMAX_NS != RED_EMAX_NS {
             bail!("red emax bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS as u64 != RED_TOL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_RED_TOL_NS != RED_TOL_NS {
             bail!("red tol bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS as u64 != ADAPT_GROW_NS {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_GROW_NS != ADAPT_GROW_NS {
             bail!("adapt grow bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS as u64 != ADAPT_SHRINK_NS {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_SHRINK_NS != ADAPT_SHRINK_NS {
             bail!("adapt shrink bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS as u64 != ADAPT_PROP_MAX_NS {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_MAX_NS != ADAPT_PROP_MAX_NS {
             bail!("adapt prop max bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT as u64 != ADAPT_PROP_SHIFT as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_PROP_SHIFT != ADAPT_PROP_SHIFT as u64 {
             bail!("adapt prop shift bad");
         }
         if ADAPT_PROP_MAX_NS != 1_000_000 {
@@ -770,22 +770,22 @@ impl Config {
         if PERIOD_NS != 4 * SLICE_MAX_NS {
             bail!("period slice max bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_ULL_NS as u64 != SLICE_ULL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_ULL_NS != SLICE_ULL_NS {
             bail!("slice ull header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_LL_NS as u64 != SLICE_LL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_LL_NS != SLICE_LL_NS {
             bail!("slice ll header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_MLL_NS as u64 != SLICE_MLL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_MLL_NS != SLICE_MLL_NS {
             bail!("slice mll header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_NL_NS as u64 != SLICE_NL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_NL_NS != SLICE_NL_NS {
             bail!("slice nl header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_ENL_NS as u64 != SLICE_ENL_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_ENL_NS != SLICE_ENL_NS {
             bail!("slice enl header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_MAX_NS as u64 != SLICE_MAX_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_MAX_NS != SLICE_MAX_NS {
             bail!("slice max header bad");
         }
         if PRED_UP_SHIFT != 3 {
@@ -812,37 +812,31 @@ impl Config {
         if ADAPT_DAMP_SHIFT != 1 {
             bail!("damp bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_UP_SHIFT as u64 != PRED_UP_SHIFT as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_UP_SHIFT != PRED_UP_SHIFT as u64 {
             bail!("pred up header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_DOWN_SHIFT as u64 != PRED_DOWN_SHIFT as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_DOWN_SHIFT != PRED_DOWN_SHIFT as u64 {
             bail!("pred down header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_UP_SHIFT as u64 != PRED_DEV_UP_SHIFT as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_UP_SHIFT != PRED_DEV_UP_SHIFT as u64 {
             bail!("pred dev up header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_DOWN_SHIFT as u64
-            != PRED_DEV_DOWN_SHIFT as u64
-        {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_DOWN_SHIFT != PRED_DEV_DOWN_SHIFT as u64 {
             bail!("pred dev down header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_MARGIN_SHIFT as u64
-            != PRED_DEV_MARGIN_SHIFT as u64
-        {
+        if crate::bpf_intf::flow_consts_FLOW_PRED_DEV_MARGIN_SHIFT != PRED_DEV_MARGIN_SHIFT as u64 {
             bail!("pred margin header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DEADBAND_SHIFT as u64
-            != ADAPT_DEADBAND_SHIFT as u64
-        {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DEADBAND_SHIFT != ADAPT_DEADBAND_SHIFT as u64 {
             bail!("deadband shift header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DEADBAND_MIN_NS as u64 != ADAPT_DEADBAND_MIN_NS {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DEADBAND_MIN_NS != ADAPT_DEADBAND_MIN_NS {
             bail!("deadband floor header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DAMP_SHIFT as u64 != ADAPT_DAMP_SHIFT as u64 {
+        if crate::bpf_intf::flow_consts_FLOW_ADAPT_DAMP_SHIFT != ADAPT_DAMP_SHIFT as u64 {
             bail!("damp header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS as u64 != SLICE_LAT_NS {
+        if crate::bpf_intf::flow_consts_FLOW_SLICE_LAT_NS != SLICE_LAT_NS {
             bail!("slice lat header bad");
         }
         if LAT_SLEEP_MIN_NS != 20_000 {
@@ -854,10 +848,10 @@ impl Config {
         if LAT_SLEEP_MIN_NS >= SLICE_LAT_NS {
             bail!("lat sleep over slice bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_LAT_SLEEP_MIN_NS as u64 != LAT_SLEEP_MIN_NS {
+        if crate::bpf_intf::flow_consts_FLOW_LAT_SLEEP_MIN_NS != LAT_SLEEP_MIN_NS {
             bail!("lat sleep header bad");
         }
-        if crate::bpf_intf::flow_consts_FLOW_D_LAT_NS as u64 != D_LAT_NS {
+        if crate::bpf_intf::flow_consts_FLOW_D_LAT_NS != D_LAT_NS {
             bail!("d lat header bad");
         }
         if RED_TOL_NS != 64_000 {
