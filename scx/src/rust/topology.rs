@@ -124,9 +124,7 @@ pub fn write_llc_bitmaps() -> Vec<String> {
 }
 
 /// Short topology line for the start log.
-/// Shows cpus seeded with primary plus llcs counts, so the start
-/// log carries primary plus llcs past the old cpus seeded line with no
-/// hot-path use.
+/// Shows cpus seeded with primary plus llcs counts with no hot-path use.
 pub fn describe_topology(rows: &[(u32, u32, u32)]) -> String {
     let primary = write_primary_bitmap(rows);
     let llcs = write_llc_bitmaps();

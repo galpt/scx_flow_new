@@ -167,11 +167,10 @@ enum flow_consts {
 	/* fallback cheap while extending coverage with the same order. */
 	FLOW_BSF_MAX_PEERS = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
-	/* Resume gap of 5s with no knob. Deltas past this bound read as a */
-	/* suspend plus resume stall, so stopping clamps with no predictor */
-	/* plus credit pollution while userspace reseeds the topology view. */
-	/* Stays past one period, so only a real stall trips the resume */
-	/* path with no false trip on a long slice. */
+	/* Resume gap of 5s. Deltas past this bound read as an s2idle */
+	/* plus long stall, so stopping clamps to zero while userspace */
+	/* reseeds the topology view. Monotonic pauses across S3, so S3 */
+	/* trips only the userspace boot gap. Stays past one period. */
 	FLOW_RESUME_GAP_NS = 5000000000ULL,
 	/* Base capacity of 1024 units with no knob. Every CPU on a */
 	/* symmetric host offers the same units, so the slowest */
@@ -511,9 +510,10 @@ static __always_inline u64 flow_delta_clamp(u64 now,
  * flow_gap_is_resume - test one delta for a suspend plus resume gap.
  * @delta: raw service in nanos already clamped by flow_delta_clamp.
  *
- * Deltas past the 5s resume bound read as a stall across suspend,
- * so the caller clamps with no predictor plus credit pollution while
- * userspace reseeds the topology view.
+ * Deltas past the 5s bound read as an s2idle stall where monotonic
+ * still advances, so the caller clamps to zero with no predictor
+ * plus minimum plus credit pollution. S3 pauses monotonic, so S3
+ * trips only the userspace boot gap with a reseed.
  *
  * Returns: true when past the resume bound, else false.
  */

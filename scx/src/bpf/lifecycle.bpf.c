@@ -4,11 +4,11 @@
  *
  * Running claims the segment start from zero with an unconditional
  * pid store. Only stopping charges. A stall past 5s clamps the
- * stopping delta to zero with no predictor plus minimum plus credit
- * pollution, so suspend plus resume never poisons the ledger. The
- * snapshot counts live pids for
- * the on CPU gauge. Stopping claims the start once, charges the raw
- * segment to total runtime, advances vruntime by the scaled delta, folds
+ * stopping delta to zero, so suspend plus resume never poisons the
+ * predictor plus the minimum plus the credit. The snapshot counts
+ * live pids for the on CPU gauge. Stopping claims the start once,
+ * charges the raw segment to total runtime, advances vruntime by the
+ * scaled delta, folds
  * the CPU minimum forward, then feeds the burst predictor average plus
  * deviation from the same delta with up plus down shifts plus half
  * deviation margin, then resumes a preempt-like head with start plus cur
@@ -212,9 +212,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p,
 		flow_clear_running_if_owner(cpu, (u32)p->pid);
 		return;
 	}
-	/* Clamp the segment delta with a fold on bad stamps, then clamp a */
-	/* suspend plus resume stall past 5s to zero, so a stale start never */
-	/* pollutes the predictor plus the minimum plus the credit below. */
+	/* Clamp the segment delta with a fold on bad stamps, then clamp an */
+	/* s2idle stall past 5s to zero, so a stale start never pollutes */
+	/* the predictor plus the minimum plus the credit below. S3 pauses */
+	/* monotonic with no BPF gap, so the boot gap reseeds instead. */
 	/* The zero delta skips the predictor plus the minimum fold through */
 	/* the gated charge, and the credit through its own delta gate. */
 	delta = flow_delta_clamp(now, start);

@@ -523,6 +523,32 @@ pub fn slice_resume(start: u64, now: u64, is_lat: bool, cur: u32) -> u32 {
     rem as u32
 }
 
+/// Resume gap in nanos at 5s shared with the BPF header.
+/// Past one period, so only a real stall trips with no false trip.
+#[cfg(test)]
+pub const RESUME_GAP_NS: u64 = 5_000_000_000;
+
+/// Mirror of flow_delta_clamp in intf.h for host tests.
+/// Zero or future start folds to zero with wrap safety and no charge.
+#[cfg(test)]
+pub fn delta_clamp(now: u64, start: u64) -> u64 {
+    if start == 0 {
+        return 0;
+    }
+    if time_before(now, start) {
+        return 0;
+    }
+    now.wrapping_sub(start)
+}
+
+/// Mirror of flow_gap_is_resume in intf.h for host tests.
+/// Past 5s reads as an s2idle stall where monotonic still advances.
+/// S3 pauses monotonic, so S3 trips only the boot gap with a reseed.
+#[cfg(test)]
+pub fn gap_is_resume(delta: u64) -> bool {
+    delta > RESUME_GAP_NS
+}
+
 /// Validated scheduling constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -1295,6 +1321,29 @@ mod tests {
         assert_eq!(slice_resume(1_000, 1_000 + 600_000, false, 500_000), 10_000);
         // Saturated end near wrap inherits with no wrap to front.
         assert_eq!(slice_resume(u64::MAX - 10, 100, false, 500_000), 500_000);
+    }
+
+    #[test]
+    /// Suspend gap past 5s clamps with a reseed trip.
+    fn suspend_gap_clamps_with_reseed_trip() {
+        // Injected start 6s back trips the resume bound for a clamp.
+        let now = 10_000_000_000u64;
+        let start = now - 6_000_000_000u64;
+        let delta = delta_clamp(now, start);
+        assert_eq!(delta, 6_000_000_000);
+        assert!(gap_is_resume(delta));
+        assert_eq!(RESUME_GAP_NS, 5_000_000_000);
+        assert_eq!(
+            RESUME_GAP_NS,
+            crate::bpf_intf::flow_consts_FLOW_RESUME_GAP_NS as u64
+        );
+        // Short 1s stall stays quiet with no trip.
+        assert!(!gap_is_resume(delta_clamp(now, now - 1_000_000_000)));
+        // Zero plus future start fold to zero with no trip.
+        assert_eq!(delta_clamp(now, 0), 0);
+        assert!(!gap_is_resume(delta_clamp(now, 0)));
+        assert_eq!(delta_clamp(now, now + 1_000), 0);
+        assert!(!gap_is_resume(delta_clamp(now, now + 1_000)));
     }
 
     #[test]
