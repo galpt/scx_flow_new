@@ -134,6 +134,31 @@ static __always_inline void flow_min_advance(s32 cpu,
 			break;
 	}
 }
+/* Rebase one CPU minimum to the given vruntime after a resume gap. */
+/* Stores unconditionally with a single store, so a stale minimum from */
+/* before suspend heals at once instead of folding only forward past a */
+/* runaway value. A zero vruntime never moves the minimum, so no history */
+/* holds zero. No-op when the CPU is out of range, not live, or missing, */
+/* so resume callers invoke it with no stall. Resume-only: callers gate */
+/* on the 5s gap first, since an ungated store would move the minimum */
+/* backward on the hot path. Kept intentionally as the resume rebase */
+/* point with no Rust mirror, so the kernel stays the single truth with */
+/* one rebase symbol. Mirrors the optional timer decay point below. */
+static __always_inline void flow_min_rebase(s32 cpu,
+	u64 vruntime)
+{
+	struct flow_cpu_state *st;
+	if (cpu < 0)
+		return;
+	if (vruntime == 0)
+		return;
+	if (!flow_cpu_live((u32)cpu))
+		return;
+	st = flow_cpu((u32)cpu);
+	if (!st)
+		return;
+	__sync_lock_test_and_set(&st->min_vruntime, vruntime);
+}
 /* Clear the running pid with a compare and swap loop. */
 /* Retries the swap so a concurrent run pairs, and a lost race keeps */
 /* the winner with no torn zero. Release carries no pid, so the loop */

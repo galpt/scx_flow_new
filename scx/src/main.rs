@@ -51,6 +51,10 @@ use stats::Metrics;
 
 /* Binary name used in logs and stats. */
 const SCHEDULER_NAME: &str = "scx_flow";
+/* Resume gap in seconds shared with FLOW_RESUME_GAP_NS in intf.h. A loop */
+/* stall past this bound reads as a suspend plus resume gap, so the run */
+/* loop refreshes the topology view once while BPF clamps stale deltas. */
+const RESUME_GAP_SECS: u64 = 5;
 /* CPU bound shared with the BPF header. */
 #[cfg(test)]
 const MAX_CPUS: usize = crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
@@ -121,6 +125,8 @@ pub(crate) struct Scheduler<'a> {
     smt: Vec<bool>,
     /* One line topology summary for the page. */
     topology: String,
+    /* Seeded rows in rank order for the resume watch. */
+    seeded: Vec<(u32, u32, u32)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -176,6 +182,7 @@ impl<'a> Scheduler<'a> {
             online_cpus,
             smt,
             topology,
+            seeded: rows,
         })
     }
 
@@ -208,6 +215,12 @@ impl<'a> Scheduler<'a> {
         /* Short tick keeps stats polls prompt while the page polls */
         /* once per second, so most ticks only refresh the bound */
         /* channel when the dashboard is on plus the queue has room. */
+        /* Resume watch on the loop tick: a stall past 5s reads as a */
+        /* suspend plus resume gap, so the topology view reseeds once */
+        /* with no hotplug use. Deep suspend pauses the monotonic clock, */
+        /* so it heals through the BPF 5s delta clamp while s2idle plus */
+        /* long stalls reseed here. */
+        let mut last_tick = std::time::Instant::now();
         /* One BPF read serves both the stats reply plus the page. */
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_millis(100)) {
@@ -234,6 +247,24 @@ impl<'a> Scheduler<'a> {
                     }
                 }
                 Err(e) => Err(e)?,
+            }
+            /* One resume check per tick keeps the reseed to one refresh */
+            /* per stall with no extra poll. */
+            let now = std::time::Instant::now();
+            let stalled = now.duration_since(last_tick);
+            last_tick = now;
+            if stalled > Duration::from_secs(RESUME_GAP_SECS) {
+                info!("resume suspected after {stalled:?}, refreshing topology");
+                if let Some(rows) = topology::reseed_if_changed(&mut self.seeded) {
+                    Self::seed_topo_with(&mut self.skel, &rows);
+                    self.online_cpus = rows.iter().map(|(cpu, _, _)| *cpu).collect();
+                    self.smt = rows
+                        .iter()
+                        .map(|(cpu, sib, _)| topology::is_smt_thread(*cpu, *sib))
+                        .collect();
+                    self.topology = topology::describe_topology(&rows);
+                    info!("Topology: {}", self.topology);
+                }
             }
         }
         let m = self.get_metrics();
@@ -428,5 +459,14 @@ mod tests {
             crate::bpf_intf::flow_consts_FLOW_HINT_MAX as u64
         );
         assert_eq!(crate::config::HINT_MAX, 8192);
+    }
+
+    #[test]
+    fn resume_gap_matches_header() {
+        assert_eq!(RESUME_GAP_SECS, 5);
+        assert_eq!(
+            crate::bpf_intf::flow_consts_FLOW_RESUME_GAP_NS as u64,
+            RESUME_GAP_SECS * 1_000_000_000
+        );
     }
 }
