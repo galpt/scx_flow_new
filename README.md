@@ -25,7 +25,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Copy `scx` into a workspace checkout and build there.
 Scheduler behavior is documented in `scx/README.md`.
 The installer pins upstream
-`6752d59a4297d8918e8fd4d7237b50e2fceb1d14`.
+`e7b3a219617472cf78880ac424714e52c932db61`.
 
 ```bash
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace

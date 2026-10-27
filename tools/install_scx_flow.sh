@@ -13,7 +13,7 @@ DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
 VER="4.8.16"
 # Pinned upstream ref, same as repo CI.
-SCX_REF="6752d59a4297d8918e8fd4d7237b50e2fceb1d14"
+SCX_REF="e7b3a219617472cf78880ac424714e52c932db61"
 UPSTREAM="https://github.com/sched-ext/scx"
 
 need() {
