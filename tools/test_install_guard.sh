@@ -18,11 +18,28 @@ fail() {
 [ -f "${SRC_DIR}/Cargo.toml" ] || fail "cargo manifest missing"
 
 # Version stays in sync between installer plus manifest.
-# Guard stays generalized across 5.0.x with no hard pin, so future
-# 5.0.7 plus empty scaffolds pass while 5.0.6 stays pinned in manifest.
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
+[ "${want}" = "5.0.6" ] || fail "version not at 5.0.6"
+
+# Scheduler sources stay present with no empty scaffold.
+# A scaffold with matching version but no logic fails closed here.
+for need_file in \
+    "src/bpf/main.bpf.c" \
+    "src/bpf/intf.h" \
+    "src/main.rs" \
+    "src/stats.rs" \
+    "build.rs"; do
+    [ -s "${SRC_DIR}/${need_file}" ] || fail "scaffold missing ${need_file}"
+done
+
+# Vendored lib stays present with no empty lib dir.
+for need_lib in \
+    "src/bpf/lib/common.bpf.c" \
+    "src/bpf/lib/dhq.bpf.c"; do
+    [ -s "${SRC_DIR}/${need_lib}" ] || fail "lib scaffold missing ${need_lib}"
+done
 
 # Deleted Rust mirrors stay deleted with no reappearance.
 # The flow facade plus its helpers stay deleted with constants in
@@ -53,6 +70,19 @@ grep -q "^TAB=\$'\\\\t'$" "${INST}" || fail "TAB guard form bad"
 
 # Shared CI tree stays protected with no clean.
 grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
+
+# Fork remote stays pinned with no upstream drift.
+grep -q 'FORK="https://github.com/galpt/scx"' "${INST}" || fail "fork remote missing"
+grep -q 'pinned fork ref' "${INST}" || fail "fork pin comment missing"
+
+# Overlay lib stays byte-identical with no silent drift.
+grep -q 'cmp -s' "${INST}" || fail "lib hash check missing"
+grep -q 'lib drift' "${INST}" || fail "lib drift guard missing"
+
+# Fork keeps lib plus license as symlinks with no real copy.
+grep -q 'src/bpf/lib' "${INST}" || fail "lib symlink missing"
+grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink target bad"
+grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
 
 # Canonical plus allowlist guards stay present. The -m forms stay for
 # string canonicalization plus a symlink refuse covers the resolve gap.

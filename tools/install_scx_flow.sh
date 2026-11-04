@@ -14,7 +14,7 @@ BIN="scx_flow"
 VER="5.0.6"
 # Pinned fork ref, same as repo CI.
 SCX_REF="b0efa3f614c0187df4cb3202d7b514d401f77d2a"
-UPSTREAM="https://github.com/galpt/scx"
+FORK="https://github.com/galpt/scx"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -157,11 +157,11 @@ esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
 rm -rf -- "${WS}"
 mkdir -p -- "${WS}"
-# Fetch the pinned upstream ref by SHA and checkout the result.
+# Fetch the pinned fork ref by SHA and checkout the result.
 git init -q "${WS}"
-git -C "${WS}" remote add origin "${UPSTREAM}"
+git -C "${WS}" remote add origin "${FORK}"
 if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
-    echo "fetch failed, check network access to ${UPSTREAM}" >&2
+    echo "fetch failed, check network access to ${FORK}" >&2
     exit 1
 fi
 # Reverify the fetched head matches the pinned ref, so a moved ref
@@ -192,6 +192,20 @@ fi
 echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
+
+# Overlay lib stays byte-identical to workspace lib with no drift.
+for lib_file in arena.bpf.c atq.bpf.c bitmap.bpf.c common.bpf.c cpumask.bpf.c dhq.bpf.c minheap.bpf.c rbtree.bpf.c sdt_alloc.bpf.c sdt_task.bpf.c topology.bpf.c; do
+    if ! cmp -s "${SRC_DIR}/src/bpf/lib/${lib_file}" "${WS}/lib/${lib_file}"; then
+        echo "lib drift for ${lib_file}" >&2
+        exit 1
+    fi
+done
+
+# Fork keeps lib plus license as symlinks with no real copy.
+rm -rf "${DEST}/src/bpf/lib"
+ln -s ../../../../../lib "${DEST}/src/bpf/lib"
+rm -f "${DEST}/LICENSE"
+ln -s ../../../LICENSE "${DEST}/LICENSE"
 
 echo "building ${BIN} in workspace"
 cargo build --manifest-path "${DEST}/Cargo.toml" --release

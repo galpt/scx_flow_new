@@ -53,9 +53,14 @@ jobs:
           git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
-          # Upstream already ships scheds/experimental/scx_flow, so
+          # Fork already ships scheds/experimental/scx_flow, so
           # replace it instead of merging into it.
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
+          for lib_file in arena.bpf.c atq.bpf.c bitmap.bpf.c common.bpf.c cpumask.bpf.c dhq.bpf.c minheap.bpf.c rbtree.bpf.c sdt_alloc.bpf.c sdt_task.bpf.c topology.bpf.c; do
+            cmp -s "scx/src/bpf/lib/${lib_file}" "/tmp/opencode/scx/lib/${lib_file}" || exit 1
+          done
+          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
@@ -102,9 +107,14 @@ jobs:
           git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
-          # Upstream already ships scheds/experimental/scx_flow, so
+          # Fork already ships scheds/experimental/scx_flow, so
           # replace it instead of merging into it.
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
+          for lib_file in arena.bpf.c atq.bpf.c bitmap.bpf.c common.bpf.c cpumask.bpf.c dhq.bpf.c minheap.bpf.c rbtree.bpf.c sdt_alloc.bpf.c sdt_task.bpf.c topology.bpf.c; do
+            cmp -s "scx/src/bpf/lib/${lib_file}" "/tmp/opencode/scx/lib/${lib_file}" || exit 1
+          done
+          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml

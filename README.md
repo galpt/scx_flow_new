@@ -26,7 +26,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 Copy `scx` into a workspace checkout and build there.
 Scheduler behavior is documented in `scx/README.md`.
-The installer pins upstream
+The installer pins fork
 `b0efa3f614c0187df4cb3202d7b514d401f77d2a`.
 
 ```bash
