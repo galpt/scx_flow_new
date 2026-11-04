@@ -98,7 +98,10 @@ pub(crate) struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<libbpf_rs::OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &'a Opts,
+        open_object: &'a mut MaybeUninit<libbpf_rs::OpenObject>,
+    ) -> Result<Self> {
         try_set_rlimit_infinity();
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
@@ -149,7 +152,10 @@ impl<'a> Scheduler<'a> {
                 None => continue,
             };
             let llc = llc_ids.iter().position(|v| *v == entry.llc_id).unwrap_or(0) as u32;
-            let node = node_ids.iter().position(|v| *v == entry.node_id).unwrap_or(0) as u32;
+            let node = node_ids
+                .iter()
+                .position(|v| *v == entry.node_id)
+                .unwrap_or(0) as u32;
             let key = (cpu as u32).to_ne_bytes();
             let mut val = [0u8; 16];
             val[0..4].copy_from_slice(&(cpu as u32).to_ne_bytes());
@@ -180,7 +186,12 @@ impl<'a> Scheduler<'a> {
         let mut out = Metrics::default();
         for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u32 {
             let key = llc.to_ne_bytes();
-            let val = match self.skel.maps.llc_stats_stor.lookup(&key, libbpf_rs::MapFlags::ANY) {
+            let val = match self
+                .skel
+                .maps
+                .llc_stats_stor
+                .lookup(&key, libbpf_rs::MapFlags::ANY)
+            {
                 Ok(Some(v)) => v,
                 Ok(None) => continue,
                 Err(e) => {
@@ -311,30 +322,15 @@ mod tests {
 
     #[test]
     fn abi_bounds_match_header() {
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as u64,
-            1024
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u64,
-            64
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_MAX_NODES as u64,
-            8
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_MAX_PAIRS as u64,
-            32
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as u64, 1024);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u64, 64);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_NODES as u64, 8);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_PAIRS as u64, 32);
     }
 
     #[test]
     fn abi_tuning_matches_header() {
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64,
-            1_000_000
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64, 1_000_000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_OPS_TIMEOUT_MS as u64,
             20_000
@@ -347,10 +343,7 @@ mod tests {
 
     #[test]
     fn abi_dsq_matches_header() {
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_LLC_BASE as u64,
-            0x6000
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_LLC_BASE as u64, 0x6000);
         assert_eq!(
             crate::bpf_intf::flow_consts_FLOW_FALLBACK_DSQ as u64,
             0x6100
@@ -359,22 +352,10 @@ mod tests {
 
     #[test]
     fn abi_modes_match_header() {
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_STRAND_A as u64,
-            0
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_STRAND_B as u64,
-            1
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_STRAND_AUTO as u64,
-            2
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_MODE_PRIORITY as u64,
-            1
-        );
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_A as u64, 0);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_B as u64, 1);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_AUTO as u64, 2);
+        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MODE_PRIORITY as u64, 1);
     }
 
     #[test]
