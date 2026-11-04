@@ -19,7 +19,8 @@
  * straight to its allowed LLC queue with its enqueue flags kept.
  * Kick preempts only when the target is allowed, else it wakes idle.
  * Dispatch moves a task to local only when the task can run on this
- * CPU, else the task stays queued with no loss.
+ * CPU, else the task stays queued with no loss. No SMT probe runs
+ * and each CPU stands single with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -509,6 +510,8 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 		return;
 	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
 }
+/* No SMT probe runs. Each CPU stands single and a missing sibling */
+/* fails closed with no move. Select stays through the shared picker. */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	bool idle = false;
