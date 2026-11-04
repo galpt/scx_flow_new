@@ -28,11 +28,15 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/arena_map.h>
 #include <lib/dhq.h>
 #include <lib/minheap.h>
 #include <lib/sdt_alloc.h>
 #include <lib/spinlock.h>
 #include "intf.h"
+/* The verifier ties a program to the arena on address use. */
+/* Keep one use in each program that reaches arena memory. */
+#define TOUCH_ARENA() do { asm volatile("" :: "r"(&arena)); } while (0)
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 /* Maps plus pair tables. */
@@ -249,6 +253,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	u64 want = 0;
 	s32 cpu;
 	u32 llc;
+	TOUCH_ARENA();
 	n = scx_bpf_nr_cpu_ids();
 	if (n == 0) {
 		scx_bpf_error("no CPUs found");
@@ -313,6 +318,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	if (want <= 1)
 		return 0;
+	/* Size the static area before the first pair queue use. */
+	/* The pair queue draws from this area so it must be ready first. */
+	{
+		int ret = scx_static_init(8);
+		if (ret) {
+			scx_bpf_error("static init failed");
+			return ret;
+		}
+	}
 	bpf_for(llc, 0, FLOW_MAX_LLCS) {
 		u32 node = 0;
 		u32 cnt;
