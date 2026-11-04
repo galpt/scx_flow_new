@@ -41,6 +41,10 @@ enum flow_consts {
 	FLOW_MAX_PAIRS = 32ULL,
 	/* Fixed slice in nanos with no knob. */
 	FLOW_SLICE_NS = 1000000ULL,
+	/* Preempt gap in nanos with no knob. */
+	FLOW_PREEMPT_THRESH = 500000ULL,
+	/* Preempt tail guard in nanos with no knob. */
+	FLOW_PREEMPT_TAIL = 125000ULL,
 	/* Ops timeout in ms for the watchdog. */
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Strand balance bound on enqueue with no knob. */
@@ -58,11 +62,24 @@ enum flow_consts {
 };
 /* Per task state for the life of the task. Small with no padding drift. */
 struct flow_task_ctx {
-	u64 vtime;
+	s64 vtime;
+	s64 deadline;
+	u64 slice_rem;
+	u64 gen;
+	u64 seq;
 	u32 strand;
 	u32 llc_id;
 	u32 flags;
 	u32 pad;
+};
+/* Per CPU running snapshot for preempt compare. Zero means empty. */
+struct flow_running_state {
+	s64 vtime;
+	s64 deadline;
+	u64 slice_rem;
+	u32 llc_id;
+	u32 strand;
+	u64 gen;
 };
 /* Per CPU view seeded once from userspace. Small with no frozen row. */
 struct flow_cpu_ctx {
