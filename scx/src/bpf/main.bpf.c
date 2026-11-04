@@ -36,6 +36,9 @@
 #include "intf.h"
 /* The verifier ties a program to the arena on address use. */
 /* Keep one use in each program that reaches arena memory. */
+/* Init plus enqueue plus dispatch reach the arena, the rest use only */
+/* maps and task storage and need no touch. Enqueue reaches the arena */
+/* through insert, dispatch covers pop to local through the same touch. */
 #define TOUCH_ARENA() do { asm volatile("" :: "r"(&arena)); } while (0)
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
@@ -320,6 +323,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return 0;
 	/* Size the static area before the first pair queue use. */
 	/* The pair queue draws from this area so it must be ready first. */
+	/* Eight pages hold 32KiB. One pair with cap n times 4 needs the */
+	/* queue header plus two heaps plus cap times 16 bytes of entries. */
+	/* A 16 CPU host needs about one KiB per pair and fits with margin. */
+	/* Overflow takes a fresh block and leaves old pages mapped, so an */
+	/* oversize host still fails closed with no reuse. Single LLC above */
+	/* uses only DSQs and creates no pair, so skipping init there is by */
+	/* design. Enqueue and dispatch guard every pair use on more than one */
+	/* LLC, so a future static user must move this init above that return. */
 	{
 		int ret = scx_static_init(8);
 		if (ret) {
@@ -583,6 +594,7 @@ idle:
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	TOUCH_ARENA();
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
 	u32 llc = 0;
@@ -841,6 +853,7 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
+	TOUCH_ARENA();
 	u32 c;
 	u32 llc = 0;
 	u32 node = 0;
