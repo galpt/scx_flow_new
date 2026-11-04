@@ -3,7 +3,7 @@
  * Shared ABI for the flow scheduler.
  *
  * DSQs are one per LLC plus one fallback safety net. Pair queues are upstream arena DHQs.
- * Stats are four counters per LLC.
+ * Stats are per LLC counters with a stable head plus an append-only tail.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -105,12 +105,24 @@ struct flow_cpu_ctx {
 	u32 node_id;
 	u32 pad;
 };
-/* Minimal per LLC counters. Queued is a gauge, rest are totals. */
+/* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal stay */
+/* stable for compat. Tail is append-only for 5.0.7 with no bound change. */
+/* Fallback stays the aggregate of pair-full plus duplicate plus stale. */
+/* fb_pair_full counts pair DHQ full spills to the LLC DSQ. fb_duplicate */
+/* counts queued-guard duplicate drops. fb_stale counts stale DHQ pops */
+/* with no task. dhq_depth is a gauge of last observed pair depth and */
+/* dhq_cap the paired capacity for sizing. Single LLC has no pair, so */
+/* depth plus cap stay zero there. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
 	u64 fallback;
 	u64 steal;
+	u64 fb_pair_full;
+	u64 fb_duplicate;
+	u64 fb_stale;
+	u64 dhq_depth;
+	u64 dhq_cap;
 };
 #ifdef __BPF__
 static __always_inline u64 flow_llc_dsq(u32 llc)
