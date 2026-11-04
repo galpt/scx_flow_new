@@ -16,11 +16,11 @@
  * and half speed when idle. The hint needs the schedutil governor
  * and hardware support and never changes placement. A task with one
  * allowed CPU or with migration disabled bypasses pairing and goes
- * straight to its allowed LLC queue with its enqueue flags kept.
- * Kick preempts only when the target is allowed, else it wakes idle.
- * Dispatch moves a task to local only when the task can run on this
- * CPU, else the task stays queued with no loss. No SMT probe runs
- * and each CPU stands single with fail closed choice.
+ * straight to the local queue of its allowed CPU with its enqueue
+ * flags kept. Kick preempts only when the target is allowed, else it
+ * wakes idle. Dispatch moves a task to local only when the peeked head
+ * can run on this CPU, else the DSQ is left alone with no loss. No SMT
+ * probe runs and each CPU stands single with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -145,6 +145,21 @@ static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 	if (!flow_cpu_ok(c))
 		return false;
 	return bpf_cpumask_test_cpu(c, p->cpus_ptr);
+}
+/* True when the peeked head of a DSQ can run on cpu. Null peek fails */
+/* closed with no move. This keeps a pinned head on its allowed CPU and */
+/* skips a steal that would run off mask with no loss. Peek is hint only */
+/* but pinned tasks wait in per CPU local queues so shared heads are */
+/* migratable in the common case. */
+static __always_inline bool flow_dsq_head_allowed(u64 dsq, u32 cpu)
+{
+	struct task_struct *p;
+	if (!flow_cpu_ok(cpu))
+		return false;
+	p = __COMPAT_scx_bpf_dsq_peek(dsq);
+	if (!p)
+		return false;
+	return flow_cpu_allowed((s32)cpu, p);
 }
 /* Saturated vtime plus slice. Caps at max on overflow. */
 static __always_inline s64 flow_vtime_add_slice(s64 v)
@@ -521,6 +536,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 /* and the running slice is past the tail. Uses unsigned gap so the */
 /* compare stays valid across wrap. Preempt is not counted as steal. */
 /* Kick preempts only when the target is allowed, else it wakes idle. */
+/* Idle kick validates the target first and skips when no allowed CPU */
+/* exists so an offline or disallowed target never takes a wake. */
 static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v, struct task_struct *p)
 {
 	u32 cpu;
@@ -546,6 +563,8 @@ static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v, struct ta
 		return;
 	}
 idle:
+	if (!flow_cpu_allowed(task_cpu, p))
+		return;
 	scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
@@ -661,6 +680,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 		}
 	}
+	/* Pinned carry keeps vtime plus slice but follows the current LLC. */
+	/* This keeps the task context aligned with the queue it waits in */
+	/* so later victim accounting stays on the enqueue LLC. */
+	if (pinned)
+		use_llc = llc;
 	if (!carry) {
 		if (dhq && have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 			s64 last = flow_dhq_seq[pair_u];
@@ -699,6 +723,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	scx_bpf_task_set_dsq_vtime(p, (u64)use_v);
 insert_only:
+	/* Pinned tasks wait in the local queue of the allowed CPU only. */
+	/* This keeps them out of shared LLC queues so no other CPU can */
+	/* steal them off mask. Falls through to the LLC queue only when */
+	/* no allowed local target exists as safety against loss. */
+	if (pinned) {
+		if (task_cpu >= 0 && flow_cpu_allowed(task_cpu, p)) {
+			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_NS, enq_flags);
+			flow_stat_inc(llc, 0);
+			flow_kick_for_enq(task_cpu, use_v, p);
+			return;
+		}
+	}
 	if (dhq) {
 		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)use_v,
 					   (u64)use_strand);
@@ -767,7 +804,7 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		if (flow_llc_ok(t->llc_id))
 			victim = t->llc_id;
 	}
-	if (!p->cpus_ptr || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+	if (!flow_cpu_allowed((s32)cpu, p)) {
 		u64 vdsq = flow_llc_dsq(victim);
 		if (!flow_dsq_ok(vdsq))
 			vdsq = (u64)FLOW_FALLBACK_DSQ;
@@ -868,7 +905,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 		}
 	}
-	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+	if (flow_dsq_head_allowed(dsq, c) && scx_bpf_dsq_move_to_local(dsq, 0)) {
 		flow_stat_inc(llc, 1);
 		flow_queued_dec(llc);
 		return;
@@ -884,6 +921,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		odsq = flow_llc_dsq(li);
 		if (!flow_dsq_ok(odsq))
 			continue;
+		if (!flow_dsq_head_allowed(odsq, c))
+			continue;
 		if (scx_bpf_dsq_move_to_local(odsq, 0)) {
 			flow_stat_inc(llc, 1);
 			flow_queued_dec(li);
@@ -892,7 +931,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 	/* Fallback DSQ is safety only. It stays empty unless LLC validation fails. */
-	if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
+	if (flow_dsq_head_allowed((u64)FLOW_FALLBACK_DSQ, c) &&
+	    scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
 		u32 li2;
 		flow_stat_inc(llc, 1);
 		bpf_for(li2, 0, FLOW_MAX_LLCS) {
