@@ -592,9 +592,20 @@ idle:
 		return;
 	scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
 }
+/* Wake idle only for inserts without task context. No preempt. */
+static __always_inline void flow_kick_idle_only(s32 task_cpu, struct task_struct *p)
+{
+	if (task_cpu < 0)
+		return;
+	if (!flow_cpu_allowed(task_cpu, p))
+		return;
+	scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
+}
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	TOUCH_ARENA();
+	if (!p)
+		return;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
 	u32 llc = 0;
@@ -651,13 +662,33 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			have_pair = 1;
 		}
 	}
+	/* Exiting tasks skip pairing plus vtime plus counters. They wait */
+	/* on the local queue of the target CPU with a minimal slice so */
+	/* exit makes progress with no stall. No queued flag plus no */
+	/* sequence plus no pair plus no queued count. Idle kick at most. */
+	/* Offline plus disallowed drops fail closed with no insert. */
+	if (p->flags & PF_EXITING) {
+		u64 ldsq;
+		if (task_cpu < 0)
+			return;
+		if (!flow_cpu_ok((u32)task_cpu))
+			return;
+		if (!flow_cpu_allowed(task_cpu, p))
+			return;
+		ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+		scx_bpf_dsq_insert(p, ldsq, 1000ULL, enq_flags);
+		scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
+		return;
+	}
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		goto insert_only;
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
-	if (old_flags & (u32)FLOW_FLAG_QUEUED)
+	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
+		flow_stat_inc(llc, 2);
 		return;
+	}
 	if (t->gen != 0 &&
 	    (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B) &&
 	    flow_llc_ok(t->llc_id) &&
@@ -758,7 +789,10 @@ insert_only:
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_NS, enq_flags);
 			flow_stat_inc(llc, 0);
-			flow_kick_for_enq(task_cpu, use_v, p);
+			if (!t)
+				flow_kick_idle_only(task_cpu, p);
+			else
+				flow_kick_for_enq(task_cpu, use_v, p);
 			return;
 		}
 	}
@@ -767,7 +801,10 @@ insert_only:
 					   (u64)use_strand);
 		if (ret == 0) {
 			flow_stat_inc(llc, 0);
-			flow_kick_for_enq(task_cpu, use_v, p);
+			if (!t)
+				flow_kick_idle_only(task_cpu, p);
+			else
+				flow_kick_for_enq(task_cpu, use_v, p);
 			return;
 		}
 		/* Pair full. Count the move to the LLC queue. */
@@ -780,7 +817,10 @@ insert_only:
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, enq_flags);
 		flow_stat_inc(llc, 0);
-		flow_kick_for_enq(task_cpu, use_v, p);
+		if (!t)
+			flow_kick_idle_only(task_cpu, p);
+		else
+			flow_kick_for_enq(task_cpu, use_v, p);
 	}
 }
 /*
@@ -789,66 +829,94 @@ insert_only:
  * Queued is charged to the enqueue LLC. Dispatched stays on the
  * dispatch LLC. Returns 1 when a task reached the local queue.
  * A task that cannot run on the thief goes back to the victim
- * queue with no counter move and no loss.
+ * queue with no counter move and no loss. Stale plus exiting
+ * entries retry bounded so one bad entry never stalls dispatch.
+ * Exiting tasks never reach shared LLC queues with a full slice.
  */
 static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand,
 					     int always_steal, u32 cpu)
 {
-	u64 pid;
-	struct task_struct *p;
-	struct flow_task_ctx *t;
-	u32 tst;
-	u32 victim;
-	u64 ins_vtime;
-	u64 dsq;
+	u32 attempt;
 	if (!dhq)
 		return 0;
 	if (!flow_llc_ok(llc))
 		return 0;
 	if (!flow_cpu_ok(cpu))
 		return 0;
-	if (scx_dhq_nr_queued(dhq) == 0)
-		return 0;
-	if (!scx_dhq_peek(dhq))
-		return 0;
-	pid = scx_dhq_pop(dhq);
-	if (!pid)
-		return 0;
-	p = bpf_task_from_pid((s32)pid);
-	if (!p) {
-		flow_stale_account(llc);
-		return 0;
-	}
-	tst = strand;
-	victim = llc;
-	ins_vtime = (u64)p->scx.dsq_vtime;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (t) {
-		tst = t->strand;
-		if (t->deadline == flow_vtime_add_slice(t->vtime))
-			ins_vtime = (u64)t->vtime;
-		if (flow_llc_ok(t->llc_id))
-			victim = t->llc_id;
-	}
-	if (!flow_cpu_allowed((s32)cpu, p)) {
-		u64 vdsq = flow_llc_dsq(victim);
-		if (!flow_dsq_ok(vdsq))
-			vdsq = (u64)FLOW_FALLBACK_DSQ;
-		scx_bpf_dsq_insert_vtime(p, vdsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
+	bpf_for(attempt, 0, 4) {
+		u64 pid;
+		struct task_struct *p;
+		struct flow_task_ctx *t;
+		u32 tst;
+		u32 victim;
+		u64 ins_vtime;
+		u64 dsq;
+		if (scx_dhq_nr_queued(dhq) == 0)
+			return 0;
+		if (!scx_dhq_peek(dhq))
+			return 0;
+		pid = scx_dhq_pop(dhq);
+		if (!pid)
+			return 0;
+		p = bpf_task_from_pid((s32)pid);
+		if (!p) {
+			flow_stale_account(llc);
+			continue;
+		}
+		/* Exiting tasks never wait on shared LLC queues. */
+		/* Allowed targets run on the thief local queue with */
+		/* a minimal slice. Disallowed targets drop with */
+		/* stale accounting so counters stay correct. */
+		if (p->flags & PF_EXITING) {
+			if (flow_cpu_allowed((s32)cpu, p)) {
+				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)cpu;
+				u32 ex_victim = llc;
+				struct flow_task_ctx *ex_t;
+				ex_t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+				if (ex_t && flow_llc_ok(ex_t->llc_id))
+					ex_victim = ex_t->llc_id;
+				scx_bpf_dsq_insert(p, ldsq, 1000ULL, 0);
+				bpf_task_release(p);
+				flow_queued_dec(ex_victim);
+				flow_stat_inc(llc, 2);
+				return 1;
+			}
+			flow_stale_account(llc);
+			bpf_task_release(p);
+			continue;
+		}
+		tst = strand;
+		victim = llc;
+		ins_vtime = (u64)p->scx.dsq_vtime;
+		t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+		if (t) {
+			tst = t->strand;
+			if (t->deadline == flow_vtime_add_slice(t->vtime))
+				ins_vtime = (u64)t->vtime;
+			if (flow_llc_ok(t->llc_id))
+				victim = t->llc_id;
+		}
+		if (!flow_cpu_allowed((s32)cpu, p)) {
+			u64 vdsq = flow_llc_dsq(victim);
+			if (!flow_dsq_ok(vdsq))
+				vdsq = (u64)FLOW_FALLBACK_DSQ;
+			scx_bpf_dsq_insert_vtime(p, vdsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
+			bpf_task_release(p);
+			return 0;
+		}
+		dsq = flow_llc_dsq(llc);
+		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
 		bpf_task_release(p);
+		flow_queued_dec(victim);
+		if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+			flow_stat_inc(llc, 1);
+			if (always_steal || tst != strand)
+				flow_stat_inc(llc, 3);
+			return 1;
+		}
+		flow_stat_inc(victim, 0);
 		return 0;
 	}
-	dsq = flow_llc_dsq(llc);
-	scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
-	bpf_task_release(p);
-	flow_queued_dec(victim);
-	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
-		flow_stat_inc(llc, 1);
-		if (always_steal || tst != strand)
-			flow_stat_inc(llc, 3);
-		return 1;
-	}
-	flow_stat_inc(victim, 0);
 	return 0;
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
