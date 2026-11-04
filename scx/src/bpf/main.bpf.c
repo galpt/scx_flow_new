@@ -14,7 +14,12 @@
  * pair, same node pairs, remote pairs, LLC queues. A per CPU hint
  * tracks burnt share and asks the governor for full speed when busy
  * and half speed when idle. The hint needs the schedutil governor
- * and hardware support and never changes placement.
+ * and hardware support and never changes placement. A task with one
+ * allowed CPU or with migration disabled bypasses pairing and goes
+ * straight to its allowed LLC queue with its enqueue flags kept.
+ * Kick preempts only when the target is allowed, else it wakes idle.
+ * Dispatch moves a task to local only when the task can run on this
+ * CPU, else the task stays queued with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -116,6 +121,29 @@ static __always_inline void flow_stale_account(u32 thief)
 		__sync_fetch_and_sub(&st->queued, 1ULL);
 		break;
 	}
+}
+/* Pinned when only one CPU is allowed or migration is disabled. */
+/* Null task fails closed with no bypass. */
+static __always_inline bool flow_is_pinned(struct task_struct *p)
+{
+	if (!p)
+		return false;
+	if (p->nr_cpus_allowed == 1)
+		return true;
+	return is_migration_disabled(p);
+}
+/* True when cpu is in the task mask. Null mask fails closed. */
+static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
+{
+	u32 c;
+	if (!p || !p->cpus_ptr)
+		return false;
+	if (cpu < 0)
+		return false;
+	c = (u32)cpu;
+	if (!flow_cpu_ok(c))
+		return false;
+	return bpf_cpumask_test_cpu(c, p->cpus_ptr);
 }
 /* Saturated vtime plus slice. Caps at max on overflow. */
 static __always_inline s64 flow_vtime_add_slice(s64 v)
@@ -489,13 +517,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 /* Preempt when the running vtime is ahead by at least the threshold */
 /* and the running slice is past the tail. Uses unsigned gap so the */
 /* compare stays valid across wrap. Preempt is not counted as steal. */
-static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v)
+/* Kick preempts only when the target is allowed, else it wakes idle. */
+static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v, struct task_struct *p)
 {
 	u32 cpu;
 	struct flow_running_state *rs;
 	u64 gap;
 	if (task_cpu < 0)
 		return;
+	if (!flow_cpu_allowed(task_cpu, p))
+		goto idle;
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		goto idle;
@@ -529,13 +560,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	int carry = 0;
 	u32 pair_u = 0;
 	int have_pair = 0;
+	bool pinned = false;
 	struct flow_task_ctx *t;
 	scx_dhq_t *dhq = NULL;
 	int ret;
 	u32 old_flags;
-	(void)enq_flags;
 	if (task_cpu < 0)
 		task_cpu = bpf_get_smp_processor_id();
+	if (p->cpus_ptr && !flow_cpu_allowed(task_cpu, p)) {
+		u32 first = bpf_cpumask_first(p->cpus_ptr);
+		if (flow_cpu_ok(first))
+			task_cpu = (s32)first;
+	}
 	cpu = (u32)task_cpu;
 	if (flow_cpu_ok(cpu)) {
 		struct flow_cpu_ctx *cc;
@@ -550,7 +586,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	use_sl = (u64)FLOW_SLICE_NS;
 	use_strand = strand;
 	use_llc = llc;
-	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
+	pinned = flow_is_pinned(p);
+	if (pinned) {
+		dhq = NULL;
+		have_pair = 0;
+	} else if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
 		u64 idx = flow_llc_pair[llc];
 		if (idx < (u64)FLOW_MAX_PAIRS) {
 			dhq = flow_pair_dhqs[(u32)idx];
@@ -661,7 +701,7 @@ insert_only:
 					   (u64)use_strand);
 		if (ret == 0) {
 			flow_stat_inc(llc, 0);
-			flow_kick_for_enq(task_cpu, use_v);
+			flow_kick_for_enq(task_cpu, use_v, p);
 			return;
 		}
 		/* Pair full. Count the move to the LLC queue. */
@@ -672,9 +712,9 @@ insert_only:
 		u64 dsq = flow_llc_dsq(llc);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
-		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, 0);
+		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, enq_flags);
 		flow_stat_inc(llc, 0);
-		flow_kick_for_enq(task_cpu, use_v);
+		flow_kick_for_enq(task_cpu, use_v, p);
 	}
 }
 /*
@@ -682,9 +722,11 @@ insert_only:
  * Peek is a hint only, pop is truth. Null task is stale.
  * Queued is charged to the enqueue LLC. Dispatched stays on the
  * dispatch LLC. Returns 1 when a task reached the local queue.
+ * A task that cannot run on the thief goes back to the victim
+ * queue with no counter move and no loss.
  */
 static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand,
-					     int always_steal)
+					     int always_steal, u32 cpu)
 {
 	u64 pid;
 	struct task_struct *p;
@@ -696,6 +738,8 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 	if (!dhq)
 		return 0;
 	if (!flow_llc_ok(llc))
+		return 0;
+	if (!flow_cpu_ok(cpu))
 		return 0;
 	if (scx_dhq_nr_queued(dhq) == 0)
 		return 0;
@@ -719,6 +763,14 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 			ins_vtime = (u64)t->vtime;
 		if (flow_llc_ok(t->llc_id))
 			victim = t->llc_id;
+	}
+	if (!p->cpus_ptr || !bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		u64 vdsq = flow_llc_dsq(victim);
+		if (!flow_dsq_ok(vdsq))
+			vdsq = (u64)FLOW_FALLBACK_DSQ;
+		scx_bpf_dsq_insert_vtime(p, vdsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
+		bpf_task_release(p);
+		return 0;
 	}
 	dsq = flow_llc_dsq(llc);
 	scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
@@ -776,7 +828,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 	if (dhq) {
-		if (flow_pop_to_local(dhq, llc, strand, 0))
+		if (flow_pop_to_local(dhq, llc, strand, 0, c))
 			return;
 		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
 			u64 idx = (u64)pi;
@@ -792,7 +844,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			cand = flow_pair_dhqs[pi];
 			if (!cand)
 				continue;
-			if (flow_pop_to_local(cand, llc, strand, 1))
+			if (flow_pop_to_local(cand, llc, strand, 1, c))
 				return;
 		}
 		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
@@ -809,7 +861,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			cand = flow_pair_dhqs[pi];
 			if (!cand)
 				continue;
-			if (flow_pop_to_local(cand, llc, strand, 1))
+			if (flow_pop_to_local(cand, llc, strand, 1, c))
 				return;
 		}
 	}
