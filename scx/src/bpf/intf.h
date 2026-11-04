@@ -80,6 +80,13 @@ struct flow_running_state {
 	u32 strand;
 	u64 gen;
 };
+/* Per CPU hint state for speed requests. Zero means empty. Last holds */
+/* the prior sample time in nanos. Level holds the smoothed load in the */
+/* same scale as the kernel speed scale. Persisted across events. */
+struct flow_freq_state {
+	u64 last;
+	u64 level;
+};
 /* Per CPU view seeded once from userspace. Small with no frozen row. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
