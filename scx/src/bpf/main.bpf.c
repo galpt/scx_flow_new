@@ -477,6 +477,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 				return -EINVAL;
 			}
 			idx = (u64)flow_pair_count - 1;
+			if (idx >= (u64)FLOW_MAX_PAIRS) {
+				scx_bpf_error("pair over bound");
+				return -EINVAL;
+			}
 			if (!flow_pair_dhqs[idx]) {
 				scx_bpf_error("pair null for strand B");
 				return -EINVAL;
