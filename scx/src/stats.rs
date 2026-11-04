@@ -29,10 +29,10 @@ pub struct Metrics {
     #[stat(desc = "Tasks moved to local in dispatch")]
     #[serde(default)]
     pub dispatched: u64,
-    #[stat(desc = "Enqueue fallbacks plus lookup misses")]
+    #[stat(desc = "Pair full moves to LLC queue plus stale discards")]
     #[serde(default)]
     pub fallback: u64,
-    #[stat(desc = "Cross strand pair moves in dispatch")]
+    #[stat(desc = "Pair and LLC queue steals in dispatch")]
     #[serde(default)]
     pub steal: u64,
 }

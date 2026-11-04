@@ -2,7 +2,7 @@
 /*
  * Shared ABI for the flow scheduler.
  *
- * DSQs are one per LLC plus one fallback. Pair queues are upstream arena DHQs.
+ * DSQs are one per LLC plus one fallback safety net. Pair queues are upstream arena DHQs.
  * Stats are four counters per LLC.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -51,22 +51,21 @@ enum flow_consts {
 	FLOW_DHQ_MAX_IMBALANCE = 3ULL,
 	/* Base DSQ id for per LLC queues. LLC id adds to the base. */
 	FLOW_LLC_BASE = 0x6000ULL,
-	/* Single fallback DSQ id used when pairing is off or full. */
+	/* Single fallback DSQ id used only when LLC id fails validation. Safety only. */
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
 	/* Strand fixed A. */
 	FLOW_STRAND_A = 0ULL,
 	/* Strand fixed B. */
 	FLOW_STRAND_B = 1ULL,
-	/* Dequeue picks the lowest vtime with fallback. */
-	FLOW_MODE_PRIORITY = 1ULL,
+	/* Queued bit in task flags. Set on enqueue, cleared on running and dequeue. */
+	FLOW_FLAG_QUEUED = 1ULL,
 };
-/* Per task state for the life of the task. Small with no padding drift. */
+/* Per task state for the life of the task. Flags holds the queued bit. */
 struct flow_task_ctx {
 	s64 vtime;
 	s64 deadline;
 	u64 slice_rem;
 	u64 gen;
-	u64 seq;
 	u32 strand;
 	u32 llc_id;
 	u32 flags;
@@ -87,11 +86,6 @@ struct flow_cpu_ctx {
 	u32 llc_id;
 	u32 node_id;
 	u32 pad;
-};
-/* Seeded topology row per CPU with node plus LLC. */
-struct flow_topo_entry {
-	u32 node_id;
-	u32 llc_id;
 };
 /* Minimal per LLC counters. Queued is a gauge, rest are totals. */
 struct flow_llc_stats {

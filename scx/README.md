@@ -2,13 +2,13 @@
 
 ## What
 
-scx_flow is a scheduler that focuses on providing a smooth modern-day desktop experience. Tasks enter a pair queue by virtual time and fall back to a per LLC queue when the pair is full or imbalanced, so interactive work keeps cache locality while bulk work still drains. Idle dispatch can take work from the local pair, then other pairs on the same node, then pairs on other nodes, then other LLC queues. A wakeup with a clearly smaller virtual time can preempt the running task, else it only wakes idle. The running task keeps its virtual time plus deadline plus slice on requeue.
+scx_flow places tasks by virtual time. Each LLC maps to one strand of a pair queue. The pair queue is a DHQ that runs in strict priority mode and picks the lowest virtual time first with ties going to strand A. When a pair is full or imbalanced the task goes to the per LLC queue. Dispatch checks the local pair first, then pairs on the same node, then pairs on other nodes, then LLC queues. A wakeup preempts the running task when its virtual time is smaller by at least 500000 nanos and the running slice has more than 125000 nanos left, else it wakes an idle CPU. Slice is 1000000 nanos. A requeued task keeps its remaining slice with virtual time advanced through the per pair sequence.
 
 ## Typical Use Cases
 
-- Latency-sensitive applications, such as audio editing.
-- General desktop use, such as gaming with some browser tabs open and other apps running in the background.
-- Mixed batch workloads, such as compiling, rendering, and others.
+- Latency sensitive work, such as audio editing.
+- Desktop use, such as gaming with browser tabs open and other apps in the background.
+- Batch work, such as compiling and rendering.
 
 ## Limitations
 
