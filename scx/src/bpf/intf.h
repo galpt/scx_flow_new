@@ -53,14 +53,8 @@ enum flow_consts {
 	FLOW_STRAND_A = 0ULL,
 	/* Strand fixed B. */
 	FLOW_STRAND_B = 1ULL,
-	/* Strand auto picks the less full strand. */
-	FLOW_STRAND_AUTO = 2ULL,
-	/* Dequeue alternates strands with fallback. */
-	FLOW_MODE_ALTERNATING = 0ULL,
-	/* Dequeue picks the lowest vtime with fallback. Pinned in v5. */
+	/* Dequeue picks the lowest vtime with fallback. */
 	FLOW_MODE_PRIORITY = 1ULL,
-	/* Dequeue prefers the larger strand with fallback. */
-	FLOW_MODE_BALANCED = 2ULL,
 };
 /* Per task state for the life of the task. Small with no padding drift. */
 struct flow_task_ctx {

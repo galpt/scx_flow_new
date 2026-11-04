@@ -6,18 +6,19 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 ## Layout
 
-- `scx/Cargo.toml` package `scx_flow`
+- `scx/Cargo.toml` package manifest
+- `scx/build.rs` build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
-- `scx/src/bpf/` maps, placement, and dispatch
+- `scx/src/bpf/main.bpf.c` maps, placement, and dispatch
+- `scx/src/bpf/lib/common.bpf.c` shared arena setup
+- `scx/src/bpf/lib/minheap.bpf.c` shared heap
+- `scx/src/bpf/lib/sdt_alloc.bpf.c` shared alloc
 - `scx/src/main.rs` frontend and run loop
+- `scx/src/stats.rs` counters and server view
 - `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
-- `scx/src/rust/config.rs` constant validation
-- `scx/src/rust/snapshot.rs` counters plus dashboard view with per CPU pids
-- `scx/src/rust/stats.rs` counters plus dashboard view with raw counters
-- `scx/src/rust/topology.rs` online plus node view for the seed
-- `scx/src/rust/webui.rs` loopback dashboard with page plus JSON
-- `scx/ui/index.html` dashboard page with counters plus cards plus download
+- `scx/README.md` scheduler behavior
 - `tools/install_scx_flow.sh` overlay build installer
+- `tools/test_install_guard.sh` installer checks
 - `tools/edf_harness/` load probe with its own README
 
 ## Build

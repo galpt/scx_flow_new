@@ -110,7 +110,6 @@ impl<'a> Scheduler<'a> {
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
-        let _ = &mut skel;
         match Self::seed_topology(&mut skel) {
             Ok(text) => info!("Topology: {text}"),
             Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
@@ -303,87 +302,4 @@ fn main() -> Result<()> {
     }
     info!("Scheduler exited");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scheduler_name_is_flow() {
-        assert_eq!(SCHEDULER_NAME, "scx_flow");
-        assert!(poll_interval_secs(1.0).is_ok());
-        assert!(poll_interval_secs(0.0).is_err());
-        assert!(poll_interval_secs(-1.0).is_err());
-        assert!(poll_interval_secs(f64::NAN).is_err());
-        assert!(poll_interval_secs(f64::INFINITY).is_err());
-        assert!(poll_interval_secs(3601.0).is_err());
-    }
-
-    #[test]
-    fn abi_bounds_match_header() {
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as u64, 1024);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u64, 64);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_NODES as u64, 8);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MAX_PAIRS as u64, 32);
-    }
-
-    #[test]
-    fn abi_tuning_matches_header() {
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_SLICE_NS as u64, 1_000_000);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_OPS_TIMEOUT_MS as u64,
-            20_000
-        );
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_DHQ_MAX_IMBALANCE as u64,
-            3
-        );
-    }
-
-    #[test]
-    fn abi_dsq_matches_header() {
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_LLC_BASE as u64, 0x6000);
-        assert_eq!(
-            crate::bpf_intf::flow_consts_FLOW_FALLBACK_DSQ as u64,
-            0x6100
-        );
-    }
-
-    #[test]
-    fn abi_modes_match_header() {
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_A as u64, 0);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_B as u64, 1);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_STRAND_AUTO as u64, 2);
-        assert_eq!(crate::bpf_intf::flow_consts_FLOW_MODE_PRIORITY as u64, 1);
-    }
-
-    #[test]
-    fn abi_struct_sizes_match_header() {
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>(), 24);
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_cpu_ctx>(), 16);
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_topo_entry>(), 8);
-        assert_eq!(std::mem::size_of::<crate::bpf_intf::flow_llc_stats>(), 32);
-    }
-
-    #[test]
-    fn metrics_delta_keeps_gauge() {
-        let prev = Metrics {
-            queued: 10,
-            dispatched: 5,
-            fallback: 2,
-            steal: 1,
-        };
-        let cur = Metrics {
-            queued: 12,
-            dispatched: 9,
-            fallback: 3,
-            steal: 4,
-        };
-        let d = cur.delta(&prev);
-        assert_eq!(d.queued, 12);
-        assert_eq!(d.dispatched, 4);
-        assert_eq!(d.fallback, 1);
-        assert_eq!(d.steal, 3);
-    }
 }

@@ -30,17 +30,10 @@ struct flow_dhq {
 	u64 capacity;
 	u64 size_a;
 	u64 size_b;
-	u64 seq_a;
-	u64 seq_b;
-	u64 dequeue_a;
-	u64 dequeue_b;
 	u64 max_imbalance;
-	u8 fifo;
-	u8 last_strand;
-	u8 mode;
 };
 typedef struct flow_dhq __arena flow_dhq_t;
-__weak u64 flow_dhq_create(bool fifo, u64 capacity, u64 mode, u64 max_imbalance)
+__weak u64 flow_dhq_create(u64 capacity, u64 max_imbalance)
 {
 	flow_dhq_t *dhq;
 	u64 half;
@@ -54,11 +47,8 @@ __weak u64 flow_dhq_create(bool fifo, u64 capacity, u64 mode, u64 max_imbalance)
 	dhq->strand_b = scx_minheap_alloc(half);
 	if (!dhq->strand_b)
 		return (u64)NULL;
-	dhq->fifo = fifo;
 	dhq->capacity = capacity;
-	dhq->mode = mode;
 	dhq->max_imbalance = max_imbalance;
-	dhq->last_strand = (u8)FLOW_STRAND_B;
 	return (u64)dhq;
 }
 static inline int flow_dhq_insert_inner(flow_dhq_t *dhq, u64 elem, u64 strand, u64 key)
@@ -103,42 +93,13 @@ out:
 	scx_spin_unlock(&dhq->lock);
 	return ret;
 }
-__hidden __noinline int flow_strand_insert_fifo(flow_dhq_t *dhq, u64 elem, u64 strand)
-{
-	u64 pick;
-	u64 key;
-	if (!dhq)
-		return -EINVAL;
-	if (!dhq->fifo)
-		return -EINVAL;
-	if (strand == (u64)FLOW_STRAND_AUTO)
-		pick = (dhq->size_a <= dhq->size_b) ?
-		       (u64)FLOW_STRAND_A : (u64)FLOW_STRAND_B;
-	else if (strand == (u64)FLOW_STRAND_A || strand == (u64)FLOW_STRAND_B)
-		pick = strand;
-	else
-		return -EINVAL;
-	if (pick == (u64)FLOW_STRAND_A)
-		key = dhq->seq_a++;
-	else
-		key = dhq->seq_b++;
-	return flow_dhq_insert_inner(dhq, elem, pick, key);
-}
 __hidden __noinline int flow_strand_insert_vtime(flow_dhq_t *dhq, u64 elem, u64 vtime, u64 strand)
 {
-	u64 pick;
 	if (!dhq)
 		return -EINVAL;
-	if (dhq->fifo)
+	if (strand != (u64)FLOW_STRAND_A && strand != (u64)FLOW_STRAND_B)
 		return -EINVAL;
-	if (strand == (u64)FLOW_STRAND_AUTO)
-		pick = (dhq->size_a <= dhq->size_b) ?
-		       (u64)FLOW_STRAND_A : (u64)FLOW_STRAND_B;
-	else if (strand == (u64)FLOW_STRAND_A || strand == (u64)FLOW_STRAND_B)
-		pick = strand;
-	else
-		return -EINVAL;
-	return flow_dhq_insert_inner(dhq, elem, pick, vtime);
+	return flow_dhq_insert_inner(dhq, elem, strand, vtime);
 }
 static inline u64 flow_dhq_pop_strand_locked(flow_dhq_t *dhq, u64 strand)
 {
@@ -154,13 +115,10 @@ static inline u64 flow_dhq_pop_strand_locked(flow_dhq_t *dhq, u64 strand)
 	ret = scx_minheap_pop(heap, &helem);
 	if (ret)
 		return (u64)NULL;
-	if (strand == (u64)FLOW_STRAND_A) {
+	if (strand == (u64)FLOW_STRAND_A)
 		dhq->size_a -= 1;
-		dhq->dequeue_a += 1;
-	} else {
+	else
 		dhq->size_b -= 1;
-		dhq->dequeue_b += 1;
-	}
 	return helem.elem;
 }
 __hidden __noinline u64 flow_dhq_pop(flow_dhq_t *dhq)
@@ -168,137 +126,32 @@ __hidden __noinline u64 flow_dhq_pop(flow_dhq_t *dhq)
 	u64 out = (u64)NULL;
 	u64 wa;
 	u64 wb;
-	u64 pick;
 	if (!dhq)
 		return (u64)NULL;
 	scx_spin_lock(&dhq->lock);
 	if (dhq->size_a + dhq->size_b == 0)
 		goto unlock;
-	if (dhq->mode == (u8)FLOW_MODE_ALTERNATING) {
-		pick = (dhq->last_strand == (u8)FLOW_STRAND_A) ?
-		       (u64)FLOW_STRAND_B : (u64)FLOW_STRAND_A;
-		out = flow_dhq_pop_strand_locked(dhq, pick);
-		if (!out) {
-			pick = (pick == (u64)FLOW_STRAND_A) ?
-			       (u64)FLOW_STRAND_B : (u64)FLOW_STRAND_A;
-			out = flow_dhq_pop_strand_locked(dhq, pick);
-		}
-		if (out)
-			dhq->last_strand = (u8)pick;
-	} else if (dhq->mode == (u8)FLOW_MODE_PRIORITY) {
-		if (dhq->size_a > 0 && dhq->strand_a)
-			wa = dhq->strand_a->helems[0].weight;
-		else
-			wa = (u64)-1;
-		if (dhq->size_b > 0 && dhq->strand_b)
-			wb = dhq->strand_b->helems[0].weight;
-		else
-			wb = (u64)-1;
-		if (wa <= wb) {
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-			if (!out) {
-				out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-				if (out)
-					dhq->last_strand = (u8)FLOW_STRAND_B;
-			} else {
-				dhq->last_strand = (u8)FLOW_STRAND_A;
-			}
-		} else {
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-			if (!out) {
-				out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-				if (out)
-					dhq->last_strand = (u8)FLOW_STRAND_A;
-			} else {
-				dhq->last_strand = (u8)FLOW_STRAND_B;
-			}
-		}
-	} else if (dhq->mode == (u8)FLOW_MODE_BALANCED) {
-		if (dhq->size_a >= dhq->size_b) {
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-			if (!out)
-				out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-			else
-				dhq->last_strand = (u8)FLOW_STRAND_A;
-		} else {
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-			if (!out)
-				out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-			else
-				dhq->last_strand = (u8)FLOW_STRAND_B;
-		}
-	}
-unlock:
-	scx_spin_unlock(&dhq->lock);
-	return out;
-}
-static inline u64 flow_dhq_peek_strand_locked(flow_dhq_t *dhq, u64 strand)
-{
-	scx_minheap_t *heap;
-	heap = (strand == (u64)FLOW_STRAND_A) ? dhq->strand_a : dhq->strand_b;
-	if (!heap || heap->size == 0)
-		return (u64)NULL;
-	return heap->helems[0].elem;
-}
-__hidden __noinline u64 flow_dhq_peek(flow_dhq_t *dhq)
-{
-	u64 out = (u64)NULL;
-	u64 wa;
-	u64 wb;
-	u64 pick;
-	if (!dhq)
-		return (u64)NULL;
-	scx_spin_lock(&dhq->lock);
-	if (dhq->size_a + dhq->size_b == 0)
-		goto unlock;
-	if (dhq->mode == (u8)FLOW_MODE_ALTERNATING) {
-		pick = (dhq->last_strand == (u8)FLOW_STRAND_A) ?
-		       (u64)FLOW_STRAND_B : (u64)FLOW_STRAND_A;
-		out = flow_dhq_peek_strand_locked(dhq, pick);
-		if (!out) {
-			pick = (pick == (u64)FLOW_STRAND_A) ?
-			       (u64)FLOW_STRAND_B : (u64)FLOW_STRAND_A;
-			out = flow_dhq_peek_strand_locked(dhq, pick);
-		}
-	} else if (dhq->mode == (u8)FLOW_MODE_PRIORITY) {
-		if (dhq->size_a > 0 && dhq->strand_a)
-			wa = dhq->strand_a->helems[0].weight;
-		else
-			wa = (u64)-1;
-		if (dhq->size_b > 0 && dhq->strand_b)
-			wb = dhq->strand_b->helems[0].weight;
-		else
-			wb = (u64)-1;
+	if (dhq->size_a > 0 && dhq->strand_a)
+		wa = dhq->strand_a->helems[0].weight;
+	else
+		wa = (u64)-1;
+	if (dhq->size_b > 0 && dhq->strand_b)
+		wb = dhq->strand_b->helems[0].weight;
+	else
+		wb = (u64)-1;
+	if (wa <= wb)
+		out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
+	else
+		out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
+	if (!out) {
 		if (wa <= wb)
-			out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_A);
+			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
 		else
-			out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_B);
-		if (!out) {
-			if (wa <= wb)
-				out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_B);
-			else
-				out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_A);
-		}
-	} else if (dhq->mode == (u8)FLOW_MODE_BALANCED) {
-		if (dhq->size_a >= dhq->size_b) {
-			out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_A);
-			if (!out)
-				out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_B);
-		} else {
-			out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_B);
-			if (!out)
-				out = flow_dhq_peek_strand_locked(dhq, (u64)FLOW_STRAND_A);
-		}
+			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
 	}
 unlock:
 	scx_spin_unlock(&dhq->lock);
 	return out;
-}
-__hidden __noinline int flow_dhq_nr_queued(flow_dhq_t *dhq)
-{
-	if (!dhq)
-		return 0;
-	return (int)(dhq->size_a + dhq->size_b);
 }
 /* Maps plus pair tables. */
 struct {
@@ -325,6 +178,7 @@ flow_dhq_t *flow_pair_dhqs[FLOW_MAX_PAIRS];
 u64 flow_llc_pair[FLOW_MAX_LLCS];
 u64 flow_llc_strand[FLOW_MAX_LLCS];
 u32 flow_node_count[FLOW_MAX_NODES];
+u64 flow_node_last_pair[FLOW_MAX_NODES];
 u32 flow_pair_count;
 static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 {
@@ -462,8 +316,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			cap = n * 4;
 			if (cap < 8)
 				cap = 8;
-			got = flow_dhq_create(false, cap,
-					      (u64)FLOW_MODE_PRIORITY,
+			got = flow_dhq_create(cap,
 					      (u64)FLOW_DHQ_MAX_IMBALANCE);
 			if (!got) {
 				scx_bpf_error("pair create failed");
@@ -471,12 +324,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			}
 			flow_pair_dhqs[idx] = (flow_dhq_t *)got;
 			flow_pair_count += 1;
+			flow_node_last_pair[node] = idx;
 		} else {
-			if (flow_pair_count == 0) {
-				scx_bpf_error("pair missing for strand B");
-				return -EINVAL;
-			}
-			idx = (u64)flow_pair_count - 1;
+			idx = flow_node_last_pair[node];
 			if (idx >= (u64)FLOW_MAX_PAIRS) {
 				scx_bpf_error("pair over bound");
 				return -EINVAL;
