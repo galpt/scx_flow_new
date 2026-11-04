@@ -12,9 +12,9 @@ WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
 VER="5.0.6"
-# Pinned upstream ref, same as repo CI.
+# Pinned fork ref, same as repo CI.
 SCX_REF="b0efa3f614c0187df4cb3202d7b514d401f77d2a"
-UPSTREAM="https://github.com/sched-ext/scx"
+UPSTREAM="https://github.com/galpt/scx"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {

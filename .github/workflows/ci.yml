@@ -3,7 +3,7 @@ name: ci
 # Overlay CI for the scx_flow scheduler.
 #
 # The scheduler in scx/ is a drop-in for scheds/experimental/scx_flow/
-# in an upstream sched-ext/scx checkout (path deps use ../../../rust),
+# in a galpt/scx fork checkout (path deps use ../../../rust),
 # so every job first assembles that workspace, syncs the overlay
 # lock entry, and then runs the usual package-scoped checks inside
 # it. No live scheduler run: GitHub
@@ -25,7 +25,7 @@ env:
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
-  # Pinned upstream workspace ref (sched-ext/scx main as of 2026-11-04).
+  # Pinned fork workspace ref (galpt/scx main as of 2026-11-04).
   # Bump deliberately after verifying the overlay still builds; the
   # overlay needs scx_* 1.1.4 + libbpf-rs 0.27.2 from the workspace.
   SCX_REF: b0efa3f614c0187df4cb3202d7b514d401f77d2a
@@ -50,7 +50,7 @@ jobs:
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
-          git -C /tmp/opencode/scx remote add origin https://github.com/sched-ext/scx
+          git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
           # Upstream already ships scheds/experimental/scx_flow, so
@@ -99,7 +99,7 @@ jobs:
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
-          git -C /tmp/opencode/scx remote add origin https://github.com/sched-ext/scx
+          git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
           # Upstream already ships scheds/experimental/scx_flow, so
