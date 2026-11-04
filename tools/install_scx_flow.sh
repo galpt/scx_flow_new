@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.0.6"
+VER="5.0.7"
 # Pinned fork ref, same as repo CI.
 SCX_REF="b0efa3f614c0187df4cb3202d7b514d401f77d2a"
 FORK="https://github.com/galpt/scx"
