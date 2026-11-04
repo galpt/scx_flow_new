@@ -4,7 +4,7 @@
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
 //! Loads the BPF object, seeds the LLC view, then drives the loop.
-//! Observability is four counters through the stats server.
+//! Observability is per LLC counters with a stable head plus a sizing tail.
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -209,6 +209,26 @@ impl<'a> Scheduler<'a> {
             out.dispatched = out.dispatched.wrapping_add(d);
             out.fallback = out.fallback.wrapping_add(f);
             out.steal = out.steal.wrapping_add(s);
+            if val.len() >= 40 {
+                let v = u64::from_ne_bytes(val[32..40].try_into().unwrap_or([0u8; 8]));
+                out.fb_pair_full = out.fb_pair_full.wrapping_add(v);
+            }
+            if val.len() >= 48 {
+                let v = u64::from_ne_bytes(val[40..48].try_into().unwrap_or([0u8; 8]));
+                out.fb_duplicate = out.fb_duplicate.wrapping_add(v);
+            }
+            if val.len() >= 56 {
+                let v = u64::from_ne_bytes(val[48..56].try_into().unwrap_or([0u8; 8]));
+                out.fb_stale = out.fb_stale.wrapping_add(v);
+            }
+            if val.len() >= 64 {
+                let v = u64::from_ne_bytes(val[56..64].try_into().unwrap_or([0u8; 8]));
+                out.dhq_depth = out.dhq_depth.wrapping_add(v);
+            }
+            if val.len() >= 72 {
+                let v = u64::from_ne_bytes(val[64..72].try_into().unwrap_or([0u8; 8]));
+                out.dhq_cap = out.dhq_cap.wrapping_add(v);
+            }
             if llc + 1 >= 64 {
                 break;
             }

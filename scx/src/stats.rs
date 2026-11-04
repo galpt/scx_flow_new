@@ -21,7 +21,7 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Minimal counters with pair plus DSQ detail.
+/// Minimal counters with pair plus DSQ detail and sizing tail.
 pub struct Metrics {
     #[stat(desc = "Tasks now queued in pair plus DSQ")]
     #[serde(default)]
@@ -35,29 +35,54 @@ pub struct Metrics {
     #[stat(desc = "Pair and LLC queue steals in dispatch")]
     #[serde(default)]
     pub steal: u64,
+    #[stat(desc = "Pair full spills to LLC queue")]
+    #[serde(default)]
+    pub fb_pair_full: u64,
+    #[stat(desc = "Duplicate requeues dropped by queued guard")]
+    #[serde(default)]
+    pub fb_duplicate: u64,
+    #[stat(desc = "Stale pair pops with no task")]
+    #[serde(default)]
+    pub fb_stale: u64,
+    #[stat(desc = "Last observed pair depth for sizing")]
+    #[serde(default)]
+    pub dhq_depth: u64,
+    #[stat(desc = "Last observed pair capacity for sizing")]
+    #[serde(default)]
+    pub dhq_cap: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={}",
             crate::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
             self.fallback,
             self.steal,
+            self.fb_pair_full,
+            self.fb_duplicate,
+            self.fb_stale,
+            self.dhq_depth,
+            self.dhq_cap,
         )?;
         Ok(())
     }
 
-    /// Interval delta with queued passing through as a live gauge.
+    /// Interval delta with queued plus depth plus cap passing through as live gauges.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             queued: self.queued,
             dispatched: self.dispatched.wrapping_sub(rhs.dispatched),
             fallback: self.fallback.wrapping_sub(rhs.fallback),
             steal: self.steal.wrapping_sub(rhs.steal),
+            fb_pair_full: self.fb_pair_full.wrapping_sub(rhs.fb_pair_full),
+            fb_duplicate: self.fb_duplicate.wrapping_sub(rhs.fb_duplicate),
+            fb_stale: self.fb_stale.wrapping_sub(rhs.fb_stale),
+            dhq_depth: self.dhq_depth,
+            dhq_cap: self.dhq_cap,
         }
     }
 }
