@@ -76,6 +76,8 @@ u64 flow_llc_strand[FLOW_MAX_LLCS];
 u32 flow_node_count[FLOW_MAX_NODES];
 u64 flow_node_last_pair[FLOW_MAX_NODES];
 u32 flow_pair_count;
+/* Per pair configured capacity for sizing. Set once at init, zero init. */
+u64 flow_pair_cap[FLOW_MAX_PAIRS];
 /* Per CPU running snapshot. Zero init means empty. */
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 /* Per CPU hint state. Zero init means empty. Persists across events. */
@@ -88,7 +90,10 @@ static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 {
 	return bpf_map_lookup_elem(&llc_stats_stor, &llc);
 }
-/* Increment one counter by one with unsigned add. */
+/* Increment one counter by one with unsigned add. Offsets 0:queued */
+/* 1:dispatched 2:fallback 3:steal stay stable. Tail 4:fb_pair_full */
+/* 5:fb_duplicate 6:fb_stale split fallback by cause. Gauges 7:depth */
+/* 8:cap use the occupancy set helper, never inc. */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -101,9 +106,40 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		cell = &st->dispatched;
 	else if (off == 2)
 		cell = &st->fallback;
-	else
+	else if (off == 3)
 		cell = &st->steal;
+	else if (off == 4)
+		cell = &st->fb_pair_full;
+	else if (off == 5)
+		cell = &st->fb_duplicate;
+	else if (off == 6)
+		cell = &st->fb_stale;
+	else
+		return;
 	__sync_fetch_and_add(cell, 1ULL);
+}
+/* Count one fallback cause. Keeps fallback as the aggregate for compat */
+/* while splitting the cause into the tail. tail_off is 4:pair-full */
+/* 5:duplicate 6:stale. */
+static __always_inline void flow_fb_inc(u32 llc, u64 tail_off)
+{
+	flow_stat_inc(llc, 2);
+	flow_stat_inc(llc, tail_off);
+}
+/* Record last observed pair occupancy for sizing. Depth is post-op */
+/* nr_queued, cap is the configured pair capacity. Null dhq or missing */
+/* stats keeps prior gauges. Single LLC has no pair so gauges stay zero. */
+static __always_inline void flow_occupancy_set(u32 llc, scx_dhq_t *dhq, u64 cap)
+{
+	struct flow_llc_stats *st = flow_stats_for(llc);
+	int depth;
+	if (!st || !dhq)
+		return;
+	depth = scx_dhq_nr_queued(dhq);
+	if (depth < 0)
+		depth = 0;
+	st->dhq_depth = (u64)depth;
+	st->dhq_cap = cap;
 }
 /* Decrement queued by one with saturation at zero. */
 static __always_inline void flow_queued_dec(u32 llc)
@@ -117,11 +153,12 @@ static __always_inline void flow_queued_dec(u32 llc)
 }
 /* Stale discard. Queued belongs to an exited task so attribute the */
 /* decrement to a victim with backlog. This keeps the total correct */
-/* and avoids a wrap on an empty thief. Fallback counts the discard. */
+/* and avoids a wrap on an empty thief. Fallback counts the discard */
+/* as the aggregate plus the stale tail for the split. */
 static __always_inline void flow_stale_account(u32 thief)
 {
 	u32 li;
-	flow_stat_inc(thief, 2);
+	flow_fb_inc(thief, 6);
 	bpf_for(li, 0, FLOW_MAX_LLCS) {
 		struct flow_llc_stats *st;
 		if ((u64)li >= flow_nr_llcs)
@@ -396,6 +433,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 				return -ENOMEM;
 			}
 			flow_pair_dhqs[idx] = (scx_dhq_t *)got;
+			if (idx < (u64)FLOW_MAX_PAIRS)
+				flow_pair_cap[(u32)idx] = cap;
 			flow_pair_count += 1;
 			flow_node_last_pair[node] = idx;
 		} else {
@@ -701,7 +740,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
-		flow_stat_inc(llc, 2);
+		flow_fb_inc(llc, 5);
 		return;
 	}
 	/* Exiting keeps single ownership through the queued guard above. */
@@ -844,16 +883,28 @@ insert_only:
 		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)use_v,
 					   (u64)use_strand);
 		if (ret == 0) {
+			u64 cap = 0;
+			if (pair_u < (u32)FLOW_MAX_PAIRS)
+				cap = flow_pair_cap[pair_u];
 			flow_stat_inc(llc, 0);
+			flow_occupancy_set(llc, dhq, cap);
 			if (!t)
 				flow_kick_idle_only(task_cpu, p);
 			else
 				flow_kick_for_enq(task_cpu, use_v, p);
 			return;
 		}
-		/* Pair full. Count the move to the LLC queue. */
-		/* This counter is separate from the fallback DSQ. */
-		flow_stat_inc(llc, 2);
+		/* Pair full. Count the spill to the LLC queue in the */
+		/* aggregate plus the pair-full tail. Occupancy keeps the */
+		/* full depth for sizing. This counter is separate from */
+		/* the fallback DSQ. */
+		{
+			u64 cap = 0;
+			if (pair_u < (u32)FLOW_MAX_PAIRS)
+				cap = flow_pair_cap[pair_u];
+			flow_fb_inc(llc, 4);
+			flow_occupancy_set(llc, dhq, cap);
+		}
 	}
 	{
 		u64 dsq = flow_llc_dsq(llc);
@@ -882,7 +933,7 @@ insert_only:
  * Hotplug needs restart, same risk as the pinned path.
  */
 static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand,
-					     int always_steal, u32 cpu)
+					     int always_steal, u32 cpu, u64 cap)
 {
 	u32 attempt;
 	if (!dhq)
@@ -906,6 +957,9 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		pid = scx_dhq_pop(dhq);
 		if (!pid)
 			return 0;
+		/* Occupancy samples post-pop depth for sizing. Placement */
+		/* below stays unchanged. */
+		flow_occupancy_set(llc, dhq, cap);
 		p = bpf_task_from_pid((s32)pid);
 		if (!p) {
 			flow_stale_account(llc);
@@ -1018,11 +1072,17 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 	if (dhq) {
-		if (flow_pop_to_local(dhq, llc, strand, 0, c))
-			return;
+		{
+			u64 cap = 0;
+			if (own_idx < (u64)FLOW_MAX_PAIRS)
+				cap = flow_pair_cap[(u32)own_idx];
+			if (flow_pop_to_local(dhq, llc, strand, 0, c, cap))
+				return;
+		}
 		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
 			u64 idx = (u64)pi;
 			scx_dhq_t *cand;
+			u64 cap;
 			if (idx == own_idx)
 				continue;
 			if (pi >= flow_pair_count)
@@ -1034,12 +1094,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			cand = flow_pair_dhqs[pi];
 			if (!cand)
 				continue;
-			if (flow_pop_to_local(cand, llc, strand, 1, c))
+			cap = flow_pair_cap[pi];
+			if (flow_pop_to_local(cand, llc, strand, 1, c, cap))
 				return;
 		}
 		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
 			u64 idx = (u64)pi;
 			scx_dhq_t *cand;
+			u64 cap;
 			if (idx == own_idx)
 				continue;
 			if (pi >= flow_pair_count)
@@ -1051,7 +1113,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			cand = flow_pair_dhqs[pi];
 			if (!cand)
 				continue;
-			if (flow_pop_to_local(cand, llc, strand, 1, c))
+			cap = flow_pair_cap[pi];
+			if (flow_pop_to_local(cand, llc, strand, 1, c, cap))
 				return;
 		}
 	}
