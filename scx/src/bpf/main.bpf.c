@@ -17,8 +17,15 @@
  * and hardware support and never changes placement. A task with one
  * allowed CPU or with migration disabled bypasses pairing and goes
  * straight to the local queue of its allowed CPU with its enqueue
- * flags kept. Kick preempts only when the target is allowed, else it
- * wakes idle. Dispatch moves a task to local only when the peeked head
+ * flags kept. Exiting tasks keep single ownership through the queued
+ * flag, then wait on the local queue of the target CPU with a minimal
+ * slice and an idle kick only. When no local target exists they fall
+ * back to the LLC or fallback queue with the same minimal slice so
+ * no wakeup is lost. Dispatch pops with a bounded retry so one stale
+ * or exiting entry never stalls the queue. Every pop either reaches
+ * local or goes back to a victim or fallback queue with no loss.
+ * Kick preempts only when the target is allowed, else it wakes idle.
+ * Dispatch moves a task to local only when the peeked head
  * can run on this CPU, else the DSQ is left alone with no loss. No SMT
  * probe runs and each CPU stands single with fail closed choice.
  *
@@ -662,32 +669,69 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			have_pair = 1;
 		}
 	}
-	/* Exiting tasks skip pairing plus vtime plus counters. They wait */
-	/* on the local queue of the target CPU with a minimal slice so */
-	/* exit makes progress with no stall. No queued flag plus no */
-	/* sequence plus no pair plus no queued count. Idle kick at most. */
-	/* Offline plus disallowed drops fail closed with no insert. */
-	if (p->flags & PF_EXITING) {
-		u64 ldsq;
-		if (task_cpu < 0)
-			return;
-		if (!flow_cpu_ok((u32)task_cpu))
-			return;
-		if (!flow_cpu_allowed(task_cpu, p))
-			return;
-		ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
-		scx_bpf_dsq_insert(p, ldsq, 1000ULL, enq_flags);
-		scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
-		return;
-	}
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!t)
+	if (!t) {
+		/* No context means no duplicate state exists. Exiting */
+		/* without context still needs no loss, so try local */
+		/* then fall back to the LLC queue with a minimal slice. */
+		if (p->flags & PF_EXITING) {
+			if (task_cpu >= 0 && flow_cpu_ok((u32)task_cpu) &&
+			    flow_cpu_allowed(task_cpu, p)) {
+				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS,
+						   enq_flags);
+				flow_stat_inc(llc, 0);
+				flow_kick_idle_only(task_cpu, p);
+				return;
+			}
+			{
+				u64 dsq = flow_llc_dsq(llc);
+				if (!flow_dsq_ok(dsq))
+					dsq = (u64)FLOW_FALLBACK_DSQ;
+				scx_bpf_dsq_insert_vtime(p, dsq,
+							 (u64)FLOW_EXIT_SLICE_NS,
+							 (u64)kv, enq_flags);
+				flow_stat_inc(llc, 0);
+				flow_kick_idle_only(task_cpu, p);
+				return;
+			}
+		}
 		goto insert_only;
+	}
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
 		flow_stat_inc(llc, 2);
 		return;
+	}
+	/* Exiting keeps single ownership through the queued guard above. */
+	/* A task already queued keeps its first entry and this requeue */
+	/* drops as duplicate, so no second local queue forms. Pair plus */
+	/* sequence are skipped. Local uses FIFO, shared fallback keeps */
+	/* vtime order. Enqueue keeps caller flags, dispatch synthesizes */
+	/* zero, same split as the normal path. Idle kick only, no preempt. */
+	/* No drop exists. A missing local target falls back to LLC so an */
+	/* exiting wakeup always queues. Bound check is best effort. */
+	/* Hotplug needs restart, same risk as the pinned path. */
+	if (p->flags & PF_EXITING) {
+		if (task_cpu >= 0 && flow_cpu_ok((u32)task_cpu) &&
+		    flow_cpu_allowed(task_cpu, p)) {
+			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
+			flow_stat_inc(llc, 0);
+			flow_kick_idle_only(task_cpu, p);
+			return;
+		}
+		{
+			u64 dsq = flow_llc_dsq(llc);
+			if (!flow_dsq_ok(dsq))
+				dsq = (u64)FLOW_FALLBACK_DSQ;
+			scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS,
+						 (u64)kv, enq_flags);
+			flow_stat_inc(llc, 0);
+			flow_kick_idle_only(task_cpu, p);
+			return;
+		}
 	}
 	if (t->gen != 0 &&
 	    (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B) &&
@@ -829,9 +873,13 @@ insert_only:
  * Queued is charged to the enqueue LLC. Dispatched stays on the
  * dispatch LLC. Returns 1 when a task reached the local queue.
  * A task that cannot run on the thief goes back to the victim
- * queue with no counter move and no loss. Stale plus exiting
- * entries retry bounded so one bad entry never stalls dispatch.
- * Exiting tasks never reach shared LLC queues with a full slice.
+ * queue with no counter move and no loss. Stale entries retry
+ * bounded so one bad entry never stalls dispatch. Four attempts
+ * cover a burst of stale entries. Each attempt is one pop plus
+ * one lookup, so worst cost stays negligible. Exiting tasks use
+ * the same victim path with a minimal slice and never use a full
+ * slice on shared queues. Cpu bound checks are best effort.
+ * Hotplug needs restart, same risk as the pinned path.
  */
 static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand,
 					     int always_steal, u32 cpu)
@@ -843,7 +891,7 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		return 0;
 	if (!flow_cpu_ok(cpu))
 		return 0;
-	bpf_for(attempt, 0, 4) {
+	bpf_for(attempt, 0, FLOW_POP_RETRY_MAX) {
 		u64 pid;
 		struct task_struct *p;
 		struct flow_task_ctx *t;
@@ -863,28 +911,6 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 			flow_stale_account(llc);
 			continue;
 		}
-		/* Exiting tasks never wait on shared LLC queues. */
-		/* Allowed targets run on the thief local queue with */
-		/* a minimal slice. Disallowed targets drop with */
-		/* stale accounting so counters stay correct. */
-		if (p->flags & PF_EXITING) {
-			if (flow_cpu_allowed((s32)cpu, p)) {
-				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)cpu;
-				u32 ex_victim = llc;
-				struct flow_task_ctx *ex_t;
-				ex_t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-				if (ex_t && flow_llc_ok(ex_t->llc_id))
-					ex_victim = ex_t->llc_id;
-				scx_bpf_dsq_insert(p, ldsq, 1000ULL, 0);
-				bpf_task_release(p);
-				flow_queued_dec(ex_victim);
-				flow_stat_inc(llc, 2);
-				return 1;
-			}
-			flow_stale_account(llc);
-			bpf_task_release(p);
-			continue;
-		}
 		tst = strand;
 		victim = llc;
 		ins_vtime = (u64)p->scx.dsq_vtime;
@@ -895,6 +921,35 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 				ins_vtime = (u64)t->vtime;
 			if (flow_llc_ok(t->llc_id))
 				victim = t->llc_id;
+		}
+		/* Exiting uses the same victim path with a minimal slice. */
+		/* Allowed targets run on the thief local queue and count */
+		/* as dispatched. Disallowed targets go back to the victim */
+		/* queue with no counter move and no loss, so exit still */
+		/* runs on an allowed CPU. Local uses FIFO, shared keeps */
+		/* vtime order. Dispatch synthesizes zero flags, same as */
+		/* the normal path. One victim lookup serves both paths. */
+		if (p->flags & PF_EXITING) {
+			if (flow_cpu_allowed((s32)cpu, p)) {
+				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)cpu;
+				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, 0);
+				bpf_task_release(p);
+				flow_queued_dec(victim);
+				flow_stat_inc(llc, 1);
+				if (always_steal)
+					flow_stat_inc(llc, 3);
+				return 1;
+			}
+			{
+				u64 vdsq = flow_llc_dsq(victim);
+				if (!flow_dsq_ok(vdsq))
+					vdsq = (u64)FLOW_FALLBACK_DSQ;
+				scx_bpf_dsq_insert_vtime(p, vdsq,
+							 (u64)FLOW_EXIT_SLICE_NS,
+							 ins_vtime, 0);
+				bpf_task_release(p);
+				return 0;
+			}
 		}
 		if (!flow_cpu_allowed((s32)cpu, p)) {
 			u64 vdsq = flow_llc_dsq(victim);

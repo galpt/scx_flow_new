@@ -41,6 +41,17 @@ enum flow_consts {
 	FLOW_MAX_PAIRS = 32ULL,
 	/* Fixed slice in nanos with no knob. */
 	FLOW_SLICE_NS = 1000000ULL,
+	/* Minimal slice for exiting tasks in nanos with no knob. */
+	/* One microsecond is 1000x smaller than the normal slice. Exit */
+	/* needs only enough runtime to release resources and never */
+	/* preempts, so a tiny slice keeps exit progress cheap without */
+	/* stalling normal tasks. Used for every exiting insert. */
+	FLOW_EXIT_SLICE_NS = 1000ULL,
+	/* Bounded pop retries per dispatch with no knob. Four covers a */
+	/* burst of stale plus exiting entries without stalling dispatch. */
+	/* Each attempt is one pop plus one lookup, so worst cost is four */
+	/* lookups per dispatch, negligible next to the normal path. */
+	FLOW_POP_RETRY_MAX = 4ULL,
 	/* Preempt gap in nanos with no knob. */
 	FLOW_PREEMPT_THRESH = 500000ULL,
 	/* Preempt tail guard in nanos with no knob. */
