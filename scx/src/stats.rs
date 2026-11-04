@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Exports four per LLC counters summed across LLCs.
+//! Exports per LLC counters summed across LLCs.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -50,14 +50,29 @@ pub struct Metrics {
     #[stat(desc = "Last observed pair capacity for sizing")]
     #[serde(default)]
     pub dhq_cap: u64,
+    #[stat(desc = "Pair steals in dispatch")]
+    #[serde(default)]
+    pub steal_pair: u64,
+    #[stat(desc = "Remote LLC steals in dispatch")]
+    #[serde(default)]
+    pub steal_llc: u64,
+    #[stat(desc = "Preempt kicks on enqueue")]
+    #[serde(default)]
+    pub kick_preempt: u64,
+    #[stat(desc = "Idle kicks on enqueue")]
+    #[serde(default)]
+    pub kick_idle: u64,
+    #[stat(desc = "Enqueue kicks skipped with no wake")]
+    #[serde(default)]
+    pub kick_skip: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={}",
-            crate::SCHEDULER_NAME,
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={}",
+            crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
             self.fallback,
@@ -67,6 +82,11 @@ impl Metrics {
             self.fb_stale,
             self.dhq_depth,
             self.dhq_cap,
+            self.steal_pair,
+            self.steal_llc,
+            self.kick_preempt,
+            self.kick_idle,
+            self.kick_skip,
         )?;
         Ok(())
     }
@@ -83,6 +103,11 @@ impl Metrics {
             fb_stale: self.fb_stale.wrapping_sub(rhs.fb_stale),
             dhq_depth: self.dhq_depth,
             dhq_cap: self.dhq_cap,
+            steal_pair: self.steal_pair.wrapping_sub(rhs.steal_pair),
+            steal_llc: self.steal_llc.wrapping_sub(rhs.steal_llc),
+            kick_preempt: self.kick_preempt.wrapping_sub(rhs.kick_preempt),
+            kick_idle: self.kick_idle.wrapping_sub(rhs.kick_idle),
+            kick_skip: self.kick_skip.wrapping_sub(rhs.kick_skip),
         }
     }
 }

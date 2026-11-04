@@ -105,14 +105,20 @@ struct flow_cpu_ctx {
 	u32 node_id;
 	u32 pad;
 };
-/* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal stay */
-/* stable for compat. Tail is append-only for 5.0.7 with no bound change. */
-/* Fallback stays the aggregate of pair-full plus duplicate plus stale. */
+/* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal */
+/* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay */
+/* stable for compat. Tail is append-only for 5.0.8 with no bound change. */
+/* 14 by u64 is 112 bytes. Fallback stays the aggregate of pair-full */
+/* plus duplicate plus stale, so fallback equals 4 plus 5 plus 6. */
+/* Steal stays the aggregate of pair plus LLC, so steal equals 9 plus 10. */
 /* fb_pair_full counts pair DHQ full spills to the LLC DSQ. fb_duplicate */
 /* counts queued-guard duplicate drops. fb_stale counts stale DHQ pops */
 /* with no task. dhq_depth is a gauge of last observed pair depth and */
 /* dhq_cap the paired capacity for sizing. Single LLC has no pair, so */
-/* depth plus cap stay zero there. */
+/* depth plus cap stay zero there. steal_pair counts pair steals in */
+/* dispatch. steal_llc counts remote LLC queue steals in dispatch. */
+/* kick_preempt counts preempt kicks on enqueue. kick_idle counts idle */
+/* kicks on enqueue. kick_skip counts enqueue kicks skipped with no wake. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
@@ -123,6 +129,11 @@ struct flow_llc_stats {
 	u64 fb_stale;
 	u64 dhq_depth;
 	u64 dhq_cap;
+	u64 steal_pair;
+	u64 steal_llc;
+	u64 kick_preempt;
+	u64 kick_idle;
+	u64 kick_skip;
 };
 #ifdef __BPF__
 static __always_inline u64 flow_llc_dsq(u32 llc)
