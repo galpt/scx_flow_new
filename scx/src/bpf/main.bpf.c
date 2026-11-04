@@ -319,8 +319,8 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_llc_stats);
 } llc_stats_stor SEC(".maps");
-volatile u64 nr_cpu_ids;
-volatile u64 nr_llc_ids;
+volatile u64 flow_nr_cpus;
+volatile u64 flow_nr_llcs;
 flow_dhq_t *flow_pair_dhqs[FLOW_MAX_PAIRS];
 u64 flow_llc_pair[FLOW_MAX_LLCS];
 u64 flow_llc_strand[FLOW_MAX_LLCS];
@@ -364,7 +364,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	nr_cpu_ids = n;
+	flow_nr_cpus = n;
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u32 key;
 		struct flow_cpu_ctx *cc;
@@ -389,7 +389,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("LLC count over bound");
 		return -E2BIG;
 	}
-	nr_llc_ids = want;
+	flow_nr_llcs = want;
 	if (n + want + 1 > 4096ULL) {
 		scx_bpf_error("queue count over bound");
 		return -E2BIG;
@@ -537,7 +537,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->vtime = vtime;
 		t->llc_id = llc;
 	}
-	if (nr_llc_ids > 1 && flow_llc_ok(llc)) {
+	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
 		u64 idx = flow_llc_pair[llc];
 		if (idx < (u64)FLOW_MAX_PAIRS) {
 			dhq = flow_pair_dhqs[idx];
@@ -591,7 +591,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		llc = READ_ONCE(cc->llc_id);
 	}
 	dsq = flow_llc_dsq(llc);
-	if (nr_llc_ids > 1 && flow_llc_ok(llc)) {
+	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
 		u64 idx = flow_llc_pair[llc];
 		if (idx < (u64)FLOW_MAX_PAIRS) {
 			dhq = flow_pair_dhqs[idx];

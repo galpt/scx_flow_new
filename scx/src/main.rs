@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
+use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
