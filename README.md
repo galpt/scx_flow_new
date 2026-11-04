@@ -11,6 +11,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` maps, placement, and dispatch
 - `scx/src/bpf/lib/common.bpf.c` shared arena setup
+- `scx/src/bpf/lib/dhq.bpf.c` upstream pair queue
 - `scx/src/bpf/lib/minheap.bpf.c` shared heap
 - `scx/src/bpf/lib/sdt_alloc.bpf.c` shared alloc
 - `scx/src/main.rs` frontend and run loop

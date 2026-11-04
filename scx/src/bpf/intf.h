@@ -2,8 +2,8 @@
 /*
  * Shared ABI for the flow scheduler.
  *
- * DSQs are one per LLC plus one fallback. Pair queues are arena DHQs
- * owned by this scheduler. Stats are four counters per LLC.
+ * DSQs are one per LLC plus one fallback. Pair queues are upstream arena DHQs.
+ * Stats are four counters per LLC.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

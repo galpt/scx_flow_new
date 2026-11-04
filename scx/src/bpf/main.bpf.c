@@ -2,7 +2,7 @@
 /*
  * Flow scheduler BPF core.
  *
- * One entry file with ordered includes and an owned pair queue.
+ * One entry file with ordered includes and an upstream pair queue.
  * Tasks enter the pair queue by vtime, else fall back to the LLC DSQ.
  * Dispatch drains pair, then LLC, then fallback. Single LLC bypasses
  * pairing and uses the LLC DSQ directly. Stats are per LLC.
@@ -13,146 +13,13 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include <bpf_arena_common.bpf.h>
+#include <lib/dhq.h>
 #include <lib/minheap.h>
 #include <lib/sdt_alloc.h>
 #include <lib/spinlock.h>
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-/*
- * Owned pair queue section. Two strands share one lock.
- * Names use flow_dhq and flow_strand with no outside text kept.
- */
-struct flow_dhq {
-	scx_minheap_t *strand_a;
-	scx_minheap_t *strand_b;
-	arena_spinlock_t lock;
-	u64 capacity;
-	u64 size_a;
-	u64 size_b;
-	u64 max_imbalance;
-};
-typedef struct flow_dhq __arena flow_dhq_t;
-__weak u64 flow_dhq_create(u64 capacity, u64 max_imbalance)
-{
-	flow_dhq_t *dhq;
-	u64 half;
-	dhq = scx_static_alloc(sizeof(*dhq), 1);
-	if (!dhq)
-		return (u64)NULL;
-	half = capacity / 2;
-	dhq->strand_a = scx_minheap_alloc(half);
-	if (!dhq->strand_a)
-		return (u64)NULL;
-	dhq->strand_b = scx_minheap_alloc(half);
-	if (!dhq->strand_b)
-		return (u64)NULL;
-	dhq->capacity = capacity;
-	dhq->max_imbalance = max_imbalance;
-	return (u64)dhq;
-}
-static inline int flow_dhq_insert_inner(flow_dhq_t *dhq, u64 elem, u64 strand, u64 key)
-{
-	scx_minheap_t *heap;
-	u64 mine;
-	u64 other;
-	int ret;
-	if (!dhq)
-		return -EINVAL;
-	heap = (strand == (u64)FLOW_STRAND_A) ? dhq->strand_a : dhq->strand_b;
-	if (!heap)
-		return -EINVAL;
-	scx_spin_lock(&dhq->lock);
-	if (dhq->size_a + dhq->size_b >= dhq->capacity) {
-		ret = -ENOSPC;
-		goto out;
-	}
-	if (dhq->max_imbalance > 0) {
-		if (strand == (u64)FLOW_STRAND_A) {
-			mine = dhq->size_a;
-			other = dhq->size_b;
-		} else {
-			mine = dhq->size_b;
-			other = dhq->size_a;
-		}
-		if (mine >= other + dhq->max_imbalance) {
-			ret = -EAGAIN;
-			goto out;
-		}
-	}
-	ret = scx_minheap_insert(heap, elem, key);
-	if (ret)
-		goto out;
-	if (strand == (u64)FLOW_STRAND_A)
-		dhq->size_a += 1;
-	else
-		dhq->size_b += 1;
-	scx_spin_unlock(&dhq->lock);
-	return 0;
-out:
-	scx_spin_unlock(&dhq->lock);
-	return ret;
-}
-__hidden __noinline int flow_strand_insert_vtime(flow_dhq_t *dhq, u64 elem, u64 vtime, u64 strand)
-{
-	if (!dhq)
-		return -EINVAL;
-	if (strand != (u64)FLOW_STRAND_A && strand != (u64)FLOW_STRAND_B)
-		return -EINVAL;
-	return flow_dhq_insert_inner(dhq, elem, strand, vtime);
-}
-static inline u64 flow_dhq_pop_strand_locked(flow_dhq_t *dhq, u64 strand)
-{
-	scx_minheap_t *heap;
-	struct scx_minheap_elem helem;
-	int ret;
-	heap = (strand == (u64)FLOW_STRAND_A) ? dhq->strand_a : dhq->strand_b;
-	if (!heap)
-		return (u64)NULL;
-	if ((strand == (u64)FLOW_STRAND_A && dhq->size_a == 0) ||
-	    (strand == (u64)FLOW_STRAND_B && dhq->size_b == 0))
-		return (u64)NULL;
-	ret = scx_minheap_pop(heap, &helem);
-	if (ret)
-		return (u64)NULL;
-	if (strand == (u64)FLOW_STRAND_A)
-		dhq->size_a -= 1;
-	else
-		dhq->size_b -= 1;
-	return helem.elem;
-}
-__hidden __noinline u64 flow_dhq_pop(flow_dhq_t *dhq)
-{
-	u64 out = (u64)NULL;
-	u64 wa;
-	u64 wb;
-	if (!dhq)
-		return (u64)NULL;
-	scx_spin_lock(&dhq->lock);
-	if (dhq->size_a + dhq->size_b == 0)
-		goto unlock;
-	if (dhq->size_a > 0 && dhq->strand_a)
-		wa = dhq->strand_a->helems[0].weight;
-	else
-		wa = (u64)-1;
-	if (dhq->size_b > 0 && dhq->strand_b)
-		wb = dhq->strand_b->helems[0].weight;
-	else
-		wb = (u64)-1;
-	if (wa <= wb)
-		out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-	else
-		out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-	if (!out) {
-		if (wa <= wb)
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_B);
-		else
-			out = flow_dhq_pop_strand_locked(dhq, (u64)FLOW_STRAND_A);
-	}
-unlock:
-	scx_spin_unlock(&dhq->lock);
-	return out;
-}
 /* Maps plus pair tables. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -174,7 +41,7 @@ struct {
 } llc_stats_stor SEC(".maps");
 volatile u64 flow_nr_cpus;
 volatile u64 flow_nr_llcs;
-flow_dhq_t *flow_pair_dhqs[FLOW_MAX_PAIRS];
+scx_dhq_t *flow_pair_dhqs[FLOW_MAX_PAIRS];
 u64 flow_llc_pair[FLOW_MAX_LLCS];
 u64 flow_llc_strand[FLOW_MAX_LLCS];
 u32 flow_node_count[FLOW_MAX_NODES];
@@ -307,7 +174,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 		cnt = flow_node_count[node];
 		strand = (u64)(cnt % 2);
-		if (strand == (u64)FLOW_STRAND_A) {
+		if (strand == (u64)SCX_DHQ_STRAND_A) {
 			idx = flow_pair_count;
 			if (idx >= (u64)FLOW_MAX_PAIRS) {
 				scx_bpf_error("pair over bound");
@@ -316,13 +183,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			cap = n * 4;
 			if (cap < 8)
 				cap = 8;
-			got = flow_dhq_create(cap,
-					      (u64)FLOW_DHQ_MAX_IMBALANCE);
+			got = scx_dhq_create_balanced(false, cap,
+						      SCX_DHQ_MODE_PRIORITY,
+						      (u64)FLOW_DHQ_MAX_IMBALANCE);
 			if (!got) {
 				scx_bpf_error("pair create failed");
 				return -ENOMEM;
 			}
-			flow_pair_dhqs[idx] = (flow_dhq_t *)got;
+			flow_pair_dhqs[idx] = (scx_dhq_t *)got;
 			flow_pair_count += 1;
 			flow_node_last_pair[node] = idx;
 		} else {
@@ -369,10 +237,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
 	u32 llc = 0;
-	u32 strand = (u32)FLOW_STRAND_A;
+	u32 strand = (u32)SCX_DHQ_STRAND_A;
 	u64 vtime = p->scx.dsq_vtime;
 	struct flow_task_ctx *t;
-	flow_dhq_t *dhq = NULL;
+	scx_dhq_t *dhq = NULL;
 	int ret;
 	(void)enq_flags;
 	if (task_cpu < 0)
@@ -396,16 +264,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (idx < (u64)FLOW_MAX_PAIRS) {
 			dhq = flow_pair_dhqs[idx];
 			strand = (u32)flow_llc_strand[llc];
-			if (strand != (u32)FLOW_STRAND_A &&
-			    strand != (u32)FLOW_STRAND_B)
-				strand = (u32)FLOW_STRAND_A;
+			if (strand != (u32)SCX_DHQ_STRAND_A &&
+			    strand != (u32)SCX_DHQ_STRAND_B)
+				strand = (u32)SCX_DHQ_STRAND_A;
 			if (t)
 				t->strand = strand;
 		}
 	}
 	if (dhq) {
-		ret = flow_strand_insert_vtime(dhq, (u64)p->pid, vtime,
-					       (u64)strand);
+		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, vtime,
+					   (u64)strand);
 		if (ret == 0) {
 			flow_stat_add(llc, 0, 1);
 			scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
@@ -425,9 +293,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 c;
 	u32 llc = 0;
-	u32 strand = (u32)FLOW_STRAND_A;
+	u32 strand = (u32)SCX_DHQ_STRAND_A;
 	u64 dsq;
-	flow_dhq_t *dhq = NULL;
+	scx_dhq_t *dhq = NULL;
 	(void)prev;
 	if (cpu < 0)
 		return;
@@ -453,7 +321,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 	if (dhq) {
-		u64 pid = flow_dhq_pop(dhq);
+		u64 pid = scx_dhq_pop(dhq);
 		if (pid) {
 			struct task_struct *p;
 			p = bpf_task_from_pid((s32)pid);
