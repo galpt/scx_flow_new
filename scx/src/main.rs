@@ -184,7 +184,7 @@ impl<'a> Scheduler<'a> {
     fn get_metrics(&self) -> Metrics {
         use libbpf_rs::MapCore;
         let mut out = Metrics::default();
-        for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as u32 {
+        for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS {
             let key = llc.to_ne_bytes();
             let val = match self
                 .skel
