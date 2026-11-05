@@ -334,10 +334,78 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 
 /* No SMT probe runs. Each CPU stands single and a missing sibling */
 /* fails closed with no move. Select stays through the shared picker. */
+/* The hint plus the pick stay inside the task mask with no off mask */
+/* result. A stale hint falls back to the first allowed CPU before the */
+/* shared pick, and a stale pick falls back the same way after. */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	bool idle = false;
-	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &idle);
+	s32 eff_prev;
+	s32 picked;
+	s32 first;
+
+	if (!p || !p->cpus_ptr)
+		return prev_cpu;
+	eff_prev = prev_cpu;
+	if (eff_prev < 0 || !flow_cpu_allowed(eff_prev, p)) {
+		first = flow_first_allowed(p);
+		if (first >= 0)
+			eff_prev = first;
+		else
+			return prev_cpu;
+	}
+	picked = scx_bpf_select_cpu_dfl(p, eff_prev, wake_flags, &idle);
+	if (picked < 0 || !flow_cpu_allowed(picked, p)) {
+		first = flow_first_allowed(p);
+		if (first >= 0)
+			return first;
+		return eff_prev;
+	}
+	return picked;
+}
+
+/* Reclamp the cached queue affinity on mask change. Preserves virtual */
+/* time plus deadline plus generation plus queued state with no fresh */
+/* assign. Exiting tasks keep the minimal slice. The enqueue plus */
+/* dispatch repair stays as fallback when the hook never fires. */
+void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
+		    const struct cpumask *cpumask)
+{
+	struct flow_task_ctx *t;
+	s32 tgt;
+	u32 cpu;
+	struct flow_cpu_ctx *cc;
+	u32 llc;
+
+	(void)cpumask;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	if (p->flags & PF_EXITING)
+		t->slice_rem = (u64)FLOW_EXIT_SLICE_NS;
+	tgt = flow_first_allowed(p);
+	if (tgt < 0)
+		return;
+	if (!flow_cpu_ok((u32)tgt))
+		return;
+	cpu = (u32)tgt;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &cpu);
+	if (!cc)
+		return;
+	llc = READ_ONCE(cc->llc_id);
+	if (!flow_llc_ok(llc))
+		return;
+	t->llc_id = llc;
+	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
+		u64 idx = flow_llc_pair[llc];
+		if (idx < (u64)FLOW_MAX_PAIRS && flow_pair_dhqs[(u32)idx]) {
+			u32 s = (u32)flow_llc_strand[llc];
+			if (s == (u32)FLOW_STRAND_A || s == (u32)FLOW_STRAND_B)
+				t->strand = s;
+		}
+	}
 }
 
 /* Seed one cgroup weight from the init args. Fires for every cgroup */
