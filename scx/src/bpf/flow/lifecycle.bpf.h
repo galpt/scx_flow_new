@@ -7,7 +7,10 @@
  * placement. Hotplug needs restart, same risk as the pinned path.
  * Unknown weights read as default with prior behavior. Blocked tail
  * counts stops that leave the task still runnable on the cached LLC
- * with no fresh lookup.
+ * with no fresh lookup and no vtime penalty, so blocking never shifts
+ * the deadline. Runnable covers preemptions plus slice expiry plus
+ * migrations, any stop where the task waits elsewhere. An invalid
+ * cached LLC falls back to zero with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -296,8 +299,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
 	/* Blocked count. A stop that leaves the task still runnable waits */
-	/* elsewhere, so count it on the cached LLC with no fresh lookup. */
-	/* The cached LLC was seeded from the CPU view at running time. */
+	/* elsewhere, which covers preemptions plus slice expiry plus */
+	/* migrations, so count it on the cached LLC with no fresh lookup */
+	/* and no vtime penalty. The cached LLC was seeded from the CPU */
+	/* view at running time, invalid falls back to zero with no loss. */
 	/* Placement plus vtime plus slice handling stay unchanged. */
 	if (runnable) {
 		u32 bllc = READ_ONCE(t->llc_id);

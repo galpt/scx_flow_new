@@ -8,26 +8,55 @@ Culprit is a carry that keeps the head when it always burns the full
 slice, plus no count for stops that leave the task still runnable. A
 task with no remain requeues at the charged time and can hold the head
 across consecutive burns, and a stop with runnable true waits elsewhere
-with no attribution. The fix adds one extra fixed slice with saturation
-on a carry with no remain, so a full burn pays one more slice with no
-wrap and no knob, and counts overrun plus penalty on the enqueue LLC.
-The monotonic last plus one floor stays after the penalty so the pair
-sequence stays unique. A stop that leaves the task still runnable counts
-blocked on the cached LLC with no fresh lookup. Pinned plus exiting
-never reach the carry path and stay byte identical. Pair mode stays
-strict priority and picks the lowest vtime with ties to strand A.
-Saturated vtime, fail closed guards versus fail open weights, single
-ownership through the queued flag, frozen steal order, and append only
-stats stay unchanged.
+with no attribution. The fix adds one extra fixed uniform slice with
+saturation on a non pinned carry with no remain, so a full burn pays one
+more quantum with no wrap and no knob, and counts overrun plus penalty
+one to one on the enqueue LLC as event versus cost. The postponed vtime
+moves the hog behind the head: the pair floor steps it past the sequence
+and LLC order uses the larger vtime directly, while the steal walk keeps
+reclaiming idle time work conserving. Uniform is intentional with no
+scaled variant: the base charge already scales by weight, so default pays
+one slice, heavy pays a hundredth and light pays a hundred, and one
+uniform extra slice doubles default, multiplies heavy a hundredfold to
+break its hold, and adds one percent to light that already sits behind.
+A scaled penalty would keep the heavy hog near the head and preserve the
+domino. Saturated at max the vtime stays capped while the count still
+grows for visibility. The monotonic last plus one floor stays after the
+penalty on the pair path only so the pair sequence stays unique. A stop
+that leaves the task still runnable counts blocked on the cached LLC with
+no fresh lookup and no vtime penalty, covering preemptions plus slice
+expiry plus migrations, with invalid cache falling back to zero. Pinned
+reaches the carry but skips the penalty and stays at the scaled charge
+with prior behavior and local FIFO placement so its vtime never orders
+shared queues, exiting bypasses through early returns and stays byte
+identical. Pair mode stays strict priority and picks the lowest vtime
+with ties to strand A. Saturated vtime, fail closed guards versus fail
+open weights, single ownership through the queued flag, frozen steal
+order, and append only stats stay unchanged.
+
+Real subset versus deferred under knob free plus verifier plus priority
+only bounds. Landed here is implicit deadline throttling through uniform
+postponement plus floor, blocked non penalization with forward plus victim
+wakes as progress, hierarchical steal as reclaim plus push pull analogue,
+and folded tail counters for harness proof. Deferred with fallback is per
+task period plus deadline inputs with no ABI so period stays one slice,
+global admission with no reject so dampening stands in, bandwidth plus PI
+inheritance with no lock graph so non penalization plus wakes stand in,
+global heap with no unbounded search so bounded hierarchy stands in, and
+timers plus GRUB reclaim with no async path so enqueue time postponement
+plus work conserving steal stand in.
 
 Guards keep first allowed plus constrained target failing closed with no
 move. Enqueue keeps one target for inserts plus kicks. Dispatch keeps
 pair then LLC then fallback drain with bounded retries and no loss.
 Stats keep offsets 0 through 13 frozen with tail 14 overrun plus 15
-domino penalty plus 16 blocked append only, fallback equals 4 plus 5
-plus 6, steal equals 9 plus 10, and gauges use set only. Userspace adds
-the same three counters with compat defaults and interval deltas as
-counters. Slice, scale, weight, order, local drain, exiting minimal, and
+domino penalty one to one plus 16 blocked append only, fallback equals
+4 plus 5 plus 6, steal equals 9 plus 10, and gauges use set only.
+Overrun plus penalty charge the enqueue LLC while blocked uses the cached
+LLC with zero fallback, and the transient zero remain refreshes at running
+time. Userspace folds all three tails with len guards plus compat defaults
+and interval deltas as counters, so harness can correlate overrun growth
+with head movement. Slice, scale, weight, order, local drain, exiting minimal, and
 arena touch stay frozen with clean room code and plain prose comments.
 
 Version syncs Cargo plus installer plus guard to 5.0.12 with the fork ref

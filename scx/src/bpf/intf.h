@@ -135,9 +135,14 @@ struct flow_cpu_ctx {
 /* kick_preempt counts preempt kicks on enqueue. kick_idle counts idle */
 /* kicks on enqueue. kick_skip counts enqueue kicks skipped with no wake. */
 /* overrun counts carry tasks that burnt the full slice with no remain. */
-/* domino_penalty counts the extra slice charged on such an overrun so a */
-/* task that always burns the full slice cannot hold the head. blocked */
-/* counts stops that leave the task still runnable. Gauges stay set only. */
+/* domino_penalty counts the extra slice charged on such an overrun one */
+/* to one with overrun by design, event versus cost, so a task that */
+/* always burns the full slice cannot hold the head. Saturated at max */
+/* the vtime stays capped while the count still grows for visibility. */
+/* blocked counts stops that leave the task still runnable, which covers */
+/* preemptions plus slice expiry plus migrations with no vtime penalty so */
+/* blocking never shifts the deadline. An invalid cached LLC falls back */
+/* to zero with no loss. Gauges stay set only. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;

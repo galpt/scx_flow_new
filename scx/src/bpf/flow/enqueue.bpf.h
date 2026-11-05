@@ -6,10 +6,15 @@
  * per LLC 11 plus 12 plus 13 counting. Predicates plus vtime carry
  * plus pair insert plus LLC spill plus occupancy are unchanged.
  * Carry plus fresh vtime increments scale by cpu.weight with slice
- * never scaled and default 100 as exact identity. Carry with no remain
- * adds one extra fixed slice with saturation and counts overrun plus
- * penalty. Pinned plus exiting paths stay byte-identical. Single
- * ownership through the queued flag is unchanged with no loss.
+ * never scaled and default 100 as exact identity. Non pinned carry
+ * with no remain adds one extra fixed uniform slice with saturation
+ * and counts overrun plus penalty on the enqueue LLC, which moves a
+ * full burn hog behind the pair sequence and behind LLC order so the
+ * head keeps moving. Pinned carry skips the penalty and stays at the
+ * scaled charge with prior behavior while exiting bypasses through
+ * the early returns above, and pinned placement stays local FIFO so
+ * its vtime never orders shared queues. Single ownership through the
+ * queued flag is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -197,17 +202,29 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				/* the same burnt slice. Saturation plus the */
 				/* monotonic floor below are unchanged. */
 				charged = flow_cgroup_charge(t->vtime, used, w);
-				/* Overrun penalty. No remain means the full slice */
-				/* burnt, so add one extra fixed slice with */
-				/* saturation to keep the head moving. Counts */
-				/* overrun plus penalty on the enqueue LLC. Pinned */
-				/* plus exiting never reach here. */
-				if (rem == 0) {
+				/* Overrun postponement. No remain means the full */
+				/* slice burnt, so add one extra fixed uniform slice */
+				/* with saturation to move the hog behind the head. */
+				/* Uniform keeps one quantum for every weight with no */
+				/* new knob: the base charge already scales by weight, */
+				/* so a heavy hog pays a large relative penalty that */
+				/* breaks its head hold while a light hog already pays */
+				/* a large base charge and still steps behind. Counts */
+				/* overrun plus penalty one to one on the enqueue LLC */
+				/* by design, event versus slices charged. Saturated at */
+				/* max the vtime stays capped while the count still */
+				/* grows for visibility. Pinned skips the penalty and */
+				/* stays at the scaled charge, exiting never reaches */
+				/* here through the early returns above. */
+				if (rem == 0 && !pinned) {
 					charged = flow_vtime_add_penalty(charged);
 					flow_stat_inc(llc, 14);
 					flow_stat_inc(llc, 15);
 				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
+					/* Pair only floor. LLC order uses the vtime */
+					/* directly with no sequence, so this last plus */
+					/* one step keeps only the pair unique. */
 					s64 last = flow_dhq_seq[pair_u];
 					if (charged <= last) {
 						if (last == (s64)0x7fffffffffffffffLL)
@@ -220,6 +237,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				carry = 1;
 				use_v = charged;
 				use_d = flow_vtime_add_slice(charged);
+				/* Transient remain. Zero on overrun refreshes at */
+				/* running time from the kernel slice, so no stuck */
+				/* zero persists past the next run. */
 				use_sl = rem;
 				use_strand = t->strand;
 				use_llc = t->llc_id;
@@ -228,7 +248,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	/* Pinned carry keeps vtime plus slice but follows the current LLC. */
 	/* This keeps the task context aligned with the queue it waits in */
-	/* so later victim accounting stays on the enqueue LLC. */
+	/* so later victim accounting stays on the enqueue LLC. Counters */
+	/* always use the enqueue LLC above, never the cached id, so thief */
+	/* versus victim attribution stays explicit. Pinned placement below */
+	/* stays local FIFO, so its vtime never orders shared queues and the */
+	/* skip above only keeps its future charge with no order effect. */
 	if (pinned)
 		use_llc = llc;
 	if (!carry) {
@@ -354,7 +378,8 @@ insert_only:
 
 /* Enqueue vtime budgets stay fixed slice 1ms plus preempt */
 /* threshold 500us plus tail 125us, weight scaling saturates with last */
-/* plus one floor, pinned plus exiting paths stay byte identical. */
+/* plus one floor on the pair path only, pinned skips the penalty while */
+/* exiting bypasses through early returns. */
 /* Docs only, no logic change. */
 
 #endif

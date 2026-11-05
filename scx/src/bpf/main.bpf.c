@@ -9,11 +9,14 @@
  * to the LLC DSQ. Dispatch drains pair, then LLC, then fallback
  * safety net. Single LLC bypasses pairing and uses the LLC DSQ
  * directly. Cgroup cpu.weight scales vtime charges with default 100
- * as identity and slice never scaled. Carry with no remain adds one
- * extra fixed slice with saturation and counts overrun plus penalty.
+ * as identity and slice never scaled. Non pinned carry with no remain
+ * adds one extra fixed uniform slice with saturation and counts overrun
+ * plus penalty, which moves a full burn hog behind the head. Pinned
+ * carry skips the penalty and exiting bypasses through early returns.
  * Stops that leave the task still runnable count as blocked on the
- * cached LLC. Stats are per LLC with queued charged to the enqueue
- * LLC and dispatched counted on the dispatch LLC. Pair mode is
+ * cached LLC with no vtime penalty. Stats are per LLC with queued plus
+ * overrun plus penalty charged to the enqueue LLC and dispatched counted
+ * on the dispatch LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
  * pairs, LLC queues. Pair pops retry bounded with no loss on stale
@@ -79,5 +82,6 @@ SCX_OPS_DEFINE(flow_ops,
 /* Thin entry with frozen include order maps, stats, guards, */
 /* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
 /* Strict priority lowest vtime strand A with frozen steal hierarchy, */
-/* overrun penalty plus blocked tail, and no SMT probe. */
+/* uniform postponement that moves the hog plus blocked tail with no */
+/* penalty, and no SMT probe. */
 /* Docs only, no logic change. */

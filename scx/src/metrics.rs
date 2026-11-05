@@ -13,7 +13,10 @@ use crate::stats::Metrics;
 /// Fold one LLC value into the aggregate.
 /// Counters use wrapping add. Depth plus cap also sum with wrapping
 /// add to keep base parity across LLCs. Short reads keep prior state
-/// with no trap. Offsets 0-8 stay frozen, tail 9-13 is append-only.
+/// with no trap. Offsets 0-13 stay frozen, tail 14-16 is append-only.
+/// Tail 14 counts overrun events and 15 counts penalty slices charged
+/// one to one by design, so the two stay equal while keeping event
+/// versus cost split for later share work.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -65,6 +68,18 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() >= 112 {
         let v = u64::from_ne_bytes(val[104..112].try_into().unwrap_or([0u8; 8]));
         out.kick_skip = out.kick_skip.wrapping_add(v);
+    }
+    if val.len() >= 120 {
+        let v = u64::from_ne_bytes(val[112..120].try_into().unwrap_or([0u8; 8]));
+        out.overrun = out.overrun.wrapping_add(v);
+    }
+    if val.len() >= 128 {
+        let v = u64::from_ne_bytes(val[120..128].try_into().unwrap_or([0u8; 8]));
+        out.domino_penalty = out.domino_penalty.wrapping_add(v);
+    }
+    if val.len() >= 136 {
+        let v = u64::from_ne_bytes(val[128..136].try_into().unwrap_or([0u8; 8]));
+        out.blocked = out.blocked.wrapping_add(v);
     }
 }
 

@@ -5,9 +5,13 @@
  * Offsets 0:queued 1:dispatched 2:fallback 3:steal 4:fb_pair_full
  * 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay frozen for compat.
  * Tail 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip
- * 14:overrun 15:domino_penalty 16:blocked is append-only with no bound change. Fallback equals 4 plus
- * 5 plus 6. Steal equals 9 plus 10. Gauges 7:depth 8:cap use the
- * occupancy set helper, never inc. Unknown offsets return with no change.
+ * 14:overrun 15:domino_penalty 16:blocked is append-only with no bound
+ * change. Overrun counts events and penalty counts slices charged one
+ * to one by design. Fallback equals 4 plus 5 plus 6. Steal equals 9
+ * plus 10. Gauges 7:depth 8:cap use the occupancy set helper, never
+ * inc. Overrun plus penalty charge the enqueue LLC while blocked uses
+ * the cached LLC, so attribution stays explicit. Unknown offsets return
+ * with no change.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,8 +29,8 @@ static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 /* Offsets 0:queued 1:dispatched 2:fallback 3:steal stay stable. Tail 4:fb_pair_full */
 /* 5:fb_duplicate 6:fb_stale split fallback by cause. Gauges 7:depth */
 /* 8:cap use the occupancy set helper, never inc. Steal split 9:pair */
-/* 10:llc plus kick split 11:preempt 12:idle 13:skip plus overrun split */
-/* 14:overrun 15:domino_penalty plus 16:blocked are append-only. */
+/* 10:llc plus kick split 11:preempt 12:idle 13:skip plus overrun event */
+/* 14 with penalty slices 15 one to one plus 16:blocked are append-only. */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
