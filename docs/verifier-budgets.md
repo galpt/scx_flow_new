@@ -21,10 +21,11 @@ misses to default with no stall.
 Virtual time is saturated. Adding one fixed slice of one million nanos
 caps at max on overflow with no wrap, and weight scaled charges split
 used nanos into slice units plus rest so the multiply never overflows,
-then cap at max with a monotonic last plus one floor. Slice never scales,
-preempt needs a gap of at least five hundred thousand nanos past a tail
-of one hundred twenty five thousand nanos, and the exiting slice stays at
-one thousand nanos.
+then cap at max with a monotonic last plus one floor. The overrun
+penalty reuses the same fixed slice with the same saturation and no
+knob. Slice never scales, preempt needs a gap of at least five hundred
+thousand nanos past a tail of one hundred twenty five thousand nanos,
+and the exiting slice stays at one thousand nanos.
 
 Frequency hints are neutral for placement with bounded integer math only.
 Sampling caps the raw ratio at full speed then blends three parts prior
@@ -33,9 +34,12 @@ quarters, half speed at or below one quarter, else keeps the smoothed
 value. Time uses monotonic nanos with zero plus missing plus reversed
 guards that keep the prior level.
 
-Stats offsets 0 through 8 stay frozen for compat with an append only tail
-through 13, fallback equals pair full plus duplicate plus stale, and steal
-equals pair plus LLC. The build carries 25 programs with 20 baseline plus
+Stats offsets 0 through 13 stay frozen for compat with an append only tail
+through 16, fallback equals pair full plus duplicate plus stale, and steal
+equals pair plus LLC. Overrun plus penalty count full slice burns on the
+enqueue LLC and blocked counts still runnable stops on the cached LLC.
+The penalty adds one straight line branch with saturating adds and no new
+loop, map, or program. The build carries 25 programs with 20 baseline plus
 5 cgroup plus task init programs, all passing with no new program added
 for documentation. Bytecode plus ELF differences from comment edits land
 in comment plus line info only.

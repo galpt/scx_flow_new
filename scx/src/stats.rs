@@ -65,13 +65,22 @@ pub struct Metrics {
     #[stat(desc = "Enqueue kicks skipped with no wake")]
     #[serde(default)]
     pub kick_skip: u64,
+    #[stat(desc = "Carry tasks that burnt the full slice")]
+    #[serde(default)]
+    pub overrun: u64,
+    #[stat(desc = "Extra slice charged on full slice burn")]
+    #[serde(default)]
+    pub domino_penalty: u64,
+    #[stat(desc = "Stops that leave the task still runnable")]
+    #[serde(default)]
+    pub blocked: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
@@ -87,6 +96,9 @@ impl Metrics {
             self.kick_preempt,
             self.kick_idle,
             self.kick_skip,
+            self.overrun,
+            self.domino_penalty,
+            self.blocked,
         )?;
         Ok(())
     }
@@ -108,6 +120,9 @@ impl Metrics {
             kick_preempt: self.kick_preempt.wrapping_sub(rhs.kick_preempt),
             kick_idle: self.kick_idle.wrapping_sub(rhs.kick_idle),
             kick_skip: self.kick_skip.wrapping_sub(rhs.kick_skip),
+            overrun: self.overrun.wrapping_sub(rhs.overrun),
+            domino_penalty: self.domino_penalty.wrapping_sub(rhs.domino_penalty),
+            blocked: self.blocked.wrapping_sub(rhs.blocked),
         }
     }
 }

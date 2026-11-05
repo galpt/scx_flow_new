@@ -6,9 +6,10 @@
  * per LLC 11 plus 12 plus 13 counting. Predicates plus vtime carry
  * plus pair insert plus LLC spill plus occupancy are unchanged.
  * Carry plus fresh vtime increments scale by cpu.weight with slice
- * never scaled and default 100 as exact identity. Pinned plus exiting
- * paths stay byte-identical. Single ownership through the queued flag
- * is unchanged with no loss.
+ * never scaled and default 100 as exact identity. Carry with no remain
+ * adds one extra fixed slice with saturation and counts overrun plus
+ * penalty. Pinned plus exiting paths stay byte-identical. Single
+ * ownership through the queued flag is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -196,6 +197,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				/* the same burnt slice. Saturation plus the */
 				/* monotonic floor below are unchanged. */
 				charged = flow_cgroup_charge(t->vtime, used, w);
+				/* Overrun penalty. No remain means the full slice */
+				/* burnt, so add one extra fixed slice with */
+				/* saturation to keep the head moving. Counts */
+				/* overrun plus penalty on the enqueue LLC. Pinned */
+				/* plus exiting never reach here. */
+				if (rem == 0) {
+					charged = flow_vtime_add_penalty(charged);
+					flow_stat_inc(llc, 14);
+					flow_stat_inc(llc, 15);
+				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					s64 last = flow_dhq_seq[pair_u];
 					if (charged <= last) {

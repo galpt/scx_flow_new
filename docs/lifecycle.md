@@ -12,16 +12,22 @@ The task cache stays a hint for move plus init and never serves alone.
 Enqueue places by virtual time. A requeued task with a live generation
 carries its remaining slice with a weight scaled charge, else a fresh
 virtual time steps past the pair sequence with a scaled gap and a last
-plus one floor with max saturation so the sequence stays unique. Pinned
+plus one floor with max saturation so the sequence stays unique. A carry
+that burnt the full slice with no remain adds one extra fixed slice with
+saturation and counts overrun plus penalty on the enqueue LLC, so a task
+that always burns the full slice cannot hold the head. Pinned plus
+exiting never reach the carry path and keep prior behavior. Pinned
 tasks wait in the allowed local queue only, exiting tasks use a minimal
 slice on an allowed local queue with fallback to the LLC queue, and all
 other tasks try the pair queue then spill to the LLC queue.
 
 Running records the per CPU snapshot, assigns the next generation, and
 clears the queued flag. Stopping folds burnt nanos into the smoothed
-frequency hint. Tick refreshes the remaining slice. Dequeue clears the
-queued flag. Exit records through the exit info helper. Single ownership
-holds through the queued flag with duplicate requeues dropped and no loss.
+frequency hint and counts a stop that leaves the task still runnable as
+blocked on the cached LLC with no fresh lookup. Tick refreshes the
+remaining slice. Dequeue clears the queued flag. Exit records through
+the exit info helper. Single ownership holds through the queued flag
+with duplicate requeues dropped and no loss.
 
 Cgroup init seeds one weight entry and never aborts creation, exit drops
 the entry so a reused id never reads stale, set weight updates or creates

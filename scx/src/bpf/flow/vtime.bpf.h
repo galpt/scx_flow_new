@@ -22,7 +22,19 @@ static __always_inline s64 flow_vtime_add_slice(s64 v)
 	return v + sl;
 }
 
+/* Saturated vtime plus one penalty slice. Reuses the fixed slice with */
+/* no knob, so a task that burnt the full slice pays one extra slice */
+/* with no wrap and no new tunable. Caps at max on overflow. */
+static __always_inline s64 flow_vtime_add_penalty(s64 v)
+{
+	const s64 vmax = (s64)0x7fffffffffffffffLL;
+	s64 sl = (s64)FLOW_SLICE_NS;
+	if (v > vmax - sl)
+		return vmax;
+	return v + sl;
+}
+
 /* Vtime adds one fixed slice with max saturation, no wrap, */
-/* no knob. Docs only, no logic change. */
+/* no knob. Penalty reuses the same slice. Docs only, no logic change. */
 
 #endif

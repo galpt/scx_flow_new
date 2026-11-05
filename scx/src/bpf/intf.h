@@ -120,9 +120,10 @@ struct flow_cpu_ctx {
 	u32 pad;
 };
 /* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal */
-/* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay */
-/* stable for compat. Tail is append-only with no bound change. */
-/* 14 by u64 is 112 bytes. Fallback stays the aggregate of pair-full */
+/* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap */
+/* 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip */
+/* stay stable for compat. Tail is append-only with no bound change. */
+/* 17 by u64 is 136 bytes. Fallback stays the aggregate of pair-full */
 /* plus duplicate plus stale, so fallback equals 4 plus 5 plus 6. */
 /* Steal stays the aggregate of pair plus LLC, so steal equals 9 plus 10. */
 /* fb_pair_full counts pair DHQ full spills to the LLC DSQ. fb_duplicate */
@@ -133,6 +134,10 @@ struct flow_cpu_ctx {
 /* dispatch. steal_llc counts remote LLC queue steals in dispatch. */
 /* kick_preempt counts preempt kicks on enqueue. kick_idle counts idle */
 /* kicks on enqueue. kick_skip counts enqueue kicks skipped with no wake. */
+/* overrun counts carry tasks that burnt the full slice with no remain. */
+/* domino_penalty counts the extra slice charged on such an overrun so a */
+/* task that always burns the full slice cannot hold the head. blocked */
+/* counts stops that leave the task still runnable. Gauges stay set only. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
@@ -148,6 +153,9 @@ struct flow_llc_stats {
 	u64 kick_preempt;
 	u64 kick_idle;
 	u64 kick_skip;
+	u64 overrun;
+	u64 domino_penalty;
+	u64 blocked;
 };
 #ifdef __BPF__
 static __always_inline u64 flow_llc_dsq(u32 llc)
@@ -175,7 +183,7 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
 /* ABI stays frozen with fixed slice, preempt, pop retry, */
-/* strand, DSQ, and cgroup weight constants plus frozen offsets 0-8 and */
+/* strand, DSQ, and cgroup weight constants plus frozen offsets 0-13 and */
 /* append only tail. Docs only, no logic change. */
 #endif
 #endif

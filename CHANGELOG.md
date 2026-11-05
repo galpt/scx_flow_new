@@ -1,5 +1,50 @@
 # Changelog
 
+## 5.0.12
+
+Overrun hardening with one extra slice plus blocked visibility.
+
+Culprit is a carry that keeps the head when it always burns the full
+slice, plus no count for stops that leave the task still runnable. A
+task with no remain requeues at the charged time and can hold the head
+across consecutive burns, and a stop with runnable true waits elsewhere
+with no attribution. The fix adds one extra fixed slice with saturation
+on a carry with no remain, so a full burn pays one more slice with no
+wrap and no knob, and counts overrun plus penalty on the enqueue LLC.
+The monotonic last plus one floor stays after the penalty so the pair
+sequence stays unique. A stop that leaves the task still runnable counts
+blocked on the cached LLC with no fresh lookup. Pinned plus exiting
+never reach the carry path and stay byte identical. Pair mode stays
+strict priority and picks the lowest vtime with ties to strand A.
+Saturated vtime, fail closed guards versus fail open weights, single
+ownership through the queued flag, frozen steal order, and append only
+stats stay unchanged.
+
+Guards keep first allowed plus constrained target failing closed with no
+move. Enqueue keeps one target for inserts plus kicks. Dispatch keeps
+pair then LLC then fallback drain with bounded retries and no loss.
+Stats keep offsets 0 through 13 frozen with tail 14 overrun plus 15
+domino penalty plus 16 blocked append only, fallback equals 4 plus 5
+plus 6, steal equals 9 plus 10, and gauges use set only. Userspace adds
+the same three counters with compat defaults and interval deltas as
+counters. Slice, scale, weight, order, local drain, exiting minimal, and
+arena touch stay frozen with clean room code and plain prose comments.
+
+Version syncs Cargo plus installer plus guard to 5.0.12 with the fork ref
+b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork galpt/scx frozen. The
+overlay Cargo lock stays stale by design and syncs through cargo update
+minus p scx_flow before any locked build. The installer still requires
+6.12 plus for cgroup hooks while 7.2 plus stays the subsystem
+recommendation. Reinstall needs a restart with no live transition.
+Rollback retains the prior 5.0.11 snapshot append only. The exit dump
+length flag stays optional with default zero preserving dump size.
+
+Verification is build plus verify only with no live mutation, no force,
+no reboot, and no push. Guard plus fmt plus clippy plus build plus test
+plus smoke plus veristat pass. Rollback stays append only.
+
+Base is archive/5.0.11 at 08c67194 with no other tree change.
+
 ## 5.0.11
 
 Pinned affinity stall true fix with constrained wakes plus head repair.

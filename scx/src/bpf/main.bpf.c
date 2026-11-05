@@ -9,15 +9,17 @@
  * to the LLC DSQ. Dispatch drains pair, then LLC, then fallback
  * safety net. Single LLC bypasses pairing and uses the LLC DSQ
  * directly. Cgroup cpu.weight scales vtime charges with default 100
- * as identity and slice never scaled. Stats are per LLC with queued
- * charged to the enqueue LLC and dispatched counted on the dispatch
- * LLC. Pair mode is
+ * as identity and slice never scaled. Carry with no remain adds one
+ * extra fixed slice with saturation and counts overrun plus penalty.
+ * Stops that leave the task still runnable count as blocked on the
+ * cached LLC. Stats are per LLC with queued charged to the enqueue
+ * LLC and dispatched counted on the dispatch LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
  * pairs, LLC queues. Pair pops retry bounded with no loss on stale
- * entries. Offsets 0-8 stay frozen, fallback equals
- * 4 plus 5 plus 6, steal equals 9 plus 10. No SMT probe runs
- * and each CPU stands single with fail closed choice.
+ * entries. Offsets 0-13 stay frozen, tail 14 through 16 is append
+ * only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10.
+ * No SMT probe runs and each CPU stands single with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -76,5 +78,6 @@ SCX_OPS_DEFINE(flow_ops,
 
 /* Thin entry with frozen include order maps, stats, guards, */
 /* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
-/* Strict priority lowest vtime strand A with frozen steal hierarchy and */
-/* no SMT probe. Docs only, no logic change. */
+/* Strict priority lowest vtime strand A with frozen steal hierarchy, */
+/* overrun penalty plus blocked tail, and no SMT probe. */
+/* Docs only, no logic change. */

@@ -5,8 +5,9 @@
  * Moved from main with additive weight hooks only. Single ownership
  * through the queued flag is unchanged. Freq hint is neutral for
  * placement. Hotplug needs restart, same risk as the pinned path.
- * Unknown weights read as default with prior behavior. Stats stay
- * frozen with no new counter for shares.
+ * Unknown weights read as default with prior behavior. Blocked tail
+ * counts stops that leave the task still runnable on the cached LLC
+ * with no fresh lookup.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -280,7 +281,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
 	u64 sl;
-	(void)runnable;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -295,6 +295,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	t->slice_rem = sl;
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
+	/* Blocked count. A stop that leaves the task still runnable waits */
+	/* elsewhere, so count it on the cached LLC with no fresh lookup. */
+	/* The cached LLC was seeded from the CPU view at running time. */
+	/* Placement plus vtime plus slice handling stay unchanged. */
+	if (runnable) {
+		u32 bllc = READ_ONCE(t->llc_id);
+
+		if (!flow_llc_ok(bllc))
+			bllc = 0;
+		flow_stat_inc(bllc, 16);
+	}
 	/* Sense load at stop. Burnt nanos over wall feed the smoothed level. */
 	/* Placement plus vtime plus slice handling stay unchanged. */
 	if ((u64)FLOW_SLICE_NS >= sl)
