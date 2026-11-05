@@ -45,8 +45,25 @@ static __always_inline s64 flow_vtime_add_penalty(s64 v)
 	return v + sl;
 }
 
+/* One shot latency offset for the queue key. A latency task moves one */
+/* fixed slice ahead of the same raw time with saturation at zero, so a */
+/* small raw time never wraps. Hogs plus pinned plus exiting keep the */
+/* raw key. Stored time plus deadline stay raw, so the offset never */
+/* accumulates across enqueues. Only the insert key plus the kick */
+/* compare use the offset key. The stamp never shifts with the offset. */
+static __always_inline s64 flow_vtime_boost(s64 raw, int is_lat)
+{
+	s64 off = (s64)FLOW_LAT_OFF_NS;
+	if (!is_lat)
+		return raw;
+	if (raw > off)
+		return raw - off;
+	return 0;
+}
+
 /* Vtime adds one fixed slice with max saturation, no wrap, */
 /* no knob. Penalty reuses the same uniform slice as the throttle. */
+/* Boost moves the latency key one slice with zero saturation one shot. */
 /* Enqueue stamp never shifts vtime. Docs only, no logic change. */
 
 #endif

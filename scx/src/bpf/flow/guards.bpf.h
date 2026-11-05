@@ -3,7 +3,9 @@
  * Flow placement guards.
  *
  * Moved from main with predicates unchanged. Null inputs fail closed
- * with no move. No SMT probe runs and each CPU stands single.
+ * with no move. No SMT probe runs and each CPU stands single. History
+ * helpers classify the three bit yield record with bit math only and
+ * never move placement on their own.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -82,6 +84,26 @@ static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct 
 	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint))
 		return hint;
 	return flow_first_allowed(p);
+}
+
+/* Latency test on the three bit history. Two of three yield bits read */
+/* as latency, else the task holds as a hog. Fresh zero reads as a hog */
+/* so a new task proves latency with early yields first. Bit math only */
+/* with no loop and no map use. */
+static __always_inline bool flow_hist_is_lat(u8 hist)
+{
+	u32 b0 = (u32)(hist & 1U);
+	u32 b1 = (u32)((hist >> 1) & 1U);
+	u32 b2 = (u32)((hist >> 2) & 1U);
+	return b0 + b1 + b2 >= 2U;
+}
+
+/* Shift one yield bit into the three bit history. A stop with remain */
+/* records one for an early yield, a full burn records zero. Keeps only */
+/* the newest three bits with no wrap past the mask. */
+static __always_inline u8 flow_hist_push(u8 hist, u8 bit)
+{
+	return (u8)(((hist << 1) | (bit & 1U)) & 7U);
 }
 
 /* Guards fail closed on null plus out of bound, no SMT */
