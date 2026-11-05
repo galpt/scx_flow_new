@@ -360,6 +360,12 @@ int main(int argc, char **argv)
     threads = calloc((size_t)nthreads, sizeof(pthread_t));
     if (!st.outs || !wargs || !threads) {
         fprintf(stderr, "no memory\n");
+        free(st.outs);
+        free(wargs);
+        free(threads);
+        st.outs = NULL;
+        wargs = NULL;
+        threads = NULL;
         return 1;
     }
     {
@@ -369,6 +375,12 @@ int main(int argc, char **argv)
         st.probe.delays = calloc(cap, sizeof(uint64_t));
         if (!st.probe.delays) {
             fprintf(stderr, "no memory\n");
+            free(st.outs);
+            free(wargs);
+            free(threads);
+            st.outs = NULL;
+            wargs = NULL;
+            threads = NULL;
             return 1;
         }
         st.probe.cap = cap;
@@ -433,8 +445,16 @@ int main(int argc, char **argv)
     probe_over50 = st.probe.over50;
     if (st.probe.len > 0 && st.probe.delays) {
         size_t n = st.probe.len;
-        size_t i95 = (size_t)((double)n * 0.95);
-        size_t i99 = (size_t)((double)n * 0.99);
+        size_t i95;
+        size_t i99;
+        /* Zero based rank with no overshoot: rank n minus one scaled. */
+        if (n == 0) {
+            i95 = 0;
+            i99 = 0;
+        } else {
+            i95 = (n - 1U) * 95U / 100U;
+            i99 = (n - 1U) * 99U / 100U;
+        }
         qsort(st.probe.delays, n, sizeof(uint64_t), cmp_u64);
         if (i95 >= n)
             i95 = n - 1;

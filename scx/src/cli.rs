@@ -66,7 +66,9 @@ pub struct Opts {
     /* Verbose output with libbpf detail. Logging only. */
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
-    /* Exit dump buffer length in bytes. Debug dump only. */
+    /* Exit dump buffer length in bytes. Debug dump only, operator trusted. */
+    /* Default zero preserves dump size, any value passes straight to the */
+    /* kernel with no clamp here since the operator owns the debug path. */
     #[clap(long, default_value = "0")]
     pub exit_dump_len: u32,
     /* Print version and exit. */
