@@ -93,6 +93,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	use_sl = (u64)FLOW_SLICE_NS;
 	use_strand = strand;
 	use_llc = llc;
+	/* Fail closed to raw. No context below jumps to insert only */
+	/* with the hog key, so shared queues never take stack garbage. */
+	key_v = use_v;
 	pinned = flow_is_pinned(p);
 	if (pinned) {
 		dhq = NULL;
