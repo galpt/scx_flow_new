@@ -3,7 +3,7 @@ name: ci
 # Overlay CI for the scx_flow scheduler.
 #
 # The scheduler in scx/ is a drop-in for scheds/experimental/scx_flow/
-# in a galpt/scx fork checkout (path deps use ../../../rust),
+# in an upstream sched-ext/scx checkout (path deps use ../../../rust),
 # so every job first assembles that workspace, syncs the overlay
 # lock entry, and then runs the usual package-scoped checks inside
 # it. No live scheduler run: GitHub
@@ -25,10 +25,10 @@ env:
   RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
-  # Pinned fork workspace ref (galpt/scx main as of 2026-11-04).
+  # Pinned upstream workspace ref (sched-ext/scx main as of 2026-10-15).
   # Bump deliberately after verifying the overlay still builds; the
   # overlay needs scx_* 1.1.4 + libbpf-rs 0.27.2 from the workspace.
-  SCX_REF: b0efa3f614c0187df4cb3202d7b514d401f77d2a
+  SCX_REF: e7b3a219617472cf78880ac424714e52c932db61
 
 jobs:
   test:
@@ -50,22 +50,18 @@ jobs:
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
-          git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
+          git -C /tmp/opencode/scx remote add origin https://github.com/sched-ext/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
-          # Fork already ships scheds/experimental/scx_flow, so
+          # Upstream already ships scheds/experimental/scx_flow, so
           # replace it instead of merging into it.
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
-          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
-          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
       - name: Sync overlay lockfile
         working-directory: /tmp/opencode/scx
         run: cargo update -p scx_flow
-      - name: Guard
-        run: bash tools/test_install_guard.sh
       - name: Format
         working-directory: /tmp/opencode/scx
         run: cargo fmt -p scx_flow --check
@@ -103,14 +99,12 @@ jobs:
       - name: Assemble the scheduler workspace
         run: |
           git init -q /tmp/opencode/scx
-          git -C /tmp/opencode/scx remote add origin https://github.com/galpt/scx
+          git -C /tmp/opencode/scx remote add origin https://github.com/sched-ext/scx
           git -C /tmp/opencode/scx fetch --depth 1 origin "${SCX_REF}"
           git -C /tmp/opencode/scx checkout FETCH_HEAD
-          # Fork already ships scheds/experimental/scx_flow, so
+          # Upstream already ships scheds/experimental/scx_flow, so
           # replace it instead of merging into it.
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
-          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
-          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml

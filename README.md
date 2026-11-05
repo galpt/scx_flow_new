@@ -10,8 +10,8 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/build.rs` build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
-- `scx/src/bpf/flow/` per area headers with no vendored sources
-- `scx/src/bpf/lib` is absent: helpers come from workspace headers
+- `scx/src/bpf/` eight area headers in one directory
+- `scx/src/bpf/lib` is not present: helpers come from workspace headers
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
 - `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
@@ -25,7 +25,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 Copy `scx` into a workspace checkout and build there.
 Scheduler behavior is documented in `scx/README.md`.
 The installer pins fork
-`b0efa3f614c0187df4cb3202d7b514d401f77d2a`.
+`e7b3a219617472cf78880ac424714e52c932db61`.
 
 ```bash
 sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
@@ -34,9 +34,8 @@ sudo bash tools/install_scx_flow.sh /tmp/scx-workspace
 
 Expect the current version, state `enabled`, ops with `flow`.
 
-This scheduler needs a restart from prior releases
-with no live transition. Queue ids, slice, dispatch order, and stats follow
-this scheduler, see `scx/README.md`.
+A reinstall from a prior release needs a restart. Queue ids, slice,
+dispatch order, and stats follow this scheduler, see `scx/README.md`.
 
 ## Checks
 
@@ -54,66 +53,88 @@ See `LICENSE`.
 
 ## Lifecycle
 
-Tasks enter through init_task with the birth cgroup cached as a hint,
-then enqueue places by virtual time into the per LLC
-queue. Stopping records a yield bit into the three bit task history, and
-enqueue reads two of three early yields as latency else a hog with fresh
-tasks neutral as hogs. Latency tasks take the queue key minus one fixed
-slice one shot with stored time staying raw, while pinned plus exiting
-bypass with prior behavior. Running records the per CPU snapshot plus the
-latency flag and clears the queued flag, stopping folds burnt nanos into
-the frequency hint, tick refreshes the remaining slice, dequeue clears
-the queued flag, and exit records through the exit info helper. Cgroup
-init, move, set weight, and exit keep weight shares current with fail
-open reads as default. Single ownership holds through the queued flag
-with no loss, and exiting tasks use a minimal slice on an allowed local
-queue with fallback to the LLC queue. The kick compares boosted keys on
-both sides with fixed gap plus tail, and an old wait that steps the
-hold down counts an age rescue.
+Tasks enter through init_task with the birth cgroup id and a weight
+hint read from init args. Enqueue places by virtual time into one of
+four per LLC queues and one fallback queue. Enqueue reads the weight
+map by id on every insert, so a weight change applies to the next
+enqueue. A missing entry, a zero id, a zero value, or a full map
+reads as the default share. The burst estimate keeps most of the old
+value and adds a small part of the fresh sample. It starts from a
+middle value and is clamped to a floor and a ceiling. The estimate
+and the wait age select one of four queues. Long waits lower the
+estimate and very long waits reset it. Latency tasks queue with an
+earlier key while the stored time is left unchanged. Pinned and
+exiting tasks use the local queue first. Pinned tasks wait on the
+allowed local queue with a single slice. Exiting tasks use a short
+slice on the allowed local queue and the queue for their target
+otherwise. Other tasks join the queue for their target with a slice
+of one to three quanta. Running records the per CPU snapshot and the
+queue and clears the queued bit. Dispatch already dropped the gauge
+for shared moves and local inserts were never counted. Stopping folds
+burnt time into the estimate and tracks consecutive full burns. Tick
+refreshes the remaining slice. Dequeue drops the gauge on cancel.
+Exit records through the exit info helper. Cgroup init, move, set
+weight, and exit keep shares current. Reads that miss fall back to
+the default. Ownership is held through the queued bit. A requeue
+that finds the bit set is dropped and counted as a duplicate. The
+kick compares shifted keys on both sides with a fixed gap and tail
+and counts a latency win when a latency task preempts. The pinned
+kick preempts past the tail. A streak at the bound turns an idle
+wake into a preempt and counts an escape. A mask change on a queued
+task keeps the queue and wakes the new owner, counting the wake when
+the owner is usable.
 
-Hotplug needs a restart. CPU and LLC tables are seeded once at init with
-fixed bounds, so an offline or added CPU after start never reshapes the
-tables. The same restart rule covers the pinned path.
+A CPU that arrives late needs a restart. CPU and LLC tables are
+written once at init within fixed bounds, so an offline or added CPU
+after start does not reshape the tables. The same restart rule covers
+the pinned path.
 
 ## Verifier budgets
 
-All BPF loops are bounded with fixed caps. LLC walks
-stop at the LLC count, and init walks stop at fixed CPU and LLC bounds.
-Virtual
-time adds one fixed slice with saturation at max and never wraps. Weight
-scaling splits used nanos into slice units plus rest so the multiply never
-overflows, then caps at max. Frequency smoothing uses bounded integer math
-only with three parts prior plus one part fresh. The history classifier
-uses bit math only with no loop, and the latency offset subtracts one
-fixed slice with zero saturation one shot. Stats count twenty one
-counters in struct order at 168 bytes with total meeting penalty
-plus extra per award. No new
-map, struct, helper, or branch was added for documentation.
+All BPF loops are bounded with fixed caps. LLC walks stop at the LLC
+count, and init walks stop at fixed CPU and LLC bounds. Virtual time
+adds saturate at the top. The per LLC floor keeps fresh times unique
+through a short compare and swap loop. Weight scaling splits used
+nanos into slice units and rest so the multiply stays in range, then
+caps at the top. Short job smoothing uses integer math that keeps
+most of the old value and adds a small part of the sample. The
+latency offset subtracts one fixed slice with saturation at zero. The
+queued gauge drops through a short compare and swap loop that never
+goes below zero and writes back the last value on contention. Preempt
+needs a gap of at least one million nanos past a tail of one hundred
+twenty five thousand nanos with both sides shifted by one fixed slice
+of three million nanos for latency tasks. The exiting slice stays at
+one thousand nanos. Stats count twenty one counters in struct order
+at 168 bytes with total matching penalty and extra combined per
+award. The build carries a thin glue and eight area headers with
+sixteen ops and stacks at or below five hundred twelve bytes.
 
 ## Reinstall safety
 
-Reinstall needs a restart from prior releases with no live transition.
-The installer always starts from a fresh workspace, refuses empty, root,
+A reinstall from a prior release needs a restart. The installer
+always starts from a fresh workspace. It refuses empty, root,
 relative, whitespace, glob, dotdot escape, symlink, shared CI tree at
-/tmp/opencode, bare /tmp, non allowlisted /tmp paths, home, usr, and var
-trees, then fetches the pinned fork ref and verifies the head before
-checkout. Overlay lib stays byte identical with symlink handling for lib
-plus license, then builds and installs the binary. After a good install
-only, an opt in clean may remove the workspace target dir.
+/tmp/opencode, bare /tmp, non allowlisted /tmp paths, home, usr, and
+var trees, then fetches the pinned fork ref and verifies the head
+before checkout. The overlay lib is byte identical with symlink
+handling for lib and license, then builds and installs the binary.
+After a good install only, an opt in clean may remove the workspace
+target dir.
 
 ## Kernel support
 
 The installer requires kernel 6.12 or newer for the cgroup weight hooks,
 since cgroup init order against task init before 6.12 is unverified and
 would stick defaults. The scheduler README recommends 7.2 or newer for
-sched_ext. The two numbers differ by design: 6.12 is the minimum for the
-hooks, 7.2 is the recommendation for the subsystem. A miss, zero id, zero
-value, or full weight map reads as default with prior behavior kept.
+sched_ext. The two numbers differ by intent: 6.12 is the minimum for the
+hooks, 7.2 is the recommendation for the subsystem. A missing entry,
+a zero id, a zero value, or a full weight map reads as default and keeps
+prior behavior.
 
 ## Cargo lock note
 
 The overlay `scx/Cargo.lock` still records the prior package entry and is
-stale by design. It is never hand edited. CI assembles the workspace and
+left as is. It is never hand edited. CI assembles the workspace and
 runs `cargo update -p scx_flow` to sync the entry, then builds and tests
 with `--locked`. Local builds follow the same sync before any locked
-check, so the stale file never drifts into the binary.
+check, so the file on disk never drifts into the binary.

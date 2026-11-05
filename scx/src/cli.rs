@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Poll interval plus scheduler flags with fail closed validation.
+//! Poll interval handling and scheduler flags.
 
 use std::time::Duration;
 
@@ -20,8 +20,7 @@ pub fn full_version() -> String {
 }
 
 /// Init stderr logging with local time offset.
-/// Verbose selects debug, else info. Time plus location plus target
-/// plus thread levels stay fixed with no knob.
+/// Verbose selects debug output. Other levels stay fixed.
 pub fn init_logging(verbose: bool) -> Result<()> {
     let loglevel = if verbose {
         simplelog::LevelFilter::Debug
@@ -45,8 +44,8 @@ pub fn init_logging(verbose: bool) -> Result<()> {
 }
 
 /// Validated poll interval from float seconds.
-/// Rejects NaN plus infinite plus non-positive plus over one hour, so
-/// a bad flag fails closed before any timer starts with no panic.
+/// Rejects NaN, infinite, non-positive, and values over one hour.
+/// A bad value returns an error before any timer starts.
 pub fn poll_interval_secs(v: f64) -> Result<Duration> {
     if !v.is_finite() || v <= 0.0 || v > 3600.0 {
         anyhow::bail!("interval bad {v}");
@@ -63,12 +62,11 @@ pub struct Opts {
     /* Run the stats printer only. */
     #[clap(long)]
     pub monitor: Option<f64>,
-    /* Verbose output with libbpf detail. Logging only. */
+    /* Verbose output with libbpf detail. */
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
-    /* Exit dump buffer length in bytes. Debug dump only, operator trusted. */
-    /* Default zero preserves dump size, any value passes straight to the */
-    /* kernel with no clamp here since the operator owns the debug path. */
+    /* Exit dump buffer length in bytes. Zero keeps the default size. */
+    /* Values pass to the kernel as given. The operator owns this path. */
     #[clap(long, default_value = "0")]
     pub exit_dump_len: u32,
     /* Print version and exit. */

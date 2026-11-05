@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler core.
+ * Flow scheduler entry.
  *
- * Entry point with ordered includes and struct ops only. Queues
- * are one per LLC plus one fallback queue, each ordered by virtual
- * time with equal times leaving in insertion order. Pinned tasks
- * use the local queue in FIFO order. Cgroup weight scales virtual
- * time charges with default weight as identity and the slice
- * fixed. A full burn postpones the task by the award length. The
- * streak turns an idle wake into a preempt at the bound. Tables
- * are seeded once, so hotplug needs a restart.
+ * Thin glue that pulls in eight area headers in order and declares
+ * the ops table. Each LLC has four queues and there is one fallback
+ * queue. Ties leave in insertion order. Tables are written once, so
+ * a CPU that arrives late needs a restart to be seen. Settings live
+ * in the shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -19,16 +16,14 @@
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
-#include "flow/maps.bpf.h"
-#include "flow/stats.bpf.h"
-#include "flow/guards.bpf.h"
-#include "flow/vtime.bpf.h"
-#include "flow/cgroup.bpf.h"
-#include "flow/freq.bpf.h"
-#include "flow/preempt.bpf.h"
-#include "flow/lifecycle.bpf.h"
-#include "flow/enqueue.bpf.h"
-#include "flow/dispatch.bpf.h"
+#include "maps.bpf.h"
+#include "stats.bpf.h"
+#include "fair.bpf.h"
+#include "sjf.bpf.h"
+#include "cgroup.bpf.h"
+#include "select.bpf.h"
+#include "enqueue.bpf.h"
+#include "dispatch.bpf.h"
 SCX_OPS_DEFINE(flow_ops,
 	       .select_cpu		= (void *)flow_select_cpu,
 	       .enqueue			= (void *)flow_enqueue,

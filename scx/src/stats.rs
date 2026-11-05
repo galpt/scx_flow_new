@@ -21,7 +21,7 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Per LLC counters for queueing, kicks, hog control, and awards.
+/// Per LLC counters for queueing, kicks, holds, and awards.
 pub struct Metrics {
     #[stat(desc = "Tasks now queued in DSQ")]
     #[serde(default)]
@@ -29,16 +29,16 @@ pub struct Metrics {
     #[stat(desc = "Tasks moved to local in dispatch")]
     #[serde(default)]
     pub dispatched: u64,
-    #[stat(desc = "Fallback inserts plus duplicate drops")]
+    #[stat(desc = "Fallback inserts and duplicate drops")]
     #[serde(default)]
     pub fallback: u64,
     #[stat(desc = "Remote LLC queue moves in dispatch")]
     #[serde(default)]
     pub steal: u64,
-    #[stat(desc = "Duplicate requeues dropped by queued guard")]
+    #[stat(desc = "Duplicate requeues dropped while queued")]
     #[serde(default)]
     pub fb_duplicate: u64,
-    #[stat(desc = "Remote LLC moves split on the thief")]
+    #[stat(desc = "Remote moves counted on the thief")]
     #[serde(default)]
     pub steal_llc: u64,
     #[stat(desc = "Preempt kicks on enqueue")]
@@ -47,10 +47,10 @@ pub struct Metrics {
     #[stat(desc = "Idle kicks on enqueue")]
     #[serde(default)]
     pub kick_idle: u64,
-    #[stat(desc = "Enqueue kicks skipped with no wake")]
+    #[stat(desc = "Skipped enqueue kicks")]
     #[serde(default)]
     pub kick_skip: u64,
-    #[stat(desc = "Carry tasks that burnt the full slice")]
+    #[stat(desc = "Tasks that burnt the full slice")]
     #[serde(default)]
     pub overrun: u64,
     #[stat(desc = "Extra slice charged on full slice burn")]
@@ -59,7 +59,7 @@ pub struct Metrics {
     #[stat(desc = "Stops that leave the task still runnable")]
     #[serde(default)]
     pub blocked: u64,
-    #[stat(desc = "Streak preempts that end a hog hold")]
+    #[stat(desc = "Streak preempts that end a hold")]
     #[serde(default)]
     pub hog_escape: u64,
     #[stat(desc = "Mask change kicks for queued tasks")]
@@ -71,19 +71,19 @@ pub struct Metrics {
     #[stat(desc = "Enqueues that take the latency key")]
     #[serde(default)]
     pub lat_boost: u64,
-    #[stat(desc = "Enqueues that keep the raw key as hogs")]
+    #[stat(desc = "Enqueues that keep the raw key")]
     #[serde(default)]
     pub hog_hold: u64,
     #[stat(desc = "Preempts won by a latency task")]
     #[serde(default)]
     pub lat_preempt: u64,
-    #[stat(desc = "Old waits that step the hold down")]
+    #[stat(desc = "Aged waits that lower the estimate")]
     #[serde(default)]
     pub age_rescue: u64,
-    #[stat(desc = "Extra quanta beyond the first as q minus one")]
+    #[stat(desc = "Extra quanta beyond the first")]
     #[serde(default)]
     pub extra_award: u64,
-    #[stat(desc = "Total quanta for the run as q")]
+    #[stat(desc = "Total quanta granted")]
     #[serde(default)]
     pub total_quanta: u64,
 }
@@ -119,7 +119,7 @@ impl Metrics {
         Ok(())
     }
 
-    /// Interval delta with queued passing through as a live gauge.
+    /// Interval delta. Queued passes through as a live gauge.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             queued: self.queued,
@@ -146,9 +146,9 @@ impl Metrics {
         }
     }
 
-    /// Books check on an interval window: total equals penalty plus extra.
-    /// Awards land exactly on non pinned overruns, so the summed window
-    /// keeps total minus penalty minus extra at zero with wrapping math.
+    /// Check totals on an interval window. Total matches penalty and extra combined.
+    /// Awards land on overruns that are not pinned, so the window keeps
+    /// the difference at zero with wrapping math.
     pub fn award_books_ok(&self, rhs: &Self) -> bool {
         let total = self.total_quanta.wrapping_sub(rhs.total_quanta);
         let penalty = self.domino_penalty.wrapping_sub(rhs.domino_penalty);
@@ -156,7 +156,7 @@ impl Metrics {
         total == penalty.wrapping_add(extra)
     }
 
-    /// Extra award plus total quanta deltas for share work.
+    /// Deltas for extra awards and total quanta.
     pub fn extra_deltas(&self, rhs: &Self) -> (u64, u64) {
         (
             self.extra_award.wrapping_sub(rhs.extra_award),

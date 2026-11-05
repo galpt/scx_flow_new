@@ -1,31 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow per LLC counters.
+ * Counters for the flow scheduler.
  *
- * Each helper attributes to one LLC so enqueue and dispatch sides
- * stay apart. The queued gauge saturates at zero on decrement. The
- * award tails take adds: extra takes q minus one, total takes q, so
- * total meets penalty plus extra on each award. Unknown offsets take
- * no action.
+ * Each helper updates the counters of one LLC. The queued gauge
+ * never drops below zero. It uses a short compare and swap loop.
+ * If the loop does not win, the last observed value is written
+ * back directly so a decrement is not lost under contention.
+ * Award counters use plain adds. Extra and total move together
+ * so the sums stay consistent. An unknown offset does nothing.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_STATS_BPF_H
 #define __FLOW_STATS_BPF_H
-
-#include "../intf.h"
+#include "intf.h"
 #include "maps.bpf.h"
-
 static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 {
 	return bpf_map_lookup_elem(&llc_stats_stor, &llc);
 }
-
-/**
- * flow_stat_inc - count one event.
- * @llc: LLC to charge.
- * @off: counter index matching the struct order.
- */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -74,13 +67,6 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
 }
-
-/**
- * flow_stat_add - add an award amount to a tail counter.
- * @llc: LLC to charge.
- * @off: counter index, 19 for extra or 20 for total.
- * @val: amount to add. Zero takes no action.
- */
 static __always_inline void flow_stat_add(u32 llc, u64 off, u64 val)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -95,36 +81,31 @@ static __always_inline void flow_stat_add(u32 llc, u64 off, u64 val)
 		return;
 	__sync_fetch_and_add(cell, val);
 }
-
-/**
- * flow_fb_inc - count a fallback with its cause.
- * @llc: LLC to charge.
- * @tail_off: cause index, 4 for duplicate drops.
- *
- * Charges the aggregate and the cause together.
- */
 static __always_inline void flow_fb_inc(u32 llc, u64 tail_off)
 {
 	flow_stat_inc(llc, 2);
 	flow_stat_inc(llc, tail_off);
 }
-
-/**
- * flow_queued_dec - drop the queued gauge by one.
- * @llc: LLC to charge.
- *
- * Saturates at zero. A concurrent race between the check and the
- * subtract stays a small stats skew with no effect on placement,
- * healing on the next insert.
- */
 static __always_inline void flow_queued_dec(u32 llc)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
+	int i;
 	if (!st)
 		return;
-	if (READ_ONCE(st->queued) == 0)
-		return;
-	__sync_fetch_and_sub(&st->queued, 1ULL);
+	for (i = 0; i < 4; i++) {
+		u64 old = READ_ONCE(st->queued);
+		u64 next;
+		if (old == 0)
+			return;
+		next = old - 1;
+		if (__sync_val_compare_and_swap(&st->queued, old, next) == old)
+			return;
+	}
+	{
+		u64 last = READ_ONCE(st->queued);
+		if (last == 0)
+			return;
+		st->queued = last - 1;
+	}
 }
-
 #endif

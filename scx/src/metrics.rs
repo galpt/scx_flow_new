@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Sums counters with wrapping add in struct order.
+//! Sums counters in struct order with wrapping add.
 
 use log::warn;
 
@@ -12,10 +12,9 @@ use crate::stats::Metrics;
 
 /// Fold one LLC value into the aggregate.
 /// Counters use wrapping add. Short reads keep prior state.
-/// Overrun counts events and penalty counts slices charged one to
-/// one, keeping event versus cost apart. Extra counts q minus one
-/// and total counts q, so total equals penalty plus extra per award
-/// and again on deltas.
+/// Overrun counts full slice burns. Penalty counts the charge for
+/// those burns. Extra counts quanta beyond the first, and total
+/// counts all quanta, so total matches penalty and extra combined.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -99,7 +98,7 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
 }
 
 /// Sum per LLC counters into one view.
-/// A failed map read warns once per poll and keeps zeros.
+/// A failed map read warns and keeps zeros for that LLC.
 pub fn collect(skel: &BpfSkel<'_>) -> Metrics {
     use libbpf_rs::MapCore;
     let mut out = Metrics::default();

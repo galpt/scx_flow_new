@@ -26,17 +26,6 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
-/* Compare two wake delays for percentile sort. */
-static int cmp_u64(const void *a, const void *b)
-{
-    uint64_t va = *(const uint64_t *)a;
-    uint64_t vb = *(const uint64_t *)b;
-    if (va < vb)
-        return -1;
-    if (va > vb)
-        return 1;
-    return 0;
-}
 /* Least period in nanos. Matches the harness range. */
 #define HARNESS_PERIOD_MIN_NS (120ULL * 1000ULL * 1000ULL)
 /* Most period in nanos. Matches the harness range. */
@@ -49,28 +38,21 @@ static int cmp_u64(const void *a, const void *b)
 #define HARNESS_JITTER_MAX_NS (1ULL * 1000ULL * 1000ULL)
 /* Probe period in nanos at 10ms with no knob. */
 #define HARNESS_PROBE_NS (10ULL * 1000ULL * 1000ULL)
-/* Per thread counts for one run. Missed counts releases skipped past */
-/* the deadline with no catch up, so a miss never storms later work. */
+/* Per thread counts for one run. */
 struct thread_out {
     uint64_t released;
     uint64_t completed;
-    uint64_t missed;
     uint64_t sum_released_ns;
     uint64_t sum_completed_ns;
     double sum_ratio;
     long nvcsw;
     long nivcsw;
 };
-/* Probe counts for one run with light wakeups. Delays holds each wake */
-/* delay for percentile sizing with over50 counting wakes past fifty ms. */
+/* Probe counts for one run with light wakeups. */
 struct probe_out {
     uint64_t count;
     uint64_t sum_delay_ns;
     uint64_t max_delay_ns;
-    uint64_t over50;
-    uint64_t *delays;
-    size_t cap;
-    size_t len;
 };
 /* Shared run state for all threads. */
 struct run_state {
@@ -198,8 +180,6 @@ static void *worker_idx(void *arg)
             if (burn_end <= deadline) {
                 out->completed += 1;
                 out->sum_completed_ns += aet;
-            } else {
-                out->missed += 1;
             }
             if (burn_end < release + period) {
                 now = sleep_until(release + period);
@@ -219,8 +199,7 @@ static void *worker_idx(void *arg)
         (long)ru_start.ru_nivcsw;
     return NULL;
 }
-/* Light probe loop with 10ms wakes and delay stats. Stores each delay */
-/* for percentile proof with over50 counting wakes past fifty ms. */
+/* Light probe loop with 10ms wakes and delay stats. */
 static void *probe_idx(void *arg)
 {
     struct probe_arg *pa = (struct probe_arg *)arg;
@@ -245,10 +224,6 @@ static void *probe_idx(void *arg)
         st->probe.sum_delay_ns += delay;
         if (delay > st->probe.max_delay_ns)
             st->probe.max_delay_ns = delay;
-        if (delay > 50ULL * 1000ULL * 1000ULL)
-            st->probe.over50 += 1;
-        if (st->probe.delays && st->probe.len < st->probe.cap)
-            st->probe.delays[st->probe.len++] = delay;
         expect += HARNESS_PROBE_NS;
         if (now >= wall_end)
             break;
@@ -301,7 +276,6 @@ int main(int argc, char **argv)
     long ncpu = 0;
     uint64_t total_released = 0;
     uint64_t total_completed = 0;
-    uint64_t total_missed = 0;
     uint64_t total_released_ns = 0;
     uint64_t total_completed_ns = 0;
     double total_ratio = 0.0;
@@ -313,9 +287,6 @@ int main(int argc, char **argv)
     double util_effective = 0.0;
     double probe_avg_us = 0.0;
     double probe_max_us = 0.0;
-    double probe_p95_us = 0.0;
-    double probe_p99_us = 0.0;
-    uint64_t probe_over50 = 0;
     char sched_state[64];
     char csv_path[1024];
     char json_path[1024];
@@ -365,31 +336,7 @@ int main(int argc, char **argv)
     threads = calloc((size_t)nthreads, sizeof(pthread_t));
     if (!st.outs || !wargs || !threads) {
         fprintf(stderr, "no memory\n");
-        free(st.outs);
-        free(wargs);
-        free(threads);
-        st.outs = NULL;
-        wargs = NULL;
-        threads = NULL;
         return 1;
-    }
-    {
-        size_t cap = (size_t)(st.duration_ns / HARNESS_PROBE_NS) + 16;
-        if (cap < 16)
-            cap = 16;
-        st.probe.delays = calloc(cap, sizeof(uint64_t));
-        if (!st.probe.delays) {
-            fprintf(stderr, "no memory\n");
-            free(st.outs);
-            free(wargs);
-            free(threads);
-            st.outs = NULL;
-            wargs = NULL;
-            threads = NULL;
-            return 1;
-        }
-        st.probe.cap = cap;
-        st.probe.len = 0;
     }
     read_sched_state(sched_state, sizeof(sched_state));
     pthread_barrier_init(&st.start_bar, NULL,
@@ -422,7 +369,6 @@ int main(int argc, char **argv)
     for (i = 0; i < nthreads; i++) {
         total_released += st.outs[i].released;
         total_completed += st.outs[i].completed;
-        total_missed += st.outs[i].missed;
         total_released_ns += st.outs[i].sum_released_ns;
         total_completed_ns += st.outs[i].sum_completed_ns;
         total_ratio += st.outs[i].sum_ratio;
@@ -448,38 +394,8 @@ int main(int argc, char **argv)
         probe_max_us = (double)st.probe.max_delay_ns /
             1000.0;
     }
-    probe_over50 = st.probe.over50;
-    if (st.probe.len > 0 && st.probe.delays) {
-        size_t n = st.probe.len;
-        size_t i95;
-        size_t i99;
-        /* Zero based rank with no overshoot: rank n minus one scaled. */
-        if (n == 0) {
-            i95 = 0;
-            i99 = 0;
-        } else {
-            i95 = (n - 1U) * 95U / 100U;
-            i99 = (n - 1U) * 99U / 100U;
-        }
-        qsort(st.probe.delays, n, sizeof(uint64_t), cmp_u64);
-        if (i95 >= n)
-            i95 = n - 1;
-        if (i99 >= n)
-            i99 = n - 1;
-        probe_p95_us = (double)st.probe.delays[i95] / 1000.0;
-        probe_p99_us = (double)st.probe.delays[i99] / 1000.0;
-    }
     snprintf(csv_path, sizeof(csv_path), "%s.csv", prefix);
     snprintf(json_path, sizeof(json_path), "%s.json", prefix);
-    if (st.probe.count == 0) {
-        fprintf(stderr, "no probe samples\n");
-        pthread_barrier_destroy(&st.start_bar);
-        free(st.probe.delays);
-        free(st.outs);
-        free(wargs);
-        free(threads);
-        return 1;
-    }
     csv = fopen(csv_path, "w");
     if (!csv) {
         perror("csv open");
@@ -488,18 +404,16 @@ int main(int argc, char **argv)
     fprintf(csv, "nthreads,ncpu,wall_secs,released,completed,");
     fprintf(csv, "completion,offered_util,exact_util,");
     fprintf(csv, "effective_util,nvcsw,nivcsw,probe_count,");
-    fprintf(csv, "probe_avg_us,probe_max_us,probe_p95_us,probe_p99_us,");
-    fprintf(csv, "probe_over50,missed,control,sched\n");
+    fprintf(csv, "probe_avg_us,probe_max_us,control,sched\n");
     fprintf(csv, "%d,%ld,%.3f,%" PRIu64 ",%" PRIu64 ",",
         nthreads, ncpu, wall_secs, total_released,
         total_completed);
     fprintf(csv, "%.6f,%.6f,%.6f,%.6f,%ld,%ld,",
         completion, util_offered, util_exact,
         util_effective, total_nvcsw, total_nivcsw);
-    fprintf(csv, "%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%d,%s\n",
+    fprintf(csv, "%" PRIu64 ",%.3f,%.3f,%d,%s\n",
         st.probe.count, probe_avg_us,
-        probe_max_us, probe_p95_us, probe_p99_us, probe_over50,
-        total_missed, control, sched_state);
+        probe_max_us, control, sched_state);
     fclose(csv);
     json = fopen(json_path, "w");
     if (!json) {
@@ -514,8 +428,6 @@ int main(int argc, char **argv)
         total_released);
     fprintf(json, "  \"completed\": %" PRIu64 ",\n",
         total_completed);
-    fprintf(json, "  \"missed\": %" PRIu64 ",\n",
-        total_missed);
     fprintf(json, "  \"completion\": %.6f,\n", completion);
     fprintf(json, "  \"offered_util\": %.6f,\n", util_offered);
     fprintf(json, "  \"exact_util\": %.6f,\n", util_exact);
@@ -527,9 +439,6 @@ int main(int argc, char **argv)
         st.probe.count);
     fprintf(json, "  \"probe_avg_us\": %.3f,\n", probe_avg_us);
     fprintf(json, "  \"probe_max_us\": %.3f,\n", probe_max_us);
-    fprintf(json, "  \"probe_p95_us\": %.3f,\n", probe_p95_us);
-    fprintf(json, "  \"probe_p99_us\": %.3f,\n", probe_p99_us);
-    fprintf(json, "  \"probe_over50\": %" PRIu64 ",\n", probe_over50);
     fprintf(json, "  \"control\": %d,\n", control);
     fprintf(json, "  \"sched\": \"%s\",\n", sched_state);
     fprintf(json, "  \"seed\": %u,\n", seed_base);
@@ -537,15 +446,14 @@ int main(int argc, char **argv)
     fprintf(json, "}\n");
     fclose(json);
     printf("done n=%d released=%" PRIu64 " completed=%" PRIu64
-        " missed=%" PRIu64 " completion=%.4f offered=%.4f exact=%.4f",
-        nthreads, total_released, total_completed, total_missed,
+        " completion=%.4f offered=%.4f exact=%.4f",
+        nthreads, total_released, total_completed,
         completion, util_offered, util_exact);
     printf(" effective=%.4f nvcsw=%ld probe_avg=%.1fus",
         util_effective, total_nvcsw, probe_avg_us);
-    printf(" probe_max=%.1fus p95=%.1fus p99=%.1fus over50=%" PRIu64 " control=%d sched=%s\n",
-        probe_max_us, probe_p95_us, probe_p99_us, probe_over50, control, sched_state);
+    printf(" probe_max=%.1fus control=%d sched=%s\n",
+        probe_max_us, control, sched_state);
     pthread_barrier_destroy(&st.start_bar);
-    free(st.probe.delays);
     free(st.outs);
     free(wargs);
     free(threads);

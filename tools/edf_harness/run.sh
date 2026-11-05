@@ -5,24 +5,9 @@
 # on the host CPU count with average burst plus period.
 # All threads run with the default policy with no
 # realtime use. One probe thread wakes each 10ms for
-# a light baseline with p95 plus p99 plus over50 for
-# strict gates. Missed counts releases skipped past
-# the deadline with no catch up. Set CONTROL to 1 to
-# mark runs as control for A and B comparison. The
-# binary is built on each run with no checked in
-# binary. Set STRICT to 1 for the 120 second full
-# burn plus probe gate run with at least 3 repeats
-# each for probe plus control, strict overrides quick
-# with QUICK forced to 0 plus DURATION to 120 plus
-# LEVELS to 1.0; the run also writes a
-# y_join template keyed by repeat plus seed plus
-# control for joining counter deltas to the per
-# award log, with share open until the log lands.
-# QUICK stays a 2 second 1 repeat smoke at target 1.0.
-# Defaults stay at or below 60 seconds. Extra share Y
-# stays as awarded extra to top band from counter deltas
-# joined to the per award log with one division alongside
-# this summary, not hog completion.
+# a light baseline. Set CONTROL to 1 to mark runs as
+# control for A and B comparison. The binary is built
+# on each run with no checked in binary.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
@@ -34,7 +19,6 @@ DURATION="${DURATION:-60}"
 REPEATS="${REPEATS:-5}"
 QUICK="${QUICK:-0}"
 CONTROL="${CONTROL:-0}"
-STRICT="${STRICT:-0}"
 need() {
     command -v "$1" >/dev/null 2>&1 || {
         echo "missing required tool $1" >&2
@@ -73,44 +57,21 @@ if [ "${QUICK}" = "1" ]; then
 else
     LEVELS="0.5 0.75 0.95 1.0 1.2 1.5"
 fi
-if [ "${STRICT}" = "1" ]; then
-    # Strict overrides quick. Full burn plus probe for 120
-    # seconds with at least 3 repeats each for probe plus control, so
-    # X plus Y plus Z read off the same soak. Forces QUICK to 0 plus
-    # DURATION to 120 plus LEVELS to 1.0. Fails loud below instead
-    # of silently running short. Defaults above stay at or below 60.
-    QUICK="0"
-    DURATION="120"
-    LEVELS="1.0"
-    if [ "${REPEATS}" -lt 3 ]; then
-        echo "strict needs REPEATS>=3" >&2
-        exit 1
-    fi
-    CONTROLS="0 1"
-else
-    CONTROLS="${CONTROL}"
-fi
 SUMMARY="${OUTDIR}/summary.csv"
 STATS="${OUTDIR}/summary_stats.csv"
-echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,probe_p95_us,probe_p99_us,probe_over50,missed,control,sched,repeat,seed" > "${SUMMARY}"
+echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,control,sched,repeat,seed" > "${SUMMARY}"
 for target in ${LEVELS}; do
     N="$(calc_n "${target}")"
     echo "level target ${target} threads ${N} duration" \
         "${DURATION} repeats ${REPEATS}"
-    for control in ${CONTROLS}; do
     for rep in $(seq 1 "${REPEATS}"); do
         seed="${rep}"
-        if [ "${STRICT}" = "1" ]; then
-            prefix="${OUTDIR}/u${target}_c${control}_rep${rep}"
-        else
-            prefix="${OUTDIR}/u${target}_rep${rep}"
-        fi
+        prefix="${OUTDIR}/u${target}_rep${rep}"
         "${HARNESS_BIN}" -n "${N}" -d "${DURATION}" \
-            -s "${seed}" -o "${prefix}" -c "${control}"
+            -s "${seed}" -o "${prefix}" -c "${CONTROL}"
         tail -n 1 "${prefix}.csv" | awk -v t="${target}" \
             -v r="${rep}" -v s="${seed}" -F, \
             'NR==1 {print t","$0","r","s}' >> "${SUMMARY}.tmp"
-    done
     done
 done
 {
@@ -129,21 +90,21 @@ groups = {}
 with open(src, newline='') as f:
     r = csv.DictReader(f)
     for row in r:
-        key = (row['target_u'], row['control'])
-        groups.setdefault(key, []).append(row)
+        t = row['target_u']
+        groups.setdefault(t, []).append(row)
 cols = ['completion', 'offered_util', 'exact_util']
 cols += ['effective_util', 'nvcsw', 'probe_avg_us']
-cols += ['probe_max_us', 'probe_p95_us', 'probe_p99_us', 'probe_over50', 'missed']
+cols += ['probe_max_us']
 with open(dst, 'w', newline='') as f:
     w = csv.writer(f)
-    head = ['target_u', 'control', 'n']
+    head = ['target_u', 'n']
     for c in cols:
         head += ['mean_' + c, 'ci95_' + c]
     w.writerow(head)
-    for (t, ctl) in sorted(groups, key=lambda k: (float(k[0]), int(k[1]))):
-        rows = groups[(t, ctl)]
+    for t in sorted(groups, key=float):
+        rows = groups[t]
         n = len(rows)
-        out = [t, ctl, n]
+        out = [t, n]
         for c in cols:
             xs = [float(x[c]) for x in rows]
             m = sum(xs) / n
@@ -156,29 +117,6 @@ with open(dst, 'w', newline='') as f:
             out += [f'{m:.6f}', f'{ci:.6f}']
         w.writerow(out)
 PY
-if [ "${STRICT}" = "1" ]; then
-    YJOIN="${OUTDIR}/y_join.csv"
-    python3 - "${SUMMARY}" "${YJOIN}" <<'PY'
-import csv
-import sys
-src = sys.argv[1]
-dst = sys.argv[2]
-with open(src, newline='') as f:
-    rows = list(csv.DictReader(f))
-with open(dst, 'w', newline='') as f:
-    w = csv.writer(f)
-    w.writerow(['prefix', 'target_u', 'repeat', 'seed', 'control',
-                'extra_delta', 'total_delta', 'top_band_extra',
-                'y_share', 'note'])
-    for r in rows:
-        prefix = "u%s_c%s_rep%s" % (r['target_u'], r['control'],
-                                    r['repeat'])
-        w.writerow([prefix, r['target_u'], r['repeat'], r['seed'],
-                    r['control'], 'NA', 'NA', 'NA', 'NA',
-                    'Y-OPEN-pending-TrackB'])
-PY
-    echo "wrote ${YJOIN}"
-fi
 if [ "${QUICK}" = "1" ]; then
     python3 - "${STATS}" <<'PY'
 import csv

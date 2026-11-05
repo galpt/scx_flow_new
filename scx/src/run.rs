@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Owns the skeleton, the link, and the stats server.
+//! Holds the skeleton, the link, and the stats server.
 
 use std::mem::MaybeUninit;
 use std::sync::Arc;
@@ -32,7 +32,7 @@ use crate::cli::SCHEDULER_NAME;
 use crate::stats::Metrics;
 
 /*
- * Scheduler owns the skeleton, the link, and the stats server.
+ * Scheduler holds the skeleton, the link, and the stats server.
  * It drives the run loop until shutdown or exit.
  */
 pub(crate) struct Scheduler<'a> {
@@ -72,7 +72,7 @@ impl<'a> Scheduler<'a> {
     }
 
     /// Sum per LLC counters into one view.
-    /// A failed map read warns once per poll and keeps zeros.
+    /// A failed map read warns and keeps zeros for that LLC.
     fn get_metrics(&self) -> Metrics {
         crate::metrics::collect(&self.skel)
     }
@@ -98,8 +98,8 @@ impl Drop for Scheduler<'_> {
 }
 
 /// Drive the restart loop until shutdown or a non-restart exit.
-/// Owns shutdown plus monitor thread plus the open object for the run.
-/// Restart follows the exit info with no live transition.
+/// Holds shutdown, the monitor thread, and the open object.
+/// Restart follows the exit info. A restart starts a new instance.
 pub fn drive(opts: &Opts) -> Result<()> {
     use anyhow::Context as _;
     let shutdown = Arc::new(AtomicBool::new(false));

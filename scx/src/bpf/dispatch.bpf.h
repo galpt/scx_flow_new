@@ -1,0 +1,543 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Dispatch and lifecycle for the flow scheduler.
+ *
+ * Each CPU drains its own LLC queues first, then queues on the same
+ * node, then distant queues, then fallback. Each queue drains in
+ * queue order with one peek per queue. A head that cannot run here
+ * sends one wake to its owner and stays queued. Remote moves count
+ * on the thief and drop the gauge on the source. Running records
+ * the task snapshot used by the kick check. Stopping folds burnt
+ * time into the burst estimate and tracks consecutive full burns.
+ * Tick refreshes the remaining slice. A mask change on a queued
+ * task keeps the queue and wakes the new owner, counting the wake
+ * when the owner is usable. Init creates four queues per LLC and
+ * the fallback queue and records the node of each LLC. CPUs that
+ * arrive late need a restart to be seen.
+ *
+ * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
+ */
+#ifndef __FLOW_DISPATCH_BPF_H
+#define __FLOW_DISPATCH_BPF_H
+#include "intf.h"
+#include "maps.bpf.h"
+#include "stats.bpf.h"
+#include "select.bpf.h"
+#include "enqueue.bpf.h"
+#include "fair.bpf.h"
+#include "sjf.bpf.h"
+#include "cgroup.bpf.h"
+static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
+{
+	s32 owner;
+	s64 hv;
+	u64 pid;
+	if (!ph)
+		return;
+	if (slot > (u32)FLOW_MAX_LLCS)
+		return;
+	pid = (u64)ph->pid;
+	hv = (s64)ph->scx.dsq_vtime;
+	owner = flow_first_allowed(ph);
+	{
+		u64 last_p = READ_ONCE(flow_fwd_pid[slot]);
+		s64 last_v = READ_ONCE(flow_fwd_vtime[slot]);
+		s32 last_o = READ_ONCE(flow_fwd_owner[slot]);
+		if (last_p == pid && last_v == hv && last_o == owner)
+			return;
+		flow_fwd_pid[slot] = pid;
+		flow_fwd_vtime[slot] = hv;
+		flow_fwd_owner[slot] = owner;
+	}
+	if (owner < 0) {
+		flow_kick_constrained(owner, hv, ph, llc);
+		return;
+	}
+	flow_stat_inc(llc, 14);
+	flow_kick_constrained(owner, hv, ph, llc);
+}
+static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, u32 slot, int steal)
+{
+	struct task_struct *ph = scx_bpf_dsq_peek(dsq);
+	if (!ph)
+		return 0;
+	if (!flow_cpu_allowed((s32)cpu, ph)) {
+		flow_forward_from_peeked(ph, llc, slot);
+		return 0;
+	}
+	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+		flow_stat_inc(llc, 1);
+		flow_queued_dec(victim);
+		if (steal) {
+			flow_stat_inc(llc, 3);
+			flow_stat_inc(llc, 5);
+		}
+		return 1;
+	}
+	return 0;
+}
+static __always_inline int flow_drain_llc(u32 cpu, u32 llc, u32 victim, int steal)
+{
+	u32 pr;
+	for (pr = 0; pr < (u32)FLOW_PRIO_COUNT; pr++) {
+		u64 dsq = flow_llc_dsq_prio(victim, pr);
+		u32 slot = victim;
+		if (!flow_dsq_ok(dsq))
+			continue;
+		if (slot > (u32)FLOW_MAX_LLCS)
+			slot = (u32)FLOW_MAX_LLCS;
+		if (flow_try_move(cpu, llc, victim, dsq, slot, steal))
+			return 1;
+	}
+	return 0;
+}
+void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
+{
+	u32 c;
+	u32 llc = 0;
+	u32 node = 0;
+	u32 li;
+	(void)prev;
+	if (cpu < 0)
+		return;
+	c = (u32)cpu;
+	if (!flow_cpu_ok(c))
+		return;
+	{
+		u32 key = c;
+		struct flow_cpu_ctx *cc;
+		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+		if (!cc)
+			return;
+		{
+			u32 tmp = READ_ONCE(cc->llc_id);
+			if (!flow_llc_ok(tmp))
+				return;
+			llc = tmp;
+		}
+		node = READ_ONCE(cc->node_id);
+		if (!flow_node_ok(node))
+			node = 0;
+	}
+	if (flow_drain_llc(c, llc, llc, 0))
+		return;
+	bpf_for(li, 0, FLOW_MAX_LLCS) {
+		u32 nd;
+		struct flow_cpu_ctx *cc;
+		u32 onode;
+		if (li == llc)
+			continue;
+		if ((u64)li >= READ_ONCE(flow_nr_llcs))
+			break;
+		if (!flow_llc_ok(li))
+			continue;
+		cc = NULL;
+		{
+			u32 ci;
+			bpf_for(ci, 0, FLOW_MAX_CPUS) {
+				u32 k = ci;
+				struct flow_cpu_ctx *tcc;
+				if ((u64)ci >= READ_ONCE(flow_nr_cpus) && READ_ONCE(flow_nr_cpus))
+					break;
+				tcc = bpf_map_lookup_elem(&cpu_ctx_stor, &k);
+				if (!tcc)
+					continue;
+				if (READ_ONCE(tcc->llc_id) == li) {
+					cc = tcc;
+					break;
+				}
+			}
+		}
+		(void)cc;
+		nd = READ_ONCE(flow_llc_node[li]);
+		if (!flow_node_ok(nd)) {
+			u32 ci2;
+			bpf_for(ci2, 0, FLOW_MAX_CPUS) {
+				u32 k2 = ci2;
+				struct flow_cpu_ctx *t2;
+				if ((u64)ci2 >= READ_ONCE(flow_nr_cpus) && READ_ONCE(flow_nr_cpus))
+					break;
+				t2 = bpf_map_lookup_elem(&cpu_ctx_stor, &k2);
+				if (!t2)
+					continue;
+				if (READ_ONCE(t2->llc_id) == li) {
+					onode = READ_ONCE(t2->node_id);
+					if (flow_node_ok(onode))
+						nd = onode;
+					break;
+				}
+			}
+		}
+		if (nd != node)
+			continue;
+		if (flow_drain_llc(c, llc, li, 1))
+			return;
+	}
+	bpf_for(li, 0, FLOW_MAX_LLCS) {
+		u32 nd;
+		if (li == llc)
+			continue;
+		if ((u64)li >= READ_ONCE(flow_nr_llcs))
+			break;
+		if (!flow_llc_ok(li))
+			continue;
+		nd = READ_ONCE(flow_llc_node[li]);
+		if (flow_node_ok(nd) && nd == node)
+			continue;
+		if (flow_drain_llc(c, llc, li, 1))
+			return;
+	}
+	{
+		struct task_struct *ph = scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
+		if (ph) {
+			if (!flow_cpu_allowed((s32)c, ph)) {
+				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
+			} else {
+				struct flow_task_ctx *pt;
+				u32 vllc = llc;
+				int have_owner = 0;
+				pt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+				if (pt) {
+					u32 q = READ_ONCE(pt->llc_id);
+					if (flow_llc_ok(q)) {
+						vllc = q;
+						have_owner = 1;
+					}
+				}
+				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
+					flow_stat_inc(llc, 1);
+					if (have_owner) {
+						flow_queued_dec(vllc);
+					} else {
+						bpf_for(li, 0, FLOW_MAX_LLCS) {
+							struct flow_llc_stats *st;
+							if ((u64)li >= READ_ONCE(flow_nr_llcs))
+								break;
+							if (!flow_llc_ok(li))
+								continue;
+							st = flow_stats_for(li);
+							if (!st)
+								continue;
+							if (READ_ONCE(st->queued) == 0)
+								continue;
+							flow_queued_dec(li);
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+}
+void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
+{
+	s32 task_cpu = scx_bpf_task_cpu(p);
+	u32 cpu;
+	struct flow_task_ctx *t;
+	struct flow_cpu_ctx *cc;
+	u32 llc = 0;
+	u32 key;
+	struct flow_running_state *rs;
+	u64 sl;
+	u64 ng;
+	if (task_cpu < 0)
+		return;
+	cpu = (u32)task_cpu;
+	if (!flow_cpu_ok(cpu))
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	key = cpu;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (cc) {
+		u32 tmp = READ_ONCE(cc->llc_id);
+		if (flow_llc_ok(tmp))
+			llc = tmp;
+	} else if (flow_llc_ok(t->llc_id)) {
+		llc = t->llc_id;
+	}
+	sl = p->scx.slice;
+	if (!sl)
+		sl = (u64)FLOW_SLICE_MIN_NS;
+	else if (sl > (u64)FLOW_SLICE_MIN_NS * 3)
+		sl = (u64)FLOW_SLICE_MIN_NS * 3;
+	rs = &flow_running_state[cpu];
+	ng = rs->gen + 1;
+	if (ng == 0)
+		ng = 1;
+	rs->vtime = t->vtime;
+	rs->slice_rem = sl;
+	rs->gen = ng;
+	rs->llc_id = llc;
+	rs->prio = t->prio;
+	if (flow_is_pinned(p))
+		rs->streak = 0;
+	t->gen = ng;
+	t->slice_rem = sl;
+	t->llc_id = llc;
+	/* The gauge was already dropped when the task moved to the local
+	 * queue. Local inserts were never counted. Running only clears
+	 * ownership. */
+	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+}
+void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
+{
+	s32 task_cpu = scx_bpf_task_cpu(p);
+	u32 cpu;
+	struct flow_task_ctx *t;
+	struct flow_running_state *rs;
+	u64 remain;
+	u64 len;
+	u64 used;
+	u64 est;
+	(void)runnable;
+	if (task_cpu < 0)
+		return;
+	cpu = (u32)task_cpu;
+	if (!flow_cpu_ok(cpu))
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	rs = &flow_running_state[cpu];
+	remain = p->scx.slice;
+	len = t->slice_rem;
+	if (!len)
+		len = (u64)FLOW_SLICE_MIN_NS;
+	if (remain > len)
+		remain = len;
+	used = flow_hog_used(len, remain);
+	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
+	t->burst_ns = est;
+	if (flow_is_pinned(p)) {
+		rs->streak = 0;
+		rs->slice_rem = remain;
+		if (runnable)
+			flow_stat_inc(rs->llc_id, 11);
+		return;
+	}
+	if (flow_hog_full(used, len, remain)) {
+		u32 cap = (u32)FLOW_STREAK_MAX * 2U;
+		if (rs->streak < cap)
+			rs->streak += 1;
+	} else {
+		if (rs->streak > 0)
+			rs->streak -= 1;
+	}
+	rs->slice_rem = remain;
+	t->slice_rem = remain;
+	if (runnable)
+		flow_stat_inc(rs->llc_id, 11);
+}
+void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
+{
+	s32 task_cpu = scx_bpf_task_cpu(p);
+	u32 cpu;
+	struct flow_running_state *rs;
+	if (task_cpu < 0)
+		return;
+	cpu = (u32)task_cpu;
+	if (!flow_cpu_ok(cpu))
+		return;
+	rs = &flow_running_state[cpu];
+	rs->slice_rem = p->scx.slice;
+}
+void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
+{
+	struct flow_task_ctx *t;
+	(void)mask;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
+		s32 owner = flow_first_allowed(p);
+		u32 qllc = READ_ONCE(t->llc_id);
+		s64 hv;
+		bool pinned = flow_is_pinned(p);
+		int olat = 0;
+		if (!flow_llc_ok(qllc))
+			qllc = 0;
+		hv = READ_ONCE(t->vtime);
+		if (!pinned && READ_ONCE(t->prio) == (u32)FLOW_PRIO_LAT)
+			olat = 1;
+		if (olat)
+			hv = flow_lat_key(hv, 1);
+		if (owner < 0 || !flow_cpu_allowed(owner, p) || !flow_cpu_live((u32)owner)) {
+			flow_kick_constrained(owner, hv, p, qllc);
+			return;
+		}
+		if (pinned)
+			flow_kick_pinned(owner, p, qllc);
+		else if (flow_kick_constrained(owner, hv, p, qllc) && olat)
+			flow_stat_inc(qllc, 17);
+		flow_stat_inc(qllc, 13);
+		return;
+	}
+	if (p->flags & PF_EXITING)
+		t->slice_rem = (u64)FLOW_EXIT_SLICE_NS;
+	{
+		s32 tgt = flow_first_allowed(p);
+		u32 cpu;
+		struct flow_cpu_ctx *cc;
+		u32 llc;
+		if (tgt < 0)
+			return;
+		if (!flow_cpu_live((u32)tgt))
+			return;
+		cpu = (u32)tgt;
+		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &cpu);
+		if (!cc)
+			return;
+		llc = READ_ONCE(cc->llc_id);
+		if (!flow_llc_ok(llc))
+			return;
+		t->llc_id = llc;
+	}
+}
+void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
+{
+	struct flow_task_ctx *t;
+	s64 v;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!t)
+		return;
+	v = (s64)p->scx.dsq_vtime;
+	t->vtime = v;
+	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+	t->gen = 0;
+	t->llc_id = 0;
+	t->flags = 0;
+	t->prio = (u32)FLOW_PRIO_NORM;
+	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
+	t->enq_ns = 0;
+	t->gpu_hint = 0;
+	t->pad = 0;
+}
+s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
+{
+	struct flow_task_ctx *t;
+	u64 cgid = 0;
+	if (!p)
+		return 0;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!t)
+		return 0;
+	if (args && args->cgroup)
+		cgid = flow_cgroup_cgid(args->cgroup);
+	t->vtime = 0;
+	t->slice_rem = 0;
+	t->gen = 1;
+	t->llc_id = 0;
+	t->flags = 0;
+	t->prio = (u32)FLOW_PRIO_NORM;
+	t->cgrp_id = cgid;
+	t->cg_weight = flow_cgroup_lookup(cgid);
+	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
+	t->enq_ns = 0;
+	t->gpu_hint = 0;
+	t->pad = 0;
+	p->scx.dsq_vtime = 0;
+	return 0;
+}
+s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
+{
+	u64 n;
+	u64 want = 0;
+	s32 cpu;
+	u32 llc;
+	n = scx_bpf_nr_cpu_ids();
+	if (n == 0) {
+		scx_bpf_error("no CPUs found");
+		return -EINVAL;
+	}
+	if (n > (u64)FLOW_MAX_CPUS) {
+		scx_bpf_error("CPU count over bound");
+		return -E2BIG;
+	}
+	flow_nr_cpus = n;
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
+		u32 key;
+		struct flow_cpu_ctx *cc;
+		u32 id;
+		if (cpu < 0)
+			continue;
+		if ((u64)cpu >= n)
+			break;
+		key = (u32)cpu;
+		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+		if (!cc)
+			continue;
+		id = READ_ONCE(cc->llc_id);
+		if (!flow_llc_ok(id))
+			continue;
+		if ((u64)id + 1 > want)
+			want = (u64)id + 1;
+	}
+	if (want == 0)
+		want = 1;
+	if (want > (u64)FLOW_MAX_LLCS) {
+		scx_bpf_error("LLC count over bound");
+		return -E2BIG;
+	}
+	flow_nr_llcs = want;
+	if (n + want * (u64)FLOW_PRIO_COUNT + 1 > 4096ULL) {
+		scx_bpf_error("queue count over bound");
+		return -E2BIG;
+	}
+	bpf_for(llc, 0, FLOW_MAX_LLCS) {
+		u32 pr;
+		if ((u64)llc >= want)
+			break;
+		for (pr = 0; pr < (u32)FLOW_PRIO_COUNT; pr++) {
+			u64 dsq = flow_llc_dsq_prio(llc, pr);
+			s32 ret;
+			if (!flow_dsq_ok(dsq)) {
+				scx_bpf_error("dsq id over bound");
+				return -EINVAL;
+			}
+			ret = scx_bpf_create_dsq(dsq, -1);
+			if (ret < 0 && ret != -EEXIST) {
+				scx_bpf_error("dsq create failed");
+				return ret;
+			}
+		}
+	}
+	{
+		s32 ret = scx_bpf_create_dsq((u64)FLOW_FALLBACK_DSQ, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("fallback dsq create failed");
+			return ret;
+		}
+	}
+	bpf_for(llc, 0, FLOW_MAX_LLCS) {
+		u32 c2;
+		if ((u64)llc >= want)
+			break;
+		bpf_for(c2, 0, FLOW_MAX_CPUS) {
+			struct flow_cpu_ctx *cc;
+			u32 key = c2;
+			if ((u64)c2 >= n)
+				break;
+			cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+			if (!cc)
+				continue;
+			if (READ_ONCE(cc->llc_id) == llc) {
+				u32 node = READ_ONCE(cc->node_id);
+				if (flow_node_ok(node))
+					flow_llc_node[llc] = node;
+				break;
+			}
+		}
+	}
+	return 0;
+}
+void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
+{
+	UEI_RECORD(uei, info);
+}
+#endif

@@ -155,31 +155,6 @@ with light protocol `DURATION=15` plus
 `REPEATS=2` on the same host plus governor
 plus seeds when measured.
 
-## SLO
-
-Strict gates for starvation cover with no
-scheduler change in the harness. Gate X needs
-probe p95 latency at or below 4ms. Gate Y needs
-hog completion at or above 90 percent. Gate Z
-needs a 120 second 1080p60 run with zero stalls
-past 50ms plus frame p99 at or below 33ms plus
-`cyclictest` at or below 50ms over 60 seconds
-times 5 repeats. Report the scheduler counters
-for latency takes plus hog keeps plus latency
-preempts plus age rescues beside each gate, so
-boost growth lines up with latency placement
-plus preempt growth with hog displacement plus
-rescue growth with old wait decay.
-
-Age analysis stays in userspace only with no
-scheduler use. Bucket waits into 500k plus 1M
-plus 2M plus 4M plus 8M plus 16M plus 32M plus
-past 32M, eight buckets from half a slice to
-thirty two slices. The 4M line equals four
-slices and matches the old wait rescue. Buckets
-reuse the probe delay plus completion CSVs with
-no new workload.
-
 ## Files
 
 - `harness.c` periodic worker plus probe plus CSV plus JSON

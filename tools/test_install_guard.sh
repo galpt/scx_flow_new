@@ -38,11 +38,21 @@ done
 # Any return of the old lib dir fails closed here before any build.
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
-# Docs plus changelog stay untracked with no re-leak.
+# Docs plus changelog plus todos stay untracked with no re-leak.
 # History remains public in prior commits; tips carry no docs blobs.
-if git -C "${REPO_DIR}" ls-files -- docs/ CHANGELOG.md | grep -q .; then
+if git -C "${REPO_DIR}" ls-files -- docs/ CHANGELOG.md TODO.md | grep -q .; then
     fail "docs re-leaked"
 fi
+
+# Ignore lines stay present with no silent drop.
+# The tracked check above stays blind to ignore loss, so this assert
+# fails closed when an ignore line goes missing.
+for need_ignored in \
+    "docs/lifecycle.md" \
+    "CHANGELOG.md" \
+    "TODO.md"; do
+    git -C "${REPO_DIR}" check-ignore -q -- "${need_ignored}" || fail "ignore missing ${need_ignored}"
+done
 
 # Top README keeps lifecycle plus budgets plus reinstall plus kernel plus lock notes.
 for need_note in \
@@ -55,24 +65,24 @@ for need_note in \
 done
 
 # Flow headers stay present with scheduler rationale in each file.
-# Code comments stay version-agnostic like lavd plain prose: no X.Y.Z
-# in src/bpf plus build.rs. Version lives only in Cargo plus installer
-# plus guard plus CHANGELOG plus manifest.
+# Code comments stay version-agnostic: no X.Y.Z
+# in src/bpf and build.rs. Version lives only in Cargo and installer
+# and guard and changelog and manifest.
 for need_flow in \
-    "src/bpf/flow/cgroup.bpf.h" \
-    "src/bpf/flow/dispatch.bpf.h" \
-    "src/bpf/flow/enqueue.bpf.h" \
-    "src/bpf/flow/freq.bpf.h" \
-    "src/bpf/flow/guards.bpf.h" \
-    "src/bpf/flow/lifecycle.bpf.h" \
-    "src/bpf/flow/maps.bpf.h" \
-    "src/bpf/flow/preempt.bpf.h" \
-    "src/bpf/flow/stats.bpf.h" \
-    "src/bpf/flow/vtime.bpf.h"; do
+    "src/bpf/cgroup.bpf.h" \
+    "src/bpf/dispatch.bpf.h" \
+    "src/bpf/enqueue.bpf.h" \
+    "src/bpf/fair.bpf.h" \
+    "src/bpf/maps.bpf.h" \
+    "src/bpf/select.bpf.h" \
+    "src/bpf/sjf.bpf.h" \
+    "src/bpf/stats.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
-[ ! -e "${SRC_DIR}/src/bpf/flow/steal.bpf.h" ] || fail "steal helper reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/flow" ] || fail "flow dir reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/steal.bpf.h" ] || fail "steal helper reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
 # Main plus intf plus build keep scheduler rationale.
 for need_core in \
@@ -88,8 +98,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "4ad5e1bff70cdea454b21cdc7a62aaced35ebaaaa25d201a35b1dfea2ece6974" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "17" ] || fail "scx README lines drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "e74641536aa3c28e66178472f0bf0e9478673bffe9404ce327fa6bab06172a1f" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "18" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
@@ -203,6 +213,89 @@ check_refuse "/var/tmp/ws" "var tree"
 if [ -n "${HOME:-}" ]; then
     check_refuse "${HOME}" "home env root"
     check_refuse "${HOME}/ws" "home env tree"
+fi
+
+# Ordered drain stays fail closed with forward wakes. Each CPU drains
+# its own LLC prios first, then same node LLCs, then remote LLCs, then
+# fallback, with one forward wake per unrunnable head and no move.
+DISP_HDR="${SRC_DIR}/src/bpf/dispatch.bpf.h"
+grep -q "flow_drain_llc" "${DISP_HDR}" || fail "drain helper missing"
+grep -q "flow_try_move" "${DISP_HDR}" || fail "move helper missing"
+grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing"
+grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
+grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
+
+# Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
+
+# CPU hog control stays with fixed integers and no knob. The detector
+# compares burnt nanos against awarded length, gates on four fixed
+# rounds through the streak bound, demotes one level with saturation,
+# and keeps the kick plus stats paths unchanged with no extra read.
+HOG_SJF="${SRC_DIR}/src/bpf/sjf.bpf.h"
+HOG_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
+grep -q "flow_hog_used" "${HOG_SJF}" || fail "hog used helper missing"
+grep -q "flow_hog_full" "${HOG_SJF}" || fail "hog full helper missing"
+grep -q "flow_hog_rounds" "${HOG_SJF}" || fail "hog rounds helper missing"
+grep -q "flow_hog_demote" "${HOG_SJF}" || fail "hog demote helper missing"
+grep -q "flow_hog_demote" "${HOG_ENQ}" || fail "hog demote call missing"
+grep -q "flow_hog_rounds" "${HOG_ENQ}" || fail "hog rounds gate missing"
+grep -q "FLOW_STREAK_MAX" "${HOG_SJF}" || fail "hog fixed rounds missing"
+
+# Queues are four per LLC and fallback with kernel order and
+# insertion ties. Fair scales base by share while extra stays uniform
+# with a per LLC floor and a latency shift. Short jobs keep most of
+# the old value and add a small part of the sample. Kicks keep gap
+# and tail and escape.
+grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/intf.h" || fail "prio count missing"
+grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf/intf.h" || fail "prio queue helper missing"
+grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
+grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra missing"
+grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
+grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
+grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "lat shift helper missing"
+grep -q "flow_sjf_next" "${HOG_SJF}" || fail "sjf blend missing"
+grep -q "FLOW_SJF_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf init missing"
+grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
+grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
+grep -q "insertion order" "${HOG_ENQ}" || fail "insertion order missing"
+grep -q "fallback queue" "${HOG_ENQ}" || fail "fallback path missing"
+grep -q "FLOW_STREAK_MAX" "${HOG_ENQ}" || fail "streak bound missing"
+
+# Dead helpers stay removed. The plain queue helper and the cached
+# weight reader have no caller and must not return.
+if grep -q "flow_llc_dsq(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    if ! grep -q "flow_llc_dsq_prio(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+        fail "queue helper check broken"
+    fi
+    if grep -q "static __always_inline u64 flow_llc_dsq(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+        fail "dead queue helper reappeared"
+    fi
+fi
+if grep -q "flow_task_weight" "${SRC_DIR}/src/bpf/cgroup.bpf.h" 2>/dev/null; then
+    fail "dead weight helper reappeared"
+fi
+
+# Local placements run before ownership so a local cancel never drops
+# a gauge that was never raised. The flag take must come after the
+# local returns.
+if ! grep -q "without the queued bit" "${HOG_ENQ}" 2>/dev/null; then
+    fail "local ownership order missing"
+fi
+
+# Fallback dispatch drops the gauge on the enqueue LLC read from the
+# task, with a scan only when no task state exists.
+if ! grep -q "have_owner" "${DISP_HDR}" 2>/dev/null; then
+    fail "fallback owner tracking missing"
+fi
+
+# Queued gauge writes back the last value when the compare loop loses.
+if ! grep -q "st->queued = last - 1" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "queued fallback store missing"
+fi
+
+# Installer provenance states the mirror and upstream share one commit.
+if ! grep -q "matches the upstream" "${INST}" 2>/dev/null; then
+    fail "fork provenance comment missing"
 fi
 
 echo "guard tests passed"

@@ -13,7 +13,11 @@ DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
 VER="5.1.0"
 # Pinned fork ref, same as repo CI.
-SCX_REF="b0efa3f614c0187df4cb3202d7b514d401f77d2a"
+# The commit id matches the upstream sched-ext/scx main id used in CI.
+# The installer fetches from the galpt/scx mirror while CI fetches from
+# sched-ext/scx directly. Both check out the same commit id, and the
+# rev-parse check below refuses any other head.
+SCX_REF="e7b3a219617472cf78880ac424714e52c932db61"
 FORK="https://github.com/galpt/scx"
 
 need() {

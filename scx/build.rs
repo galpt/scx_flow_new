@@ -4,7 +4,6 @@
  *
  * Adds a warning suppression for the generated kernel header
  * and then builds the BPF object and the userspace bindings.
- * Links the allowlisted upstream libs.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,6 +33,6 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .compile_link_gen()
+        .build()
         .unwrap();
 }

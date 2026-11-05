@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Maps Topology LLC and node ids to contiguous BPF indices.
+//! Maps topology LLC and node ids to BPF indices.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -12,8 +12,8 @@ use scx_utils::Topology;
 use crate::BpfSkel;
 
 /// Seed one CPU row per online CPU into the BPF view.
-/// Maps Topology LLC and node ids to contiguous indices for the
-/// fixed BPF bounds. Failures return an error with no trap.
+/// Maps topology LLC and node ids to contiguous indices for the
+/// BPF bounds. Failures return an error.
 pub fn seed_topology(skel: &mut BpfSkel<'_>) -> Result<String> {
     use libbpf_rs::MapCore;
     let topo = Topology::new().context("topology discovery")?;
