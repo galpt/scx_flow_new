@@ -56,6 +56,11 @@ enum flow_consts {
 	FLOW_PREEMPT_THRESH = 500000ULL,
 	/* Preempt tail guard in nanos with no knob. */
 	FLOW_PREEMPT_TAIL = 125000ULL,
+	/* Latency offset in nanos with no knob. One fixed slice that */
+	/* moves a latency task ahead of a hog at the same raw time. */
+	/* Only the queue key plus the kick compare use the offset. */
+	/* Stored time plus deadline plus stamp stay raw. */
+	FLOW_LAT_OFF_NS = 1000000ULL,
 	/* Ops timeout in ms for the watchdog. */
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	/* Strand balance bound on enqueue with no knob. */
@@ -80,11 +85,15 @@ enum flow_consts {
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
 };
 /* Per task state for the life of the task. Flags holds the queued bit. */
-/* Tail cgrp_id plus cg_weight carry the cpu.weight share. Zero init */
-/* means no cgroup seen and reads as default through the clamp. Tail */
-/* enq_ns holds the last enqueue time in nanos from the monotonic clock. */
-/* Zero means never queued. It ages waits with no vtime shift and never */
-/* changes placement. Nine by eight plus tail is 72 bytes. */
+/* Hist holds the last three yield bits in bits zero through two with */
+/* zero init fresh neutral as a hog. A stop with remain records one, a */
+/* full burn records zero, and two of three ones reads as latency. Tail */
+/* cgrp_id plus cg_weight carry the cpu.weight share. Zero init means */
+/* no cgroup seen and reads as default through the clamp. Tail enq_ns */
+/* holds the last enqueue time in nanos from the monotonic clock. Zero */
+/* means never queued. It ages waits with no vtime shift and never */
+/* changes placement. Nine by eight plus tail is 72 bytes with no size */
+/* change from the history byte reuse of the pad. */
 struct flow_task_ctx {
 	s64 vtime;
 	s64 deadline;
@@ -93,7 +102,8 @@ struct flow_task_ctx {
 	u32 strand;
 	u32 llc_id;
 	u32 flags;
-	u32 pad;
+	u8 hist3;
+	u8 pad[3];
 	u64 cgrp_id;
 	u32 cg_weight;
 	u32 pad2;
@@ -104,8 +114,12 @@ struct flow_task_ctx {
 /* grows on stops that burnt the full slice capped at twice the pop */
 /* retry bound with no new knob, decays one step on clean stops and on */
 /* old waits, cleared when a pinned wait reaches the CPU. Saturated */
-/* with no wrap so a hold ends but never sticks. Reserved keeps */
-/* alignment and stays zero. Six by eight plus tail is 48 bytes. */
+/* with no wrap so a hold ends but never sticks. Lat tells whether the */
+/* running task reads as latency with one else zero, seeded at start */
+/* from the history with pinned always zero, so the kick can boost both */
+/* sides with no extra lookup. Reserved keeps alignment and stays zero */
+/* past the flag. Six by eight plus tail is 48 bytes with no size */
+/* change from the flag reuse of the reserved word. */
 struct flow_running_state {
 	s64 vtime;
 	s64 deadline;
@@ -114,7 +128,8 @@ struct flow_running_state {
 	u32 strand;
 	u64 gen;
 	u32 hog_streak;
-	u32 __rsvd;
+	u8 lat;
+	u8 __rsvd[3];
 };
 /* Per CPU hint state for speed requests. Zero means empty. Last holds */
 /* the prior sample time in nanos. Level holds the smoothed load in the */
@@ -136,8 +151,9 @@ struct flow_cpu_ctx {
 /* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal */
 /* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap */
 /* 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip */
-/* 14:overrun 15:domino_penalty 16:blocked stay stable for compat. Tail is */
-/* append-only with no bound change. Twenty by u64 is 160 bytes. Fallback */
+/* 14:overrun 15:domino_penalty 16:blocked 17:hog_escape 18:orphan_kick */
+/* 19:hol_forward stay stable for compat. Tail is append-only with no */
+/* bound change. Twenty four by u64 is 192 bytes. Fallback */
 /* stays the aggregate of pair-full plus duplicate plus stale, so fallback */
 /* equals 4 plus 5 plus 6. Steal stays the aggregate of pair plus LLC, so */
 /* steal equals 9 plus 10. fb_pair_full counts pair DHQ full spills to the */
@@ -160,7 +176,10 @@ struct flow_cpu_ctx {
 /* streak forced an idle wake to preempt so a hog hold ends. orphan_kick */
 /* counts mask change kicks for queued tasks with no queue rewrite. */
 /* hol_forward counts forwards where the head cannot run on the thief with */
-/* no move no loss. */
+/* no move no loss. lat_boost counts enqueues that take the latency key. */
+/* hog_hold counts enqueues that keep the raw key as hogs. lat_preempt */
+/* counts preempts won by a latency task on the boosted gap. age_rescue */
+/* counts old waits that step the hold down. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
@@ -182,6 +201,10 @@ struct flow_llc_stats {
 	u64 hog_escape;
 	u64 orphan_kick;
 	u64 hol_forward;
+	u64 lat_boost;
+	u64 hog_hold;
+	u64 lat_preempt;
+	u64 age_rescue;
 };
 #ifdef __BPF__
 static __always_inline u64 flow_llc_dsq(u32 llc)
@@ -208,8 +231,9 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	return dsq >= (u64)FLOW_LLC_BASE &&
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
-/* ABI stays frozen with fixed slice, preempt, pop retry, */
-/* strand, DSQ, and cgroup weight constants plus frozen offsets 0 through 16 */
-/* and append only tail 17 through 19. Docs only, no logic change. */
+/* ABI stays frozen with fixed slice, latency offset, preempt, pop retry, */
+/* strand, DSQ, and cgroup weight constants plus frozen offsets 0 through 19 */
+/* and append only tail 20 through 23. History plus running flag reuse spare */
+/* bytes with no size change. Docs only, no logic change. */
 #endif
 #endif
