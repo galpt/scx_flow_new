@@ -292,6 +292,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					extra_q = q;
 					t->pad[0] = (u8)q;
 					t->pad[1] = (u8)ex;
+					/* Per award books with score plus hold plus q. */
+					/* Twenty four takes q minus one as extra, twenty */
+					/* five takes q as total, so total equals old */
+					/* penalty plus new extra per award and again on */
+					/* deltas with one addition. Score plus prev plus */
+					/* q stay in the per CPU row plus the task pad for */
+					/* the proof log with no second path. */
+					flow_stat_add(llc, 24, ex);
+					flow_stat_add(llc, 25, q);
+					(void)score;
+					(void)prev;
 				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					/* Pair only floor. LLC order uses the vtime */
