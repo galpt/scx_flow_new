@@ -274,8 +274,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					if (flow_cpu_ok(cpu)) {
 						struct flow_extra_state *es = &flow_extra_state[cpu];
 						u64 st = es->score;
+						/* Fresh reads zero with q one until the */
+						/* first count, amended from the prior */
+						/* middle default with no burn seen yet. */
 						if (es->n_growth == 0 && es->n_decay == 0) {
-							st = 50;
+							st = 0;
 						} else if (st > (u64)FLOW_SCORE_HMAX) {
 							st = (u64)FLOW_SCORE_HMAX;
 						}
@@ -308,15 +311,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 						if (ex >= 2ULL)
 							charged = flow_vtime_add_penalty(charged);
 					} else {
-						/* Invalid CPU fallback keeps a */
-						/* conservative fresh default at */
-						/* middle with no top award and */
+						/* Invalid CPU fallback keeps a fresh */
+						/* zero default with no award and */
 						/* bounded debt, documented. */
 						if (t->pad[1] <= (u8)2)
 							prev = (u64)t->pad[1];
 						else
 							prev = 0;
-						score = 50;
+						score = 0;
 						ex = flow_score_extra(score, prev);
 						q = flow_score_quanta(ex);
 						if (q < 1ULL)

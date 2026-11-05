@@ -407,15 +407,17 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	/* hundred and blend three old plus one new over four for a window */
 	/* about four and time about three and a half. Counts stay separate */
 	/* with no new bound beyond the streak cap. CPU only with no cross */
-	/* average. Fresh reads fifty with q two until the first count. */
-	/* Growth needs a full base burn with raw top, so an extended award */
-	/* that stops after one base slice with remain still takes decay. */
-	/* That self limit is intentional with no new knob: only a full */
-	/* extended burn earns growth. Latency history feeds the queue key */
-	/* offset only and never feeds the score here, so a latency task */
-	/* still needs a full burn for growth with no inversion. Merged */
-	/* means the raw burn hint shares the same blend with no second */
-	/* path, not a history feed. */
+	/* average. Fresh reads zero with q one until the first count, */
+	/* amended from the prior middle default since no burn has been */
+	/* seen yet. Growth needs a full awarded burn with raw top against */
+	/* the q scaled denom, so a partial burn still takes decay with no */
+	/* new knob: only a full extended burn earns growth. Award length */
+	/* comes from the task pad in one through three else one, with */
+	/* voluntary plus empty wait keeping precedence through decay. */
+	/* Latency history feeds the queue key offset only and never feeds */
+	/* the score here, so a latency task still needs a full burn for */
+	/* growth with no inversion. Merged means the raw burn hint shares */
+	/* the same blend with no second path, not a history feed. */
 	{
 		bool is_pinned = flow_is_pinned(p);
 		bool is_exiting = (p->flags & PF_EXITING) != 0;
@@ -423,10 +425,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		u64 old;
 		u64 now_s;
 		u64 enq;
+		u64 q_src = 1;
 		if (!is_pinned && !is_exiting) {
 			es = &flow_extra_state[cpu];
+			/* Award length source. The task pad carries the last */
+			/* award q in one through three else one, so the burn */
+			/* below accounts against the slice just run. */
+			if (t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
+				q_src = (u64)t->pad[0];
 			if (es->n_growth == 0 && es->n_decay == 0) {
-				old = 50;
+				old = 0;
 			} else {
 				old = es->score;
 				if (old > (u64)FLOW_SCORE_HMAX)
@@ -444,14 +452,23 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 			} else {
 				u64 used;
 				u64 raw;
-				if ((u64)FLOW_SLICE_NS >= sl)
-					used = (u64)FLOW_SLICE_NS - sl;
+				u64 denom = q_src * (u64)FLOW_SLICE_NS;
+				/* Denom scales with the award. The q bound keeps */
+				/* the product small, the guard below saturates on */
+				/* overflow with no wrap. A remain past the award */
+				/* keeps used zero with no underflow. */
+				if (denom / (u64)FLOW_SLICE_NS != q_src)
+					denom = (u64)0xffffffffffffffffULL;
+				if (denom >= sl)
+					used = denom - sl;
 				else
 					used = 0;
 				/* Raw burn steps wire the raw max lock with no */
 				/* knob: zero through four with only the top */
 				/* step at full taking growth. */
-				raw = used * (u64)FLOW_SCORE_RAW_MAX / (u64)FLOW_SLICE_NS;
+				raw = 0;
+				if (denom)
+					raw = used * (u64)FLOW_SCORE_RAW_MAX / denom;
 				if (raw > (u64)FLOW_SCORE_RAW_MAX)
 					raw = (u64)FLOW_SCORE_RAW_MAX;
 				if (raw == (u64)FLOW_SCORE_RAW_MAX) {
