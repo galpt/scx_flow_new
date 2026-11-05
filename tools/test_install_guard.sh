@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.1" ] || fail "version not at 5.1.1"
+[ "${want}" = "5.1.2" ] || fail "version not at 5.1.2"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -258,6 +258,38 @@ grep -q "extra = 0" "${HOG_ENQ}" || fail "fixed extra missing"
 grep -q "flow_fair_charge" "${HOG_ENQ}" || fail "charge pass through missing"
 grep -q "flow_fair_extra" "${HOG_ENQ}" || fail "extra pass through missing"
 grep -q "flow_kick_constrained" "${HOG_ENQ}" || fail "single kick missing"
+
+# Linear burst predictor stays with fixed weights and no knob. The helper
+# takes old plus sample plus wait plus remain, uses eight fractional bits
+# with straight line integer math, clamps between floor and cap, and falls
+# back to the half blend on saturation. Stopping calls it with wait plus
+# remain from the task clock plus slice. No map plus no program plus no
+# loop is added for the predictor.
+PRED_SRTF="${HOG_SRTF}"
+grep -q "flow_pred_next" "${PRED_SRTF}" || fail "pred helper missing"
+grep -q "wait_ms" "${PRED_SRTF}" || fail "pred wait missing"
+grep -q "rem_ms" "${PRED_SRTF}" || fail "pred remain missing"
+grep -q ">> 8" "${PRED_SRTF}" || fail "pred Q8 shift missing"
+grep -q "<< 7" "${PRED_SRTF}" || fail "pred old weight missing"
+grep -q "<< 2" "${PRED_SRTF}" || fail "pred wait weight missing"
+grep -q "<< 3" "${PRED_SRTF}" || fail "pred remain weight missing"
+grep -q "flow_sjf_next(old, sample)" "${PRED_SRTF}" || fail "pred fallback missing"
+grep -q "FLOW_SJF_FLOOR_NS" "${PRED_SRTF}" || fail "pred floor missing"
+grep -q "FLOW_SJF_CAP_NS" "${PRED_SRTF}" || fail "pred cap missing"
+grep -q "flow_pred_next" "${DISP_HDR}" || fail "pred call missing"
+grep -q "bpf_ktime_get_ns" "${DISP_HDR}" || fail "pred clock missing"
+if grep -q "bpf_map_" "${PRED_SRTF}" 2>/dev/null; then
+    fail "pred map drift"
+fi
+if grep -q "BPF_STRUCT_OPS" "${PRED_SRTF}" 2>/dev/null; then
+    fail "pred prog drift"
+fi
+if grep -q "bpf_for" "${PRED_SRTF}" 2>/dev/null; then
+    fail "pred loop drift"
+fi
+if grep -q "for (" "${PRED_SRTF}" 2>/dev/null; then
+    fail "pred loop drift"
+fi
 
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
