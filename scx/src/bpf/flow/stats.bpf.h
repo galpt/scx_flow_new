@@ -5,8 +5,9 @@
  * Offsets 0:queued 1:dispatched 2:fallback 3:steal 4:fb_pair_full
  * 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay frozen for compat.
  * Tail 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip
- * 14:overrun 15:domino_penalty 16:blocked stays frozen, tail 17:hog_escape
- * 18:orphan_kick 19:hol_forward is append-only with no bound change.
+ * 14:overrun 15:domino_penalty 16:blocked 17:hog_escape 18:orphan_kick
+ * 19:hol_forward stays frozen, tail 20:lat_boost 21:hog_hold
+ * 22:lat_preempt 23:age_rescue is append-only with no bound change.
  * Overrun counts events and penalty counts slices charged one to one by
  * design. Fallback equals 4 plus 5 plus 6. Steal equals 9 plus 10. Gauges
  * 7:depth 8:cap use the occupancy set helper, never inc. Overrun plus
@@ -16,7 +17,11 @@
  * owner on the queued LLC with skips never inflating the orphan count,
  * hol forward counts head forwards with a live allowed owner at pick on
  * the dispatch LLC with outcome split into preempt plus idle plus skip.
- * Unknown offsets return with no change.
+ * lat_boost counts enqueues that take the latency key on the enqueue
+ * LLC, hog_hold counts enqueues that keep the raw key as hogs there,
+ * lat_preempt counts preempts won by a latency task on the enqueue LLC,
+ * age_rescue counts old waits that step the hold down on the running
+ * LLC. Boost charges no queue. Unknown offsets return with no change.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -35,8 +40,9 @@ static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 /* 5:fb_duplicate 6:fb_stale split fallback by cause. Gauges 7:depth */
 /* 8:cap use the occupancy set helper, never inc. Steal split 9:pair */
 /* 10:llc plus kick split 11:preempt 12:idle 13:skip plus overrun event */
-/* 14 with penalty slices 15 one to one plus 16:blocked are append-only with */
-/* 17:hog_escape plus 18:orphan_kick plus 19:hol_forward as the new tail. */
+/* 14 with penalty slices 15 one to one plus 16:blocked plus 17:escape */
+/* plus 18:orphan plus 19:forward are frozen with 20:lat_boost plus */
+/* 21:hog_hold plus 22:lat_preempt plus 23:age_rescue as the new tail. */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -79,6 +85,14 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		cell = &st->orphan_kick;
 	else if (off == 19)
 		cell = &st->hol_forward;
+	else if (off == 20)
+		cell = &st->lat_boost;
+	else if (off == 21)
+		cell = &st->hog_hold;
+	else if (off == 22)
+		cell = &st->lat_preempt;
+	else if (off == 23)
+		cell = &st->age_rescue;
 	else
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
@@ -149,7 +163,7 @@ static __always_inline void flow_stale_account(u32 thief)
 	}
 }
 
-/* Stats 0 through 16 stay frozen with tail 17 through 19 */
+/* Stats 0 through 19 stay frozen with tail 20 through 23 */
 /* append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10, */
 /* gauges use set only. Docs only, no logic change. */
 

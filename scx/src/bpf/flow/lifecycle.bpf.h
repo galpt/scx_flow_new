@@ -13,10 +13,15 @@
  * cached LLC falls back to zero with no loss. Enqueue time ages waits
  * with no vtime shift and a zero clock clears to unknown. Streak counts
  * full burns capped at twice the pop retry bound with clean decay and
- * ends in a preempt when the bound is reached. Hist keeps the last four
+ * ends in a preempt when the bound is reached. Stop records a yield bit
+ * into the three bit task history with fresh zero neutral as a hog.
+ * Running seeds the latency flag from the history with pinned always
+ * zero and counts an age rescue when an old wait steps the hold down.
+ * Freq hist keeps the last four
  * raw samples for sizing with no reader in BPF. Mask change on a queued
  * task keeps the queue with no rewrite and wakes the owner through the
- * pinned fast path for pinned waits else the constrained path.
+ * pinned fast path for pinned waits else the constrained path with the
+ * boosted key for latency tasks.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -216,11 +221,15 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->strand = (u32)FLOW_STRAND_A;
 	t->llc_id = 0;
 	t->flags = 0;
-	t->pad = 0;
+	t->hist3 = 0;
+	t->pad[0] = 0;
+	t->pad[1] = 0;
+	t->pad[2] = 0;
 	t->enq_ns = 0;
-	/* Cgroup tail stays. Init plus move seed it, zero init reads as */
-	/* default, and membership never changes on enable. Enqueue time */
-	/* starts empty with no wait. */
+	/* History starts empty. Zero reads as a hog, so a new task proves */
+	/* latency with early yields first. Cgroup tail stays. Init plus */
+	/* move seed it, zero init reads as default, and membership never */
+	/* changes on enable. Enqueue time starts empty with no wait. */
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -283,20 +292,27 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	/* reach the bound. A legacy tall hold clamps to twice the pop */
 	/* retry bound with no new knob so a prior count never sticks past */
 	/* the storm window. Clean stops decay elsewhere, so this path only */
-	/* ages old waits. Reserved stays zero. */
+	/* ages old waits. The latency flag follows the history with pinned */
+	/* always zero so the kick can boost both sides with no extra */
+	/* lookup. An old wait that steps the hold down counts an age */
+	/* rescue on the running LLC. Reserved stays zero past the flag. */
 	if (flow_is_pinned(p)) {
 		rs->hog_streak = 0;
+		rs->lat = 0;
 	} else {
 		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
 		u64 enq = READ_ONCE(t->enq_ns);
 		u64 now = bpf_ktime_get_ns();
+		rs->lat = flow_hist_is_lat(t->hist3) ? 1 : 0;
 		if (rs->hog_streak > cap)
 			rs->hog_streak = cap;
 		if (enq && now > enq) {
 			u64 age = now - enq;
 			if (age > (u64)FLOW_SLICE_NS * 4ULL) {
-				if (rs->hog_streak > 0)
+				if (rs->hog_streak > 0) {
 					rs->hog_streak -= 1;
+					flow_stat_inc(llc, 23);
+				}
 			}
 		}
 	}
@@ -329,6 +345,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (sl > (u64)FLOW_SLICE_NS)
 		sl = (u64)FLOW_SLICE_NS;
 	t->slice_rem = sl;
+	/* Yield record. A stop with remain yields early and records one, */
+	/* a full burn records zero, so two of three ones later read as */
+	/* latency while fresh zero stays a hog. Placement plus vtime plus */
+	/* slice handling stay unchanged. */
+	t->hist3 = flow_hist_push(t->hist3, sl == 0 ? 0 : 1);
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
 	/* Streak step. No remain means the full slice burnt, so step the */
@@ -468,10 +489,24 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
 		s64 hv;
+		bool pinned = flow_is_pinned(p);
+		int olat = 0;
 
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
 		hv = READ_ONCE(t->vtime);
+		/* Latency wakes compare on the boosted key on both sides, */
+		/* so shift the raw stored time here while the kick boosts */
+		/* the running side from its flag. Pinned keeps the raw key */
+		/* with the fast path. The stored time stays raw with no */
+		/* accumulation. One pinned test serves the key plus the */
+		/* kick below with no second walk. A preempt won by a */
+		/* latency task counts the latency preempt tail on the */
+		/* queued LLC with the class already in hand. */
+		if (!pinned)
+			olat = flow_hist_is_lat(READ_ONCE(t->hist3)) ? 1 : 0;
+		if (olat)
+			hv = flow_vtime_boost(hv, 1);
 		/* Queued keep. No LLC rewrite so accounting stays on the */
 		/* enqueue LLC. Pinned uses the fast path that preempts past */
 		/* the tail with no gap check since the wait cannot run */
@@ -485,10 +520,10 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 			flow_kick_constrained(owner, hv, p, qllc);
 			return;
 		}
-		if (flow_is_pinned(p))
+		if (pinned)
 			flow_kick_pinned(owner, hv, p, qllc);
-		else
-			flow_kick_constrained(owner, hv, p, qllc);
+		else if (flow_kick_constrained(owner, hv, p, qllc) && olat)
+			flow_stat_inc(qllc, 22);
 		flow_stat_inc(qllc, 18);
 		return;
 	}
