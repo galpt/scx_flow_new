@@ -333,6 +333,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
 	u64 sl;
+	bool voluntary;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -344,6 +345,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	sl = p->scx.slice;
 	if (sl > (u64)FLOW_SLICE_NS)
 		sl = (u64)FLOW_SLICE_NS;
+	/* Single snapshot for the stop. True when the task reads not */
+	/* runnable with remain above zero at this stop else false. One */
+	/* read serves the score path below with no second read for the */
+	/* same stop. Pinned plus exiting bypass score effects below. */
+	voluntary = !runnable && sl > 0;
 	t->slice_rem = sl;
 	/* Yield record. A stop with remain yields early and records one, */
 	/* a full burn records zero, so two of three ones later read as */
@@ -387,6 +393,65 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		flow_freq_sample(cpu, (u64)FLOW_SLICE_NS - sl);
 	else
 		flow_freq_sample(cpu, 0);
+	/* Extra score with hysteresis and bypass. Pinned plus exiting keep */
+	/* prior behavior and never take a score from this path. Voluntary */
+	/* feeds zero with no growth step on that stop. Empty wait feeds */
+	/* zero with no age credit. Full burn with raw top takes growth, */
+	/* all else takes decay. Both use integer floor with wide cap four */
+	/* hundred and blend three old plus one new over four for a window */
+	/* about four and time about three and a half. Counts stay separate */
+	/* with no new bound beyond the streak cap. CPU only with no cross */
+	/* average. Fresh reads fifty with q two until the first count. */
+	{
+		bool is_pinned = flow_is_pinned(p);
+		bool is_exiting = (p->flags & PF_EXITING) != 0;
+		struct flow_extra_state *es;
+		u64 old;
+		u64 now_s;
+		u64 enq;
+		if (!is_pinned && !is_exiting) {
+			es = &flow_extra_state[cpu];
+			if (es->n_growth == 0 && es->n_decay == 0) {
+				old = 50;
+			} else {
+				old = es->score;
+				if (old > (u64)FLOW_SCORE_HMAX)
+					old = (u64)FLOW_SCORE_HMAX;
+			}
+			enq = READ_ONCE(t->enq_ns);
+			if (voluntary) {
+				now_s = flow_score_decay(old);
+				if (es->n_decay < 0xffffffffffffffffULL)
+					es->n_decay += 1;
+			} else if (!enq) {
+				now_s = flow_score_decay(old);
+				if (es->n_decay < 0xffffffffffffffffULL)
+					es->n_decay += 1;
+			} else {
+				u64 used;
+				u64 raw;
+				if ((u64)FLOW_SLICE_NS >= sl)
+					used = (u64)FLOW_SLICE_NS - sl;
+				else
+					used = 0;
+				raw = used * 4ULL / (u64)FLOW_SLICE_NS;
+				if (raw > 4ULL)
+					raw = 4ULL;
+				if (raw == 4ULL) {
+					now_s = flow_score_growth(old);
+					if (es->n_growth < 0xffffffffffffffffULL)
+						es->n_growth += 1;
+				} else {
+					now_s = flow_score_decay(old);
+					if (es->n_decay < 0xffffffffffffffffULL)
+						es->n_decay += 1;
+				}
+			}
+			if (now_s > (u64)FLOW_SCORE_HMAX)
+				now_s = (u64)FLOW_SCORE_HMAX;
+			es->score = now_s;
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
