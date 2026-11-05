@@ -20,6 +20,32 @@
 #include "guards.bpf.h"
 #include "steal.bpf.h"
 
+/* Forward a wake to the head owner when the head cannot run here. */
+/* Peeks once, wakes the first allowed CPU with no move no loss. */
+/* Empty queues stay silent with no counter move. A valid owner takes */
+/* an idle wake, a missing owner counts a skip with no wake. */
+static __always_inline void flow_forward_kick(u64 dsq, u32 llc)
+{
+	struct task_struct *ph;
+	struct task_struct *p;
+	s32 owner;
+
+	ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+	if (!ph)
+		return;
+	p = bpf_task_from_pid(ph->pid);
+	if (!p)
+		return;
+	owner = flow_first_allowed(p);
+	bpf_task_release(p);
+	if (owner >= 0 && flow_cpu_ok((u32)owner)) {
+		scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
+		flow_stat_inc(llc, 12);
+	} else {
+		flow_stat_inc(llc, 13);
+	}
+}
+
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	TOUCH_ARENA();
@@ -114,6 +140,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		flow_stat_inc(llc, 1);
 		flow_queued_dec(llc);
 		return;
+	} else if (!flow_dsq_head_allowed(dsq, c)) {
+		/* Head cannot run here. Forward a wake to the owner */
+		/* with no move no loss, once per queue. */
+		flow_forward_kick(dsq, llc);
 	}
 	bpf_for(li, 0, FLOW_MAX_LLCS) {
 		u64 odsq;
@@ -126,8 +156,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		odsq = flow_llc_dsq(li);
 		if (!flow_dsq_ok(odsq))
 			continue;
-		if (!flow_dsq_head_allowed(odsq, c))
+		if (!flow_dsq_head_allowed(odsq, c)) {
+			flow_forward_kick(odsq, llc);
 			continue;
+		}
 		if (scx_bpf_dsq_move_to_local(odsq, 0)) {
 			flow_stat_inc(llc, 1);
 			flow_queued_dec(li);
@@ -156,6 +188,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 		}
 		return;
+	} else if (!flow_dsq_head_allowed((u64)FLOW_FALLBACK_DSQ, c)) {
+		flow_forward_kick((u64)FLOW_FALLBACK_DSQ, llc);
 	}
 }
 
