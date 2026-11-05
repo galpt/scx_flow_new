@@ -11,8 +11,8 @@
  * so two tasks never share the same value. Tasks judged latency
  * sensitive queue slightly earlier, while the stored time is left
  * unchanged. A burst estimate tracks recent run time and selects
- * the queue. Slices have a lower bound and an upper bound. Tasks
- * that wait long have their estimate lowered. Tasks that burn
+ * the queue. Slices hold one fixed quantum. Tasks
+ * that wait long have their estimate halved. Tasks that burn
  * several full slices in a row move to a lower queue. The graphics
  * hint keeps tasks near their previous CPU. It does not change
  * ordering by itself.
@@ -57,13 +57,13 @@ enum flow_consts {
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
-	FLOW_SJF_INIT_NS = 50000ULL,
+	FLOW_SJF_INIT_NS = 3000000ULL,
 	FLOW_SJF_FLOOR_NS = 5000ULL,
 	FLOW_SJF_CAP_NS = 1000000000ULL,
-	FLOW_PREEMPT_GAP_NS = 1000000ULL,
+	FLOW_PREEMPT_GAP_NS = 250000ULL,
 	FLOW_PREEMPT_TAIL_NS = 125000ULL,
 	FLOW_AGING_NS = 100000000ULL,
-	FLOW_STARVE_NS = 500000000ULL,
+	FLOW_STARVE_NS = 200000000ULL,
 	FLOW_STREAK_MAX = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_LLC_BASE = 0x6000ULL,

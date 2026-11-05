@@ -297,17 +297,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			flow_stat_inc(llc, 15);
 		else
 			flow_stat_inc(llc, 16);
-		slice_len = est;
-		if (slice_len < (u64)FLOW_SLICE_MIN_NS)
-			slice_len = (u64)FLOW_SLICE_MIN_NS;
-		if (slice_len > (u64)FLOW_SLICE_MIN_NS * 3)
-			slice_len = (u64)FLOW_SLICE_MIN_NS * 3;
-		quanta = slice_len / (u64)FLOW_SLICE_MIN_NS;
-		if (quanta < 1)
-			quanta = 1;
-		if (quanta > 3)
-			quanta = 3;
-		extra = quanta - 1;
+		slice_len = (u64)FLOW_SLICE_MIN_NS;
+		quanta = 1;
+		extra = 0;
 		if (cpu_ok) {
 			struct flow_running_state *rs = &flow_running_state[(u32)tgt];
 			if (rs->gen != 0 && flow_hog_rounds(rs->streak)) {

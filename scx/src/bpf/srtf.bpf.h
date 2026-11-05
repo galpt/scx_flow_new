@@ -3,12 +3,12 @@
  * Shortest remaining time tracking for the flow scheduler.
  *
  * Each task keeps a remaining time estimate. The estimate mixes the old
- * value with the fresh sample, keeping most of the old value and
- * adding a small part of the sample. It starts from a middle value
+ * value with the fresh sample, keeping half of the old value and
+ * adding half of the sample. It starts from a fixed seed
  * and is clamped to a floor and a ceiling. Small remaining times select
  * the latency queue and large estimates select the batch queues.
  * The queue choice preempts through the kick path. Waits that grow
- * long lower the estimate, and waits that grow very long reset it
+ * long halve the estimate, and waits that grow very long reset it
  * and count a rescue. Tasks that burn several full slices in a row
  * move down one queue. All math uses integers.
  *
@@ -31,8 +31,8 @@ static __always_inline u64 flow_sjf_next(u64 old, u64 sample)
 {
 	u64 s = flow_sjf_clamp(sample ? sample : (u64)FLOW_SJF_INIT_NS);
 	u64 o = old ? flow_sjf_clamp(old) : (u64)FLOW_SJF_INIT_NS;
-	u64 keep = o - (o >> 3);
-	u64 add = s >> 3;
+	u64 keep = o - (o >> 1);
+	u64 add = s >> 1;
 	u64 v = keep + add;
 	return flow_sjf_clamp(v);
 }
@@ -45,7 +45,7 @@ static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)
 		return (u32)FLOW_PRIO_LAT;
 	if (est <= (u64)FLOW_SJF_INIT_NS)
 		return (u32)FLOW_PRIO_LAT;
-	if (est <= (u64)FLOW_SLICE_MIN_NS)
+	if (est <= (u64)FLOW_SLICE_MIN_NS * 3)
 		return (u32)FLOW_PRIO_NORM;
 	if (est <= (u64)FLOW_AGING_NS)
 		return (u32)FLOW_PRIO_BATCH;
@@ -66,7 +66,7 @@ static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc, 
 		return (u64)FLOW_SJF_INIT_NS;
 	}
 	if (age >= (u64)FLOW_AGING_NS) {
-		u64 v = est - (est >> 3);
+		u64 v = est - (est >> 1);
 		flow_stat_inc(llc, 18);
 		return flow_sjf_clamp(v);
 	}

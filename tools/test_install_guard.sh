@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.0" ] || fail "version not at 5.1.0"
+[ "${want}" = "5.1.1" ] || fail "version not at 5.1.1"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -241,10 +241,28 @@ grep -q "flow_hog_demote" "${HOG_ENQ}" || fail "hog demote call missing"
 grep -q "flow_hog_rounds" "${HOG_ENQ}" || fail "hog rounds gate missing"
 grep -q "FLOW_STREAK_MAX" "${HOG_SRTF}" || fail "hog fixed rounds missing"
 
+# SRTF stutter fix stays with fixed integers and no knob. Seed at three
+# millis, rescue at two hundred millis, gap at two hundred fifty thousand,
+# half blend plus halve age through a shift by one, bands at three plus
+# nine plus one hundred millis, fixed one quantum slice with pass through
+# demote plus charge and a single kick.
+grep -q "FLOW_SJF_INIT_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf seed missing"
+grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf rescue missing"
+grep -q "FLOW_PREEMPT_GAP_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf gap missing"
+grep -q ">> 1" "${HOG_SRTF}" || fail "srtf half blend missing"
+grep -q "FLOW_SLICE_MIN_NS \* 3" "${HOG_SRTF}" || fail "srtf norm band missing"
+grep -q "FLOW_AGING_NS" "${HOG_SRTF}" || fail "srtf batch band missing"
+grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${HOG_ENQ}" || fail "fixed slice missing"
+grep -q "quanta = 1" "${HOG_ENQ}" || fail "fixed quanta missing"
+grep -q "extra = 0" "${HOG_ENQ}" || fail "fixed extra missing"
+grep -q "flow_fair_charge" "${HOG_ENQ}" || fail "charge pass through missing"
+grep -q "flow_fair_extra" "${HOG_ENQ}" || fail "extra pass through missing"
+grep -q "flow_kick_constrained" "${HOG_ENQ}" || fail "single kick missing"
+
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
-# with a per LLC floor and a latency shift. Short jobs keep most of
-# the old value and add a small part of the sample. Kicks keep gap
+# with a per LLC floor and a latency shift. Short jobs keep half of
+# the old value and add half of the sample. Kicks keep gap
 # and tail and escape.
 grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/intf.h" || fail "prio count missing"
 grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf/intf.h" || fail "prio queue helper missing"
