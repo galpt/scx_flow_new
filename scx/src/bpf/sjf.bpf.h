@@ -9,7 +9,9 @@
  * the latency queue and large estimates select the batch queues.
  * The queue choice wakes idle targets only with no preempt.
  * Waits that grow long halve the estimate, and waits that grow
- * very long reset it and count a rescue. All math uses integers.
+ * very long reset it and count a rescue. Remaining takes the aged
+ * estimate minus the burnt part with saturation at the floor.
+ * All math uses integers.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,6 +36,16 @@ static __always_inline u64 flow_sjf_next(u64 old, u64 sample)
 	u64 add = s >> 1;
 	u64 v = keep + add;
 	return flow_sjf_clamp(v);
+}
+static __always_inline u64 flow_sjf_remain(u64 aged, u64 used)
+{
+	u64 a = aged ? flow_sjf_clamp(aged) : (u64)FLOW_SJF_INIT_NS;
+	if (used >= a)
+		return (u64)FLOW_SJF_FLOOR_NS;
+	{
+		u64 v = a - used;
+		return flow_sjf_clamp(v);
+	}
 }
 static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)
 {

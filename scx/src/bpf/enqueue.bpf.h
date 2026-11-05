@@ -9,7 +9,9 @@
  * when allowed and the LLC queue otherwise with a short slice. Tasks
  * that have no usable CPU join the fallback queue. The stored time
  * is left unchanged while the queue key is earlier for latency
- * sensitive tasks. Fresh times move past the per LLC floor. The
+ * sensitive tasks. Fresh times move past the per LLC floor. Queue
+ * choice uses remaining time from the aged estimate minus the burnt
+ * part with saturation at the floor. The
  * charge scales with the share and the extra amount is fixed. Each
  * enqueue sends at most one idle wake. A wake goes only to an idle
  * target, else it counts a skip with no wake. The kernel idle flag
@@ -179,9 +181,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		int rescued = 0;
 		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc, &rescued);
 		u64 est = aged;
+		u64 old_rem = t->slice_rem;
+		u64 used_last = 0;
+		u64 rem;
 		if (!t->burst_ns)
 			est = (u64)FLOW_SJF_INIT_NS;
-		prio = flow_sjf_prio(est, t->enq_ns, now);
+		if (old_rem < (u64)FLOW_SLICE_MIN_NS)
+			used_last = (u64)FLOW_SLICE_MIN_NS - old_rem;
+		rem = flow_sjf_remain(aged, used_last);
+		prio = flow_sjf_prio(rem, t->enq_ns, now);
 		if (!flow_prio_ok(prio))
 			prio = (u32)FLOW_PRIO_NORM;
 		t->burst_ns = est;

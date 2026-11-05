@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.3" ] || fail "version not at 5.1.3"
+[ "${want}" = "5.1.4" ] || fail "version not at 5.1.4"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -232,14 +232,17 @@ grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary pre
 # SJF stays non preemptive with fixed integers and no knob. The burst
 # keeps half of the old value and adds half of the sample, ages down
 # on long waits with a rescue on very long waits, picks one of four
-# queues by estimate plus age, and wakes idle targets only with a skip
-# otherwise. Stopping folds burnt time through the half blend with no
-# wait plus remain step. No streak plus no hog plus no demote is kept.
+# queues by remaining plus age, and wakes idle targets only with a skip
+# otherwise. Remaining takes the aged estimate minus the burnt part
+# with saturation at the floor. Stopping folds burnt time through
+# the half blend with no wait plus remain step. No streak plus no hog
+# plus no demote is kept.
 SJF_HDR="${SRC_DIR}/src/bpf/sjf.bpf.h"
 SJF_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
 grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
 grep -q "flow_sjf_prio" "${SJF_HDR}" || fail "sjf prio missing"
 grep -q "flow_sjf_age" "${SJF_HDR}" || fail "sjf age missing"
+grep -q "flow_sjf_remain" "${SJF_HDR}" || fail "sjf remain missing"
 grep -q "FLOW_SJF_INIT_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf seed missing"
 grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf rescue missing"
 grep -q ">> 1" "${SJF_HDR}" || fail "sjf half blend missing"
@@ -251,6 +254,11 @@ grep -q "extra = 0" "${SJF_ENQ}" || fail "fixed extra missing"
 grep -q "flow_fair_charge" "${SJF_ENQ}" || fail "charge pass through missing"
 grep -q "flow_fair_extra" "${SJF_ENQ}" || fail "extra pass through missing"
 grep -q "flow_kick_idle_only" "${SJF_ENQ}" || fail "idle kick missing"
+grep -q "flow_sjf_remain" "${SJF_ENQ}" || fail "remain use missing"
+grep -q "used_last" "${SJF_ENQ}" || fail "remain burnt missing"
+grep -q "FLOW_SJF_FLOOR_NS" "${SJF_HDR}" || fail "sjf floor missing"
+grep -q "flow_seq_floor" "${SJF_ENQ}" || fail "floor key missing"
+grep -q "flow_lat_key" "${SJF_ENQ}" || fail "lat key missing"
 grep -q "flow_sjf_next" "${DISP_HDR}" || fail "stopping blend missing"
 grep -q "reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved field missing"
 grep -q "rs->reserved = 0" "${DISP_HDR}" || fail "reserved zero missing"
