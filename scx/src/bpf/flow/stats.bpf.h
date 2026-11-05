@@ -194,7 +194,17 @@ static __always_inline void flow_stale_account(u32 thief)
 
 /* Stats 0 through 23 stay frozen with tail 24 through 25 */
 /* append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10, */
-/* total equals 15 plus 24 per award, gauges use set only. */
+/* total equals 15 plus 24 per award, gauges use set only. Proof stays */
+/* TBD with no live gate yet. First checks sticky edges with twenty four */
+/* plus twenty five deltas plus score plus hold plus q at award time on */
+/* a full burn plus probe run with summary. Second checks growth plus */
+/* decay math with separate counts plus old plus new plus path on the */
+/* same run with the per award log. Third checks slice times q at insert */
+/* with q plus nanos on the same run. Fourth checks total equals penalty */
+/* plus extra per award with fifteen plus twenty four plus twenty five */
+/* plus voluntary plus wait plus pinned outcome on the same run with */
+/* bypass cases present. Fifth checks strict gates together on the same */
+/* run with summary plus stats plus per award log for share via deltas. */
 /* Docs only, no logic change. */
 
 #endif
