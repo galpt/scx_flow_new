@@ -38,12 +38,11 @@ done
 # Any return of the old lib dir fails closed here before any build.
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
-# Docs stay present as additive narrative with no knob change.
-for need_doc in \
-    "docs/lifecycle.md" \
-    "docs/verifier-budgets.md"; do
-    [ -s "${REPO_DIR}/${need_doc}" ] || fail "docs scaffold missing ${need_doc}"
-done
+# Docs plus changelog stay untracked with no re-leak.
+# History remains public in prior commits; tips carry no docs blobs.
+if git -C "${REPO_DIR}" ls-files -- docs/ CHANGELOG.md | grep -q .; then
+    fail "docs re-leaked"
+fi
 
 # Top README keeps lifecycle plus budgets plus reinstall plus kernel plus lock notes.
 for need_note in \
@@ -96,10 +95,7 @@ fi
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
 [ -s "${REPO_DIR}/tools/edf_harness/run.sh" ] || fail "harness scaffold missing run.sh"
 
-# Changelog stays present with the additive 5.1.0 entry.
-[ -s "${REPO_DIR}/CHANGELOG.md" ] || fail "changelog scaffold missing"
-grep -q "5\.1\.0" "${REPO_DIR}/CHANGELOG.md" || fail "changelog version missing"
-grep -q "5\.0\.16" "${REPO_DIR}/CHANGELOG.md" || fail "changelog prior missing"
+# Changelog history remains public in prior commits; tip carries no changelog blob.
 
 # Deleted Rust mirrors stay deleted with no reappearance.
 # The flow facade plus its helpers stay deleted with constants in
