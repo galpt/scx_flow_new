@@ -1,7 +1,7 @@
 # Verifier budgets
 
-This note documents the verifier budgets as built with pinned escape
-plus hist cover. It is narrative only with no opcode, branch, map,
+This note documents the verifier budgets as built with latency boost
+plus history cover. It is narrative only with no opcode, branch, map,
 struct, or helper change beyond the appended tails.
 
 All BPF loops are bounded. Dispatch pops retry at most four times per
@@ -34,8 +34,12 @@ and saturated max keeps the vtime capped while the count still grows.
 Pinned skips the penalty through one extra condition with no new branch
 shape, exiting bypasses through early returns. Slice never scales, preempt
 needs a gap of at least five hundred thousand nanos past a tail of one
-hundred twenty five thousand nanos, and the exiting slice stays at one
-thousand nanos. The transient zero remain on overrun refreshes at running
+hundred twenty five thousand nanos with both sides boosted by one fixed
+slice of one million nanos for latency tasks, and the exiting slice stays
+at one thousand nanos. The constrained kick returns one on a preempt else
+zero, so enqueue plus mask callers count latency wins with the class in
+hand while forward plus steal callers drop the return with no shape
+change. Pair plus fallback share one kick site per enqueue with no storm. The transient zero remain on overrun refreshes at running
 time from the kernel slice.
 
 Frequency hints are neutral for placement with bounded integer math only.
@@ -49,8 +53,8 @@ value. Time uses monotonic nanos with zero plus missing plus reversed
 guards that keep the prior level. Smooth plus hint plus apply stay
 identical with integer math and a bound of four.
 
-Stats offsets 0 through 16 stay frozen for compat with an append only tail
-through 19, fallback equals pair full plus duplicate plus stale, and steal
+Stats offsets 0 through 19 stay frozen for compat with an append only tail
+through 23, fallback equals pair full plus duplicate plus stale, and steal
 equals pair plus LLC. Overrun counts events and penalty counts slices one
 to one by design on the enqueue LLC, blocked counts still runnable stops
 with no penalty on the cached LLC with zero fallback, covering preemptions
@@ -58,11 +62,19 @@ plus slice expiry plus migrations. Escape counts streak preempts on the
 enqueue LLC, orphan counts mask change kicks with a live allowed owner
 on the queued LLC with skips never inflating the orphan count, forward
 counts head forwards with a live allowed owner at pick on the dispatch
-LLC with outcome split into preempt plus idle plus skip. Streak caps at
+LLC with outcome split into preempt plus idle plus skip. Boost counts
+latency takes plus hog keeps on the enqueue LLC, latency preempt counts
+wins with the class in hand on the enqueue plus queued LLCs, and rescue
+counts old waits that step the hold down on the running LLC. The history
+classifier uses bit math only with no loop and no map use, and the offset
+subtracts one fixed slice with zero saturation one shot with no
+accumulation. Streak caps at
 twice the pop retry bound with clean decay so a hold ends but never
 sticks. Userspace folds all tails with
-len guards so harness can correlate overrun growth with head movement
-plus escape growth with hold ends.
+len guards at one sixty eight plus one seventy six plus one eighty four
+plus one ninety two so harness can correlate boost growth with latency
+placement plus preempt growth with hog displacement plus rescue growth
+with old wait decay.
 The penalty adds one straight line condition with saturating adds and no new
 loop, map, or program. Deferred with fallback is per task period plus
 deadline with no ABI so period stays one slice, global admission with no
@@ -70,7 +82,9 @@ reject so dampening stands in, bandwidth plus PI inheritance with no lock
 graph so non penalization plus forward plus victim wakes stand in, global
 heap with no unbounded search so bounded hierarchy stands in, and timers
 plus reclaim with no async path so enqueue postponement plus work conserving
-steal stand in. The build carries 25 programs with 20 baseline plus
-5 cgroup plus task init programs, all passing with no new program added
-for documentation. Bytecode plus ELF differences from comment edits land
+steal stand in. The build carries 26 programs with 16 flow plus 10 lib,
+all passing with no new program added
+for documentation. Stacks stay at or below five hundred twelve bytes,
+hot paths stay within two percent with the aggregate neutral, and
+bytecode plus ELF differences from comment edits land
 in comment plus line info only.

@@ -1,7 +1,7 @@
 # Lifecycle
 
-This note documents the task and cgroup lifecycle as built with pinned
-escape plus orphan plus forward cover. It is narrative only with no knob,
+This note documents the task and cgroup lifecycle as built with latency
+boost plus history cover. It is narrative only with no knob,
 map, struct, helper, or branch change beyond the appended tails.
 
 Tasks are seeded at init_task with the birth cgroup id and a clamped
@@ -13,7 +13,14 @@ The task cache stays a hint for move plus init and never serves alone.
 Enqueue places by virtual time. A requeued task with a live generation
 carries its remaining slice with a weight scaled charge, else a fresh
 virtual time steps past the pair sequence with a scaled gap and a last
-plus one floor with max saturation so the sequence stays unique. A non
+plus one floor with max saturation so the sequence stays unique. Stopping
+records a yield bit into the three bit task history with fresh zero
+neutral as a hog, and enqueue reads two of three early yields as latency
+else a hog with pinned plus exiting bypassing. A latency task takes the
+queue key minus one fixed slice one shot with the stored time plus
+deadline staying raw, so the offset never accumulates and the stamp never
+shifts. Pair pops pick the lowest boosted key with ties to strand A and
+the sequence keeps first in first out within a class. A non
 pinned carry that burnt the full slice with no remain adds one extra
 fixed uniform slice with saturation and counts overrun plus penalty one
 to one on the enqueue LLC, so a task that always burns the full slice
@@ -29,11 +36,13 @@ slice on an allowed local queue with fallback to the LLC queue, and all
 other tasks try the pair queue then spill to the LLC queue. The transient
 zero remain on overrun refreshes at running time from the kernel slice.
 
-Running records the per CPU snapshot, assigns the next generation, and
+Running records the per CPU snapshot plus the latency flag from the
+history with pinned always zero, assigns the next generation, and
 clears the queued flag. A pinned start clears the hold since the wait
 reached the CPU, while a start with an old enqueue steps the hold down by
 one so a single good wait eases the hold with no new knob and a recent
-requeue keeps the hold for consecutive full burns. A legacy tall hold
+requeue keeps the hold for consecutive full burns. An old wait that steps
+the hold down counts an age rescue on the running LLC. A legacy tall hold
 clamps to twice the pop retry bound with no new knob so a prior count
 never sticks past the storm window. Stopping folds burnt
 nanos into the smoothed frequency hint and counts a stop that leaves the
@@ -43,14 +52,19 @@ no remain steps the hold capped at twice the pop retry bound, while a
 clean stop steps the hold down one so a clean run never sticks past the
 storm window. Runnable covers preemptions
 plus slice expiry plus migrations, and an invalid cached LLC falls back
-to zero with no loss. Enqueue stamps the wait start with the monotonic
+to zero with no loss. The same stop records the yield bit for the next
+classify with no remain recording a burn else a yield. Enqueue stamps the wait start with the monotonic
 clock with no vtime shift, and a zero clock clears to unknown with
 running treating zero as no decay. Hist keeps the last four raw samples
 as a shift ring for sizing with no reader in BPF as shadow verify for
 post mortem only.
 Pinned local wakes use the fast path that preempts past the tail with no
 gap check plus a streak cover that turns an idle wake into a preempt at
-the bound, so a hold ends. Forward plus victim wakes keep progress when
+the bound, so a hold ends. The constrained kick compares boosted keys on
+both sides with frozen gap plus tail and returns one on a preempt, so
+enqueue plus mask callers count latency wins with the class in hand while
+forward plus victim wakes keep the preempt count with no latency split.
+Forward plus victim wakes keep progress when
 the head cannot run on the thief, with a forward count for attempts with
 a live allowed owner at pick on the dispatch
 LLC and no move no loss, outcome splitting into preempt plus idle plus
@@ -59,7 +73,9 @@ valid head retries, and hierarchical steal reclaims idle time as
 the bounded push pull analogue. A mask change on a queued task keeps the
 queue with no rewrite and wakes the owner through the pinned fast path
 for pinned waits else the constrained path
-with an orphan count only on a live allowed kick. Tick steps the hold on
+with an orphan count only on a live allowed kick. A mask change wake for
+a latency task uses the boosted key and counts a latency win on a preempt
+with the class in hand. Tick steps the hold on
 a full burn capped at twice the pop retry bound with no freq
 move and refreshes the remaining slice, keeping the hold on a mid slice
 tick since only a clean stop decays. Dequeue clears the
