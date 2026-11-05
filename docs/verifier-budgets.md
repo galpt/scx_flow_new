@@ -26,7 +26,7 @@ then cap at max with a monotonic last plus one floor on the pair path
 only. The overrun debt scales with the award with no knob as implicit
 deadline throttling: one uniform slice at overrun plus extra uniform
 slices for a total of q, each saturating at max, so a one quantum burn
-pays two slices while a three quantum burn pays four slices and cannot
+pays one slice while a three quantum burn pays three slices and cannot
 hold the head three times longer on one slice of debt. Base charge
 scales by weight while extra stays uniform, so default about doubles at
 q one and heavy still steps far behind at q three, with light already
