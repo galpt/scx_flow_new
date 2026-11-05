@@ -54,15 +54,16 @@ for need_ignored in \
     git -C "${REPO_DIR}" check-ignore -q -- "${need_ignored}" || fail "ignore missing ${need_ignored}"
 done
 
-# Top README keeps lifecycle plus budgets plus reinstall plus kernel plus lock notes.
+# Top README stays concise with layout plus build plus checks and a scheduler ref.
+# Scheduler rationale stays signed in BPF headers; top README points at scx/README.md
+# with no duplicated lifecycle prose.
 for need_note in \
-    "## Lifecycle" \
-    "## Verifier budgets" \
-    "## Reinstall safety" \
-    "## Kernel support" \
-    "## Cargo lock note"; do
+    "## Layout" \
+    "## Build" \
+    "## Checks"; do
     grep -qF "${need_note}" "${REPO_DIR}/README.md" || fail "readme note missing ${need_note}"
 done
+grep -qF "scx/README.md" "${REPO_DIR}/README.md" || fail "readme scheduler ref missing"
 
 # Flow headers stay present with scheduler rationale in each file.
 # Code comments stay version-agnostic: no X.Y.Z
