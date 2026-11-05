@@ -1,5 +1,86 @@
 # Changelog
 
+## 5.0.14
+
+Latency boost with three bit history plus one slice offset and four tail counters.
+
+Culprit is a shared queue where batch burns keep the head while short
+sleeps wait behind large virtual time with no record of past yields. A
+task that sleeps early looks the same as a task that burns the full
+slice, so interactive wakes queue behind hogs with no offset and no
+count, and the preempt gap test compares raw times where a one slice
+lead never fires. The fix keeps a three bit shift history per task that
+records a yield bit at stop with fresh tasks starting neutral as hogs,
+classifies a task as latency sensitive when at least two of three bits
+show early yields else holds it as a hog, subtracts one fixed slice from
+the queue key for latency tasks only with one shot and no accumulation
+while the stored virtual time plus deadline keep the raw value, compares
+boosted keys on both sides of the preempt test with frozen gap plus tail
+so latency wins ties by one slice while hog versus hog keeps the old
+rule plus streak escape unchanged, and counts latency boosts plus hog
+holds plus latency preempts plus age rescues on the tail with zero
+through nineteen frozen. Pinned plus exiting bypass the classifier with
+prior behavior. The enqueue stamp never shifts with the offset and
+forward coalescing keeps pid plus virtual time plus owner with one kick
+per enqueue capped at twice the pop retry bound.
+
+Task state reuses the pad for the history byte for seventy two bytes
+with no size change. Running state reuses the reserved byte for the
+latency flag for forty eight bytes with no size change. Counters add
+latency boost plus hog hold plus latency preempt plus age rescue at
+twenty plus twenty one plus twenty two plus twenty three for one hundred
+ninety two bytes with zero through nineteen frozen. Docs for zero
+through nineteen stay frozen with the new tail append only. No new map
+with bounds at one thousand twenty four plus sixty four plus eight plus
+thirty two plus four thousand ninety six. Cgroup plus frequency plus
+steal plus maps plus main stay frozen with strict priority lowest boosted
+virtual time strand A, fixed slice of one millisecond, retry of four,
+and imbalance of three. Userspace folds the new tails with serde defaults
+plus length guards at one sixty eight plus one seventy six plus one
+eighty four plus one ninety two plus interval deltas and regenerates
+bindings only.
+
+Knob free with no new tunable, verifier fail closed on guards versus fail
+open on weights with saturation and no wrap, append only stats, pinned
+FIFO with bypass, frozen order, and restart only for hotplug plus
+reinstall. Fallback keeps raw keys with no boost if the verifier
+regresses. Slice, scale, weight, order, local drain, exiting minimal,
+and arena touch stay frozen with clean room code and plain prose
+comments.
+
+Enqueue keeps one target for inserts plus boosted keys for latency tasks
+plus raw keys for hogs plus pinned plus exiting bypass. Preempt keeps the
+frozen threshold plus tail with boosted both sides plus latency preempt
+counts. Dispatch keeps pair then LLC then fallback drain with bounded
+retries and no loss plus forward keys boosted both sides. Stats keep
+offsets zero through nineteen frozen with tail twenty latency boost plus
+twenty one hog hold plus twenty two latency preempt plus twenty three age
+rescue append only, fallback equals four plus five plus six, steal equals
+nine plus ten, and gauges use set only. Boost charges no queue and the
+enqueue stamp never shifts virtual time. Userspace folds all tails with
+length guards plus compat defaults and interval deltas as counters, so
+harness can correlate boost growth with latency placement plus preempt
+growth with hog displacement plus rescue growth with old wait decay.
+Slice, scale, weight, order, local drain, exiting minimal, and arena
+touch stay frozen with clean room code and plain prose comments.
+
+Version syncs Cargo plus installer plus guard to 5.0.14 with the fork ref
+b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork galpt/scx frozen. The
+overlay Cargo lock stays stale by design and syncs through cargo update
+minus p scx_flow before any locked build. The installer still requires
+6.12 plus for cgroup hooks while 7.2 plus stays the subsystem
+recommendation. Reinstall needs a restart with no live transition.
+Rollback retains the prior 5.0.13 snapshot append only. The exit dump
+length flag stays optional with default zero preserving dump size.
+
+Verification is build plus verify only with no live mutation, no force,
+no reboot, and no push. Guard plus fmt plus clippy plus build plus test
+plus smoke plus veristat twenty six of twenty six pass with stack at or
+below five hundred twelve bytes and insn within two percent. Rollback
+stays append only.
+
+Base is archive/5.0.13 at b2300bcc6 with no other tree change.
+
 ## 5.0.13
 
 Pinned hold escape with streak plus orphan plus forward visibility.
