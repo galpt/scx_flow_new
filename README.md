@@ -12,8 +12,6 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
 - `scx/src/bpf/flow/` per area headers with no vendored sources
 - `scx/src/bpf/lib` is absent: helpers come from workspace headers
-- `scx/src/bpf/lib/minheap.bpf.c` shared heap
-- `scx/src/bpf/lib/sdt_alloc.bpf.c` shared alloc
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
 - `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
@@ -70,7 +68,7 @@ init, move, set weight, and exit keep weight shares current with fail
 open reads as default. Single ownership holds through the queued flag
 with no loss, and exiting tasks use a minimal slice on an allowed local
 queue with fallback to the LLC queue. The kick compares boosted keys on
-both sides with frozen gap plus tail, and an old wait that steps the
+both sides with fixed gap plus tail, and an old wait that steps the
 hold down counts an age rescue.
 
 Hotplug needs a restart. CPU and LLC tables are seeded once at init with
