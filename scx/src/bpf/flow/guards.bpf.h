@@ -37,24 +37,27 @@ static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 	return bpf_cpumask_test_cpu(c, p->cpus_ptr);
 }
 
-/* True when the peeked head of a DSQ can run on cpu. Null peek fails */
-/* closed with no move. This keeps a pinned head on its allowed CPU and */
-/* skips a steal that would run off mask with no loss. Peek is hint only */
-/* but pinned tasks wait in per CPU local queues so shared heads are */
-/* migratable in the common case. */
-static __always_inline bool flow_dsq_head_allowed(u64 dsq, u32 cpu)
+/* Live CPU needs bound plus init count range. Hotplug beyond needs restart. */
+/* Init seeds one row per discovered CPU and the count stays fixed, so a */
+/* CPU at or beyond the count fails closed with no wake. Offline inside */
+/* the range also needs restart and stays scoped there. Head checks use */
+/* a single peek plus an allowed test at the caller with no helper, so */
+/* no second peek runs. */
+static __always_inline bool flow_cpu_live(u32 cpu)
 {
-	struct task_struct *p;
+	u64 n;
+
 	if (!flow_cpu_ok(cpu))
 		return false;
-	p = __COMPAT_scx_bpf_dsq_peek(dsq);
-	if (!p)
+	n = READ_ONCE(flow_nr_cpus);
+	if (n && (u64)cpu >= n)
 		return false;
-	return flow_cpu_allowed((s32)cpu, p);
+	return true;
 }
 
 /* First allowed CPU in the task mask. Fails closed to minus one */
-/* with no move when no allowed target exists. */
+/* with no move when no allowed live target exists. Live keeps the */
+/* init range so a beyond range CPU never takes a wake. */
 static __always_inline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
@@ -62,7 +65,7 @@ static __always_inline s32 flow_first_allowed(struct task_struct *p)
 	if (!p || !p->cpus_ptr)
 		return -1;
 	first = bpf_cpumask_first(p->cpus_ptr);
-	if (!flow_cpu_ok(first))
+	if (!flow_cpu_live(first))
 		return -1;
 	if (!flow_cpu_allowed((s32)first, p))
 		return -1;
@@ -70,13 +73,13 @@ static __always_inline s32 flow_first_allowed(struct task_struct *p)
 }
 
 /* Constrained target for inserts plus kicks. Keeps the hint when it */
-/* stays allowed, else falls back to the first allowed CPU. Fails */
-/* closed to minus one with no move when no allowed target exists. */
+/* stays allowed and live, else falls back to the first allowed live */
+/* CPU. Fails closed to minus one with no move when no target exists. */
 static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
 	if (!p || !p->cpus_ptr)
 		return -1;
-	if (hint >= 0 && flow_cpu_allowed(hint, p))
+	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint))
 		return hint;
 	return flow_first_allowed(p);
 }

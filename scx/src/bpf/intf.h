@@ -158,6 +158,9 @@ static __always_inline bool flow_llc_ok(u32 llc)
 {
 	return llc < (u32)FLOW_MAX_LLCS;
 }
+/* Bound check only. Practical scope adds the init count range, so live */
+/* needs this plus below the discovered count. Offline inside the range */
+/* also needs restart and stays scoped there. */
 static __always_inline bool flow_cpu_ok(u32 cpu)
 {
 	return cpu < (u32)FLOW_MAX_CPUS;

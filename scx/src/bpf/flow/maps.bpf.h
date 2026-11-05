@@ -65,6 +65,13 @@ struct flow_freq_state flow_freq_state[FLOW_MAX_CPUS];
 s64 flow_dhq_seq[FLOW_MAX_PAIRS];
 /* Node per pair for hierarchy walk. Zero init. */
 u32 flow_pair_node[FLOW_MAX_PAIRS];
+/* Last forwarded head per DSQ for wake coalescing. One slot per LLC */
+/* plus one for the fallback safety net. Zero init means empty. Pid plus */
+/* vtime plus owner identify the head so a new head or a new owner */
+/* forwards again with no storm. */
+u64 flow_fwd_pid[FLOW_MAX_LLCS + 1];
+s64 flow_fwd_vtime[FLOW_MAX_LLCS + 1];
+s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];
 
 /* Maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
 /* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */

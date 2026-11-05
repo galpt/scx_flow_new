@@ -14,7 +14,8 @@
  * LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
- * pairs, LLC queues. Offsets 0-8 stay frozen, fallback equals
+ * pairs, LLC queues. Pair pops retry bounded with no loss on stale
+ * entries. Offsets 0-8 stay frozen, fallback equals
  * 4 plus 5 plus 6, steal equals 9 plus 10. No SMT probe runs
  * and each CPU stands single with fail closed choice.
  *

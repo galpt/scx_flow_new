@@ -87,7 +87,9 @@ static __always_inline void flow_occupancy_set(u32 llc, scx_dhq_t *dhq, u64 cap)
 	st->dhq_cap = cap;
 }
 
-/* Decrement queued by one with saturation at zero. */
+/* Decrement queued by one with saturation at zero. Stats only best effort. */
+/* A concurrent dec race stays a stats glitch with no loss and no wrap */
+/* beyond the zero check, so the total stays close. */
 static __always_inline void flow_queued_dec(u32 llc)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -100,8 +102,11 @@ static __always_inline void flow_queued_dec(u32 llc)
 
 /* Stale discard. Queued belongs to an exited task so attribute the */
 /* decrement to a victim with backlog. This keeps the total correct */
-/* and avoids a wrap on an empty thief. Fallback counts the discard */
-/* as the aggregate plus the stale tail for the split. */
+/* and avoids a wrap on an empty thief. Thief counts fallback plus stale, */
+/* victim takes the queued dec. Fallback counts the discard as the */
+/* aggregate plus the stale tail for the split. Queued stays charged to */
+/* the enqueue LLC while dispatched stays on the dispatch LLC, so thief */
+/* versus victim attribution stays explicit with no loss. */
 static __always_inline void flow_stale_account(u32 thief)
 {
 	u32 li;

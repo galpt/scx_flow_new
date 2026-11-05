@@ -233,8 +233,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	key = cpu;
 	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
 	if (cc) {
-		if (flow_llc_ok(READ_ONCE(cc->llc_id)))
-			llc = READ_ONCE(cc->llc_id);
+		u32 tmp = READ_ONCE(cc->llc_id);
+		if (flow_llc_ok(tmp))
+			llc = tmp;
 		if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
 			u64 idx = flow_llc_pair[llc];
 			if (idx < (u64)FLOW_MAX_PAIRS && flow_pair_dhqs[(u32)idx]) {
@@ -334,9 +335,10 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 
 /* No SMT probe runs. Each CPU stands single and a missing sibling */
 /* fails closed with no move. Select stays through the shared picker. */
-/* The hint plus the pick stay inside the task mask with no off mask */
-/* result. A stale hint falls back to the first allowed CPU before the */
-/* shared pick, and a stale pick falls back the same way after. */
+/* The hint plus the pick stay inside the task mask plus the live range */
+/* with no off mask result. A stale hint falls back to the first allowed */
+/* live CPU before the shared pick, and a stale pick falls back the same */
+/* way after. The cached first target serves both fallbacks with one walk. */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	bool idle = false;
@@ -346,17 +348,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 
 	if (!p || !p->cpus_ptr)
 		return prev_cpu;
+	first = flow_first_allowed(p);
 	eff_prev = prev_cpu;
-	if (eff_prev < 0 || !flow_cpu_allowed(eff_prev, p)) {
-		first = flow_first_allowed(p);
+	if (eff_prev < 0 || !flow_cpu_live((u32)eff_prev) || !flow_cpu_allowed(eff_prev, p)) {
 		if (first >= 0)
 			eff_prev = first;
 		else
 			return prev_cpu;
 	}
 	picked = scx_bpf_select_cpu_dfl(p, eff_prev, wake_flags, &idle);
-	if (picked < 0 || !flow_cpu_allowed(picked, p)) {
-		first = flow_first_allowed(p);
+	if (picked < 0 || !flow_cpu_live((u32)picked) || !flow_cpu_allowed(picked, p)) {
 		if (first >= 0)
 			return first;
 		return eff_prev;
@@ -366,8 +367,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 
 /* Reclamp the cached queue affinity on mask change. Preserves virtual */
 /* time plus deadline plus generation plus queued state with no fresh */
-/* assign. Exiting tasks keep the minimal slice. The enqueue plus */
-/* dispatch repair stays as fallback when the hook never fires. */
+/* assign. Exiting tasks keep the minimal slice. A queued task keeps the */
+/* charged affinity with no rewrite so later accounting stays on the */
+/* enqueue LLC, and the new owner takes one idle wake with no move. The */
+/* enqueue plus dispatch repair stays as fallback when the hook never */
+/* fires. */
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -383,12 +387,26 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
+	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
+		s32 owner = flow_first_allowed(p);
+		u32 qllc = READ_ONCE(t->llc_id);
+
+		if (!flow_llc_ok(qllc))
+			qllc = 0;
+		if (owner >= 0 && flow_cpu_live((u32)owner)) {
+			scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
+			flow_stat_inc(qllc, 12);
+		} else {
+			flow_stat_inc(qllc, 13);
+		}
+		return;
+	}
 	if (p->flags & PF_EXITING)
 		t->slice_rem = (u64)FLOW_EXIT_SLICE_NS;
 	tgt = flow_first_allowed(p);
 	if (tgt < 0)
 		return;
-	if (!flow_cpu_ok((u32)tgt))
+	if (!flow_cpu_live((u32)tgt))
 		return;
 	cpu = (u32)tgt;
 	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &cpu);

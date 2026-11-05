@@ -23,9 +23,11 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 
-/* Constrained kick to the allowed target only. Preempts when the */
-/* running vtime trails by at least the threshold past the tail, */
-/* else wakes idle. Skips with no wake when no allowed target exists. */
+/* Constrained kick to the allowed live target only. Preempts when the */
+/* running vtime is ahead by at least the threshold past the tail, */
+/* else wakes idle. Skips with no wake when no allowed live target exists. */
+/* The idle path re-validates after the preempt test so a mask change */
+/* between pick and kick never takes an off mask wake. Overlap is intentional. */
 static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
 						  struct task_struct *p, u32 llc)
 {
@@ -42,7 +44,7 @@ static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
 		return;
 	}
 	cpu = (u32)tgt;
-	if (!flow_cpu_ok(cpu)) {
+	if (!flow_cpu_live(cpu)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
@@ -60,7 +62,13 @@ static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
 		return;
 	}
 idle:
+	/* Re-validation keeps an off mask wake out when the mask changes */
+	/* between pick and kick. Bound overlap with live is intentional. */
 	if (!flow_cpu_allowed(tgt, p)) {
+		flow_stat_inc(llc, 13);
+		return;
+	}
+	if (!flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
@@ -83,6 +91,9 @@ static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v,
 }
 
 /* Wake idle only for inserts without task context. No preempt. */
+/* No running state lookup keeps the wake cheap. Re-validation keeps off */
+/* mask wakes out when the mask changes between pick and kick. Bound */
+/* overlap with live is intentional, live adds the init count range. */
 static __always_inline void flow_kick_idle_only(s32 task_cpu,
 						struct task_struct *p, u32 llc)
 {
@@ -96,7 +107,7 @@ static __always_inline void flow_kick_idle_only(s32 task_cpu,
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	if (!flow_cpu_ok((u32)tgt)) {
+	if (!flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}

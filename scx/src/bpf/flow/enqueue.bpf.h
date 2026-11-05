@@ -51,16 +51,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (task_cpu < 0)
 		task_cpu = bpf_get_smp_processor_id();
 	/* Single constrained target drives inserts plus kicks. Keeps the */
-	/* hint when allowed, else falls back to the first allowed CPU. */
+	/* hint when allowed and live, else falls back to the first live CPU. */
 	/* Fails closed to minus one with no move when no target exists. */
+	/* No live target queues to the fallback safety net with no wake. */
 	tgt = flow_constrained_target(task_cpu, p);
-	if (tgt >= 0 && flow_cpu_ok((u32)tgt)) {
+	if (tgt >= 0 && flow_cpu_live((u32)tgt)) {
 		struct flow_cpu_ctx *cc;
 		u32 key = (u32)tgt;
 		cpu = (u32)tgt;
 		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-		if (cc && flow_llc_ok(READ_ONCE(cc->llc_id)))
-			llc = READ_ONCE(cc->llc_id);
+		if (cc) {
+			u32 tmp = READ_ONCE(cc->llc_id);
+			if (flow_llc_ok(tmp))
+				llc = tmp;
+		}
 	} else {
 		cpu = (u32)FLOW_MAX_CPUS;
 	}
@@ -103,7 +107,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				return;
 			}
 			{
-				u64 dsq = flow_llc_dsq(llc);
+				u64 dsq;
+
+				if (tgt < 0)
+					dsq = (u64)FLOW_FALLBACK_DSQ;
+				else
+					dsq = flow_llc_dsq(llc);
 				if (!flow_dsq_ok(dsq))
 					dsq = (u64)FLOW_FALLBACK_DSQ;
 				scx_bpf_dsq_insert_vtime(p, dsq,
@@ -139,7 +148,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 		{
-			u64 dsq = flow_llc_dsq(llc);
+			u64 dsq;
+
+			if (tgt < 0)
+				dsq = (u64)FLOW_FALLBACK_DSQ;
+			else
+				dsq = flow_llc_dsq(llc);
 			if (!flow_dsq_ok(dsq))
 				dsq = (u64)FLOW_FALLBACK_DSQ;
 			scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS,
@@ -161,7 +175,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B) &&
 	 flow_llc_ok(t->llc_id) &&
 	 t->deadline == flow_vtime_add_slice(t->vtime)) {
-		if (flow_cpu_ok(cpu)) {
+		if (flow_cpu_live(cpu)) {
 			struct flow_running_state *rs = &flow_running_state[cpu];
 			if (rs->gen != 0 && rs->gen == t->gen &&
 			 flow_llc_ok(rs->llc_id) &&
@@ -262,7 +276,9 @@ insert_only:
 	/* steal them off mask. Falls through to the LLC queue only when */
 	/* no allowed local target exists as safety against loss. */
 	/* The single constrained target drives the local insert plus the */
-	/* shared fallback kick with no stale split. */
+	/* shared fallback kick with no stale split, so one mask walk serves */
+	/* inserts plus kicks. Without context the kick stays idle only with */
+	/* no preempt so the wake stays cheap with no running state lookup. */
 	if (pinned) {
 		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
@@ -275,7 +291,7 @@ insert_only:
 			return;
 		}
 	}
-	if (dhq) {
+	if (dhq && tgt >= 0) {
 		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)use_v,
 					 (u64)use_strand);
 		if (ret == 0) {
@@ -302,8 +318,18 @@ insert_only:
 			flow_occupancy_set(llc, dhq, cap);
 		}
 	}
+	/* Fallback safety net charges queued to the enqueue LLC, zero when */
+	/* no live target exists. Dispatch takes a best effort dec from a */
+	/* victim with backlog so the total stays close with no loss. The */
+	/* fallback DSQ has no per queue stats, so the enqueue LLC carries */
+	/* the queued count and the dispatch LLC carries the dispatched count. */
 	{
-		u64 dsq = flow_llc_dsq(llc);
+		u64 dsq;
+
+		if (tgt < 0)
+			dsq = (u64)FLOW_FALLBACK_DSQ;
+		else
+			dsq = flow_llc_dsq(llc);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, enq_flags);

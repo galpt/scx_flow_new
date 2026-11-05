@@ -18,32 +18,39 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "guards.bpf.h"
+#include "preempt.bpf.h"
 #include "steal.bpf.h"
 
-/* Forward a wake to the head owner when the head cannot run here. */
-/* Peeks once, wakes the first allowed CPU with no move no loss. */
-/* Empty queues stay silent with no counter move. A valid owner takes */
-/* an idle wake, a missing owner counts a skip with no wake. */
-static __always_inline void flow_forward_kick(u64 dsq, u32 llc)
+/* Forward one wake from an already peeked head with no second peek. */
+/* Empty stays silent with no counter move. One wake per head plus owner */
+/* keeps no storm with no move no loss. Preempt when the owner runs far */
+/* ahead past the tail, else wake idle, else count a skip with no wake. */
+static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
+						     u32 llc, u32 slot)
 {
-	struct task_struct *ph;
-	struct task_struct *p;
 	s32 owner;
+	s64 hv;
+	u64 pid;
 
-	ph = __COMPAT_scx_bpf_dsq_peek(dsq);
 	if (!ph)
 		return;
-	p = bpf_task_from_pid(ph->pid);
-	if (!p)
+	if (slot > (u32)FLOW_MAX_LLCS)
 		return;
-	owner = flow_first_allowed(p);
-	bpf_task_release(p);
-	if (owner >= 0 && flow_cpu_ok((u32)owner)) {
-		scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
-		flow_stat_inc(llc, 12);
-	} else {
-		flow_stat_inc(llc, 13);
+	pid = (u64)ph->pid;
+	hv = (s64)ph->scx.dsq_vtime;
+	owner = flow_first_allowed(ph);
+	{
+		u64 last_p = READ_ONCE(flow_fwd_pid[slot]);
+		s64 last_v = READ_ONCE(flow_fwd_vtime[slot]);
+		s32 last_o = READ_ONCE(flow_fwd_owner[slot]);
+
+		if (last_p == pid && last_v == hv && last_o == owner)
+			return;
+		flow_fwd_pid[slot] = pid;
+		flow_fwd_vtime[slot] = hv;
+		flow_fwd_owner[slot] = owner;
 	}
+	flow_kick_constrained(owner, hv, ph, llc);
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
@@ -70,9 +77,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
 		if (!cc)
 			return;
-		if (!flow_llc_ok(READ_ONCE(cc->llc_id)))
-			return;
-		llc = READ_ONCE(cc->llc_id);
+		{
+			u32 tmp = READ_ONCE(cc->llc_id);
+			if (!flow_llc_ok(tmp))
+				return;
+			llc = tmp;
+		}
 		node = READ_ONCE(cc->node_id);
 		if (!flow_node_ok(node))
 			node = 0;
@@ -136,17 +146,24 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 		}
 	}
-	if (flow_dsq_head_allowed(dsq, c) && scx_bpf_dsq_move_to_local(dsq, 0)) {
-		flow_stat_inc(llc, 1);
-		flow_queued_dec(llc);
-		return;
-	} else if (!flow_dsq_head_allowed(dsq, c)) {
-		/* Head cannot run here. Forward a wake to the owner */
-		/* with no move no loss, once per queue. */
-		flow_forward_kick(dsq, llc);
+	{
+		struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+
+		if (ph) {
+			if (!flow_cpu_allowed((s32)c, ph)) {
+				/* Head cannot run here. Forward one wake */
+				/* to the owner with no move no loss. */
+				flow_forward_from_peeked(ph, llc, llc);
+			} else if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+				flow_stat_inc(llc, 1);
+				flow_queued_dec(llc);
+				return;
+			}
+		}
 	}
 	bpf_for(li, 0, FLOW_MAX_LLCS) {
 		u64 odsq;
+		struct task_struct *ph;
 		if (li == llc)
 			continue;
 		if ((u64)li >= flow_nr_llcs)
@@ -156,8 +173,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		odsq = flow_llc_dsq(li);
 		if (!flow_dsq_ok(odsq))
 			continue;
-		if (!flow_dsq_head_allowed(odsq, c)) {
-			flow_forward_kick(odsq, llc);
+		ph = __COMPAT_scx_bpf_dsq_peek(odsq);
+		if (!ph)
+			continue;
+		if (!flow_cpu_allowed((s32)c, ph)) {
+			flow_forward_from_peeked(ph, llc, li);
 			continue;
 		}
 		if (scx_bpf_dsq_move_to_local(odsq, 0)) {
@@ -168,28 +188,39 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 		}
 	}
-	/* Fallback DSQ is safety only. It stays empty unless LLC validation fails. */
-	if (flow_dsq_head_allowed((u64)FLOW_FALLBACK_DSQ, c) &&
-	    scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
-		u32 li2;
-		flow_stat_inc(llc, 1);
-		bpf_for(li2, 0, FLOW_MAX_LLCS) {
-			struct flow_llc_stats *st;
-			if ((u64)li2 >= flow_nr_llcs)
-				break;
-			if (!flow_llc_ok(li2))
-				continue;
-			st = flow_stats_for(li2);
-			if (!st)
-				continue;
-			if (READ_ONCE(st->queued) == 0)
-				continue;
-			__sync_fetch_and_sub(&st->queued, 1ULL);
-			break;
+	/* Fallback DSQ is safety only. It stays empty unless no live target exists. */
+	/* Queued was charged to the enqueue LLC at insert, zero when no live */
+	/* target existed. The dec below takes a best effort victim with backlog */
+	/* so the total stays close with no loss. Stats only best effort with */
+	/* saturation at zero, a race stays a stats glitch. Single peek per */
+	/* queue serves the allowed test plus the move plus the forward wake. */
+	{
+		struct task_struct *fph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
+
+		if (fph) {
+			if (!flow_cpu_allowed((s32)c, fph)) {
+				flow_forward_from_peeked(fph, llc, (u32)FLOW_MAX_LLCS);
+			} else if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
+				u32 li2;
+
+				flow_stat_inc(llc, 1);
+				bpf_for(li2, 0, FLOW_MAX_LLCS) {
+					struct flow_llc_stats *st;
+					if ((u64)li2 >= flow_nr_llcs)
+						break;
+					if (!flow_llc_ok(li2))
+						continue;
+					st = flow_stats_for(li2);
+					if (!st)
+						continue;
+					if (READ_ONCE(st->queued) == 0)
+						continue;
+					__sync_fetch_and_sub(&st->queued, 1ULL);
+					break;
+				}
+				return;
+			}
 		}
-		return;
-	} else if (!flow_dsq_head_allowed((u64)FLOW_FALLBACK_DSQ, c)) {
-		flow_forward_kick((u64)FLOW_FALLBACK_DSQ, llc);
 	}
 }
 

@@ -19,12 +19,16 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 #include "vtime.bpf.h"
+#include "preempt.bpf.h"
 
 /*
  * Pop one entry from a pair queue into the local LLC queue.
- * Peek is a hint only, pop is truth. Null task is stale.
- * Queued is charged to the enqueue LLC. Dispatched stays on the
- * dispatch LLC. Returns 1 when a task reached the local queue.
+ * Empty peek stays silent with no counter move. Peek is hint only,
+ * pop is truth. A pop with no task is stale and counts through the
+ * stale helper. Queued is charged to the enqueue LLC and dispatched
+ * stays on the dispatch LLC. Thief counts steal plus fallback, victim
+ * keeps the queued dec with saturation at zero. Returns 1 when a task
+ * reached the local queue.
  * A task that cannot run on the thief goes back to the victim
  * queue with no counter move and no loss. Stale entries retry
  * bounded so one bad entry never stalls dispatch. Four attempts
@@ -85,7 +89,12 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		/* runs on an allowed CPU. Local uses FIFO, shared keeps */
 		/* vtime order. Dispatch synthesizes zero flags, same as */
 		/* the normal path. One victim lookup serves both paths. */
-		/* A bounce wakes the victim owner with no move no loss. */
+		/* A bounce wakes the victim owner with no move no loss. Both the */
+		/* exiting and the disallowed bounce share the constrained kick */
+		/* with no split. Preempt when the owner runs far ahead past the */
+		/* tail, else wake idle, else count a skip with no wake. Owner */
+		/* plus vtime are copied before release so the kick never touches */
+		/* a released task, and the kick re-validates the mask. */
 		if (p->flags & PF_EXITING) {
 			if (flow_cpu_allowed((s32)cpu, p)) {
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)cpu;
@@ -107,13 +116,8 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 				scx_bpf_dsq_insert_vtime(p, vdsq,
 							 (u64)FLOW_EXIT_SLICE_NS,
 							 ins_vtime, 0);
+				flow_kick_constrained(owner, (s64)ins_vtime, p, victim);
 				bpf_task_release(p);
-				if (owner >= 0 && flow_cpu_ok((u32)owner)) {
-					scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
-					flow_stat_inc(victim, 12);
-				} else {
-					flow_stat_inc(victim, 13);
-				}
 				return 0;
 			}
 		}
@@ -123,13 +127,8 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 			if (!flow_dsq_ok(vdsq))
 				vdsq = (u64)FLOW_FALLBACK_DSQ;
 			scx_bpf_dsq_insert_vtime(p, vdsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
+			flow_kick_constrained(owner, (s64)ins_vtime, p, victim);
 			bpf_task_release(p);
-			if (owner >= 0 && flow_cpu_ok((u32)owner)) {
-				scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
-				flow_stat_inc(victim, 12);
-			} else {
-				flow_stat_inc(victim, 13);
-			}
 			return 0;
 		}
 		dsq = flow_llc_dsq(llc);
