@@ -23,16 +23,20 @@ Virtual time is saturated. Adding one fixed slice of one million nanos
 caps at max on overflow with no wrap, and weight scaled charges split
 used nanos into slice units plus rest so the multiply never overflows,
 then cap at max with a monotonic last plus one floor on the pair path
-only. The overrun penalty reuses the same fixed uniform slice with the
-same saturation and no knob as implicit deadline throttling: base charge
-scales by weight while the extra quantum stays fixed, so default doubles,
-heavy multiplies a hundredfold to leave the head, and light already sits
-behind on base charge. A scaled penalty would keep the heavy hog near the
-head. The postponed vtime moves behind the pair sequence through the floor
-and behind LLC order directly, steal reclaims idle time work conserving,
-and saturated max keeps the vtime capped while the count still grows.
-Pinned skips the penalty through one extra condition with no new branch
-shape, exiting bypasses through early returns. Slice never scales, preempt
+only. The overrun debt scales with the award with no knob as implicit
+deadline throttling: one uniform slice at overrun plus extra uniform
+slices for a total of q, each saturating at max, so a one quantum burn
+pays two slices while a three quantum burn pays four slices and cannot
+hold the head three times longer on one slice of debt. Base charge
+scales by weight while extra stays uniform, so default about doubles at
+q one and heavy still steps far behind at q three, with light already
+behind on base charge. The postponed vtime moves behind the pair
+sequence through the floor and behind LLC order directly, steal reclaims
+idle time work conserving, and saturated max keeps the vtime capped
+while the count still grows. Pinned skips the penalty plus the award
+and stays at the scaled charge with local FIFO order, exiting bypasses
+through early returns. Slice runs one slice times q with no weight scale
+on the extra part and no order shift for extra. Preempt
 needs a gap of at least five hundred thousand nanos past a tail of one
 hundred twenty five thousand nanos with both sides boosted by one fixed
 slice of one million nanos for latency tasks, and the exiting slice stays
@@ -40,7 +44,7 @@ at one thousand nanos. The constrained kick returns one on a preempt else
 zero, so enqueue plus mask callers count latency wins with the class in
 hand while forward plus steal callers drop the return with no shape
 change. Pair plus fallback share one kick site per enqueue with no storm. The transient zero remain on overrun refreshes at running
-time from the kernel slice.
+time from the kernel slice, now clamped at three quanta with no drop.
 
 Frequency hints are neutral for placement with bounded integer math only.
 Sampling caps the raw ratio at full speed then blends three parts prior
@@ -53,10 +57,12 @@ value. Time uses monotonic nanos with zero plus missing plus reversed
 guards that keep the prior level. Smooth plus hint plus apply stay
 identical with integer math and a bound of four.
 
-Stats offsets 0 through 19 stay frozen for compat with an append only tail
-through 23, fallback equals pair full plus duplicate plus stale, and steal
-equals pair plus LLC. Overrun counts events and penalty counts slices one
-to one by design on the enqueue LLC, blocked counts still runnable stops
+Stats offsets 0 through 23 stay frozen for compat with an append only tail
+through 25 holding extra award plus total quanta, fallback equals pair
+full plus duplicate plus stale, steal equals pair plus LLC, and total
+equals penalty plus extra per award and on deltas. Overrun counts events
+and penalty counts one per overrun on the enqueue LLC, extra counts q
+minus one and total counts q there, blocked counts still runnable stops
 with no penalty on the cached LLC with zero fallback, covering preemptions
 plus slice expiry plus migrations. Escape counts streak preempts on the
 enqueue LLC, orphan counts mask change kicks with a live allowed owner
@@ -68,14 +74,20 @@ wins with the class in hand on the enqueue plus queued LLCs, and rescue
 counts old waits that step the hold down on the running LLC. The history
 classifier uses bit math only with no loop and no map use, and the offset
 subtracts one fixed slice with zero saturation one shot with no
-accumulation. Streak caps at
+accumulation. Score stays per CPU with no cross average while the hold
+travels in the task pad with steal preserving slice length only, pinned
+keeps one slice with no award even on a stale pad, invalid CPU keeps a
+conservative middle default. Growth needs a full base burn with raw top
+so a partial extended burn still decays by design with no inversion from
+latency history. Streak caps at
 twice the pop retry bound with clean decay so a hold ends but never
-sticks. Userspace folds all tails with
-len guards at one sixty eight plus one seventy six plus one eighty four
-plus one ninety two so harness can correlate boost growth with latency
+sticks, now with debt scaled to q. Userspace folds all tails with
+len guards at two hundred plus two hundred eight for twenty four plus
+twenty five alongside one sixty eight plus one seventy six plus one eighty
+four plus one ninety two so harness can correlate boost growth with latency
 placement plus preempt growth with hog displacement plus rescue growth
-with old wait decay.
-The penalty adds one straight line condition with saturating adds and no new
+with old wait decay plus extra share via deltas.
+Extra award adds bounded branches with saturating adds and no new
 loop, map, or program. Deferred with fallback is per task period plus
 deadline with no ABI so period stays one slice, global admission with no
 reject so dampening stands in, bandwidth plus PI inheritance with no lock
@@ -85,6 +97,20 @@ plus reclaim with no async path so enqueue postponement plus work conserving
 steal stand in. The build carries 26 programs with 16 flow plus 10 lib,
 all passing with no new program added
 for documentation. Stacks stay at or below five hundred twelve bytes,
-hot paths stay within two percent with the aggregate neutral, and
-bytecode plus ELF differences from comment edits land
+hot path growth past the two percent note is accepted as a feature
+waiver with no shrink here: extra award plus hysteresis plus scaled debt
+necessarily add branches on the enqueue path, veristat still shows 26 of
+26 pass with stacks within bound, WS perf proof stays owed with no live
+run here. Bytecode plus ELF differences from comment edits land
 in comment plus line info only.
+Open deferred live with no run here: strict tail plus share plus soak
+gates with per award log join for share via deltas, one hundred twenty
+second full burn plus probe for all five questions, WS perf sizing.
+Accepted exceptions with no history rewrite: tracked docs plus changelog
+stay committed with forward ignore only, per CPU hold row stays shadow,
+queued dec stays stats only self healing, no context insert stays no loss,
+exit dump length stays operator trusted default zero, pre init live reads
+fail open safe, freq ring stays shadow post mortem, cross CPU races stay
+benign self healing, prior safe directory plus tag plus checkout pins stay
+docs only. Kick plus streak plus stamp plus decay plus atomics plus mask
+costs stay as documented rare or constant with no action.
