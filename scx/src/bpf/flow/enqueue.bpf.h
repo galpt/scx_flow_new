@@ -38,6 +38,7 @@
 #include "guards.bpf.h"
 #include "vtime.bpf.h"
 #include "cgroup.bpf.h"
+#include "freq.bpf.h"
 #include "preempt.bpf.h"
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
@@ -63,6 +64,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 pair_u = 0;
 	int have_pair = 0;
 	bool pinned = false;
+	u64 extra_q = 1;
 	struct flow_task_ctx *t;
 	scx_dhq_t *dhq = NULL;
 	int ret;
@@ -206,17 +208,25 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				s64 charged;
 				u64 used;
 				u64 rem = t->slice_rem;
-				if (rem > (u64)FLOW_SLICE_NS)
-					rem = (u64)FLOW_SLICE_NS;
-				if ((u64)FLOW_SLICE_NS >= rem)
-					used = (u64)FLOW_SLICE_NS - rem;
-				else
-					used = 0;
+				u64 rem_raw = rem;
+				if (rem > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
+					rem = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
+				{
+					u64 rem_c = rem;
+					if (rem_c > (u64)FLOW_SLICE_NS)
+						rem_c = (u64)FLOW_SLICE_NS;
+					if ((u64)FLOW_SLICE_NS >= rem_c)
+						used = (u64)FLOW_SLICE_NS - rem_c;
+					else
+						used = 0;
+				}
 				if (used > (u64)FLOW_SLICE_NS)
 					used = (u64)FLOW_SLICE_NS;
 				/* Scaled charge. Heavier pays less vtime for */
 				/* the same burnt slice. Saturation plus the */
-				/* monotonic floor below are unchanged. */
+				/* monotonic floor below are unchanged. Extra */
+				/* slice never scales by weight and never moves */
+				/* order, only run length once picked. */
 				charged = flow_cgroup_charge(t->vtime, used, w);
 				/* Overrun postponement. No remain means the full */
 				/* slice burnt, so add one extra fixed uniform slice */
@@ -231,11 +241,57 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				/* max the vtime stays capped while the count still */
 				/* grows for visibility. Pinned skips the penalty and */
 				/* stays at the scaled charge, exiting never reaches */
-				/* here through the early returns above. */
-				if (rem == 0 && !pinned) {
+				/* here through the early returns above. Extra award */
+				/* shares this carry with no remain on non pinned */
+				/* alongside fifteen with no fast path for pinned. */
+				/* Order stays strict priority lowest boosted time */
+				/* with ties to strand A. Score plus hold give q of */
+				/* one plus extra with top first then middle then zero. */
+				if (rem_raw == 0 && !pinned) {
+					u64 score = 50;
+					u64 prev = 0;
+					u64 ex = 1;
+					u64 q = 2;
 					charged = flow_vtime_add_penalty(charged);
 					flow_stat_inc(llc, 14);
 					flow_stat_inc(llc, 15);
+					if (flow_cpu_ok(cpu)) {
+						struct flow_extra_state *es = &flow_extra_state[cpu];
+						u64 st = es->score;
+						u64 pv;
+						if (es->n_growth == 0 && es->n_decay == 0) {
+							st = 50;
+						} else if (st > (u64)FLOW_SCORE_HMAX) {
+							st = (u64)FLOW_SCORE_HMAX;
+						}
+						score = st;
+						pv = es->prev_extra;
+						if (pv > (u64)FLOW_MAX_EXTRA)
+							pv = 0;
+						if (t->pad[1] <= (u8)2)
+							pv = (u64)t->pad[1];
+						prev = pv;
+						ex = flow_score_extra(st, pv);
+						q = flow_score_quanta(ex);
+						if (q < 1ULL)
+							q = 1ULL;
+						if (q > (u64)FLOW_MAX_QUANTA)
+							q = (u64)FLOW_MAX_QUANTA;
+						if (ex > (u64)FLOW_MAX_EXTRA)
+							ex = (u64)FLOW_MAX_EXTRA;
+						es->prev_extra = ex;
+					} else {
+						if (t->pad[1] <= (u8)2)
+							prev = (u64)t->pad[1];
+						else
+							prev = 0;
+						score = 50;
+						ex = flow_score_extra(score, prev);
+						q = flow_score_quanta(ex);
+					}
+					extra_q = q;
+					t->pad[0] = (u8)q;
+					t->pad[1] = (u8)ex;
 				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					/* Pair only floor. LLC order uses the vtime */
@@ -398,16 +454,22 @@ insert_only:
 	/* victim with backlog so the total stays close with no loss. The */
 	/* fallback DSQ has no per queue stats, so the enqueue LLC carries */
 	/* the queued count and the dispatch LLC carries the dispatched count. */
+	/* Awarded tasks run one slice times q with no other scale and no */
+	/* weight scale on the extra part. Pinned keeps one slice with no */
+	/* award. Order stays strict priority with no vtime shift for extra. */
 	{
 		u64 dsq;
+		u64 sl = (u64)FLOW_SLICE_NS * extra_q;
 
+		if (extra_q < 1ULL || extra_q > (u64)FLOW_MAX_QUANTA)
+			sl = (u64)FLOW_SLICE_NS;
 		if (tgt < 0)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
 			dsq = flow_llc_dsq(llc);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
-		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)key_v, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, dsq, sl, (u64)key_v, enq_flags);
 		flow_stat_inc(llc, 0);
 	}
 do_kick:
@@ -423,10 +485,12 @@ do_kick:
 		flow_stat_inc(llc, 22);
 }
 
-/* Enqueue vtime budgets stay fixed slice 1ms plus preempt */
+/* Enqueue vtime budgets stay fixed slice 1ms times q plus preempt */
 /* threshold 500us plus tail 125us plus latency offset 1ms, weight scaling */
 /* saturates with last plus one floor on the pair path only, pinned skips */
-/* the penalty plus the offset while exiting bypasses through early returns. */
+/* the penalty plus the offset plus the award while exiting bypasses */
+/* through early returns. Extra changes run length only with no order */
+/* shift and no weight scale on the extra part. */
 /* Docs only, no logic change. */
 
 #endif

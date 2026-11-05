@@ -273,7 +273,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			strand = t->strand;
 	}
 	sl = p->scx.slice;
-	if (!sl || sl > (u64)FLOW_SLICE_NS)
+	if (!sl || sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
 		sl = (u64)FLOW_SLICE_NS;
 	rs = &flow_running_state[cpu];
 	ng = rs->gen + 1;
@@ -343,8 +343,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (!t)
 		return;
 	sl = p->scx.slice;
-	if (sl > (u64)FLOW_SLICE_NS)
-		sl = (u64)FLOW_SLICE_NS;
+	if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
+		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
 	/* Single snapshot for the stop. True when the task reads not */
 	/* runnable with remain above zero at this stop else false. One */
 	/* read serves the score path below with no second read for the */
@@ -469,8 +469,8 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (rs->gen == 0)
 		return;
 	sl = p->scx.slice;
-	if (sl > (u64)FLOW_SLICE_NS)
-		sl = (u64)FLOW_SLICE_NS;
+	if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
+		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
 	rs->slice_rem = sl;
 	/* Streak step shares the stop cap at twice the pop retry bound */
 	/* with no new knob and no wrap. A mid slice tick with remain */
