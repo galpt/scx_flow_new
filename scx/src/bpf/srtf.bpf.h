@@ -4,7 +4,8 @@
  *
  * Each task keeps a remaining time estimate. The estimate mixes the old
  * value with the fresh sample, keeping half of the old value and
- * adding half of the sample. It starts from a fixed seed
+ * adding half of the sample. Stopping refines the mix with the wait
+ * and the remain through fixed weights. It starts from a fixed seed
  * and is clamped to a floor and a ceiling. Small remaining times select
  * the latency queue and large estimates select the batch queues.
  * The queue choice preempts through the kick path. Waits that grow
@@ -34,6 +35,44 @@ static __always_inline u64 flow_sjf_next(u64 old, u64 sample)
 	u64 keep = o - (o >> 1);
 	u64 add = s >> 1;
 	u64 v = keep + add;
+	return flow_sjf_clamp(v);
+}
+/* Linear burst estimate with fixed weights. Keeps half of the old value
+ * and half of the sample, then takes away a small part of the wait and
+ * a small part of the remain. Wait and remain arrive in millis and move
+ * to nanos with saturation. All weights use eight fractional bits. The
+ * sum shifts down by eight and clamps between floor and cap. Any step
+ * that would overflow falls back to the half blend. */
+static __always_inline u64 flow_pred_next(u64 old, u64 sample, u64 wait_ms, u64 rem_ms)
+{
+	u64 o = old ? flow_sjf_clamp(old) : (u64)FLOW_SJF_INIT_NS;
+	u64 s = flow_sjf_clamp(sample ? sample : (u64)FLOW_SJF_INIT_NS);
+	u64 wait_ns;
+	u64 rem_ns;
+	u64 wpart;
+	u64 rpart;
+	u64 acc;
+	u64 sub;
+	u64 v;
+	if (wait_ms > (u64)18446744073709ULL)
+		return flow_sjf_next(old, sample);
+	wait_ns = wait_ms * (u64)1000000ULL;
+	if (rem_ms > (u64)18446744073709ULL)
+		return flow_sjf_next(old, sample);
+	rem_ns = rem_ms * (u64)1000000ULL;
+	if (wait_ns > (u64)4611686018427387903ULL)
+		return flow_sjf_next(old, sample);
+	if (rem_ns > (u64)2305843009213693951ULL)
+		return flow_sjf_next(old, sample);
+	wpart = wait_ns << 2;
+	rpart = rem_ns << 3;
+	if (wpart > (u64)0xffffffffffffffffULL - rpart)
+		return flow_sjf_next(old, sample);
+	acc = (o << 7) + (s << 7);
+	sub = wpart + rpart;
+	if (sub > acc)
+		return (u64)FLOW_SJF_FLOOR_NS;
+	v = (acc - sub) >> 8;
 	return flow_sjf_clamp(v);
 }
 static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)

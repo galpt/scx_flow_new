@@ -8,7 +8,8 @@
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot used by the kick check. Stopping folds burnt
- * time into the burst estimate and tracks consecutive full burns.
+ * time plus wait plus remain into the burst estimate through fixed
+ * weights and tracks consecutive full burns.
  * Tick refreshes the remaining slice. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
@@ -290,6 +291,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 remain;
 	u64 len;
 	u64 used;
+	u64 wait_ms;
+	u64 rem_ms;
+	u64 now;
 	u64 est;
 	(void)runnable;
 	if (task_cpu < 0)
@@ -308,7 +312,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (remain > len)
 		remain = len;
 	used = flow_hog_used(len, remain);
-	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
+	now = bpf_ktime_get_ns();
+	wait_ms = 0;
+	rem_ms = remain / (u64)1000000ULL;
+	if (now && t->enq_ns && now > t->enq_ns)
+		wait_ms = (now - t->enq_ns) / (u64)1000000ULL;
+	est = flow_pred_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS, wait_ms, rem_ms);
 	t->burst_ns = est;
 	if (flow_is_pinned(p)) {
 		rs->streak = 0;
