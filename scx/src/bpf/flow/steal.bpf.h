@@ -85,6 +85,7 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		/* runs on an allowed CPU. Local uses FIFO, shared keeps */
 		/* vtime order. Dispatch synthesizes zero flags, same as */
 		/* the normal path. One victim lookup serves both paths. */
+		/* A bounce wakes the victim owner with no move no loss. */
 		if (p->flags & PF_EXITING) {
 			if (flow_cpu_allowed((s32)cpu, p)) {
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)cpu;
@@ -100,21 +101,35 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 			}
 			{
 				u64 vdsq = flow_llc_dsq(victim);
+				s32 owner = flow_first_allowed(p);
 				if (!flow_dsq_ok(vdsq))
 					vdsq = (u64)FLOW_FALLBACK_DSQ;
 				scx_bpf_dsq_insert_vtime(p, vdsq,
 							 (u64)FLOW_EXIT_SLICE_NS,
 							 ins_vtime, 0);
 				bpf_task_release(p);
+				if (owner >= 0 && flow_cpu_ok((u32)owner)) {
+					scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
+					flow_stat_inc(victim, 12);
+				} else {
+					flow_stat_inc(victim, 13);
+				}
 				return 0;
 			}
 		}
 		if (!flow_cpu_allowed((s32)cpu, p)) {
 			u64 vdsq = flow_llc_dsq(victim);
+			s32 owner = flow_first_allowed(p);
 			if (!flow_dsq_ok(vdsq))
 				vdsq = (u64)FLOW_FALLBACK_DSQ;
 			scx_bpf_dsq_insert_vtime(p, vdsq, (u64)FLOW_SLICE_NS, ins_vtime, 0);
 			bpf_task_release(p);
+			if (owner >= 0 && flow_cpu_ok((u32)owner)) {
+				scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
+				flow_stat_inc(victim, 12);
+			} else {
+				flow_stat_inc(victim, 13);
+			}
 			return 0;
 		}
 		dsq = flow_llc_dsq(llc);

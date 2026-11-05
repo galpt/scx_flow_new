@@ -29,6 +29,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!p)
 		return;
 	s32 task_cpu = scx_bpf_task_cpu(p);
+	s32 tgt;
 	u32 cpu;
 	u32 llc = 0;
 	u32 strand = (u32)SCX_DHQ_STRAND_A;
@@ -49,18 +50,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 old_flags;
 	if (task_cpu < 0)
 		task_cpu = bpf_get_smp_processor_id();
-	if (p->cpus_ptr && !flow_cpu_allowed(task_cpu, p)) {
-		u32 first = bpf_cpumask_first(p->cpus_ptr);
-		if (flow_cpu_ok(first))
-			task_cpu = (s32)first;
-	}
-	cpu = (u32)task_cpu;
-	if (flow_cpu_ok(cpu)) {
+	/* Single constrained target drives inserts plus kicks. Keeps the */
+	/* hint when allowed, else falls back to the first allowed CPU. */
+	/* Fails closed to minus one with no move when no target exists. */
+	tgt = flow_constrained_target(task_cpu, p);
+	if (tgt >= 0 && flow_cpu_ok((u32)tgt)) {
 		struct flow_cpu_ctx *cc;
-		u32 key = cpu;
+		u32 key = (u32)tgt;
+		cpu = (u32)tgt;
 		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
 		if (cc && flow_llc_ok(READ_ONCE(cc->llc_id)))
 			llc = READ_ONCE(cc->llc_id);
+	} else {
+		cpu = (u32)FLOW_MAX_CPUS;
 	}
 	kv = (s64)p->scx.dsq_vtime;
 	use_v = kv;
@@ -92,13 +94,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		/* without context still needs no loss, so try local */
 		/* then fall back to the LLC queue with a minimal slice. */
 		if (p->flags & PF_EXITING) {
-			if (task_cpu >= 0 && flow_cpu_ok((u32)task_cpu) &&
-			 flow_cpu_allowed(task_cpu, p)) {
-				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+			if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
+				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS,
 						 enq_flags);
 				flow_stat_inc(llc, 0);
-				flow_kick_idle_only(task_cpu, p, llc);
+				flow_kick_idle_only(tgt, p, llc);
 				return;
 			}
 			{
@@ -109,7 +110,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 							 (u64)FLOW_EXIT_SLICE_NS,
 							 (u64)kv, enq_flags);
 				flow_stat_inc(llc, 0);
-				flow_kick_idle_only(task_cpu, p, llc);
+				flow_kick_idle_only(tgt, p, llc);
 				return;
 			}
 		}
@@ -130,12 +131,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	/* exiting wakeup always queues. Bound check is best effort. */
 	/* Hotplug needs restart, same risk as the pinned path. */
 	if (p->flags & PF_EXITING) {
-		if (task_cpu >= 0 && flow_cpu_ok((u32)task_cpu) &&
-		 flow_cpu_allowed(task_cpu, p)) {
-			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
+			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
 			flow_stat_inc(llc, 0);
-			flow_kick_idle_only(task_cpu, p, llc);
+			flow_kick_idle_only(tgt, p, llc);
 			return;
 		}
 		{
@@ -145,7 +145,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS,
 						 (u64)kv, enq_flags);
 			flow_stat_inc(llc, 0);
-			flow_kick_idle_only(task_cpu, p, llc);
+			flow_kick_idle_only(tgt, p, llc);
 			return;
 		}
 	}
@@ -261,15 +261,17 @@ insert_only:
 	/* This keeps them out of shared LLC queues so no other CPU can */
 	/* steal them off mask. Falls through to the LLC queue only when */
 	/* no allowed local target exists as safety against loss. */
+	/* The single constrained target drives the local insert plus the */
+	/* shared fallback kick with no stale split. */
 	if (pinned) {
-		if (task_cpu >= 0 && flow_cpu_allowed(task_cpu, p)) {
-			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)task_cpu;
+		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
+			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_NS, enq_flags);
 			flow_stat_inc(llc, 0);
 			if (!t)
-				flow_kick_idle_only(task_cpu, p, llc);
+				flow_kick_idle_only(tgt, p, llc);
 			else
-				flow_kick_for_enq(task_cpu, use_v, p, llc);
+				flow_kick_constrained(tgt, use_v, p, llc);
 			return;
 		}
 	}
@@ -283,9 +285,9 @@ insert_only:
 			flow_stat_inc(llc, 0);
 			flow_occupancy_set(llc, dhq, cap);
 			if (!t)
-				flow_kick_idle_only(task_cpu, p, llc);
+				flow_kick_idle_only(tgt, p, llc);
 			else
-				flow_kick_for_enq(task_cpu, use_v, p, llc);
+				flow_kick_constrained(tgt, use_v, p, llc);
 			return;
 		}
 		/* Pair full. Count the spill to the LLC queue in the */
@@ -307,9 +309,9 @@ insert_only:
 		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (!t)
-			flow_kick_idle_only(task_cpu, p, llc);
+			flow_kick_idle_only(tgt, p, llc);
 		else
-			flow_kick_for_enq(task_cpu, use_v, p, llc);
+			flow_kick_constrained(tgt, use_v, p, llc);
 	}
 }
 
