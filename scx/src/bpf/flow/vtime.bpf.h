@@ -47,6 +47,6 @@ static __always_inline s64 flow_vtime_add_penalty(s64 v)
 
 /* Vtime adds one fixed slice with max saturation, no wrap, */
 /* no knob. Penalty reuses the same uniform slice as the throttle. */
-/* Docs only, no logic change. */
+/* Enqueue stamp never shifts vtime. Docs only, no logic change. */
 
 #endif

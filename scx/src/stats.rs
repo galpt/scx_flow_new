@@ -74,13 +74,22 @@ pub struct Metrics {
     #[stat(desc = "Stops that leave the task still runnable")]
     #[serde(default)]
     pub blocked: u64,
+    #[stat(desc = "Streak preempts that end a hog hold")]
+    #[serde(default)]
+    pub hog_escape: u64,
+    #[stat(desc = "Mask change kicks for queued tasks")]
+    #[serde(default)]
+    pub orphan_kick: u64,
+    #[stat(desc = "Forwards where the head cannot run here")]
+    #[serde(default)]
+    pub hol_forward: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
@@ -99,6 +108,9 @@ impl Metrics {
             self.overrun,
             self.domino_penalty,
             self.blocked,
+            self.hog_escape,
+            self.orphan_kick,
+            self.hol_forward,
         )?;
         Ok(())
     }
@@ -123,6 +135,9 @@ impl Metrics {
             overrun: self.overrun.wrapping_sub(rhs.overrun),
             domino_penalty: self.domino_penalty.wrapping_sub(rhs.domino_penalty),
             blocked: self.blocked.wrapping_sub(rhs.blocked),
+            hog_escape: self.hog_escape.wrapping_sub(rhs.hog_escape),
+            orphan_kick: self.orphan_kick.wrapping_sub(rhs.orphan_kick),
+            hol_forward: self.hol_forward.wrapping_sub(rhs.hol_forward),
         }
     }
 }

@@ -1,5 +1,82 @@
 # Changelog
 
+## 5.0.13
+
+Pinned hold escape with streak plus orphan plus forward visibility.
+
+Culprit is a local hold on a single LLC host under full burn plus a mask
+move with no constrained wake. Sixteen burn threads hold every CPU at
+large virtual time while a pinned wait on CPU zero with zero virtual time
+waits in the local queue through a mask move, and the owner keeps burning
+with tail idle wakes that never preempt. The watchdog reports a runnable
+stall past twenty three seconds on CPU zero with the pinned task queued
+and the holder running, and the forward plus mask paths leave no count.
+The fix keeps a pinned fast path that preempts past the tail with no gap
+check since a pinned wait cannot run elsewhere, turns an idle wake into a
+preempt when the streak reaches the pop retry bound of four with an escape
+count, stamps the enqueue time with the monotonic clock with no virtual
+time shift, keeps the penalty on non pinned carry with no remain only,
+keeps pair spill plus occupancy plus queued guard identical, keeps the
+queued mask path on the queue with no rewrite through the constrained
+wake plus an orphan count, decays the hold on an old wait and clears it
+on a pinned start, steps the hold with saturation on full burns at stop
+plus tick, keeps blocked plus frequency behavior, writes the raw sample
+into a four entry shift ring with the smooth plus hint plus apply
+identical, and counts head forwards on the dispatch LLC with order frozen.
+
+Task state adds enqueue time at the tail for seventy two bytes. Running
+state adds hold streak plus reserved for forty eight bytes. Frequency
+state adds four raw samples for forty eight bytes. Counters add escape
+plus orphan plus forward at seventeen plus eighteen plus nineteen for one
+hundred sixty bytes with zero through sixteen frozen. Docs for zero
+through sixteen stay frozen with the new tail append only. No new map
+with bounds at one thousand twenty four plus sixty four plus eight plus
+thirty two plus four thousand ninety six. Guards plus virtual time plus
+cgroup plus steal plus main stay frozen with strict priority lowest
+virtual time strand A, fixed slice of one millisecond, retry of four,
+and imbalance of three. Userspace folds the new tails with serde defaults
+plus length guards plus interval deltas and regenerates bindings only.
+
+Knob free with no new tunable, verifier fail closed on guards versus fail
+open on weights with saturation and no wrap, append only stats, pinned
+FIFO with penalty skip, frozen order, and restart only for hotplug plus
+reinstall. Fallback keeps kick plus escalation with no hist if the
+verifier regresses. Slice, scale, weight, order, local drain, exiting
+minimal, and arena touch stay frozen with clean room code and plain prose
+comments.
+
+Guards keep first allowed plus constrained target failing closed with no
+move. Enqueue keeps one target for inserts plus pinned fast path on the
+local queue plus constrained elsewhere. Dispatch keeps pair then LLC then
+fallback drain with bounded retries and no loss plus forward counts.
+Stats keep offsets zero through sixteen frozen with tail seventeen escape
+plus eighteen orphan plus nineteen forward append only, fallback equals
+four plus five plus six, steal equals nine plus ten, and gauges use set
+only. Escape charges the enqueue LLC, orphan uses the queued LLC, forward
+uses the dispatch LLC, and the enqueue stamp never shifts virtual time.
+Userspace folds all tails with length guards plus compat defaults and
+interval deltas as counters, so harness can correlate escape growth with
+hold ends plus orphan growth with mask moves plus forward growth with head
+blocks. Slice, scale, weight, order, local drain, exiting minimal, and
+arena touch stay frozen with clean room code and plain prose comments.
+
+Version syncs Cargo plus installer plus guard to 5.0.13 with the fork ref
+b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork galpt/scx frozen. The
+overlay Cargo lock stays stale by design and syncs through cargo update
+minus p scx_flow before any locked build. The installer still requires
+6.12 plus for cgroup hooks while 7.2 plus stays the subsystem
+recommendation. Reinstall needs a restart with no live transition.
+Rollback retains the prior 5.0.12 snapshot append only. The exit dump
+length flag stays optional with default zero preserving dump size.
+
+Verification is build plus verify only with no live mutation, no force,
+no reboot, and no push. Guard plus fmt plus clippy plus build plus test
+plus smoke plus veristat twenty six of twenty six pass with stack at or
+below five hundred twelve bytes and insn within two percent. Rollback
+stays append only.
+
+Base is archive/5.0.12 at 79ab39f90 with no other tree change.
+
 ## 5.0.12
 
 Overrun hardening with one extra slice plus blocked visibility.

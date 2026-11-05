@@ -75,6 +75,7 @@ s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];
 
 /* Maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
 /* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */
-/* single ownership. Docs only, no logic change. */
+/* single ownership. Appended tails stay in place with no new map. */
+/* Docs only, no logic change. */
 
 #endif

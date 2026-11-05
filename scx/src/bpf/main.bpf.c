@@ -13,15 +13,20 @@
  * adds one extra fixed uniform slice with saturation and counts overrun
  * plus penalty, which moves a full burn hog behind the head. Pinned
  * carry skips the penalty and exiting bypasses through early returns.
- * Stops that leave the task still runnable count as blocked on the
- * cached LLC with no vtime penalty. Stats are per LLC with queued plus
- * overrun plus penalty charged to the enqueue LLC and dispatched counted
- * on the dispatch LLC. Pair mode is
+ * Pinned local wakes through the fast path with streak cover so a hold
+ * ends. Stops that leave the task still runnable count as blocked on the
+ * cached LLC with no vtime penalty. Streak counts full burns and ends in
+ * a preempt at the bound. Hist keeps four raw samples for sizing. Mask
+ * change on a queued task keeps the queue and wakes the owner with an
+ * orphan count. A head that cannot run here forwards one wake with a
+ * forward count. Stats are per LLC with queued plus overrun plus penalty
+ * plus escape charged to the enqueue LLC, orphan on the queued LLC, and
+ * dispatched plus forward on the dispatch LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
  * pairs, LLC queues. Pair pops retry bounded with no loss on stale
- * entries. Offsets 0-13 stay frozen, tail 14 through 16 is append
- * only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10.
+ * entries. Offsets 0 through 16 stay frozen, tail 17 through 19 is
+ * append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10.
  * No SMT probe runs and each CPU stands single with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -83,5 +88,6 @@ SCX_OPS_DEFINE(flow_ops,
 /* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
 /* Strict priority lowest vtime strand A with frozen steal hierarchy, */
 /* uniform postponement that moves the hog plus blocked tail with no */
-/* penalty, and no SMT probe. */
+/* penalty, plus pinned fast path with streak plus hist plus orphan plus */
+/* forward, and no SMT probe. */
 /* Docs only, no logic change. */

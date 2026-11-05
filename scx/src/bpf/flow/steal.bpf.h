@@ -151,6 +151,7 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 
 /* Steal keeps bounded retry 4 with peek hint plus pop truth, */
 /* victim accounting saturates at zero, exiting uses minimal slice on the */
-/* same victim path. Docs only, no logic change. */
+/* same victim path. Order plus retry stay frozen. */
+/* Docs only, no logic change. */
 
 #endif

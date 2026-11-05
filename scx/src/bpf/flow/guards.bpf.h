@@ -85,6 +85,7 @@ static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct 
 }
 
 /* Guards fail closed on null plus out of bound, no SMT */
-/* probe runs, each CPU stands single. Docs only, no logic change. */
+/* probe runs, each CPU stands single. Pinned plus constrained kicks reuse */
+/* the same guards with no new shape. Docs only, no logic change. */
 
 #endif

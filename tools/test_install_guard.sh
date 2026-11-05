@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.0.12" ] || fail "version not at 5.0.12"
+[ "${want}" = "5.0.13" ] || fail "version not at 5.0.13"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -99,10 +99,10 @@ fi
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
 [ -s "${REPO_DIR}/tools/edf_harness/run.sh" ] || fail "harness scaffold missing run.sh"
 
-# Changelog stays present with the additive 5.0.12 entry.
+# Changelog stays present with the additive 5.0.13 entry.
 [ -s "${REPO_DIR}/CHANGELOG.md" ] || fail "changelog scaffold missing"
-grep -q "5\.0\.12" "${REPO_DIR}/CHANGELOG.md" || fail "changelog version missing"
-grep -q "5\.0\.11" "${REPO_DIR}/CHANGELOG.md" || fail "changelog prior missing"
+grep -q "5\.0\.13" "${REPO_DIR}/CHANGELOG.md" || fail "changelog version missing"
+grep -q "5\.0\.12" "${REPO_DIR}/CHANGELOG.md" || fail "changelog prior missing"
 
 # Deleted Rust mirrors stay deleted with no reappearance.
 # The flow facade plus its helpers stay deleted with constants in

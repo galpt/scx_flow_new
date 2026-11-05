@@ -1,7 +1,8 @@
 # Verifier budgets
 
-This note documents the verifier budgets as built in 5.0.9.
-It is narrative only with no opcode, branch, map, struct, or helper change.
+This note documents the verifier budgets as built with pinned escape
+plus hist cover. It is narrative only with no opcode, branch, map,
+struct, or helper change beyond the appended tails.
 
 All BPF loops are bounded. Dispatch pops retry at most four times per
 queue, which covers a burst of stale plus exiting entries with one pop
@@ -39,18 +40,23 @@ time from the kernel slice.
 
 Frequency hints are neutral for placement with bounded integer math only.
 Sampling caps the raw ratio at full speed then blends three parts prior
-plus one part fresh, and the band asks full speed at or above three
-quarters, half speed at or below one quarter, else keeps the smoothed
+plus one part fresh, writes the raw sample into a four entry shift ring
+with newest at zero for sizing, and the band asks full speed at or above
+three quarters, half speed at or below one quarter, else keeps the smoothed
 value. Time uses monotonic nanos with zero plus missing plus reversed
-guards that keep the prior level.
+guards that keep the prior level. Smooth plus hint plus apply stay
+identical with integer math and a bound of four.
 
-Stats offsets 0 through 13 stay frozen for compat with an append only tail
-through 16, fallback equals pair full plus duplicate plus stale, and steal
+Stats offsets 0 through 16 stay frozen for compat with an append only tail
+through 19, fallback equals pair full plus duplicate plus stale, and steal
 equals pair plus LLC. Overrun counts events and penalty counts slices one
 to one by design on the enqueue LLC, blocked counts still runnable stops
 with no penalty on the cached LLC with zero fallback, covering preemptions
-plus slice expiry plus migrations. Userspace folds all three tails with len
-guards so harness can correlate overrun growth with head movement.
+plus slice expiry plus migrations. Escape counts streak preempts on the
+enqueue LLC, orphan counts mask change kicks on the queued LLC, forward
+counts head forwards on the dispatch LLC. Userspace folds all tails with
+len guards so harness can correlate overrun growth with head movement
+plus escape growth with hold ends.
 The penalty adds one straight line condition with saturating adds and no new
 loop, map, or program. Deferred with fallback is per task period plus
 deadline with no ABI so period stays one slice, global admission with no

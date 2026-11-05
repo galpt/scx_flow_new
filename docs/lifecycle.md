@@ -1,7 +1,8 @@
 # Lifecycle
 
-This note documents the task and cgroup lifecycle as built in 5.0.9.
-It is narrative only with no knob, map, struct, helper, or branch change.
+This note documents the task and cgroup lifecycle as built with pinned
+escape plus orphan plus forward cover. It is narrative only with no knob,
+map, struct, helper, or branch change beyond the appended tails.
 
 Tasks are seeded at init_task with the birth cgroup id and a clamped
 weight hint. The enqueue path reads the live weight map by id, so a plain
@@ -29,14 +30,26 @@ other tasks try the pair queue then spill to the LLC queue. The transient
 zero remain on overrun refreshes at running time from the kernel slice.
 
 Running records the per CPU snapshot, assigns the next generation, and
-clears the queued flag. Stopping folds burnt nanos into the smoothed
-frequency hint and counts a stop that leaves the task still runnable as
-blocked on the cached LLC with no fresh lookup and no vtime penalty, so
-blocking never shifts the deadline. Runnable covers preemptions plus slice
-expiry plus migrations, and an invalid cached LLC falls back to zero with
-no loss. Forward plus victim wakes keep progress when the head cannot run
-on the thief, and hierarchical steal reclaims idle time as the bounded
-push pull analogue. Tick refreshes the remaining slice. Dequeue clears the
+clears the queued flag. A pinned start clears the hold since the wait
+reached the CPU, while a start with an old enqueue steps the hold down by
+one so a single good wait eases the hold with no new knob and a recent
+requeue keeps the hold for consecutive full burns. Stopping folds burnt
+nanos into the smoothed frequency hint and counts a stop that leaves the
+task still runnable as blocked on the cached LLC with no fresh lookup
+and no vtime penalty, so blocking never shifts the deadline. A stop with
+no remain steps the hold with saturation. Runnable covers preemptions
+plus slice expiry plus migrations, and an invalid cached LLC falls back
+to zero with no loss. Enqueue stamps the wait start with the monotonic
+clock with no vtime shift, and a zero clock keeps the prior stamp.
+Pinned local wakes use the fast path that preempts past the tail with no
+gap check plus a streak cover that turns an idle wake into a preempt at
+the bound, so a hold ends. Forward plus victim wakes keep progress when
+the head cannot run on the thief, with a forward count on the dispatch
+LLC and no move no loss, and hierarchical steal reclaims idle time as
+the bounded push pull analogue. A mask change on a queued task keeps the
+queue with no rewrite and wakes the owner through the constrained path
+with an orphan count. Tick steps the hold on a full burn with no freq
+move and refreshes the remaining slice. Dequeue clears the
 queued flag. Exit records through the exit info helper. Single ownership
 holds through the queued flag with duplicate requeues dropped and no loss.
 

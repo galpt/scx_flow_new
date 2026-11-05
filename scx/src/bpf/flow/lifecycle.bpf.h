@@ -10,7 +10,11 @@
  * with no fresh lookup and no vtime penalty, so blocking never shifts
  * the deadline. Runnable covers preemptions plus slice expiry plus
  * migrations, any stop where the task waits elsewhere. An invalid
- * cached LLC falls back to zero with no loss.
+ * cached LLC falls back to zero with no loss. Enqueue time ages waits
+ * with no vtime shift. Streak counts full burns on the running CPU and
+ * ends in a preempt when the bound is reached. Hist keeps the last four
+ * raw samples for sizing. Mask change on a queued task keeps the queue
+ * with no rewrite and wakes the owner through the constrained path.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,6 +28,7 @@
 #include "vtime.bpf.h"
 #include "cgroup.bpf.h"
 #include "freq.bpf.h"
+#include "preempt.bpf.h"
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
@@ -210,8 +215,10 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->llc_id = 0;
 	t->flags = 0;
 	t->pad = 0;
+	t->enq_ns = 0;
 	/* Cgroup tail stays. Init plus move seed it, zero init reads as */
-	/* default, and membership never changes on enable. */
+	/* default, and membership never changes on enable. Enqueue time */
+	/* starts empty with no wait. */
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -267,6 +274,24 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->llc_id = llc;
 	rs->strand = strand;
 	rs->gen = ng;
+	/* Streak switch. A pinned start clears the hold since the wait */
+	/* reached the CPU. A start with an old enqueue ages out one step */
+	/* so a single good wait steps the hold down with no new knob. A */
+	/* recent requeue keeps the hold so consecutive full burns still */
+	/* reach the bound. Reserved stays zero. */
+	if (flow_is_pinned(p)) {
+		rs->hog_streak = 0;
+	} else {
+		u64 enq = READ_ONCE(t->enq_ns);
+		u64 now = bpf_ktime_get_ns();
+		if (enq && now > enq) {
+			u64 age = now - enq;
+			if (age > (u64)FLOW_SLICE_NS * 4ULL) {
+				if (rs->hog_streak > 0)
+					rs->hog_streak -= 1;
+			}
+		}
+	}
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
@@ -298,6 +323,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	t->slice_rem = sl;
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
+	/* Streak step. No remain means the full slice burnt, so step the */
+	/* hold with saturation and no wrap. A clean stop keeps the hold so */
+	/* the running path ages it out. Placement plus vtime plus slice */
+	/* handling stay unchanged. */
+	if (sl == 0) {
+		u32 s = rs->hog_streak;
+
+		if (s < (u32)0xfffffffe)
+			rs->hog_streak = s + 1;
+	}
 	/* Blocked count. A stop that leaves the task still runnable waits */
 	/* elsewhere, which covers preemptions plus slice expiry plus */
 	/* migrations, so count it on the cached LLC with no fresh lookup */
@@ -337,6 +372,14 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (sl > (u64)FLOW_SLICE_NS)
 		sl = (u64)FLOW_SLICE_NS;
 	rs->slice_rem = sl;
+	/* Streak step shares the stop rule with saturation and no wrap. */
+	/* Placement plus slice handling stay unchanged with no freq move. */
+	if (sl == 0) {
+		u32 s = rs->hog_streak;
+
+		if (s < (u32)0xfffffffe)
+			rs->hog_streak = s + 1;
+	}
 }
 
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
@@ -385,9 +428,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 /* time plus deadline plus generation plus queued state with no fresh */
 /* assign. Exiting tasks keep the minimal slice. A queued task keeps the */
 /* charged affinity with no rewrite so later accounting stays on the */
-/* enqueue LLC, and the new owner takes one idle wake with no move. The */
-/* enqueue plus dispatch repair stays as fallback when the hook never */
-/* fires. */
+/* enqueue LLC, and the new owner takes one constrained wake with an */
+/* orphan count and no move. The enqueue plus dispatch repair stays as */
+/* fallback when the hook never fires. */
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -406,15 +449,16 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
+		s64 hv;
 
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
-		if (owner >= 0 && flow_cpu_live((u32)owner)) {
-			scx_bpf_kick_cpu(owner, SCX_KICK_IDLE);
-			flow_stat_inc(qllc, 12);
-		} else {
-			flow_stat_inc(qllc, 13);
-		}
+		hv = READ_ONCE(t->vtime);
+		/* Queued keep. No LLC rewrite so accounting stays on the */
+		/* enqueue LLC. Constrained wake carries the outcome count */
+		/* plus the orphan count with no move no loss. */
+		flow_kick_constrained(owner, hv, p, qllc);
+		flow_stat_inc(qllc, 18);
 		return;
 	}
 	if (p->flags & PF_EXITING)

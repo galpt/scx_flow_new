@@ -119,6 +119,7 @@ static __always_inline s64 flow_cgroup_charge(s64 base, u64 used, u32 w)
 
 /* Cgroup hooks need 6.12 plus, miss plus zero id plus zero */
 /* value plus full map read as default, live lookup heals reversed start, */
-/* slice never scales. Docs only, no logic change. */
+/* slice never scales. Shares stay fail open with no new map. */
+/* Docs only, no logic change. */
 
 #endif

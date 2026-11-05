@@ -3,8 +3,8 @@
  * Flow enqueue with steal-outcome split.
  *
  * Moved from main with the enqueue LLC passed to kick helpers for
- * per LLC 11 plus 12 plus 13 counting. Predicates plus vtime carry
- * plus pair insert plus LLC spill plus occupancy are unchanged.
+ * per LLC 11 plus 12 plus 13 plus 17 counting. Predicates plus vtime
+ * carry plus pair insert plus LLC spill plus occupancy are unchanged.
  * Carry plus fresh vtime increments scale by cpu.weight with slice
  * never scaled and default 100 as exact identity. Non pinned carry
  * with no remain adds one extra fixed uniform slice with saturation
@@ -13,8 +13,10 @@
  * head keeps moving. Pinned carry skips the penalty and stays at the
  * scaled charge with prior behavior while exiting bypasses through
  * the early returns above, and pinned placement stays local FIFO so
- * its vtime never orders shared queues. Single ownership through the
- * queued flag is unchanged with no loss.
+ * its vtime never orders shared queues. Pinned local wakes through the
+ * pinned fast path with streak cover. Enqueue time stamps the wait with
+ * the monotonic clock and never shifts vtime. Single ownership through
+ * the queued flag is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -304,6 +306,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->strand = use_strand;
 		t->llc_id = use_llc;
 	}
+	/* Enqueue stamp. Holds the wait start with no vtime shift. Zero */
+	/* clock keeps the prior stamp so a bad read never erases a wait. */
+	{
+		u64 now = bpf_ktime_get_ns();
+
+		if (now)
+			t->enq_ns = now;
+	}
 	scx_bpf_task_set_dsq_vtime(p, (u64)use_v);
 insert_only:
 	/* Pinned tasks wait in the local queue of the allowed CPU only. */
@@ -314,6 +324,8 @@ insert_only:
 	/* shared fallback kick with no stale split, so one mask walk serves */
 	/* inserts plus kicks. Without context the kick stays idle only with */
 	/* no preempt so the wake stays cheap with no running state lookup. */
+	/* With context the pinned local wake uses the pinned fast path with */
+	/* streak cover so a hold ends with no move. */
 	if (pinned) {
 		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
@@ -322,7 +334,7 @@ insert_only:
 			if (!t)
 				flow_kick_idle_only(tgt, p, llc);
 			else
-				flow_kick_constrained(tgt, use_v, p, llc);
+				flow_kick_pinned(tgt, use_v, p, llc);
 			return;
 		}
 	}

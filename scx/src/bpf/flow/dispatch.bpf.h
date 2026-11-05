@@ -5,9 +5,11 @@
  * Moved from main with 10 counted on the thief for remote LLC steals.
  * Steal aggregate 3 moves with 10 so steal equals 9 plus 10. Order is
  * frozen: own pair, same node pairs, remote pairs, own LLC queue,
- * remote LLC queues, fallback safety net. Pair steals count through
- * the steal helper with 9. Queued_dec stays on the victim with
- * saturation at zero. No knob with fail closed choice.
+ * remote LLC queues, fallback safety net. A head that cannot run here
+ * forwards one wake to the owner with no move no loss and counts hol
+ * forward on the dispatch LLC. Pair steals count through the steal
+ * helper with 9. Queued_dec stays on the victim with saturation at zero.
+ * No knob with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,6 +27,7 @@
 /* Empty stays silent with no counter move. One wake per head plus owner */
 /* keeps no storm with no move no loss. Preempt when the owner runs far */
 /* ahead past the tail, else wake idle, else count a skip with no wake. */
+/* Counts the forward on the dispatch LLC with no order change. */
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 						     u32 llc, u32 slot)
 {
@@ -50,6 +53,7 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 		flow_fwd_vtime[slot] = hv;
 		flow_fwd_owner[slot] = owner;
 	}
+	flow_stat_inc(llc, 19);
 	flow_kick_constrained(owner, hv, ph, llc);
 }
 
@@ -226,6 +230,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 
 /* Dispatch order stays frozen own pair, same node pairs, */
 /* remote pairs, own LLC queue, remote LLC queues, fallback safety net. */
-/* Steal 9 plus 10 accounting unchanged. Docs only, no logic change. */
+/* Steal 9 plus 10 plus hol forward 19 accounting unchanged in order. */
+/* Docs only, no logic change. */
 
 #endif

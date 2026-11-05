@@ -2,9 +2,10 @@
 /*
  * Flow frequency hint helpers.
  *
- * Moved from main with no behavior change. The hint needs the schedutil
- * governor and hardware support and never changes placement. Hint is
- * neutral for the verifier with bounded integer math only.
+ * Moved from main with no placement change. The hint needs the schedutil
+ * governor and hardware support and never changes placement. Hist keeps
+ * the last four raw samples as a shift ring for sizing. Hint is neutral
+ * for the verifier with bounded integer math only and a bound of four.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -23,8 +24,9 @@ static __always_inline u64 flow_freq_smooth(u64 prior, u64 fresh)
 
 /* Fold one stop sample into the per CPU level. Used holds nanos burnt */
 /* this run. Wall holds nanos since the prior stop. Caps the raw ratio */
-/* at full speed then blends it. Zero time plus missing state plus zero */
-/* wall keep the prior level with no change. */
+/* at full speed then blends it. Writes the raw sample into the four */
+/* entry shift ring with integer moves only, newest at zero. Zero time */
+/* plus missing state plus zero wall keep the prior level with no change. */
 static __always_inline void flow_freq_sample(u32 cpu, u64 used)
 {
 	struct flow_freq_state *st;
@@ -50,6 +52,10 @@ static __always_inline void flow_freq_sample(u32 cpu, u64 used)
 	raw = used * (u64)SCX_CPUPERF_ONE / wall;
 	if (raw > (u64)SCX_CPUPERF_ONE)
 		raw = (u64)SCX_CPUPERF_ONE;
+	st->hist[3] = st->hist[2];
+	st->hist[2] = st->hist[1];
+	st->hist[1] = st->hist[0];
+	st->hist[0] = raw;
 	st->level = flow_freq_smooth(st->level, raw);
 }
 
@@ -93,6 +99,6 @@ static __always_inline void flow_freq_apply(s32 cpu)
 
 /* Freq hint stays neutral for placement with bounded */
 /* integer math three parts prior plus one part fresh plus band full, */
-/* half, keep. Docs only, no logic change. */
+/* half, keep, plus a four entry shift ring. Docs only, no logic change. */
 
 #endif
