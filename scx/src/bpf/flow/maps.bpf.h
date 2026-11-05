@@ -66,4 +66,8 @@ s64 flow_dhq_seq[FLOW_MAX_PAIRS];
 /* Node per pair for hierarchy walk. Zero init. */
 u32 flow_pair_node[FLOW_MAX_PAIRS];
 
+/* 5.0.10 note: maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
+/* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */
+/* single ownership. Docs only, no logic change. */
+
 #endif

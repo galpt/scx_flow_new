@@ -441,4 +441,8 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
 	return 0;
 }
 
+/* 5.0.10 note: lifecycle hotplug needs restart with tables seeded once, */
+/* reinstall needs restart with no live transition, creation never aborts */
+/* on shares. Docs only, no logic change. */
+
 #endif

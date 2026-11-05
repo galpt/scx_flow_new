@@ -171,5 +171,8 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	return dsq >= (u64)FLOW_LLC_BASE &&
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
+/* 5.0.10 note: ABI stays frozen with fixed slice, preempt, pop retry, */
+/* strand, DSQ, and cgroup weight constants plus frozen offsets 0-8 and */
+/* append only tail. Docs only, no logic change. */
 #endif
 #endif

@@ -47,4 +47,6 @@ fn main() {
         .add_source("src/bpf/lib/topology.bpf.c")
         .compile_link_gen()
         .unwrap();
+    // 5.0.10 note: build lib list stays frozen with the upstream pair queue
+    // plus warning suppression for the generated header only. Docs only.
 }

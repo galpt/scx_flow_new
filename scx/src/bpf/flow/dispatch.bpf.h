@@ -159,4 +159,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 }
 
+/* 5.0.10 note: dispatch order stays frozen own pair, same node pairs, */
+/* remote pairs, own LLC queue, remote LLC queues, fallback safety net. */
+/* Steal 9 plus 10 accounting unchanged. Docs only, no logic change. */
+
 #endif

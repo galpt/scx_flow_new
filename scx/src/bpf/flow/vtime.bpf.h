@@ -22,4 +22,7 @@ static __always_inline s64 flow_vtime_add_slice(s64 v)
 	return v + sl;
 }
 
+/* 5.0.10 note: vtime adds one fixed slice with max saturation, no wrap, */
+/* no knob. Docs only, no logic change. */
+
 #endif

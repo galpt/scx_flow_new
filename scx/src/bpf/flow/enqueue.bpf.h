@@ -313,4 +313,9 @@ insert_only:
 	}
 }
 
+/* 5.0.10 note: enqueue vtime budgets stay fixed slice 1ms plus preempt */
+/* threshold 500us plus tail 125us, weight scaling saturates with last */
+/* plus one floor, pinned plus exiting paths stay byte identical. */
+/* Docs only, no logic change. */
+
 #endif

@@ -122,4 +122,8 @@ static __always_inline void flow_stale_account(u32 thief)
 	}
 }
 
+/* 5.0.10 note: stats 0 through 8 stay frozen with tail 9 through 13 */
+/* append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10, */
+/* gauges use set only. Docs only, no logic change. */
+
 #endif
