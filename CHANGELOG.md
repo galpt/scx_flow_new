@@ -51,6 +51,20 @@ sixty at or below five hundred twelve bytes, dispatch insn unchanged at
 fourteen thousand two hundred forty eight with enqueue slightly down at
 seventeen thousand nine hundred fifty seven. Rollback stays append only.
 
+Correction against fresh workspace evidence at
+/tmp/opencode/ws-slices/veristat-fresh.csv with verbose at
+/tmp/opencode/ws-slices/veristat-fresh-verbose.txt, twenty six of twenty
+six pass: global stack max is two hundred twenty four on flow enqueue
+with flow dispatch plus flow init at one hundred sixty and flow stopping
+at forty eight, all at or below five hundred twelve bytes; dispatch
+holds at fourteen thousand two hundred forty eight insn with enqueue at
+eighteen thousand sixty insn. The one hundred sixty figure above scopes
+to dispatch plus init only, and the seventeen thousand nine hundred fifty
+seven figure is superseded by the fresh eighteen thousand sixty measure.
+Design five point zero point sixteen locks only twenty six of twenty six
+plus five hundred twelve bytes, so code versus design stays pass with no
+code change from this narrative correction.
+
 Base is archive/5.0.15 at 12129f383738bb1a75da392cab5f152e75dd93e6 with
 no other tree change.
 

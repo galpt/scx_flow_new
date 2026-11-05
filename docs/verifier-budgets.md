@@ -99,13 +99,17 @@ plus reclaim with no async path so enqueue postponement plus work conserving
 steal stand in. The build carries 26 programs with 16 flow plus 10 lib,
 all passing with no new program added
 for documentation. Stacks stay at or below five hundred twelve bytes
-with a measured max of one hundred sixty, hot path insn holds near the
-prior release with dispatch unchanged plus enqueue slightly down as a
-feature note with no shrink here: fresh zero plus q scaled denom plus
-one add per epoch necessarily touch the stop plus award paths, veristat
-still shows 26 of 26 pass with stacks within bound, WS proof recorded
-workspace only with no live run here. Attach the veristat CSV with the
-run when available. A veristat exit of minus 95 means the host lacks
+with a measured global max of two hundred twenty four on flow enqueue
+with flow dispatch plus flow init at one hundred sixty and flow stopping
+at forty eight, hot path insn holds near the prior release with dispatch
+at fourteen thousand two hundred forty eight plus enqueue at eighteen
+thousand sixty as a feature note with no shrink here: fresh zero plus
+q scaled denom plus one add per epoch necessarily touch the stop plus
+award paths, veristat still shows 26 of 26 pass with stacks within bound,
+WS proof recorded workspace only with no live run here against fresh
+evidence at /tmp/opencode/ws-slices/veristat-fresh.csv with verbose at
+/tmp/opencode/ws-slices/veristat-fresh-verbose.txt. Attach the veristat
+CSV with the run when available. A veristat exit of minus 95 means the host lacks
 arena support in this env with no scheduler change needed. Bytecode plus ELF differences
 from comment edits land in comment plus line info only.
 Open deferred live with no run here: strict tail plus share plus soak
