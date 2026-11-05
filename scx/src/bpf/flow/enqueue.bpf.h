@@ -16,7 +16,15 @@
  * its vtime never orders shared queues. Pinned local wakes through the
  * pinned fast path with streak cover. Enqueue time stamps the wait with
  * the monotonic clock with a zero clock clearing to unknown and never
- * shifts vtime. Single ownership through
+ * shifts vtime. Latency class comes from the three bit task history
+ * with two of three early yields reading as latency else a hog, fresh
+ * zero neutral as a hog, pinned plus exiting bypassing with prior
+ * behavior. The queue key subtracts one fixed slice for latency tasks
+ * only one shot with no accumulation while stored time plus deadline
+ * stay raw, so the offset never compounds. Only the insert key plus the
+ * kick compare use the offset key, and the stamp never shifts with the
+ * offset. Latency enqueues count the boost tail while hog enqueues
+ * count the hold tail on the enqueue LLC. Single ownership through
  * the queued flag is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -45,6 +53,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	s64 kv;
 	s64 use_v;
 	s64 use_d;
+	s64 key_v;
+	int is_lat = 0;
 	u64 use_sl;
 	u32 use_strand;
 	u32 use_llc;
@@ -315,7 +325,23 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 
 		t->enq_ns = now;
 	}
-	scx_bpf_task_set_dsq_vtime(p, (u64)use_v);
+	/* Latency key. Fresh plus carry above stay raw in stored time plus */
+	/* deadline, and only this key takes the one slice offset for */
+	/* latency tasks. Pinned plus exiting bypass with the raw key and */
+	/* no count, and no context stays a hog with no count. One shot */
+	/* with no accumulation since stored time stays raw. */
+	is_lat = 0;
+	key_v = use_v;
+	if (t && !pinned)
+		is_lat = flow_hist_is_lat(t->hist3) ? 1 : 0;
+	key_v = flow_vtime_boost(use_v, is_lat);
+	if (t && !pinned) {
+		if (is_lat)
+			flow_stat_inc(llc, 20);
+		else
+			flow_stat_inc(llc, 21);
+	}
+	scx_bpf_task_set_dsq_vtime(p, (u64)key_v);
 insert_only:
 	/* Pinned tasks wait in the local queue of the allowed CPU only. */
 	/* This keeps them out of shared LLC queues so no other CPU can */
@@ -340,7 +366,8 @@ insert_only:
 		}
 	}
 	if (dhq && tgt >= 0) {
-		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)use_v,
+		int queued_pair = 0;
+		ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)key_v,
 					 (u64)use_strand);
 		if (ret == 0) {
 			u64 cap = 0;
@@ -348,23 +375,20 @@ insert_only:
 				cap = flow_pair_cap[pair_u];
 			flow_stat_inc(llc, 0);
 			flow_occupancy_set(llc, dhq, cap);
-			if (!t)
-				flow_kick_idle_only(tgt, p, llc);
-			else
-				flow_kick_constrained(tgt, use_v, p, llc);
-			return;
-		}
-		/* Pair full. Count the spill to the LLC queue in the */
-		/* aggregate plus the pair-full tail. Occupancy keeps the */
-		/* full depth for sizing. This counter is separate from */
-		/* the fallback DSQ. */
-		{
+			queued_pair = 1;
+		} else {
+			/* Pair full. Count the spill to the LLC queue in */
+			/* the aggregate plus the pair-full tail. Occupancy */
+			/* keeps the full depth for sizing. This counter is */
+			/* separate from the fallback DSQ. */
 			u64 cap = 0;
 			if (pair_u < (u32)FLOW_MAX_PAIRS)
 				cap = flow_pair_cap[pair_u];
 			flow_fb_inc(llc, 4);
 			flow_occupancy_set(llc, dhq, cap);
 		}
+		if (queued_pair)
+			goto do_kick;
 	}
 	/* Fallback safety net charges queued to the enqueue LLC, zero when */
 	/* no live target exists. Dispatch takes a best effort dec from a */
@@ -380,19 +404,26 @@ insert_only:
 			dsq = flow_llc_dsq(llc);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
-		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)use_v, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_NS, (u64)key_v, enq_flags);
 		flow_stat_inc(llc, 0);
-		if (!t)
-			flow_kick_idle_only(tgt, p, llc);
-		else
-			flow_kick_constrained(tgt, use_v, p, llc);
 	}
+do_kick:
+	/* One kick per enqueue keeps no storm. Pair success plus spill */
+	/* plus fallback share this single wake with the same target plus */
+	/* key, so the order above never doubles a wake. A preempt won by a */
+	/* latency task counts the latency preempt tail on the enqueue LLC */
+	/* with the class already in hand and no extra lookup. Forward plus */
+	/* steal wins keep the preempt count with no latency split. */
+	if (!t)
+		flow_kick_idle_only(tgt, p, llc);
+	else if (flow_kick_constrained(tgt, key_v, p, llc) && is_lat)
+		flow_stat_inc(llc, 22);
 }
 
 /* Enqueue vtime budgets stay fixed slice 1ms plus preempt */
-/* threshold 500us plus tail 125us, weight scaling saturates with last */
-/* plus one floor on the pair path only, pinned skips the penalty while */
-/* exiting bypasses through early returns. */
+/* threshold 500us plus tail 125us plus latency offset 1ms, weight scaling */
+/* saturates with last plus one floor on the pair path only, pinned skips */
+/* the penalty plus the offset while exiting bypasses through early returns. */
 /* Docs only, no logic change. */
 
 #endif
