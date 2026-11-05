@@ -53,6 +53,34 @@ static __always_inline bool flow_dsq_head_allowed(u64 dsq, u32 cpu)
 	return flow_cpu_allowed((s32)cpu, p);
 }
 
+/* First allowed CPU in the task mask. Fails closed to minus one */
+/* with no move when no allowed target exists. */
+static __always_inline s32 flow_first_allowed(struct task_struct *p)
+{
+	u32 first;
+
+	if (!p || !p->cpus_ptr)
+		return -1;
+	first = bpf_cpumask_first(p->cpus_ptr);
+	if (!flow_cpu_ok(first))
+		return -1;
+	if (!flow_cpu_allowed((s32)first, p))
+		return -1;
+	return (s32)first;
+}
+
+/* Constrained target for inserts plus kicks. Keeps the hint when it */
+/* stays allowed, else falls back to the first allowed CPU. Fails */
+/* closed to minus one with no move when no allowed target exists. */
+static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
+{
+	if (!p || !p->cpus_ptr)
+		return -1;
+	if (hint >= 0 && flow_cpu_allowed(hint, p))
+		return hint;
+	return flow_first_allowed(p);
+}
+
 /* Guards fail closed on null plus out of bound, no SMT */
 /* probe runs, each CPU stands single. Docs only, no logic change. */
 

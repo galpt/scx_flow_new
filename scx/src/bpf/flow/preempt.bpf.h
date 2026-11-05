@@ -23,27 +23,25 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 
-/* Preempt when the running vtime is ahead by at least the threshold */
-/* and the running slice is past the tail. Uses unsigned gap so the */
-/* compare stays valid across wrap. Preempt is not counted as steal. */
-/* Kick preempts only when the target is allowed, else it wakes idle. */
-/* Idle kick validates the target first and skips when no allowed CPU */
-/* exists so an offline or disallowed target never takes a wake. */
-static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v,
-					     struct task_struct *p, u32 llc)
+/* Constrained kick to the allowed target only. Preempts when the */
+/* running vtime trails by at least the threshold past the tail, */
+/* else wakes idle. Skips with no wake when no allowed target exists. */
+static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
+						  struct task_struct *p, u32 llc)
 {
 	u32 cpu;
 	struct flow_running_state *rs;
 	u64 gap;
-	if (task_cpu < 0) {
+
+	if (tgt < 0) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	if (!flow_cpu_allowed(task_cpu, p)) {
+	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	cpu = (u32)task_cpu;
+	cpu = (u32)tgt;
 	if (!flow_cpu_ok(cpu)) {
 		flow_stat_inc(llc, 13);
 		return;
@@ -57,32 +55,52 @@ static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v,
 		goto idle;
 	gap = (u64)(rs->vtime - use_v);
 	if (gap >= (u64)FLOW_PREEMPT_THRESH) {
-		scx_bpf_kick_cpu(task_cpu, SCX_KICK_PREEMPT);
+		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 		flow_stat_inc(llc, 11);
 		return;
 	}
 idle:
-	if (!flow_cpu_allowed(task_cpu, p)) {
+	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 12);
+}
+
+/* Preempt when the running vtime is ahead by at least the threshold */
+/* and the running slice is past the tail. Uses unsigned gap so the */
+/* compare stays valid across wrap. Preempt is not counted as steal. */
+/* Kick preempts only when the target is allowed, else it wakes idle. */
+/* Idle kick validates the target first and skips when no allowed CPU */
+/* exists so an offline or disallowed target never takes a wake. */
+static __always_inline void flow_kick_for_enq(s32 task_cpu, s64 use_v,
+					      struct task_struct *p, u32 llc)
+{
+	s32 tgt = flow_constrained_target(task_cpu, p);
+
+	flow_kick_constrained(tgt, use_v, p, llc);
 }
 
 /* Wake idle only for inserts without task context. No preempt. */
 static __always_inline void flow_kick_idle_only(s32 task_cpu,
-					       struct task_struct *p, u32 llc)
+						struct task_struct *p, u32 llc)
 {
-	if (task_cpu < 0) {
+	s32 tgt = flow_constrained_target(task_cpu, p);
+
+	if (tgt < 0) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	if (!flow_cpu_allowed(task_cpu, p)) {
+	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 13);
 		return;
 	}
-	scx_bpf_kick_cpu(task_cpu, SCX_KICK_IDLE);
+	if (!flow_cpu_ok((u32)tgt)) {
+		flow_stat_inc(llc, 13);
+		return;
+	}
+	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 12);
 }
 
