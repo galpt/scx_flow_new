@@ -1,5 +1,45 @@
 # Changelog
 
+## 5.1.0
+
+Strict PRIQ on per LLC queues with the pair layer removed.
+
+Culprit is a pair queue layer that repeats the kernel order at the
+cost of an arena, per pair heaps, capacity sizing, occupancy
+gauges, stale handling, and two level drain walks. Each per LLC
+queue already leaves in virtual time order with equal times
+leaving in insertion order. The fix queues directly on one queue
+per LLC plus one fallback queue with a per LLC monotonic floor
+keeping fresh times unique, and drains own LLC first, then same
+node LLCs, then remote LLCs, then fallback with a forward wake
+for heads that cannot run here. Pinned tasks keep local FIFO with
+one slice and no award. The streak bound replaces the pop retry
+bound with the same value of four. Stats drop the pair only
+counters to twenty one in struct order at 168 bytes with total
+still meeting penalty plus extra per award and on deltas. The
+pair steal helper is deleted. Restart only for hotplug plus
+reinstall with no live transition. Rollback retains the prior
+5.0.14 snapshot. No vendored sources ship: the eleven lib units
+are unreferenced now that queues are kernel dispatch queues, so
+helpers come from workspace headers with the lib include path
+symlinked at install.
+
+Version syncs Cargo plus installer plus guard to 5.1.0 with the
+fork ref b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork
+galpt/scx. The overlay Cargo lock stays stale by design and syncs
+through cargo update minus p scx_flow before any locked build.
+The installer still requires 6.12 plus for cgroup hooks while 7.2
+plus stays the subsystem recommendation. Reinstall needs a
+restart with no live transition.
+
+Verification is workspace only with no live mutation, no force,
+no reboot, and no push: live load stays untouched with the
+scheduler state disabled. Guard plus fmt plus clippy plus build
+plus test plus smoke plus veristat pass with stacks at or below
+five hundred twelve bytes. Rollback stays append only.
+
+Base is 5d7be59 with no other tree change.
+
 ## 5.0.16
 
 WS-only accounting with fresh zero plus q scaled burn plus one add per epoch.

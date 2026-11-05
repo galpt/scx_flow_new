@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow maps plus pair tables.
+ * Flow maps and shared tables.
  *
- * Moved from main plus one HASH for cgroup weights. All bounds stay fixed
- * with no knob. Single ownership through the queued flag is unchanged.
- * Hotplug needs restart, same risk as the pinned path.
+ * Task storage carries per task state. CPU storage carries the
+ * seeded topology view. LLC storage carries per LLC counters.
+ * The weight hash carries cgroup shares. The sequence array keeps
+ * a monotonic floor per LLC so fresh times stay unique. The
+ * forward arrays coalesce head forward wakes by head and owner.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,12 +36,9 @@ struct {
 	__type(value, struct flow_llc_stats);
 } llc_stats_stor SEC(".maps");
 
-/* Cgroup weight by kernfs id. Key is cgrp->kn->id, value holds the */
-/* clamped cpu.weight. Miss plus zero id plus zero value all read as */
-/* default, so an unknown kernel plus a missing entry fail open to */
-/* prior behavior. Sized for thousands of cgroups with no eviction. */
-/* A full map misses to default with no stall. Deleted on cgroup_exit */
-/* so a reused id never reads a stale weight. */
+/* Cgroup weight by kernfs id. A miss reads as default, and a full */
+/* map misses the same way. Entries leave on cgroup exit so a reused */
+/* id never reads a stale share. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);
@@ -49,38 +48,21 @@ struct {
 
 volatile u64 flow_nr_cpus;
 volatile u64 flow_nr_llcs;
-scx_dhq_t *flow_pair_dhqs[FLOW_MAX_PAIRS];
-u64 flow_llc_pair[FLOW_MAX_LLCS];
-u64 flow_llc_strand[FLOW_MAX_LLCS];
-u32 flow_node_count[FLOW_MAX_NODES];
-u64 flow_node_last_pair[FLOW_MAX_NODES];
-u32 flow_pair_count;
-/* Per pair configured capacity for sizing. Set once at init, zero init. */
-u64 flow_pair_cap[FLOW_MAX_PAIRS];
-/* Per CPU running snapshot. Zero init means empty. */
+/* Per CPU running snapshot. Zero generation means empty. */
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
-/* Per CPU hint state. Zero init means empty. Persists across events. */
+/* Per CPU frequency hint state. Zero means empty. */
 struct flow_freq_state flow_freq_state[FLOW_MAX_CPUS];
-/* Per CPU extra score. Zero init means fresh fifty with no hold. Each */
-/* CPU keeps its own row with no average across CPUs. Score stays zero */
-/* through one hundred, prev stays zero through two, counts stay separate. */
+/* Per CPU burn score. Zero means fresh with no counts yet. */
 struct flow_extra_state flow_extra_state[FLOW_MAX_CPUS];
-/* Per pair last vtime for monotonic unique assign. Zero init. */
-s64 flow_dhq_seq[FLOW_MAX_PAIRS];
-/* Node per pair for hierarchy walk. Zero init. */
-u32 flow_pair_node[FLOW_MAX_PAIRS];
-/* Last forwarded head per DSQ for wake coalescing. One slot per LLC */
-/* plus one for the fallback safety net. Zero init means empty. Pid plus */
-/* vtime plus owner identify the head so a new head or a new owner */
-/* forwards again with no storm. */
+/* Per LLC last virtual time for the monotonic floor. Zero init. */
+s64 flow_llc_seq[FLOW_MAX_LLCS];
+/* Per LLC node for drain order. Seeded once at init. Zero init. */
+u32 flow_llc_node[FLOW_MAX_LLCS];
+/* Last forwarded head per queue for wake coalescing. One slot per */
+/* LLC plus one for the fallback queue. Pid plus time plus owner */
+/* identify the head, so a new head or a new owner forwards again. */
 u64 flow_fwd_pid[FLOW_MAX_LLCS + 1];
 s64 flow_fwd_vtime[FLOW_MAX_LLCS + 1];
 s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];
-
-/* Maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
-/* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */
-/* single ownership. Appended tails stay in place with no new map. Extra */
-/* rows stay zero init per CPU with no cross average. */
-/* Docs only, no logic change. */
 
 #endif

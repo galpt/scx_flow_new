@@ -2,20 +2,10 @@
 /*
  * Flow cgroup weight shares.
  *
- * Maps cpu.weight onto vtime charge scaling. Range [1, 10000] default
- * 100 comes from include/linux/cgroup.h CGROUP_WEIGHT_MIN/DFL/MAX plus
- * the cgroup v2 doc "All weights are in the range [1, 10000] with the
- * default at 100" plus flash/forge CGROUP_WEIGHT_DFL 100. Id comes
- * from cgrp->kn->id the same way lavd reads to->kn->id, and kernfs_node
- * carries u64 id in vmlinux. Hooks match the pinned sched_ext_ops
- * field names cgroup_init/cgroup_exit/cgroup_move/cgroup_set_weight
- * plus init_task with args->cgroup, same shapes as flash/forge.
- * Maps plus task storage only with no arena use, so no TOUCH here.
- * Miss plus zero id plus zero weight all read as default, which keeps
- * prior behavior whenever shares are unknown. Slice never scales.
- * Enqueue reads the live map by id, so a plain echo weight lands on
- * next enqueue with no move needed. Task cache is a hint only for
- * move plus init, and a reversed start heals through the live read.
+ * The cpu.weight range is 1 through 10000 with default 100. The id
+ * comes from the kernfs node. Enqueue reads the live map by id, so
+ * a weight change lands on the next enqueue. The task cache is a
+ * hint for move and init only. The slice never scales.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,8 +15,14 @@
 #include "../intf.h"
 #include "maps.bpf.h"
 
-/* Clamp a weight knob into [1, 10000]. Zero is never valid and falls */
-/* back to default, same as a missing entry. Cited above. */
+/**
+ * flow_cgroup_clamp - clamp a weight into range.
+ * @w: candidate weight.
+ *
+ * Zero is not valid and reads as default.
+ *
+ * Returns: the clamped weight.
+ */
 static __always_inline u32 flow_cgroup_clamp(u32 w)
 {
 	if (w == (u32)FLOW_CGROUP_WEIGHT_INVALID ||
@@ -37,7 +33,12 @@ static __always_inline u32 flow_cgroup_clamp(u32 w)
 	return w;
 }
 
-/* Same clamp for map values, which store the weight as u64. */
+/**
+ * flow_cgroup_clamp_u64 - clamp a stored weight into range.
+ * @w: candidate weight from the map.
+ *
+ * Returns: the clamped weight.
+ */
 static __always_inline u32 flow_cgroup_clamp_u64(u64 w)
 {
 	if (!w || w < (u64)FLOW_CGROUP_WEIGHT_MIN)
@@ -47,9 +48,12 @@ static __always_inline u32 flow_cgroup_clamp_u64(u64 w)
 	return (u32)w;
 }
 
-/* Cgroup id from the kernfs node. Null cgroup plus null node fail */
-/* closed to zero, which always reads as default. Only the move plus */
-/* init paths need an id; current-only helpers cannot serve them. */
+/**
+ * flow_cgroup_cgid - id for a cgroup.
+ * @cgrp: cgroup, may be NULL.
+ *
+ * Returns: the kernfs id, or zero when unavailable.
+ */
 static __always_inline u64 flow_cgroup_cgid(struct cgroup *cgrp)
 {
 	if (!cgrp)
@@ -59,7 +63,14 @@ static __always_inline u64 flow_cgroup_cgid(struct cgroup *cgrp)
 	return cgrp->kn->id;
 }
 
-/* Weight by id. Miss plus zero id plus zero value read as default. */
+/**
+ * flow_cgroup_lookup - weight for an id.
+ * @cgid: kernfs id, with zero meaning none.
+ *
+ * A miss reads as default.
+ *
+ * Returns: the weight.
+ */
 static __always_inline u32 flow_cgroup_lookup(u64 cgid)
 {
 	u64 *wp;
@@ -71,9 +82,12 @@ static __always_inline u32 flow_cgroup_lookup(u64 cgid)
 	return flow_cgroup_clamp_u64(*wp);
 }
 
-/* Task cached weight. Zero init plus invalid read as default. */
-/* Enqueue reads the live map by id, so this cache stays a hint only */
-/* for move plus init. */
+/**
+ * flow_task_weight - cached weight for a task.
+ * @t: task context, may be NULL.
+ *
+ * Returns: the cached weight, or default when unset.
+ */
 static __always_inline u32 flow_task_weight(struct flow_task_ctx *t)
 {
 	if (!t || t->cg_weight == (u32)FLOW_CGROUP_WEIGHT_INVALID)
@@ -81,8 +95,15 @@ static __always_inline u32 flow_task_weight(struct flow_task_ctx *t)
 	return flow_cgroup_clamp(t->cg_weight);
 }
 
-/* Scaled slice step for a weight. Slice times default over weight, */
-/* so 200 charges half and 50 charges double. Default is identity. */
+/**
+ * flow_cgroup_step - slice scaled step for a weight.
+ * @w: weight.
+ *
+ * Slice times default over weight, so 200 charges half and 50
+ * charges double. Default is identity.
+ *
+ * Returns: the step in nanos.
+ */
 static __always_inline u64 flow_cgroup_step(u32 w)
 {
 	u32 cw = flow_cgroup_clamp(w);
@@ -91,11 +112,18 @@ static __always_inline u64 flow_cgroup_step(u32 w)
 	return (u64)FLOW_SLICE_NS * (u64)FLOW_CGROUP_WEIGHT_DFLT / (u64)cw;
 }
 
-/* Saturated weight-scaled charge of used nanos onto base vtime. */
-/* Splits used into slice units plus rest so the multiply never */
-/* overflows, then caps at max. Default weight is exact identity. */
-/* Monotonic floor stays with the caller, so starvation is bounded */
-/* by the same last plus one rule as before. Slice never scales. */
+/**
+ * flow_cgroup_charge - charge used nanos onto a base time.
+ * @base: base virtual time.
+ * @used: nanos burnt.
+ * @w: weight.
+ *
+ * Splits used into slice units plus rest so the multiply cannot
+ * overflow, then caps at the maximum. Default weight is identity.
+ * The caller keeps the monotonic floor.
+ *
+ * Returns: the charged time.
+ */
 static __always_inline s64 flow_cgroup_charge(s64 base, u64 used, u32 w)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
@@ -116,10 +144,5 @@ static __always_inline s64 flow_cgroup_charge(s64 base, u64 used, u32 w)
 		return vmax;
 	return base + (s64)scaled;
 }
-
-/* Cgroup hooks need 6.12 plus, miss plus zero id plus zero */
-/* value plus full map read as default, live lookup heals reversed start, */
-/* slice never scales. Shares stay fail open with no new map. */
-/* Docs only, no logic change. */
 
 #endif

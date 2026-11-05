@@ -2,8 +2,9 @@
 /*
  * Shared ABI for the flow scheduler.
  *
- * DSQs are one per LLC plus one fallback safety net. Pair queues are upstream arena DHQs.
- * Stats are per LLC counters with a stable head plus an append-only tail.
+ * Queues are one per LLC plus one fallback queue. The kernel orders
+ * each queue by virtual time, with equal times leaving in insertion
+ * order. Stats are per LLC counters read by the userspace monitor.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -31,78 +32,57 @@ typedef int pid_t;
 #define READ_ONCE(x) (*(const volatile typeof(x) *)&(x))
 #endif
 enum flow_consts {
-	/* Hard CPU bound for all BPF arrays keyed by CPU. */
+	/* Array bound for tables keyed by CPU. */
 	FLOW_MAX_CPUS = 1024ULL,
-	/* Hard LLC bound for all BPF arrays keyed by LLC. */
+	/* Array bound for tables keyed by LLC. */
 	FLOW_MAX_LLCS = 64ULL,
-	/* Hard node bound for all BPF arrays keyed by node. */
+	/* Array bound for tables keyed by node. */
 	FLOW_MAX_NODES = 8ULL,
-	/* Pair count is half the LLC bound. */
-	FLOW_MAX_PAIRS = 32ULL,
-	/* Fixed slice in nanos with no knob. */
+	/* Fixed time slice in nanos. */
 	FLOW_SLICE_NS = 1000000ULL,
-	/* Minimal slice for exiting tasks in nanos with no knob. */
-	/* One microsecond is 1000x smaller than the normal slice. Exit */
-	/* needs only enough runtime to release resources and never */
-	/* preempts, so a tiny slice keeps exit progress cheap without */
-	/* stalling normal tasks. Used for every exiting insert. */
+	/* Slice for exiting tasks in nanos. Exit only releases */
+	/* resources, so a small slice keeps teardown cheap. */
 	FLOW_EXIT_SLICE_NS = 1000ULL,
-	/* Bounded pop retries per dispatch with no knob. Four covers a */
-	/* burst of stale plus exiting entries without stalling dispatch. */
-	/* Each attempt is one pop plus one lookup, so worst cost is four */
-	/* lookups per dispatch, negligible next to the normal path. */
-	FLOW_POP_RETRY_MAX = 4ULL,
-	/* Preempt gap in nanos with no knob. */
+	/* Streak length that turns an idle wake into a preempt. */
+	FLOW_STREAK_MAX = 4ULL,
+	/* Preempt gap in nanos. */
 	FLOW_PREEMPT_THRESH = 500000ULL,
-	/* Preempt tail guard in nanos with no knob. */
+	/* Preempt tail guard in nanos. A target with less slice */
+	/* left than this is left alone. */
 	FLOW_PREEMPT_TAIL = 125000ULL,
-	/* Latency offset in nanos with no knob. One fixed slice that */
-	/* moves a latency task ahead of a hog at the same raw time. */
-	/* Only the queue key plus the kick compare use the offset. */
-	/* Stored time plus deadline plus stamp stay raw. */
+	/* Latency offset in nanos. A latency task is queued one */
+	/* slice ahead of the same raw time. Stored time is */
+	/* unaffected, so the shift applies once per enqueue. */
 	FLOW_LAT_OFF_NS = 1000000ULL,
 	/* Ops timeout in ms for the watchdog. */
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
-	/* Strand balance bound on enqueue with no knob. */
-	FLOW_DHQ_MAX_IMBALANCE = 3ULL,
-	/* Base DSQ id for per LLC queues. LLC id adds to the base. */
+	/* Base DSQ id for per LLC queues. The LLC index adds to the base. */
 	FLOW_LLC_BASE = 0x6000ULL,
-	/* Single fallback DSQ id used only when LLC id fails validation. Safety only. */
+	/* Fallback DSQ id used when no LLC target is available. */
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
-	/* Strand fixed A. */
-	FLOW_STRAND_A = 0ULL,
-	/* Strand fixed B. */
-	FLOW_STRAND_B = 1ULL,
-	/* Queued bit in task flags. Set on enqueue, cleared on running and dequeue. */
+	/* Queued bit in task flags. Set on enqueue, cleared on running */
+	/* and dequeue. A set bit drops a second enqueue of the same task. */
 	FLOW_FLAG_QUEUED = 1ULL,
-	/* Cgroup weight default. Matches CGROUP_WEIGHT_DFL in */
-	/* include/linux/cgroup.h plus the v2 range doc [1, 10000] */
-	/* default 100 plus flash/forge CGROUP_WEIGHT_DFL 100. Zero */
-	/* is never a valid weight and fails closed to default. */
+	/* Cgroup weight range. Zero is not a valid weight and reads */
+	/* as the default. */
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
-	/* Bounded extra quanta with no knob. Total runs one base plus */
-	/* zero through two extra for one through three quanta. */
+	/* Extra quanta bound. A run lasts one base quantum plus */
+	/* zero through two extra quanta. */
 	FLOW_MAX_QUANTA = 3ULL,
 	FLOW_MAX_EXTRA = 2ULL,
-	/* Score bands with no knob. Four bands each span twenty five. */
-	/* Three levels name extra zero plus one plus two. Raw hint has */
-	/* five steps zero through four with only the top step at full. */
-	/* Lower steps merge into the same blend with no second path. */
-	/* Band count times width equals the top, levels equal max extra */
-	/* plus one, raw max bounds the burn steps, sample bound covers */
-	/* the blend window, wide cap covers the blend sum before clamp. */
+	/* Score bands. Four bands of width twenty five cover the */
+	/* zero through one hundred scale. The raw burn hint has five */
+	/* steps, with only the top step counting as a full burn. */
 	FLOW_SCORE_BANDS = 4ULL,
 	FLOW_SCORE_WIDTH = 25ULL,
 	FLOW_SCORE_LEVELS = 3ULL,
 	FLOW_SCORE_RAW_MAX = 4ULL,
-	/* Score scale top with no knob. Band width plus engage plus */
-	/* release plus sample bound plus wide cap stay fixed. Engage */
-	/* takes the top from below, release keeps the hold from above. */
-	/* Sample bound covers the blend window, wide cap covers the */
-	/* blend sum before the clamp with floor on both paths. */
+	/* Score scale top. The top band engages at seventy five and */
+	/* releases below fifty. The wide cap bounds the blend sum */
+	/* before clamping. */
 	FLOW_SCORE_HMAX = 100ULL,
 	FLOW_SCORE_Q = 25ULL,
 	FLOW_SCORE_ENGAGE = 75ULL,
@@ -110,22 +90,16 @@ enum flow_consts {
 	FLOW_SCORE_N = 8ULL,
 	FLOW_SCORE_MAX = 400ULL,
 };
-/* Per task state for the life of the task. Flags holds the queued bit. */
-/* Hist holds the last three yield bits in bits zero through two with */
-/* zero init fresh neutral as a hog. A stop with remain records one, a */
-/* full burn records zero, and two of three ones reads as latency. Tail */
-/* cgrp_id plus cg_weight carry the cpu.weight share. Zero init means */
-/* no cgroup seen and reads as default through the clamp. Tail enq_ns */
-/* holds the last enqueue time in nanos from the monotonic clock. Zero */
-/* means never queued. It ages waits with no vtime shift and never */
-/* changes placement. Nine by eight plus tail is 72 bytes with no size */
-/* change from the history byte reuse of the pad. */
+/* Per task state held for the life of the task. Hist keeps the last */
+/* three stop outcomes, with a set bit for an early yield and a clear */
+/* bit for a full burn. Pad carries the last award length and the hold */
+/* level. Cgrp carries the weight share hint. Enq holds the last */
+/* enqueue time, with zero meaning never queued. */
 struct flow_task_ctx {
 	s64 vtime;
 	s64 deadline;
 	u64 slice_rem;
 	u64 gen;
-	u32 strand;
 	u32 llc_id;
 	u32 flags;
 	u8 hist3;
@@ -135,105 +109,62 @@ struct flow_task_ctx {
 	u32 pad2;
 	u64 enq_ns;
 };
-/* Per CPU running snapshot for preempt compare. Zero means empty. */
-/* Tail hog_streak counts consecutive full burns seen on this CPU. It */
-/* grows on stops that burnt the full slice capped at twice the pop */
-/* retry bound with no new knob, decays one step on clean stops and on */
-/* old waits, cleared when a pinned wait reaches the CPU. Saturated */
-/* with no wrap so a hold ends but never sticks. Lat tells whether the */
-/* running task reads as latency with one else zero, seeded at start */
-/* from the history with pinned always zero, so the kick can boost both */
-/* sides with no extra lookup. Reserved keeps alignment and stays zero */
-/* past the flag. Six by eight plus tail is 48 bytes with no size */
-/* change from the flag reuse of the reserved word. */
+/* Per CPU running snapshot used for the preempt compare. Hog streak */
+/* counts consecutive full burns on this CPU. Lat marks a latency */
+/* task with one, else zero. Zero generation means empty. */
 struct flow_running_state {
 	s64 vtime;
 	s64 deadline;
 	u64 slice_rem;
 	u32 llc_id;
-	u32 strand;
+	u32 pad;
 	u64 gen;
 	u32 hog_streak;
 	u8 lat;
 	u8 __rsvd[3];
 };
-/* Per CPU hint state for speed requests. Zero means empty. Last holds */
-/* the prior sample time in nanos. Level holds the smoothed load in the */
-/* same scale as the kernel speed scale. Hist holds the last four raw */
-/* samples as a shift ring for sizing with integer math only. Persisted */
-/* across events. Two by eight plus four by eight is 48 bytes. */
+/* Per CPU frequency hint state. Last holds the prior sample time. */
+/* Level holds the smoothed ratio. Hist keeps the last four raw */
+/* samples for post mortem sizing. The hint never steers placement. */
 struct flow_freq_state {
 	u64 last;
 	u64 level;
 	u64 hist[4];
 };
-/* Per CPU extra score with zero init and no cross use. Score holds zero */
-/* through one hundred. Prev holds zero through two for the last award. */
-/* Growth plus decay counts stay separate for proof with no shared path. */
-/* Each CPU keeps its own row with no average across CPUs. Persisted */
-/* across events. Four by eight is 32 bytes. */
+/* Per CPU burn score. Score spans zero through one hundred. Prev */
+/* holds the last award level. Growth and decay counts are kept */
+/* apart so each path stays visible. Each CPU keeps its own row. */
 struct flow_extra_state {
 	u64 score;
 	u64 prev_extra;
 	u64 n_growth;
 	u64 n_decay;
 };
-/* Per CPU view seeded once from userspace. Small with no frozen row. */
+/* Per CPU view seeded once from userspace. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
 	u32 llc_id;
 	u32 node_id;
 	u32 pad;
 };
-/* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal */
-/* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap */
-/* 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip */
-/* 14:overrun 15:domino_penalty 16:blocked 17:hog_escape 18:orphan_kick */
-/* 19:hol_forward 20:lat_boost 21:hog_hold 22:lat_preempt 23:age_rescue */
-/* stay stable for compat. Tail is append-only with no bound change. */
-/* 24:extra_award 25:total_quanta only append with zero through twenty */
-/* three frozen. Twenty six by u64 is 208 bytes. Twenty five by u64 is */
-/* 200 bytes with twenty four present. Fallback */
-/* stays the aggregate of pair-full plus duplicate plus stale, so fallback */
-/* equals 4 plus 5 plus 6. Steal stays the aggregate of pair plus LLC, so */
-/* steal equals 9 plus 10. fb_pair_full counts pair DHQ full spills to the */
-/* LLC DSQ. fb_duplicate counts queued-guard duplicate drops. fb_stale */
-/* counts stale DHQ pops with no task. dhq_depth is a gauge of last */
-/* observed pair depth and dhq_cap the paired capacity for sizing. Single */
-/* LLC has no pair, so depth plus cap stay zero there. steal_pair counts */
-/* pair steals in dispatch. steal_llc counts remote LLC queue steals in */
-/* dispatch. kick_preempt counts preempt kicks on enqueue. kick_idle counts */
-/* idle kicks on enqueue. kick_skip counts enqueue kicks skipped with no */
-/* wake. overrun counts carry tasks that burnt the full slice with no */
-/* remain. domino_penalty counts the extra slice charged on such an overrun */
-/* one to one with overrun by design, event versus cost, so a task that */
-/* always burns the full slice cannot hold the head. Saturated at max the */
-/* vtime stays capped while the count still grows for visibility. blocked */
-/* counts stops that leave the task still runnable, which covers preemptions */
-/* plus slice expiry plus migrations with no vtime penalty so blocking never */
-/* shifts the deadline. An invalid cached LLC falls back to zero with no */
-/* loss. Gauges stay set only. hog_escape counts escalated preempts where a */
-/* streak forced an idle wake to preempt so a hog hold ends. orphan_kick */
-/* counts mask change kicks for queued tasks with no queue rewrite. */
-/* hol_forward counts forwards where the head cannot run on the thief with */
-/* no move no loss. lat_boost counts enqueues that take the latency key. */
-/* hog_hold counts enqueues that keep the raw key as hogs. lat_preempt */
-/* counts preempts won by a latency task on the boosted gap. age_rescue */
-/* counts old waits that step the hold down. Extra award holds q minus */
-/* one beyond the first. Total quanta holds q for the run. The total is */
-/* the sum of the old penalty plus the new extra with one addition per */
-/* award and again on deltas. Pinned fast path never awards extra. */
+/* Per LLC counters. Queued counts inserts, dispatched counts moves */
+/* to the local queue, fallback counts fallback queue inserts plus */
+/* duplicate drops, steal counts remote LLC moves. Duplicate counts */
+/* requeues dropped by the queued guard. Steal split counts remote */
+/* moves again on the thief. Kick split counts preempt, idle, and */
+/* skipped wakes. Overrun counts full slice burns, penalty counts */
+/* the extra slice charged for each. Blocked counts stops that leave */
+/* the task runnable. Escape counts streak preempts. Orphan counts */
+/* mask change kicks. Forward counts head forwards to the owner. */
+/* Boost counts latency takes, hold counts hog keeps, preempt counts */
+/* latency preempt wins, rescue counts aged out holds. Extra holds */
+/* q minus one, total holds q. Twenty one counters, 168 bytes. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
 	u64 fallback;
 	u64 steal;
-	u64 fb_pair_full;
 	u64 fb_duplicate;
-	u64 fb_stale;
-	u64 dhq_depth;
-	u64 dhq_cap;
-	u64 steal_pair;
 	u64 steal_llc;
 	u64 kick_preempt;
 	u64 kick_idle;
@@ -252,11 +183,9 @@ struct flow_llc_stats {
 	u64 total_quanta;
 };
 #ifdef __BPF__
-/* Band locks hold at compile time with no runtime cost and no knob. */
-/* Bands times width equals the top, levels equal max extra plus one, */
-/* width equals the middle band edge, engage is three widths, release */
-/* is two widths, raw max bounds the burn steps, wide cap bounds three */
-/* times top plus full. Sample bound covers the blend window. */
+/* Band relations checked at compile time. Bands times width meets */
+/* the top, levels meet max extra plus one, engage spans three */
+/* widths, release spans two, the wide cap bounds the blend sum. */
 _Static_assert((unsigned long long)FLOW_SCORE_BANDS * (unsigned long long)FLOW_SCORE_WIDTH == (unsigned long long)FLOW_SCORE_HMAX,
 	       "bands times width equals top");
 _Static_assert((unsigned long long)FLOW_SCORE_LEVELS == (unsigned long long)FLOW_MAX_EXTRA + 1ULL,
@@ -281,9 +210,8 @@ static __always_inline bool flow_llc_ok(u32 llc)
 {
 	return llc < (u32)FLOW_MAX_LLCS;
 }
-/* Bound check only. Practical scope adds the init count range, so live */
-/* needs this plus below the discovered count. Offline inside the range */
-/* also needs restart and stays scoped there. */
+/* Bound check only. The live range adds the discovered CPU count, */
+/* so offline CPUs past it need a restart. */
 static __always_inline bool flow_cpu_ok(u32 cpu)
 {
 	return cpu < (u32)FLOW_MAX_CPUS;
@@ -297,11 +225,5 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	return dsq >= (u64)FLOW_LLC_BASE &&
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
-/* ABI stays frozen with fixed slice, latency offset, preempt, pop retry, */
-/* strand, DSQ, and cgroup weight constants plus frozen offsets 0 through 23 */
-/* and append only tail 24 through 25. History plus running flag reuse spare */
-/* bytes with no size change. Extra tails hold q minus one plus q with the */
-/* sum checkable per award. Per CPU extra rows stay zero init with no cross */
-/* average. Docs only, no logic change. */
 #endif
 #endif

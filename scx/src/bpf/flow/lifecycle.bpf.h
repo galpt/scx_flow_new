@@ -1,27 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow task lifecycle plus init with cgroup shares.
+ * Flow task lifecycle and init.
  *
- * Moved from main with additive weight hooks only. Single ownership
- * through the queued flag is unchanged. Freq hint is neutral for
- * placement. Hotplug needs restart, same risk as the pinned path.
- * Unknown weights read as default with prior behavior. Blocked tail
- * counts stops that leave the task still runnable on the cached LLC
- * with no fresh lookup and no vtime penalty, so blocking never shifts
- * the deadline. Runnable covers preemptions plus slice expiry plus
- * migrations, any stop where the task waits elsewhere. An invalid
- * cached LLC falls back to zero with no loss. Enqueue time ages waits
- * with no vtime shift and a zero clock clears to unknown. Streak counts
- * full burns capped at twice the pop retry bound with clean decay and
- * ends in a preempt when the bound is reached. Stop records a yield bit
- * into the three bit task history with fresh zero neutral as a hog.
- * Running seeds the latency flag from the history with pinned always
- * zero and counts an age rescue when an old wait steps the hold down.
- * Freq hist keeps the last four
- * raw samples for sizing with no reader in BPF. Mask change on a queued
- * task keeps the queue with no rewrite and wakes the owner through the
- * pinned fast path for pinned waits else the constrained path with the
- * boosted key for latency tasks.
+ * Init seeds the CPU view counts, the per LLC node index, and one
+ * queue per LLC plus the fallback queue. Running snapshots the
+ * task for the preempt compare and clears the queued flag.
+ * Stopping records the yield bit, steps the streak, counts runnable
+ * stops, samples the frequency hint, and scores the burn. Tick
+ * refreshes the remaining slice. Select keeps the pick inside the
+ * mask and the live range. Mask changes keep the queue and wake
+ * the owner. Cgroup hooks track weight shares with fail open
+ * reads as default. Hotplug needs a restart since tables are
+ * seeded once.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -43,7 +33,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	u64 want = 0;
 	s32 cpu;
 	u32 llc;
-	TOUCH_ARENA();
 	n = scx_bpf_nr_cpu_ids();
 	if (n == 0) {
 		scx_bpf_error("no CPUs found");
@@ -106,37 +95,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			return ret;
 		}
 	}
-	if (want <= 1)
-		return 0;
-	/* Size the static area before the first pair queue use. */
-	/* The pair queue draws from this area so it must be ready first. */
-	/* Eight pages hold 32KiB. One pair with cap n times 4 needs the */
-	/* queue header plus two heaps plus cap times 16 bytes of entries. */
-	/* A 16 CPU host needs about one KiB per pair and fits with margin. */
-	/* Overflow takes a fresh block and leaves old pages mapped, so an */
-	/* oversize host still fails closed with no reuse. Single LLC above */
-	/* uses only DSQs and creates no pair, so skipping init there is by */
-	/* design. Enqueue and dispatch guard every pair use on more than one */
-	/* LLC, so a future static user must move this init above that return. */
-	{
-		int ret = scx_static_init(8);
-		if (ret) {
-			scx_bpf_error("static init failed");
-			return ret;
-		}
-	}
+	/* One node index per LLC for drain order. The first CPU found */
+	/* on the LLC lends its node. */
 	bpf_for(llc, 0, FLOW_MAX_LLCS) {
-		u32 node = 0;
-		u32 cnt;
-		u64 strand;
-		u64 idx;
-		u64 cap;
-		bool first = false;
 		u32 c;
-		u64 got = (u64)-1;
 		if ((u64)llc >= want)
 			break;
-		first = false;
 		bpf_for(c, 0, FLOW_MAX_CPUS) {
 			struct flow_cpu_ctx *cc;
 			u32 key = c;
@@ -146,56 +110,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			if (!cc)
 				continue;
 			if (READ_ONCE(cc->llc_id) == llc) {
-				node = READ_ONCE(cc->node_id);
-				first = true;
+				u32 node = READ_ONCE(cc->node_id);
+				if (flow_node_ok(node))
+					flow_llc_node[llc] = node;
 				break;
 			}
 		}
-		if (!first)
-			node = 0;
-		if (!flow_node_ok(node)) {
-			scx_bpf_error("node over bound");
-			return -EINVAL;
-		}
-		cnt = flow_node_count[node];
-		strand = (u64)(cnt % 2);
-		if (strand == (u64)SCX_DHQ_STRAND_A) {
-			idx = flow_pair_count;
-			if (idx >= (u64)FLOW_MAX_PAIRS) {
-				scx_bpf_error("pair over bound");
-				return -EINVAL;
-			}
-			cap = n * 4;
-			if (cap < 8)
-				cap = 8;
-			got = scx_dhq_create_balanced(false, cap,
-						      SCX_DHQ_MODE_PRIORITY,
-						      (u64)FLOW_DHQ_MAX_IMBALANCE);
-			if (!got) {
-				scx_bpf_error("pair create failed");
-				return -ENOMEM;
-			}
-			flow_pair_dhqs[idx] = (scx_dhq_t *)got;
-			if (idx < (u64)FLOW_MAX_PAIRS)
-				flow_pair_cap[(u32)idx] = cap;
-			flow_pair_count += 1;
-			flow_node_last_pair[node] = idx;
-		} else {
-			idx = flow_node_last_pair[node];
-			if (idx >= (u64)FLOW_MAX_PAIRS) {
-				scx_bpf_error("pair over bound");
-				return -EINVAL;
-			}
-			if (!flow_pair_dhqs[idx]) {
-				scx_bpf_error("pair null for strand B");
-				return -EINVAL;
-			}
-		}
-		flow_llc_pair[llc] = idx;
-		flow_llc_strand[llc] = strand;
-		flow_node_count[node] = cnt + 1;
-		if (idx < (u64)FLOW_MAX_PAIRS)
-			flow_pair_node[(u32)idx] = node;
 	}
 	return 0;
 }
@@ -218,7 +138,6 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->deadline = flow_vtime_add_slice(v);
 	t->slice_rem = (u64)FLOW_SLICE_NS;
 	t->gen = 0;
-	t->strand = (u32)FLOW_STRAND_A;
 	t->llc_id = 0;
 	t->flags = 0;
 	t->hist3 = 0;
@@ -226,10 +145,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->pad[1] = 0;
 	t->pad[2] = 0;
 	t->enq_ns = 0;
-	/* History starts empty. Zero reads as a hog, so a new task proves */
-	/* latency with early yields first. Cgroup tail stays. Init plus */
-	/* move seed it, zero init reads as default, and membership never */
-	/* changes on enable. Enqueue time starts empty with no wait. */
+	/* History starts empty and reads as a hog, so a new task */
+	/* proves latency with early yields first. */
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -239,7 +156,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_task_ctx *t;
 	struct flow_cpu_ctx *cc;
 	u32 llc = 0;
-	u32 strand = (u32)FLOW_STRAND_A;
 	u32 key;
 	struct flow_running_state *rs;
 	u64 sl;
@@ -258,25 +174,13 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		u32 tmp = READ_ONCE(cc->llc_id);
 		if (flow_llc_ok(tmp))
 			llc = tmp;
-		if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
-			u64 idx = flow_llc_pair[llc];
-			if (idx < (u64)FLOW_MAX_PAIRS && flow_pair_dhqs[(u32)idx]) {
-				u32 s = (u32)flow_llc_strand[llc];
-				if (s == (u32)FLOW_STRAND_A || s == (u32)FLOW_STRAND_B)
-					strand = s;
-			}
-		}
 	} else {
 		if (flow_llc_ok(t->llc_id))
 			llc = t->llc_id;
-		if (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B)
-			strand = t->strand;
 	}
 	sl = p->scx.slice;
-	/* Clamp holds the extended award bound at three quanta with no */
-	/* drop to one, so an awarded slice keeps its length here while a */
-	/* bad read still falls back to one. Stopping plus tick share the */
-	/* same three quantum clamp. */
+	/* Clamp keeps the award length while a bad read falls back */
+	/* to one slice. Stopping and tick share the same clamp. */
 	if (!sl)
 		sl = (u64)FLOW_SLICE_NS;
 	else if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
@@ -289,24 +193,19 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->deadline = t->deadline;
 	rs->slice_rem = sl;
 	rs->llc_id = llc;
-	rs->strand = strand;
 	rs->gen = ng;
-	/* Streak switch. A pinned start clears the hold since the wait */
-	/* reached the CPU. A start with an old enqueue ages out one step */
-	/* so a single good wait steps the hold down with no new knob. A */
-	/* recent requeue keeps the hold so consecutive full burns still */
-	/* reach the bound. A legacy tall hold clamps to twice the pop */
-	/* retry bound with no new knob so a prior count never sticks past */
-	/* the storm window. Clean stops decay elsewhere, so this path only */
-	/* ages old waits. The latency flag follows the history with pinned */
-	/* always zero so the kick can boost both sides with no extra */
-	/* lookup. An old wait that steps the hold down counts an age */
-	/* rescue on the running LLC. Reserved stays zero past the flag. */
+	/* A pinned start clears the hold since the wait reached the */
+	/* CPU. A start with an old enqueue steps the hold down one, */
+	/* while a recent requeue keeps it for consecutive full burns. */
+	/* A tall hold clamps to twice the streak bound. The latency */
+	/* flag follows the history with pinned always zero, so the */
+	/* kick compares shifted keys on both sides with no lookup. An */
+	/* old wait that steps the hold down counts a rescue. */
 	if (flow_is_pinned(p)) {
 		rs->hog_streak = 0;
 		rs->lat = 0;
 	} else {
-		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
+		u32 cap = (u32)FLOW_STREAK_MAX * 2U;
 		u64 enq = READ_ONCE(t->enq_ns);
 		u64 now = bpf_ktime_get_ns();
 		rs->lat = flow_hist_is_lat(t->hist3) ? 1 : 0;
@@ -317,7 +216,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			if (age > (u64)FLOW_SLICE_NS * 4ULL) {
 				if (rs->hog_streak > 0) {
 					rs->hog_streak -= 1;
-					flow_stat_inc(llc, 23);
+					flow_stat_inc(llc, 18);
 				}
 			}
 		}
@@ -325,10 +224,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
-	t->strand = strand;
 	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
-	/* Act at start. Send the smoothed hint for this one CPU only. */
-	/* Placement plus vtime plus slice handling stay unchanged. */
+	/* Send the smoothed hint for this CPU only. */
 	flow_freq_apply(task_cpu);
 }
 
@@ -351,30 +248,23 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	sl = p->scx.slice;
 	if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
 		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
-	/* Single snapshot for the stop. True when the task reads not */
-	/* runnable with remain above zero at this stop else false. One */
-	/* read serves the score path below with no second read for the */
-	/* same stop. Pinned plus exiting bypass score effects below. */
+	/* One snapshot serves the score path below. Pinned and */
+	/* exiting tasks bypass score effects. */
 	voluntary = !runnable && sl > 0;
 	t->slice_rem = sl;
-	/* Yield record. A stop with remain yields early and records one, */
-	/* a full burn records zero, so two of three ones later read as */
-	/* latency while fresh zero stays a hog. Placement plus vtime plus */
-	/* slice handling stay unchanged. */
+	/* A stop with remain records an early yield, a full burn */
+	/* records zero. Fresh zero reads as a hog. */
 	t->hist3 = flow_hist_push(t->hist3, sl == 0 ? 0 : 1);
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
-	/* Streak step on the stop edge only, one add per run epoch. No */
-	/* remain means the full award burnt, so step the hold by the */
-	/* award q capped at twice the pop retry bound with no new knob */
-	/* and no wrap. A clean stop steps the hold down one so */
-	/* consecutive full burns still reach the bound but a clean run */
-	/* never sticks past the storm window. The tick keeps remain only */
-	/* with no step so one burn never counts twice. Placement plus */
-	/* vtime plus slice handling stay unchanged. */
+	/* The step runs on the stop edge only with one add per run. */
+	/* A full burn steps the hold by the award length capped at */
+	/* twice the streak bound. A clean stop steps it down one. The */
+	/* tick keeps remain with no step, so one burn never counts */
+	/* twice. */
 	if (sl == 0) {
 		u32 s = rs->hog_streak;
-		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
+		u32 cap = (u32)FLOW_STREAK_MAX * 2U;
 		u64 step = 1;
 
 		if (t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
@@ -390,44 +280,27 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		if (rs->hog_streak > 0)
 			rs->hog_streak -= 1;
 	}
-	/* Blocked count. A stop that leaves the task still runnable waits */
-	/* elsewhere, which covers preemptions plus slice expiry plus */
-	/* migrations, so count it on the cached LLC with no fresh lookup */
-	/* and no vtime penalty. The cached LLC was seeded from the CPU */
-	/* view at running time, invalid falls back to zero with no loss. */
-	/* Placement plus vtime plus slice handling stay unchanged. */
+	/* A stop that leaves the task runnable waits elsewhere, which */
+	/* covers preemptions plus slice expiry plus migrations. Count */
+	/* it on the cached LLC with no time shift. An invalid cache */
+	/* falls back to zero. */
 	if (runnable) {
 		u32 bllc = READ_ONCE(t->llc_id);
 
 		if (!flow_llc_ok(bllc))
 			bllc = 0;
-		flow_stat_inc(bllc, 16);
+		flow_stat_inc(bllc, 11);
 	}
-	/* Sense load at stop. Burnt nanos over wall feed the smoothed level. */
-	/* Placement plus vtime plus slice handling stay unchanged. */
+	/* Burnt nanos over wall feed the smoothed level. */
 	if ((u64)FLOW_SLICE_NS >= sl)
 		flow_freq_sample(cpu, (u64)FLOW_SLICE_NS - sl);
 	else
 		flow_freq_sample(cpu, 0);
-	/* Extra score with hysteresis and bypass. Pinned plus exiting keep */
-	/* prior behavior and never take a score from this path. Voluntary */
-	/* feeds zero with no growth step on that stop. Empty wait feeds */
-	/* zero with no age credit. Full burn with raw top takes growth, */
-	/* all else takes decay. Both use integer floor with wide cap four */
-	/* hundred and blend three old plus one new over four for a window */
-	/* about four and time about three and a half. Counts stay separate */
-	/* with no new bound beyond the streak cap. CPU only with no cross */
-	/* average. Fresh reads zero with q one until the first count, */
-	/* amended from the prior middle default since no burn has been */
-	/* seen yet. Growth needs a full awarded burn with raw top against */
-	/* the q scaled denom, so a partial burn still takes decay with no */
-	/* new knob: only a full extended burn earns growth. Award length */
-	/* comes from the task pad in one through three else one, with */
-	/* voluntary plus empty wait keeping precedence through decay. */
-	/* Latency history feeds the queue key offset only and never feeds */
-	/* the score here, so a latency task still needs a full burn for */
-	/* growth with no inversion. Merged means the raw burn hint shares */
-	/* the same blend with no second path, not a history feed. */
+	/* Pinned and exiting tasks never take a score here. Voluntary */
+	/* stops and empty waits decay. A full awarded burn with a top */
+	/* raw step grows, all else decays. Latency history feeds the */
+	/* queue key only, never the score, so a latency task still */
+	/* needs a full burn for growth. */
 	{
 		bool is_pinned = flow_is_pinned(p);
 		bool is_exiting = (p->flags & PF_EXITING) != 0;
@@ -438,9 +311,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		u64 q_src = 1;
 		if (!is_pinned && !is_exiting) {
 			es = &flow_extra_state[cpu];
-			/* Award length source. The task pad carries the last */
-			/* award q in one through three else one, so the burn */
-			/* below accounts against the slice just run. */
+			/* The pad carries the last award length, so the */
+			/* burn accounts against the slice just run. */
 			if (t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
 				q_src = (u64)t->pad[0];
 			if (es->n_growth == 0 && es->n_decay == 0) {
@@ -463,22 +335,19 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 				u64 used;
 				u64 raw;
 				u64 denom = q_src * (u64)FLOW_SLICE_NS;
-				/* Denom scales with the award. The q bound keeps */
-				/* the product small, the guard below saturates on */
-				/* overflow with no wrap. A remain past the award */
-				/* keeps used zero with no underflow. */
+				/* The q bound keeps the product small and */
+				/* the guard saturates on overflow. Remain */
+				/* past the award keeps used at zero. */
 				if (denom / (u64)FLOW_SLICE_NS != q_src)
 					denom = (u64)0xffffffffffffffffULL;
 				if (denom >= sl)
 					used = denom - sl;
 				else
 					used = 0;
-				/* Raw burn steps wire the raw max lock with no */
-				/* knob: zero through four with only the top */
-				/* step at full taking growth. Used stays at or */
-				/* below denom at or below three slices so used */
-				/* times four stays near twelve million with no */
-				/* overflow and no wrap. */
+				/* Zero through four steps with only the top */
+				/* step at full taking growth. Used stays at */
+				/* or below three slices, so used times four */
+				/* cannot overflow. */
 				raw = 0;
 				if (denom)
 					raw = used * (u64)FLOW_SCORE_RAW_MAX / denom;
@@ -519,11 +388,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
 		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
 	rs->slice_rem = sl;
-	/* Tick keeps remain with no streak step. The stop edge above owns */
-	/* the one add per run epoch, so a burn that ticks at zero remain */
-	/* then stops never counts twice. A mid slice tick with remain */
-	/* keeps the hold since only a clean stop decays. Placement plus */
-	/* slice handling stay unchanged with no freq move. */
+	/* The stop edge owns the one add per run, so a burn that */
+	/* ticks at zero remain then stops never counts twice. A mid */
+	/* slice tick keeps the hold since only a clean stop decays. */
 }
 
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
@@ -536,12 +403,18 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
 }
 
-/* No SMT probe runs. Each CPU stands single and a missing sibling */
-/* fails closed with no move. Select stays through the shared picker. */
-/* The hint plus the pick stay inside the task mask plus the live range */
-/* with no off mask result. A stale hint falls back to the first allowed */
-/* live CPU before the shared pick, and a stale pick falls back the same */
-/* way after. The cached first target serves both fallbacks with one walk. */
+/**
+ * flow_select_cpu - pick a CPU for a waking task.
+ * @p: waking task.
+ * @prev_cpu: CPU it ran on before.
+ * @wake_flags: wakeup flags from the kernel.
+ *
+ * The hint and the pick stay inside the mask and the live range.
+ * A stale hint falls back to the first allowed live CPU before the
+ * shared pick, and a stale pick falls back the same way after.
+ *
+ * Returns: the picked CPU.
+ */
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	bool idle = false;
@@ -568,14 +441,18 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	return picked;
 }
 
-/* Reclamp the cached queue affinity on mask change. Preserves virtual */
-/* time plus deadline plus generation plus queued state with no fresh */
-/* assign. Exiting tasks keep the minimal slice. A queued task keeps the */
-/* charged affinity with no rewrite so later accounting stays on the */
-/* enqueue LLC, and the new owner takes a pinned fast path wake for */
-/* pinned waits else a constrained wake with an orphan count only on a */
-/* live allowed kick and no move. The enqueue plus dispatch repair stays */
-/* as fallback when the hook never fires. */
+/**
+ * flow_set_cpumask - track a mask change.
+ * @p: task whose mask changed.
+ * @cpumask: new mask, unused beyond the hook itself.
+ *
+ * Keeps virtual time, deadline, generation, and queued state with
+ * no fresh assign. A queued task keeps its queue and wakes the new
+ * owner: pinned through the fast path, shared through the
+ * constrained path with the latency key. The orphan count lands
+ * only on a live allowed kick. An unqueued task reclamps its cached
+ * LLC. Exiting tasks keep the minimal slice.
+ */
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -601,26 +478,18 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
 		hv = READ_ONCE(t->vtime);
-		/* Latency wakes compare on the boosted key on both sides, */
-		/* so shift the raw stored time here while the kick boosts */
-		/* the running side from its flag. Pinned keeps the raw key */
-		/* with the fast path. The stored time stays raw with no */
-		/* accumulation. One pinned test serves the key plus the */
-		/* kick below with no second walk. A preempt won by a */
-		/* latency task counts the latency preempt tail on the */
-		/* queued LLC with the class already in hand. */
+		/* The kick boosts the running side from its flag, so */
+		/* shift the raw stored time here for the waiter side. */
+		/* Stored time stays raw. One pinned test serves the key */
+		/* and the kick below. A latency preempt win counts with */
+		/* the class already in hand. */
 		if (!pinned)
 			olat = flow_hist_is_lat(READ_ONCE(t->hist3)) ? 1 : 0;
 		if (olat)
 			hv = flow_vtime_boost(hv, 1);
-		/* Queued keep. No LLC rewrite so accounting stays on the */
-		/* enqueue LLC. Pinned uses the fast path that preempts past */
-		/* the tail with no gap check since the wait cannot run */
-		/* elsewhere, shared uses the constrained gap test. Orphan */
-		/* counts only when a live allowed owner takes a kick so a */
-		/* skip never inflates the orphan count. A race that loses */
-		/* the owner between the check and the kick stays a stats */
-		/* glitch with no move no loss. */
+		/* No queue rewrite, so accounting stays on the enqueue */
+		/* LLC. A race that loses the owner between check and kick */
+		/* stays a small stats skew with no move. */
 		if (owner < 0 || !flow_cpu_allowed(owner, p) ||
 		    !flow_cpu_live((u32)owner)) {
 			flow_kick_constrained(owner, hv, p, qllc);
@@ -629,8 +498,8 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		if (pinned)
 			flow_kick_pinned(owner, hv, p, qllc);
 		else if (flow_kick_constrained(owner, hv, p, qllc) && olat)
-			flow_stat_inc(qllc, 22);
-		flow_stat_inc(qllc, 18);
+			flow_stat_inc(qllc, 17);
+		flow_stat_inc(qllc, 13);
 		return;
 	}
 	if (p->flags & PF_EXITING)
@@ -648,23 +517,19 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 	if (!flow_llc_ok(llc))
 		return;
 	t->llc_id = llc;
-	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
-		u64 idx = flow_llc_pair[llc];
-		if (idx < (u64)FLOW_MAX_PAIRS && flow_pair_dhqs[(u32)idx]) {
-			u32 s = (u32)flow_llc_strand[llc];
-			if (s == (u32)FLOW_STRAND_A || s == (u32)FLOW_STRAND_B)
-				t->strand = s;
-		}
-	}
 }
 
-/* Seed one cgroup weight from the init args. Fires for every cgroup */
-/* including root at load. Every path returns zero so a bad arg plus */
-/* a missing id plus a full map never aborts cgroup creation or load. */
-/* A miss reads as default with prior behavior. Map holds 4096 entries */
-/* with no eviction, so a full map also reads as default. Seeding order */
-/* with init_task is documented at init_task, and the live enqueue */
-/* lookup heals a reversed start with no sticky default. */
+/**
+ * flow_cgroup_init - seed one weight entry.
+ * @cgrp: cgroup being created.
+ * @args: init args carrying the weight.
+ *
+ * Every path returns zero so shares never abort creation. A full
+ * map reads as default. The live enqueue lookup heals a reversed
+ * start with no sticky default.
+ *
+ * Returns: always zero.
+ */
 s32 BPF_STRUCT_OPS(flow_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
@@ -680,7 +545,12 @@ s32 BPF_STRUCT_OPS(flow_cgroup_init, struct cgroup *cgrp,
 	return 0;
 }
 
-/* Drop the weight entry so a reused id never reads stale shares. */
+/**
+ * flow_cgroup_exit - drop the weight entry.
+ * @cgrp: cgroup going away.
+ *
+ * A reused id never reads a stale share.
+ */
 void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
 {
 	u64 cgid;
@@ -692,8 +562,14 @@ void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
 	bpf_map_delete_elem(&cgrp_weight_stor, &cgid);
 }
 
-/* Track cpu.weight changes. Update creates, so a weight set before */
-/* init still lands. Clamp keeps the knob in range. */
+/**
+ * flow_cgroup_set_weight - track a weight change.
+ * @cgrp: cgroup.
+ * @weight: new weight.
+ *
+ * Update creates, so a set before init still lands. Values clamp
+ * into range.
+ */
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
 {
 	u64 cgid;
@@ -707,10 +583,15 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
 	bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY);
 }
 
-/* Cache the destination weight on the moving task. Null dest keeps */
-/* defaults with no move. Storage is created on miss so a task without */
-/* context still caches the move, which stays sleepable safe. Enqueue */
-/* reads the live map by id, so the cache is a hint only. */
+/**
+ * flow_cgroup_move - cache the destination share on a task.
+ * @p: moving task.
+ * @from: source cgroup, unused.
+ * @to: destination cgroup, may be NULL.
+ *
+ * Null destination keeps defaults. Storage is created on miss.
+ * Enqueue reads the live map by id, so the cache is a hint only.
+ */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
@@ -733,14 +614,16 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	t->cg_weight = flow_cgroup_lookup(cgid);
 }
 
-/* Seed the task weight cache at task init. Args carry the birth */
-/* cgroup the same way as flash/forge. Null cgroup keeps defaults. */
-/* Cgroup init runs for every cgroup including root at load, but order */
-/* against init_task before 6.12 is unverified. A task born before its */
-/* cgroup weight lands reads default, and the live enqueue lookup heals */
-/* on next enqueue with no sticky default. Needs 6.12 plus for the */
-/* cgroup hooks, checked by the installer. Enqueue never reads this */
-/* cache alone, so set_weight needs no move. */
+/**
+ * flow_init_task - seed the task weight cache.
+ * @p: new task.
+ * @args: init args carrying the birth cgroup, may be NULL.
+ *
+ * Null cgroup keeps defaults. The live enqueue lookup heals a task
+ * born before its cgroup weight lands.
+ *
+ * Returns: zero, or minus ENOMEM when storage fails.
+ */
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -758,9 +641,5 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
 	t->cg_weight = flow_cgroup_lookup(cgid);
 	return 0;
 }
-
-/* Lifecycle hotplug needs restart with tables seeded once, */
-/* reinstall needs restart with no live transition, creation never aborts */
-/* on shares. Docs only, no logic change. */
 
 #endif

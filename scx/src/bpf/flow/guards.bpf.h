@@ -2,10 +2,9 @@
 /*
  * Flow placement guards.
  *
- * Moved from main with predicates unchanged. Null inputs fail closed
- * with no move. No SMT probe runs and each CPU stands single. History
- * helpers classify the three bit yield record with bit math only and
- * never move placement on their own.
+ * Predicates for pinning, mask membership, and liveness, plus the
+ * yield history helpers. Null inputs fail closed. Each CPU is
+ * treated singly with no sibling probe.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -14,8 +13,15 @@
 
 #include "../intf.h"
 
-/* Pinned when only one CPU is allowed or migration is disabled. */
-/* Null task fails closed with no bypass. */
+/**
+ * flow_is_pinned - check whether a task cannot migrate.
+ * @p: task to test, may be NULL.
+ *
+ * A task with one allowed CPU or disabled migration must run where
+ * it is queued.
+ *
+ * Returns: true when pinned, else false.
+ */
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
 	if (!p)
@@ -25,7 +31,13 @@ static __always_inline bool flow_is_pinned(struct task_struct *p)
 	return is_migration_disabled(p);
 }
 
-/* True when cpu is in the task mask. Null mask fails closed. */
+/**
+ * flow_cpu_allowed - check mask membership.
+ * @cpu: CPU to test.
+ * @p: task carrying the mask.
+ *
+ * Returns: true when the CPU is in the mask, else false.
+ */
 static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 {
 	u32 c;
@@ -39,14 +51,17 @@ static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 	return bpf_cpumask_test_cpu(c, p->cpus_ptr);
 }
 
-/* Live CPU needs bound plus init count range. Hotplug beyond needs restart. */
-/* Init seeds one row per discovered CPU and the count stays fixed, so a */
-/* CPU at or beyond the count fails closed with no wake. Offline inside */
-/* the range also needs restart and stays scoped there. Head checks use */
-/* a single peek plus an allowed test at the caller with no helper, so */
-/* no second peek runs. Before init the count reads zero and every bound */
-/* CPU reads live fail open, which is safe since init seeds the count */
-/* before any queue use and early probes take no placement. */
+/**
+ * flow_cpu_live - check the seeded CPU range.
+ * @cpu: CPU to test.
+ *
+ * Init seeds one row per discovered CPU and the count stays fixed,
+ * so a CPU past the count needs a restart. Before init the count
+ * reads zero and every bound CPU reads live, which is safe since
+ * init seeds the count before any queue use.
+ *
+ * Returns: true when the CPU is usable, else false.
+ */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	u64 n;
@@ -59,9 +74,12 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 	return true;
 }
 
-/* First allowed CPU in the task mask. Fails closed to minus one */
-/* with no move when no allowed live target exists. Live keeps the */
-/* init range so a beyond range CPU never takes a wake. */
+/**
+ * flow_first_allowed - first live allowed CPU in the mask.
+ * @p: task carrying the mask.
+ *
+ * Returns: the CPU id, or minus one when none exists.
+ */
 static __always_inline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
@@ -76,9 +94,16 @@ static __always_inline s32 flow_first_allowed(struct task_struct *p)
 	return (s32)first;
 }
 
-/* Constrained target for inserts plus kicks. Keeps the hint when it */
-/* stays allowed and live, else falls back to the first allowed live */
-/* CPU. Fails closed to minus one with no move when no target exists. */
+/**
+ * flow_constrained_target - queue and kick target for a task.
+ * @hint: preferred CPU, usually where the task woke.
+ * @p: task carrying the mask.
+ *
+ * Keeps the hint when it stays allowed and live, else falls back
+ * to the first allowed live CPU.
+ *
+ * Returns: the target CPU, or minus one when none exists.
+ */
 static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
 	if (!p || !p->cpus_ptr)
@@ -88,10 +113,16 @@ static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct 
 	return flow_first_allowed(p);
 }
 
-/* Latency test on the three bit history. Two of three yield bits read */
-/* as latency, else the task holds as a hog. Fresh zero reads as a hog */
-/* so a new task proves latency with early yields first. Bit math only */
-/* with no loop and no map use. */
+/**
+ * flow_hist_is_lat - classify the yield history.
+ * @hist: three bit record of recent stops.
+ *
+ * Two of three early yields read as latency sensitive, else the
+ * task reads as a hog. Fresh zero reads as a hog, so a new task
+ * proves latency with early yields first.
+ *
+ * Returns: true for latency, else false.
+ */
 static __always_inline bool flow_hist_is_lat(u8 hist)
 {
 	u32 b0 = (u32)(hist & 1U);
@@ -100,16 +131,16 @@ static __always_inline bool flow_hist_is_lat(u8 hist)
 	return b0 + b1 + b2 >= 2U;
 }
 
-/* Shift one yield bit into the three bit history. A stop with remain */
-/* records one for an early yield, a full burn records zero. Keeps only */
-/* the newest three bits with no wrap past the mask. */
+/**
+ * flow_hist_push - shift one stop outcome into the history.
+ * @hist: current record.
+ * @bit: one for an early yield, zero for a full burn.
+ *
+ * Returns: the updated record.
+ */
 static __always_inline u8 flow_hist_push(u8 hist, u8 bit)
 {
 	return (u8)(((hist << 1) | (bit & 1U)) & 7U);
 }
-
-/* Guards fail closed on null plus out of bound, no SMT */
-/* probe runs, each CPU stands single. Pinned plus constrained kicks reuse */
-/* the same guards with no new shape. Docs only, no logic change. */
 
 #endif

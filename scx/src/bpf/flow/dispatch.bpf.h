@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow dispatch with steal-outcome split.
+ * Flow dispatch.
  *
- * Moved from main with 10 counted on the thief for remote LLC steals.
- * Steal aggregate 3 moves with 10 so steal equals 9 plus 10. Order is
- * frozen: own pair, same node pairs, remote pairs, own LLC queue,
- * remote LLC queues, fallback safety net. A head that cannot run here
- * forwards one wake to the owner with no move no loss and counts hol
- * forward with a live allowed owner at pick on the dispatch LLC with
- * outcome split into preempt plus idle plus skip. Pair steals count through the steal
- * helper with 9. Queued_dec stays on the victim with saturation at zero.
- * Peeked keys already carry the one slice latency offset, so the forward
- * kick compares boosted keys on both sides with no extra shift here.
- * No knob with fail closed choice.
+ * Each CPU drains its own LLC queue first, then LLC queues on the
+ * same node, then LLC queues on other nodes, then the fallback
+ * queue. A head that cannot run here forwards one wake to the
+ * owner with no move. Remote moves count steal on the thief and
+ * drop the queued gauge on the victim. Queued keys already carry
+ * the latency shift, so the forward kick compares shifted keys on
+ * both sides.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,22 +20,17 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 #include "preempt.bpf.h"
-#include "steal.bpf.h"
 
-/* Forward one wake from an already peeked head with no second peek. */
-/* Empty stays silent with no counter move. One wake per head plus owner */
-/* keeps no storm with no move no loss. Preempt when the owner runs far */
-/* ahead past the tail, else wake idle, else count a skip with no wake. */
-/* The peeked key already carries the latency offset and the kick boosts */
-/* the running side from its flag, so both sides compare boosted with no */
-/* stamp shift here. */
-/* Forward counts attempts with a live allowed owner at pick on the */
-/* dispatch LLC with no order change, outcome splits into preempt plus */
-/* idle plus skip so attempts never read as successes alone. No valid */
-/* owner keeps coalescing with no forward count so a future valid head */
-/* retries through the key mismatch. An owner change already forwards */
-/* again through the key mismatch. A race that loses the owner between */
-/* pick and kick stays a stats glitch. */
+/**
+ * flow_forward_from_peeked - forward one wake for a peeked head.
+ * @ph: peeked head task, may be NULL.
+ * @llc: LLC to charge.
+ * @slot: coalescing slot, one per LLC plus one for fallback.
+ *
+ * Empty stays silent. One wake per head plus owner keeps wakes
+ * bounded. A head with no valid owner keeps coalescing state
+ * without counting, so a later valid head retries.
+ */
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 						     u32 llc, u32 slot)
 {
@@ -69,21 +60,52 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 		flow_kick_constrained(owner, hv, ph, llc);
 		return;
 	}
-	flow_stat_inc(llc, 19);
+	flow_stat_inc(llc, 14);
 	flow_kick_constrained(owner, hv, ph, llc);
+}
+
+/**
+ * flow_try_move - peek one queue and move its head when runnable here.
+ * @cpu: dispatching CPU.
+ * @llc: LLC to charge the move.
+ * @victim: LLC that owns the queue, for the queued gauge.
+ * @dsq: queue id.
+ * @slot: coalescing slot for forwards.
+ * @steal: non-zero when the queue is remote.
+ *
+ * Peeks once and serves the allowed test plus the move plus the
+ * forward wake from that peek.
+ *
+ * Returns: one when a task reached the local queue, else zero.
+ */
+static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim,
+					 u64 dsq, u32 slot, int steal)
+{
+	struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+
+	if (!ph)
+		return 0;
+	if (!flow_cpu_allowed((s32)cpu, ph)) {
+		flow_forward_from_peeked(ph, llc, slot);
+		return 0;
+	}
+	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+		flow_stat_inc(llc, 1);
+		flow_queued_dec(victim);
+		if (steal) {
+			flow_stat_inc(llc, 3);
+			flow_stat_inc(llc, 5);
+		}
+		return 1;
+	}
+	return 0;
 }
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
-	TOUCH_ARENA();
 	u32 c;
 	u32 llc = 0;
 	u32 node = 0;
-	u32 strand = (u32)SCX_DHQ_STRAND_A;
-	u64 dsq;
-	u64 own_idx = (u64)-1;
-	scx_dhq_t *dhq = NULL;
-	u32 pi;
 	u32 li;
 	(void)prev;
 	if (cpu < 0)
@@ -107,115 +129,47 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (!flow_node_ok(node))
 			node = 0;
 	}
-	dsq = flow_llc_dsq(llc);
-	if (flow_nr_llcs > 1 && flow_llc_ok(llc)) {
-		u64 idx = flow_llc_pair[llc];
-		if (idx < (u64)FLOW_MAX_PAIRS) {
-			dhq = flow_pair_dhqs[(u32)idx];
-			strand = (u32)flow_llc_strand[llc];
-			if (strand != (u32)FLOW_STRAND_A &&
-			    strand != (u32)FLOW_STRAND_B)
-				strand = (u32)SCX_DHQ_STRAND_A;
-			own_idx = idx;
-		}
-	}
-	if (dhq) {
-		{
-			u64 cap = 0;
-			if (own_idx < (u64)FLOW_MAX_PAIRS)
-				cap = flow_pair_cap[(u32)own_idx];
-			if (flow_pop_to_local(dhq, llc, strand, 0, c, cap))
-				return;
-		}
-		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
-			u64 idx = (u64)pi;
-			scx_dhq_t *cand;
-			u64 cap;
-			if (idx == own_idx)
-				continue;
-			if (pi >= flow_pair_count)
-				break;
-			if (idx >= (u64)FLOW_MAX_PAIRS)
-				continue;
-			if (flow_pair_node[pi] != node)
-				continue;
-			cand = flow_pair_dhqs[pi];
-			if (!cand)
-				continue;
-			cap = flow_pair_cap[pi];
-			if (flow_pop_to_local(cand, llc, strand, 1, c, cap))
-				return;
-		}
-		bpf_for(pi, 0, FLOW_MAX_PAIRS) {
-			u64 idx = (u64)pi;
-			scx_dhq_t *cand;
-			u64 cap;
-			if (idx == own_idx)
-				continue;
-			if (pi >= flow_pair_count)
-				break;
-			if (idx >= (u64)FLOW_MAX_PAIRS)
-				continue;
-			if (flow_pair_node[pi] == node)
-				continue;
-			cand = flow_pair_dhqs[pi];
-			if (!cand)
-				continue;
-			cap = flow_pair_cap[pi];
-			if (flow_pop_to_local(cand, llc, strand, 1, c, cap))
-				return;
-		}
-	}
-	{
-		struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
-
-		if (ph) {
-			if (!flow_cpu_allowed((s32)c, ph)) {
-				/* Head cannot run here. Forward one wake */
-				/* to the owner with no move no loss. */
-				flow_forward_from_peeked(ph, llc, llc);
-			} else if (scx_bpf_dsq_move_to_local(dsq, 0)) {
-				flow_stat_inc(llc, 1);
-				flow_queued_dec(llc);
-				return;
-			}
-		}
-	}
+	if (flow_try_move(c, llc, llc, flow_llc_dsq(llc), llc, 0))
+		return;
+	/* Same node queues before other nodes to keep work near. */
 	bpf_for(li, 0, FLOW_MAX_LLCS) {
 		u64 odsq;
-		struct task_struct *ph;
 		if (li == llc)
 			continue;
 		if ((u64)li >= flow_nr_llcs)
 			break;
 		if (!flow_llc_ok(li))
 			continue;
+		if (flow_llc_node[li] != node)
+			continue;
 		odsq = flow_llc_dsq(li);
 		if (!flow_dsq_ok(odsq))
 			continue;
-		ph = __COMPAT_scx_bpf_dsq_peek(odsq);
-		if (!ph)
-			continue;
-		if (!flow_cpu_allowed((s32)c, ph)) {
-			flow_forward_from_peeked(ph, llc, li);
-			continue;
-		}
-		if (scx_bpf_dsq_move_to_local(odsq, 0)) {
-			flow_stat_inc(llc, 1);
-			flow_queued_dec(li);
-			flow_stat_inc(llc, 3);
-			flow_stat_inc(llc, 10);
+		if (flow_try_move(c, llc, li, odsq, li, 1))
 			return;
-		}
 	}
-	/* Fallback DSQ is safety only. It stays empty unless no live target exists. */
-	/* Queued was charged to the enqueue LLC at insert, zero when no live */
-	/* target existed. The dec below takes a best effort victim with backlog */
-	/* so the total stays close with no loss. Stats only best effort with */
-	/* saturation at zero, a race stays a stats glitch. Single peek per */
-	/* queue serves the allowed test plus the move plus the forward wake. */
+	bpf_for(li, 0, FLOW_MAX_LLCS) {
+		u64 odsq;
+		if (li == llc)
+			continue;
+		if ((u64)li >= flow_nr_llcs)
+			break;
+		if (!flow_llc_ok(li))
+			continue;
+		if (flow_llc_node[li] == node)
+			continue;
+		odsq = flow_llc_dsq(li);
+		if (!flow_dsq_ok(odsq))
+			continue;
+		if (flow_try_move(c, llc, li, odsq, li, 1))
+			return;
+	}
+	/* Fallback holds tasks with no live target at insert. The */
+	/* queued gauge was charged to the enqueue LLC, so the move */
+	/* takes a best effort drop from a victim with backlog. */
 	{
-		struct task_struct *fph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
+		struct task_struct *fph =
+			__COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
 
 		if (fph) {
 			if (!flow_cpu_allowed((s32)c, fph)) {
@@ -243,14 +197,5 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 }
-
-/* Dispatch order stays frozen own pair, same node pairs, */
-/* remote pairs, own LLC queue, remote LLC queues, fallback safety net. */
-/* Steal 9 plus 10 plus hol forward 19 valid owner only accounting */
-/* unchanged in order. Pair pops pick the lowest boosted key with ties */
-/* to strand A and the sequence keeps first in first out within a class. */
-/* Forward attempts with no valid owner keep */
-/* coalescing with no count so a future valid head retries. */
-/* Docs only, no logic change. */
 
 #endif

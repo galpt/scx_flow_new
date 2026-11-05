@@ -1,57 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow scheduler BPF core.
+ * Flow scheduler core.
  *
- * Thin entry with ordered includes and struct ops only. Placement
- * lives in flow headers with a lavd-style split: maps, stats,
- * guards, vtime, cgroup, freq, preempt, steal, lifecycle, enqueue,
- * dispatch. Tasks enter the pair queue by vtime, else fall back
- * to the LLC DSQ. Dispatch drains pair, then LLC, then fallback
- * safety net. Single LLC bypasses pairing and uses the LLC DSQ
- * directly. Cgroup cpu.weight scales vtime charges with default 100
- * as identity and slice never scaled. Non pinned carry with no remain
- * adds one extra fixed uniform slice with saturation and counts overrun
- * plus penalty, which moves a full burn hog behind the head. Pinned
- * carry skips the penalty and exiting bypasses through early returns.
- * Pinned local wakes through the fast path with streak cover so a hold
- * ends. Stops that leave the task still runnable count as blocked on the
- * cached LLC with no vtime penalty. Streak counts full burns capped at
- * twice the pop retry bound with clean decay and ends in a preempt at
- * the bound. Hist keeps four raw samples for sizing with no reader in
- * BPF. Mask change on a queued task keeps the queue and wakes the owner
- * through the pinned fast path for pinned waits else the constrained
- * path with an orphan count only on a live allowed kick. A head that
- * cannot run here forwards one wake with a forward count only on a live
- * allowed owner at pick. Stats are per LLC with queued plus overrun plus penalty
- * plus escape charged to the enqueue LLC, orphan on the queued LLC, and
- * dispatched plus forward on the dispatch LLC. Pair mode is
- * strict priority and picks the lowest vtime with ties going to
- * strand A. Stealing walks own pair, same node pairs, remote
- * pairs, LLC queues. Pair pops retry bounded with no loss on stale
- * entries. Offsets 0 through 23 stay frozen, tail 24 through 25 is
- * append only with extra award plus total quanta, fallback equals
- * 4 plus 5 plus 6, steal equals 9 plus 10, total equals 15 plus 24.
- * Extra debt scales with q while counters keep event versus extra
- * split. No SMT probe runs and each CPU stands single with fail closed choice.
+ * Entry point with ordered includes and struct ops only. Queues
+ * are one per LLC plus one fallback queue, each ordered by virtual
+ * time with equal times leaving in insertion order. Pinned tasks
+ * use the local queue in FIFO order. Cgroup weight scales virtual
+ * time charges with default weight as identity and the slice
+ * fixed. A full burn postpones the task by the award length. The
+ * streak turns an idle wake into a preempt at the bound. Tables
+ * are seeded once, so hotplug needs a restart.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
-#include <bpf_arena_common.bpf.h>
-#include <lib/arena_map.h>
-#include <lib/dhq.h>
-#include <lib/minheap.h>
-#include <lib/sdt_alloc.h>
-#include <lib/spinlock.h>
 #include "intf.h"
-/* The verifier ties a program to the arena on address use. */
-/* Keep one use in each program that reaches arena memory. */
-/* Init plus enqueue plus dispatch reach the arena, the rest use only */
-/* maps and task storage and need no touch. Enqueue reaches the arena */
-/* through insert, dispatch covers pop to local through the same touch. */
-#define TOUCH_ARENA() do { asm volatile("" :: "r"(&arena)); } while (0)
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 #include "flow/maps.bpf.h"
@@ -61,7 +26,6 @@ UEI_DEFINE(uei);
 #include "flow/cgroup.bpf.h"
 #include "flow/freq.bpf.h"
 #include "flow/preempt.bpf.h"
-#include "flow/steal.bpf.h"
 #include "flow/lifecycle.bpf.h"
 #include "flow/enqueue.bpf.h"
 #include "flow/dispatch.bpf.h"
@@ -88,11 +52,3 @@ SCX_OPS_DEFINE(flow_ops,
 					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");
-
-/* Thin entry with frozen include order maps, stats, guards, */
-/* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
-/* Strict priority lowest vtime strand A with frozen steal hierarchy, */
-/* scaled postponement with q plus blocked tail with no penalty, plus */
-/* pinned fast path with streak plus hist plus orphan plus forward valid */
-/* owner only, and no SMT probe. */
-/* Docs only, no logic change. */

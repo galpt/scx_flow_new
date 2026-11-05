@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.0.16" ] || fail "version not at 5.0.16"
+[ "${want}" = "5.1.0" ] || fail "version not at 5.1.0"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -34,12 +34,9 @@ for need_file in \
     [ -s "${SRC_DIR}/${need_file}" ] || fail "scaffold missing ${need_file}"
 done
 
-# Vendored lib stays present with no empty lib dir.
-for need_lib in \
-    "src/bpf/lib/common.bpf.c" \
-    "src/bpf/lib/dhq.bpf.c"; do
-    [ -s "${SRC_DIR}/${need_lib}" ] || fail "lib scaffold missing ${need_lib}"
-done
+# No vendored sources remain: all helpers come from workspace headers.
+# Any return of the old lib dir fails closed here before any build.
+[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
 # Docs stay present as additive narrative with no knob change.
 for need_doc in \
@@ -58,7 +55,7 @@ for need_note in \
     grep -qF "${need_note}" "${REPO_DIR}/README.md" || fail "readme note missing ${need_note}"
 done
 
-# Flow headers stay present with timeless rationale and no logic drift.
+# Flow headers stay present with scheduler rationale in each file.
 # Code comments stay version-agnostic like lavd plain prose: no X.Y.Z
 # in src/bpf plus build.rs. Version lives only in Cargo plus installer
 # plus guard plus CHANGELOG plus manifest.
@@ -72,18 +69,18 @@ for need_flow in \
     "src/bpf/flow/maps.bpf.h" \
     "src/bpf/flow/preempt.bpf.h" \
     "src/bpf/flow/stats.bpf.h" \
-    "src/bpf/flow/steal.bpf.h" \
     "src/bpf/flow/vtime.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
-    grep -q "Docs only, no logic change." "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
+    grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
+[ ! -e "${SRC_DIR}/src/bpf/flow/steal.bpf.h" ] || fail "steal helper reappeared"
 
-# Main plus intf plus build keep timeless rationale with no logic change.
+# Main plus intf plus build keep scheduler rationale.
 for need_core in \
     "src/bpf/main.bpf.c" \
     "src/bpf/intf.h" \
     "build.rs"; do
-    grep -q "Docs only" "${SRC_DIR}/${need_core}" || fail "core rationale missing ${need_core}"
+    grep -q "Galih Tama" "${SRC_DIR}/${need_core}" || fail "core rationale missing ${need_core}"
 done
 
 # BPF plus build stay version-agnostic with no X.Y.Z string.
@@ -92,17 +89,17 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "0d40abdd36be0c7b3393c8c45ffc86fdcb42b16ba6c73c704de206523dd2495a" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "4ad5e1bff70cdea454b21cdc7a62aaced35ebaaaa25d201a35b1dfea2ece6974" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "17" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
 [ -s "${REPO_DIR}/tools/edf_harness/run.sh" ] || fail "harness scaffold missing run.sh"
 
-# Changelog stays present with the additive 5.0.16 entry.
+# Changelog stays present with the additive 5.1.0 entry.
 [ -s "${REPO_DIR}/CHANGELOG.md" ] || fail "changelog scaffold missing"
-grep -q "5\.0\.16" "${REPO_DIR}/CHANGELOG.md" || fail "changelog version missing"
-grep -q "5\.0\.15" "${REPO_DIR}/CHANGELOG.md" || fail "changelog prior missing"
+grep -q "5\.1\.0" "${REPO_DIR}/CHANGELOG.md" || fail "changelog version missing"
+grep -q "5\.0\.16" "${REPO_DIR}/CHANGELOG.md" || fail "changelog prior missing"
 
 # Deleted Rust mirrors stay deleted with no reappearance.
 # The flow facade plus its helpers stay deleted with constants in
@@ -138,11 +135,7 @@ grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 grep -q 'FORK="https://github.com/galpt/scx"' "${INST}" || fail "fork remote missing"
 grep -q 'pinned fork ref' "${INST}" || fail "fork pin comment missing"
 
-# Overlay lib stays byte-identical with no silent drift.
-grep -q 'cmp -s' "${INST}" || fail "lib hash check missing"
-grep -q 'lib drift' "${INST}" || fail "lib drift guard missing"
-
-# Fork keeps lib plus license as symlinks with no real copy.
+# Fork keeps lib include path plus license as symlinks with no real copy.
 grep -q 'src/bpf/lib' "${INST}" || fail "lib symlink missing"
 grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink target bad"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"

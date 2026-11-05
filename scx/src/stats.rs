@@ -21,39 +21,24 @@ use serde::Serialize;
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
-/// Minimal counters with pair plus DSQ detail and sizing tail.
+/// Per LLC counters for queueing, kicks, hog control, and awards.
 pub struct Metrics {
-    #[stat(desc = "Tasks now queued in pair plus DSQ")]
+    #[stat(desc = "Tasks now queued in DSQ")]
     #[serde(default)]
     pub queued: u64,
     #[stat(desc = "Tasks moved to local in dispatch")]
     #[serde(default)]
     pub dispatched: u64,
-    #[stat(desc = "Pair full plus duplicate plus stale discards")]
+    #[stat(desc = "Fallback inserts plus duplicate drops")]
     #[serde(default)]
     pub fallback: u64,
-    #[stat(desc = "Pair and LLC queue steals in dispatch")]
+    #[stat(desc = "Remote LLC queue moves in dispatch")]
     #[serde(default)]
     pub steal: u64,
-    #[stat(desc = "Pair full spills to LLC queue")]
-    #[serde(default)]
-    pub fb_pair_full: u64,
     #[stat(desc = "Duplicate requeues dropped by queued guard")]
     #[serde(default)]
     pub fb_duplicate: u64,
-    #[stat(desc = "Stale pair pops with no task")]
-    #[serde(default)]
-    pub fb_stale: u64,
-    #[stat(desc = "Last observed pair depth for sizing")]
-    #[serde(default)]
-    pub dhq_depth: u64,
-    #[stat(desc = "Last observed pair capacity for sizing")]
-    #[serde(default)]
-    pub dhq_cap: u64,
-    #[stat(desc = "Pair steals in dispatch")]
-    #[serde(default)]
-    pub steal_pair: u64,
-    #[stat(desc = "Remote LLC steals in dispatch")]
+    #[stat(desc = "Remote LLC moves split on the thief")]
     #[serde(default)]
     pub steal_llc: u64,
     #[stat(desc = "Preempt kicks on enqueue")]
@@ -107,18 +92,13 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={} lat_boost={} hog_hold={} lat_preempt={} age_rescue={} extra_award={} total_quanta={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_duplicate={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={} lat_boost={} hog_hold={} lat_preempt={} age_rescue={} extra_award={} total_quanta={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
             self.fallback,
             self.steal,
-            self.fb_pair_full,
             self.fb_duplicate,
-            self.fb_stale,
-            self.dhq_depth,
-            self.dhq_cap,
-            self.steal_pair,
             self.steal_llc,
             self.kick_preempt,
             self.kick_idle,
@@ -139,19 +119,14 @@ impl Metrics {
         Ok(())
     }
 
-    /// Interval delta with queued plus depth plus cap passing through as live gauges.
+    /// Interval delta with queued passing through as a live gauge.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {
             queued: self.queued,
             dispatched: self.dispatched.wrapping_sub(rhs.dispatched),
             fallback: self.fallback.wrapping_sub(rhs.fallback),
             steal: self.steal.wrapping_sub(rhs.steal),
-            fb_pair_full: self.fb_pair_full.wrapping_sub(rhs.fb_pair_full),
             fb_duplicate: self.fb_duplicate.wrapping_sub(rhs.fb_duplicate),
-            fb_stale: self.fb_stale.wrapping_sub(rhs.fb_stale),
-            dhq_depth: self.dhq_depth,
-            dhq_cap: self.dhq_cap,
-            steal_pair: self.steal_pair.wrapping_sub(rhs.steal_pair),
             steal_llc: self.steal_llc.wrapping_sub(rhs.steal_llc),
             kick_preempt: self.kick_preempt.wrapping_sub(rhs.kick_preempt),
             kick_idle: self.kick_idle.wrapping_sub(rhs.kick_idle),
@@ -182,8 +157,6 @@ impl Metrics {
     }
 
     /// Extra award plus total quanta deltas for share work.
-    /// Top band share stays open: deltas carry no score at award time,
-    /// so Y needs the per award log which stays deferred.
     pub fn extra_deltas(&self, rhs: &Self) -> (u64, u64) {
         (
             self.extra_award.wrapping_sub(rhs.extra_award),
@@ -260,27 +233,27 @@ mod tests {
     }
 
     #[test]
-    fn fold_len_guards_keep_tails_append_only() {
+    fn fold_len_guards_keep_tails() {
         let mut short = Metrics::default();
-        let mut buf192 = [0u8; 192];
-        buf192[184..192].copy_from_slice(&1u64.to_ne_bytes());
-        fold_llc_val(&mut short, &buf192);
+        let mut buf152 = [0u8; 152];
+        buf152[144..152].copy_from_slice(&1u64.to_ne_bytes());
+        fold_llc_val(&mut short, &buf152);
         assert_eq!(short.extra_award, 0);
         assert_eq!(short.total_quanta, 0);
         assert_eq!(short.age_rescue, 1);
 
         let mut extra_only = Metrics::default();
-        let mut buf200 = [0u8; 200];
-        buf200[192..200].copy_from_slice(&7u64.to_ne_bytes());
-        fold_llc_val(&mut extra_only, &buf200);
+        let mut buf160 = [0u8; 160];
+        buf160[152..160].copy_from_slice(&7u64.to_ne_bytes());
+        fold_llc_val(&mut extra_only, &buf160);
         assert_eq!(extra_only.extra_award, 7);
         assert_eq!(extra_only.total_quanta, 0);
 
         let mut both = Metrics::default();
-        let mut buf208 = [0u8; 208];
-        buf208[192..200].copy_from_slice(&7u64.to_ne_bytes());
-        buf208[200..208].copy_from_slice(&9u64.to_ne_bytes());
-        fold_llc_val(&mut both, &buf208);
+        let mut buf168 = [0u8; 168];
+        buf168[152..160].copy_from_slice(&7u64.to_ne_bytes());
+        buf168[160..168].copy_from_slice(&9u64.to_ne_bytes());
+        fold_llc_val(&mut both, &buf168);
         assert_eq!(both.extra_award, 7);
         assert_eq!(both.total_quanta, 9);
     }

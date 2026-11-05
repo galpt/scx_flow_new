@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Sums counters with wrapping add, depth plus cap included, matching base.
+//! Sums counters with wrapping add in struct order.
 
 use log::warn;
 
@@ -11,17 +11,11 @@ use crate::BpfSkel;
 use crate::stats::Metrics;
 
 /// Fold one LLC value into the aggregate.
-/// Counters use wrapping add. Depth plus cap also sum with wrapping
-/// add to keep base parity across LLCs. Short reads keep prior state
-/// with no trap. Offsets 0-23 stay frozen, tail 24-25 is append-only.
-/// Tail 14 counts overrun events and 15 counts penalty slices charged
-/// one to one by design, so the two stay equal while keeping event
-/// versus cost split for later share work. Tail 17 counts streak
-/// preempts, 18 counts mask change kicks, 19 counts head forwards.
-/// Tail 20 counts latency takes, 21 counts hog keeps, 22 counts
-/// latency preempt wins, 23 counts age rescues. Tail 24 counts extra
-/// as q minus one, 25 counts total as q, so total equals old penalty
-/// plus new extra per award and again on deltas.
+/// Counters use wrapping add. Short reads keep prior state.
+/// Overrun counts events and penalty counts slices charged one to
+/// one, keeping event versus cost apart. Extra counts q minus one
+/// and total counts q, so total equals penalty plus extra per award
+/// and again on deltas.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -36,90 +30,70 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     out.steal = out.steal.wrapping_add(s);
     if val.len() >= 40 {
         let v = u64::from_ne_bytes(val[32..40].try_into().unwrap_or([0u8; 8]));
-        out.fb_pair_full = out.fb_pair_full.wrapping_add(v);
+        out.fb_duplicate = out.fb_duplicate.wrapping_add(v);
     }
     if val.len() >= 48 {
         let v = u64::from_ne_bytes(val[40..48].try_into().unwrap_or([0u8; 8]));
-        out.fb_duplicate = out.fb_duplicate.wrapping_add(v);
+        out.steal_llc = out.steal_llc.wrapping_add(v);
     }
     if val.len() >= 56 {
         let v = u64::from_ne_bytes(val[48..56].try_into().unwrap_or([0u8; 8]));
-        out.fb_stale = out.fb_stale.wrapping_add(v);
+        out.kick_preempt = out.kick_preempt.wrapping_add(v);
     }
     if val.len() >= 64 {
         let v = u64::from_ne_bytes(val[56..64].try_into().unwrap_or([0u8; 8]));
-        out.dhq_depth = out.dhq_depth.wrapping_add(v);
+        out.kick_idle = out.kick_idle.wrapping_add(v);
     }
     if val.len() >= 72 {
         let v = u64::from_ne_bytes(val[64..72].try_into().unwrap_or([0u8; 8]));
-        out.dhq_cap = out.dhq_cap.wrapping_add(v);
+        out.kick_skip = out.kick_skip.wrapping_add(v);
     }
     if val.len() >= 80 {
         let v = u64::from_ne_bytes(val[72..80].try_into().unwrap_or([0u8; 8]));
-        out.steal_pair = out.steal_pair.wrapping_add(v);
+        out.overrun = out.overrun.wrapping_add(v);
     }
     if val.len() >= 88 {
         let v = u64::from_ne_bytes(val[80..88].try_into().unwrap_or([0u8; 8]));
-        out.steal_llc = out.steal_llc.wrapping_add(v);
+        out.domino_penalty = out.domino_penalty.wrapping_add(v);
     }
     if val.len() >= 96 {
         let v = u64::from_ne_bytes(val[88..96].try_into().unwrap_or([0u8; 8]));
-        out.kick_preempt = out.kick_preempt.wrapping_add(v);
+        out.blocked = out.blocked.wrapping_add(v);
     }
     if val.len() >= 104 {
         let v = u64::from_ne_bytes(val[96..104].try_into().unwrap_or([0u8; 8]));
-        out.kick_idle = out.kick_idle.wrapping_add(v);
+        out.hog_escape = out.hog_escape.wrapping_add(v);
     }
     if val.len() >= 112 {
         let v = u64::from_ne_bytes(val[104..112].try_into().unwrap_or([0u8; 8]));
-        out.kick_skip = out.kick_skip.wrapping_add(v);
+        out.orphan_kick = out.orphan_kick.wrapping_add(v);
     }
     if val.len() >= 120 {
         let v = u64::from_ne_bytes(val[112..120].try_into().unwrap_or([0u8; 8]));
-        out.overrun = out.overrun.wrapping_add(v);
+        out.hol_forward = out.hol_forward.wrapping_add(v);
     }
     if val.len() >= 128 {
         let v = u64::from_ne_bytes(val[120..128].try_into().unwrap_or([0u8; 8]));
-        out.domino_penalty = out.domino_penalty.wrapping_add(v);
+        out.lat_boost = out.lat_boost.wrapping_add(v);
     }
     if val.len() >= 136 {
         let v = u64::from_ne_bytes(val[128..136].try_into().unwrap_or([0u8; 8]));
-        out.blocked = out.blocked.wrapping_add(v);
+        out.hog_hold = out.hog_hold.wrapping_add(v);
     }
     if val.len() >= 144 {
         let v = u64::from_ne_bytes(val[136..144].try_into().unwrap_or([0u8; 8]));
-        out.hog_escape = out.hog_escape.wrapping_add(v);
+        out.lat_preempt = out.lat_preempt.wrapping_add(v);
     }
     if val.len() >= 152 {
         let v = u64::from_ne_bytes(val[144..152].try_into().unwrap_or([0u8; 8]));
-        out.orphan_kick = out.orphan_kick.wrapping_add(v);
+        out.age_rescue = out.age_rescue.wrapping_add(v);
     }
     if val.len() >= 160 {
         let v = u64::from_ne_bytes(val[152..160].try_into().unwrap_or([0u8; 8]));
-        out.hol_forward = out.hol_forward.wrapping_add(v);
+        out.extra_award = out.extra_award.wrapping_add(v);
     }
     if val.len() >= 168 {
         let v = u64::from_ne_bytes(val[160..168].try_into().unwrap_or([0u8; 8]));
-        out.lat_boost = out.lat_boost.wrapping_add(v);
-    }
-    if val.len() >= 176 {
-        let v = u64::from_ne_bytes(val[168..176].try_into().unwrap_or([0u8; 8]));
-        out.hog_hold = out.hog_hold.wrapping_add(v);
-    }
-    if val.len() >= 184 {
-        let v = u64::from_ne_bytes(val[176..184].try_into().unwrap_or([0u8; 8]));
-        out.lat_preempt = out.lat_preempt.wrapping_add(v);
-    }
-    if val.len() >= 192 {
-        let v = u64::from_ne_bytes(val[184..192].try_into().unwrap_or([0u8; 8]));
-        out.age_rescue = out.age_rescue.wrapping_add(v);
-    }
-    if val.len() >= 200 {
-        let v = u64::from_ne_bytes(val[192..200].try_into().unwrap_or([0u8; 8]));
-        out.extra_award = out.extra_award.wrapping_add(v);
-    }
-    if val.len() >= 208 {
-        let v = u64::from_ne_bytes(val[200..208].try_into().unwrap_or([0u8; 8]));
         out.total_quanta = out.total_quanta.wrapping_add(v);
     }
 }

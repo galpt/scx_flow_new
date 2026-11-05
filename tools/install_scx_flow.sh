@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.0.16"
+VER="5.1.0"
 # Pinned fork ref, same as repo CI.
 SCX_REF="b0efa3f614c0187df4cb3202d7b514d401f77d2a"
 FORK="https://github.com/galpt/scx"
@@ -208,15 +208,10 @@ echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
-# Overlay lib stays byte-identical to workspace lib with no drift.
-for lib_file in arena.bpf.c atq.bpf.c bitmap.bpf.c common.bpf.c cpumask.bpf.c dhq.bpf.c minheap.bpf.c rbtree.bpf.c sdt_alloc.bpf.c sdt_task.bpf.c topology.bpf.c; do
-    if ! cmp -s "${SRC_DIR}/src/bpf/lib/${lib_file}" "${WS}/lib/${lib_file}"; then
-        echo "lib drift for ${lib_file}" >&2
-        exit 1
-    fi
-done
-
 # Fork keeps lib plus license as symlinks with no real copy.
+# The scheduler needs no vendored sources: all helpers come from
+# workspace headers, so only the include path plus the license link
+# are set up here.
 rm -rf "${DEST}/src/bpf/lib"
 ln -s ../../../../../lib "${DEST}/src/bpf/lib"
 rm -f "${DEST}/LICENSE"

@@ -9,9 +9,9 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/Cargo.toml` package manifest
 - `scx/build.rs` build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
-- `scx/src/bpf/main.bpf.c` maps, placement, and dispatch
-- `scx/src/bpf/lib/common.bpf.c` shared arena setup
-- `scx/src/bpf/lib/dhq.bpf.c` upstream pair queue
+- `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
+- `scx/src/bpf/flow/` per area headers with no vendored sources
+- `scx/src/bpf/lib` is absent: helpers come from workspace headers
 - `scx/src/bpf/lib/minheap.bpf.c` shared heap
 - `scx/src/bpf/lib/sdt_alloc.bpf.c` shared alloc
 - `scx/src/main.rs` frontend and run loop
@@ -57,7 +57,7 @@ See `LICENSE`.
 ## Lifecycle
 
 Tasks enter through init_task with the birth cgroup cached as a hint,
-then enqueue places by virtual time into the pair queue or the per LLC
+then enqueue places by virtual time into the per LLC
 queue. Stopping records a yield bit into the three bit task history, and
 enqueue reads two of three early yields as latency else a hog with fresh
 tasks neutral as hogs. Latency tasks take the queue key minus one fixed
@@ -79,18 +79,17 @@ tables. The same restart rule covers the pinned path.
 
 ## Verifier budgets
 
-All BPF loops are bounded with fixed caps. Dispatch retries at most four
-pops per queue, pair walks stop at the configured pair count, LLC walks
+All BPF loops are bounded with fixed caps. LLC walks
 stop at the LLC count, and init walks stop at fixed CPU and LLC bounds.
-Per pair capacity is four times CPU count with a floor of eight, and the
-static area is eight pages created once before the first pair use. Virtual
+Virtual
 time adds one fixed slice with saturation at max and never wraps. Weight
 scaling splits used nanos into slice units plus rest so the multiply never
 overflows, then caps at max. Frequency smoothing uses bounded integer math
 only with three parts prior plus one part fresh. The history classifier
 uses bit math only with no loop, and the latency offset subtracts one
-fixed slice with zero saturation one shot. Stats stay frozen through
-offset nineteen with an append only tail through twenty three. No new
+fixed slice with zero saturation one shot. Stats count twenty one
+counters in struct order at 168 bytes with total meeting penalty
+plus extra per award. No new
 map, struct, helper, or branch was added for documentation.
 
 ## Reinstall safety
