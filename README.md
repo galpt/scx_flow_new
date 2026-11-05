@@ -53,3 +53,60 @@ Run from inside the workspace so path deps resolve.
 ## License
 
 See `LICENSE`.
+
+## Lifecycle
+
+Tasks enter through init_task with the birth cgroup cached as a hint,
+then enqueue places by virtual time into the pair queue or the per LLC
+queue. Running records the per CPU snapshot and clears the queued flag,
+stopping folds burnt nanos into the frequency hint, tick refreshes the
+remaining slice, dequeue clears the queued flag, and exit records through
+the exit info helper. Cgroup init, move, set weight, and exit keep weight
+shares current with fail open reads as default. Single ownership holds
+through the queued flag with no loss, and exiting tasks use a minimal
+slice on an allowed local queue with fallback to the LLC queue.
+
+Hotplug needs a restart. CPU and LLC tables are seeded once at init with
+fixed bounds, so an offline or added CPU after start never reshapes the
+tables. The same restart rule covers the pinned path.
+
+## Verifier budgets
+
+All BPF loops are bounded with fixed caps. Dispatch retries at most four
+pops per queue, pair walks stop at the configured pair count, LLC walks
+stop at the LLC count, and init walks stop at fixed CPU and LLC bounds.
+Per pair capacity is four times CPU count with a floor of eight, and the
+static area is eight pages created once before the first pair use. Virtual
+time adds one fixed slice with saturation at max and never wraps. Weight
+scaling splits used nanos into slice units plus rest so the multiply never
+overflows, then caps at max. Frequency smoothing uses bounded integer math
+only with three parts prior plus one part fresh. No new map, struct,
+helper, or branch was added for documentation.
+
+## Reinstall safety
+
+Reinstall needs a restart from prior releases with no live transition.
+The installer always starts from a fresh workspace, refuses empty, root,
+relative, whitespace, glob, dotdot escape, symlink, shared CI tree at
+/tmp/opencode, bare /tmp, non allowlisted /tmp paths, home, usr, and var
+trees, then fetches the pinned fork ref and verifies the head before
+checkout. Overlay lib stays byte identical with symlink handling for lib
+plus license, then builds and installs the binary. After a good install
+only, an opt in clean may remove the workspace target dir.
+
+## Kernel support
+
+The installer requires kernel 6.12 or newer for the cgroup weight hooks,
+since cgroup init order against task init before 6.12 is unverified and
+would stick defaults. The scheduler README recommends 7.2 or newer for
+sched_ext. The two numbers differ by design: 6.12 is the minimum for the
+hooks, 7.2 is the recommendation for the subsystem. A miss, zero id, zero
+value, or full weight map reads as default with prior behavior kept.
+
+## Cargo lock note
+
+The overlay `scx/Cargo.lock` still records the prior package entry and is
+stale by design. It is never hand edited. CI assembles the workspace and
+runs `cargo update -p scx_flow` to sync the entry, then builds and tests
+with `--locked`. Local builds follow the same sync before any locked
+check, so the stale file never drifts into the binary.
