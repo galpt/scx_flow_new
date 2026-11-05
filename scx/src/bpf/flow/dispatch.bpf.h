@@ -7,7 +7,8 @@
  * frozen: own pair, same node pairs, remote pairs, own LLC queue,
  * remote LLC queues, fallback safety net. A head that cannot run here
  * forwards one wake to the owner with no move no loss and counts hol
- * forward on the dispatch LLC. Pair steals count through the steal
+ * forward with a live allowed owner at pick on the dispatch LLC with
+ * outcome split into preempt plus idle plus skip. Pair steals count through the steal
  * helper with 9. Queued_dec stays on the victim with saturation at zero.
  * No knob with fail closed choice.
  *
@@ -27,7 +28,13 @@
 /* Empty stays silent with no counter move. One wake per head plus owner */
 /* keeps no storm with no move no loss. Preempt when the owner runs far */
 /* ahead past the tail, else wake idle, else count a skip with no wake. */
-/* Counts the forward on the dispatch LLC with no order change. */
+/* Forward counts attempts with a live allowed owner at pick on the */
+/* dispatch LLC with no order change, outcome splits into preempt plus */
+/* idle plus skip so attempts never read as successes alone. No valid */
+/* owner keeps coalescing with no forward count so a future valid head */
+/* retries through the key mismatch. An owner change already forwards */
+/* again through the key mismatch. A race that loses the owner between */
+/* pick and kick stays a stats glitch. */
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 						     u32 llc, u32 slot)
 {
@@ -52,6 +59,10 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph,
 		flow_fwd_pid[slot] = pid;
 		flow_fwd_vtime[slot] = hv;
 		flow_fwd_owner[slot] = owner;
+	}
+	if (owner < 0) {
+		flow_kick_constrained(owner, hv, ph, llc);
+		return;
 	}
 	flow_stat_inc(llc, 19);
 	flow_kick_constrained(owner, hv, ph, llc);
@@ -230,7 +241,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 
 /* Dispatch order stays frozen own pair, same node pairs, */
 /* remote pairs, own LLC queue, remote LLC queues, fallback safety net. */
-/* Steal 9 plus 10 plus hol forward 19 accounting unchanged in order. */
+/* Steal 9 plus 10 plus hol forward 19 valid owner only accounting */
+/* unchanged in order. Forward attempts with no valid owner keep */
+/* coalescing with no count so a future valid head retries. */
 /* Docs only, no logic change. */
 
 #endif

@@ -33,23 +33,36 @@ Running records the per CPU snapshot, assigns the next generation, and
 clears the queued flag. A pinned start clears the hold since the wait
 reached the CPU, while a start with an old enqueue steps the hold down by
 one so a single good wait eases the hold with no new knob and a recent
-requeue keeps the hold for consecutive full burns. Stopping folds burnt
+requeue keeps the hold for consecutive full burns. A legacy tall hold
+clamps to twice the pop retry bound with no new knob so a prior count
+never sticks past the storm window. Stopping folds burnt
 nanos into the smoothed frequency hint and counts a stop that leaves the
 task still runnable as blocked on the cached LLC with no fresh lookup
 and no vtime penalty, so blocking never shifts the deadline. A stop with
-no remain steps the hold with saturation. Runnable covers preemptions
+no remain steps the hold capped at twice the pop retry bound, while a
+clean stop steps the hold down one so a clean run never sticks past the
+storm window. Runnable covers preemptions
 plus slice expiry plus migrations, and an invalid cached LLC falls back
 to zero with no loss. Enqueue stamps the wait start with the monotonic
-clock with no vtime shift, and a zero clock keeps the prior stamp.
+clock with no vtime shift, and a zero clock clears to unknown with
+running treating zero as no decay. Hist keeps the last four raw samples
+as a shift ring for sizing with no reader in BPF as shadow verify for
+post mortem only.
 Pinned local wakes use the fast path that preempts past the tail with no
 gap check plus a streak cover that turns an idle wake into a preempt at
 the bound, so a hold ends. Forward plus victim wakes keep progress when
-the head cannot run on the thief, with a forward count on the dispatch
-LLC and no move no loss, and hierarchical steal reclaims idle time as
+the head cannot run on the thief, with a forward count for attempts with
+a live allowed owner at pick on the dispatch
+LLC and no move no loss, outcome splitting into preempt plus idle plus
+skip, no valid owner keeping coalescing with no forward count so a future
+valid head retries, and hierarchical steal reclaims idle time as
 the bounded push pull analogue. A mask change on a queued task keeps the
-queue with no rewrite and wakes the owner through the constrained path
-with an orphan count. Tick steps the hold on a full burn with no freq
-move and refreshes the remaining slice. Dequeue clears the
+queue with no rewrite and wakes the owner through the pinned fast path
+for pinned waits else the constrained path
+with an orphan count only on a live allowed kick. Tick steps the hold on
+a full burn capped at twice the pop retry bound with no freq
+move and refreshes the remaining slice, keeping the hold on a mid slice
+tick since only a clean stop decays. Dequeue clears the
 queued flag. Exit records through the exit info helper. Single ownership
 holds through the queued flag with duplicate requeues dropped and no loss.
 

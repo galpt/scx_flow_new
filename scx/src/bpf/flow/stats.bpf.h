@@ -12,9 +12,11 @@
  * 7:depth 8:cap use the occupancy set helper, never inc. Overrun plus
  * penalty charge the enqueue LLC while blocked uses the cached LLC, so
  * attribution stays explicit. Hog escape counts streak preempts on the
- * enqueue LLC, orphan kick counts mask change kicks on the queued LLC,
- * hol forward counts head forwards on the dispatch LLC. Unknown offsets
- * return with no change.
+ * enqueue LLC, orphan kick counts mask change kicks with a live allowed
+ * owner on the queued LLC with skips never inflating the orphan count,
+ * hol forward counts head forwards with a live allowed owner at pick on
+ * the dispatch LLC with outcome split into preempt plus idle plus skip.
+ * Unknown offsets return with no change.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

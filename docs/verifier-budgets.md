@@ -41,7 +41,9 @@ time from the kernel slice.
 Frequency hints are neutral for placement with bounded integer math only.
 Sampling caps the raw ratio at full speed then blends three parts prior
 plus one part fresh, writes the raw sample into a four entry shift ring
-with newest at zero for sizing, and the band asks full speed at or above
+with newest at zero for sizing with no reader in BPF as shadow verify
+for post mortem only and no placement use, and the band asks full speed
+at or above
 three quarters, half speed at or below one quarter, else keeps the smoothed
 value. Time uses monotonic nanos with zero plus missing plus reversed
 guards that keep the prior level. Smooth plus hint plus apply stay
@@ -53,8 +55,12 @@ equals pair plus LLC. Overrun counts events and penalty counts slices one
 to one by design on the enqueue LLC, blocked counts still runnable stops
 with no penalty on the cached LLC with zero fallback, covering preemptions
 plus slice expiry plus migrations. Escape counts streak preempts on the
-enqueue LLC, orphan counts mask change kicks on the queued LLC, forward
-counts head forwards on the dispatch LLC. Userspace folds all tails with
+enqueue LLC, orphan counts mask change kicks with a live allowed owner
+on the queued LLC with skips never inflating the orphan count, forward
+counts head forwards with a live allowed owner at pick on the dispatch
+LLC with outcome split into preempt plus idle plus skip. Streak caps at
+twice the pop retry bound with clean decay so a hold ends but never
+sticks. Userspace folds all tails with
 len guards so harness can correlate overrun growth with head movement
 plus escape growth with hold ends.
 The penalty adds one straight line condition with saturating adds and no new

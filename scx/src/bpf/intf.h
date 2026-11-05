@@ -101,10 +101,11 @@ struct flow_task_ctx {
 };
 /* Per CPU running snapshot for preempt compare. Zero means empty. */
 /* Tail hog_streak counts consecutive full burns seen on this CPU. It */
-/* grows on stops that burnt the full slice and decays on clean runs, */
-/* cleared when a pinned wait reaches the CPU. Saturated with no wrap. */
-/* Reserved keeps alignment and stays zero. Six by eight plus tail is */
-/* 48 bytes. */
+/* grows on stops that burnt the full slice capped at twice the pop */
+/* retry bound with no new knob, decays one step on clean stops and on */
+/* old waits, cleared when a pinned wait reaches the CPU. Saturated */
+/* with no wrap so a hold ends but never sticks. Reserved keeps */
+/* alignment and stays zero. Six by eight plus tail is 48 bytes. */
 struct flow_running_state {
 	s64 vtime;
 	s64 deadline;

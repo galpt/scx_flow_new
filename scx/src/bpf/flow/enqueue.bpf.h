@@ -15,7 +15,8 @@
  * the early returns above, and pinned placement stays local FIFO so
  * its vtime never orders shared queues. Pinned local wakes through the
  * pinned fast path with streak cover. Enqueue time stamps the wait with
- * the monotonic clock and never shifts vtime. Single ownership through
+ * the monotonic clock with a zero clock clearing to unknown and never
+ * shifts vtime. Single ownership through
  * the queued flag is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -307,12 +308,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->llc_id = use_llc;
 	}
 	/* Enqueue stamp. Holds the wait start with no vtime shift. Zero */
-	/* clock keeps the prior stamp so a bad read never erases a wait. */
+	/* clock clears to unknown so a bad read never keeps a stale wait. */
+	/* Running treats zero as no decay with no false age out. */
 	{
 		u64 now = bpf_ktime_get_ns();
 
-		if (now)
-			t->enq_ns = now;
+		t->enq_ns = now;
 	}
 	scx_bpf_task_set_dsq_vtime(p, (u64)use_v);
 insert_only:

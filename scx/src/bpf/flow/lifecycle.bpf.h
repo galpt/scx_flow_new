@@ -11,10 +11,12 @@
  * the deadline. Runnable covers preemptions plus slice expiry plus
  * migrations, any stop where the task waits elsewhere. An invalid
  * cached LLC falls back to zero with no loss. Enqueue time ages waits
- * with no vtime shift. Streak counts full burns on the running CPU and
+ * with no vtime shift and a zero clock clears to unknown. Streak counts
+ * full burns capped at twice the pop retry bound with clean decay and
  * ends in a preempt when the bound is reached. Hist keeps the last four
- * raw samples for sizing. Mask change on a queued task keeps the queue
- * with no rewrite and wakes the owner through the constrained path.
+ * raw samples for sizing with no reader in BPF. Mask change on a queued
+ * task keeps the queue with no rewrite and wakes the owner through the
+ * pinned fast path for pinned waits else the constrained path.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -278,12 +280,18 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	/* reached the CPU. A start with an old enqueue ages out one step */
 	/* so a single good wait steps the hold down with no new knob. A */
 	/* recent requeue keeps the hold so consecutive full burns still */
-	/* reach the bound. Reserved stays zero. */
+	/* reach the bound. A legacy tall hold clamps to twice the pop */
+	/* retry bound with no new knob so a prior count never sticks past */
+	/* the storm window. Clean stops decay elsewhere, so this path only */
+	/* ages old waits. Reserved stays zero. */
 	if (flow_is_pinned(p)) {
 		rs->hog_streak = 0;
 	} else {
+		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
 		u64 enq = READ_ONCE(t->enq_ns);
 		u64 now = bpf_ktime_get_ns();
+		if (rs->hog_streak > cap)
+			rs->hog_streak = cap;
 		if (enq && now > enq) {
 			u64 age = now - enq;
 			if (age > (u64)FLOW_SLICE_NS * 4ULL) {
@@ -324,14 +332,20 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
 	/* Streak step. No remain means the full slice burnt, so step the */
-	/* hold with saturation and no wrap. A clean stop keeps the hold so */
-	/* the running path ages it out. Placement plus vtime plus slice */
-	/* handling stay unchanged. */
+	/* hold capped at twice the pop retry bound with no new knob and */
+	/* no wrap. A clean stop steps the hold down one so consecutive */
+	/* full burns still reach the bound but a clean run never sticks */
+	/* past the storm window. Placement plus vtime plus slice handling */
+	/* stay unchanged. */
 	if (sl == 0) {
 		u32 s = rs->hog_streak;
+		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
 
-		if (s < (u32)0xfffffffe)
+		if (s < cap)
 			rs->hog_streak = s + 1;
+	} else {
+		if (rs->hog_streak > 0)
+			rs->hog_streak -= 1;
 	}
 	/* Blocked count. A stop that leaves the task still runnable waits */
 	/* elsewhere, which covers preemptions plus slice expiry plus */
@@ -372,12 +386,15 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (sl > (u64)FLOW_SLICE_NS)
 		sl = (u64)FLOW_SLICE_NS;
 	rs->slice_rem = sl;
-	/* Streak step shares the stop rule with saturation and no wrap. */
-	/* Placement plus slice handling stay unchanged with no freq move. */
+	/* Streak step shares the stop cap at twice the pop retry bound */
+	/* with no new knob and no wrap. A mid slice tick with remain */
+	/* keeps the hold since only a clean stop decays. Placement plus */
+	/* slice handling stay unchanged with no freq move. */
 	if (sl == 0) {
 		u32 s = rs->hog_streak;
+		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
 
-		if (s < (u32)0xfffffffe)
+		if (s < cap)
 			rs->hog_streak = s + 1;
 	}
 }
@@ -428,9 +445,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 /* time plus deadline plus generation plus queued state with no fresh */
 /* assign. Exiting tasks keep the minimal slice. A queued task keeps the */
 /* charged affinity with no rewrite so later accounting stays on the */
-/* enqueue LLC, and the new owner takes one constrained wake with an */
-/* orphan count and no move. The enqueue plus dispatch repair stays as */
-/* fallback when the hook never fires. */
+/* enqueue LLC, and the new owner takes a pinned fast path wake for */
+/* pinned waits else a constrained wake with an orphan count only on a */
+/* live allowed kick and no move. The enqueue plus dispatch repair stays */
+/* as fallback when the hook never fires. */
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -455,9 +473,22 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p,
 			qllc = 0;
 		hv = READ_ONCE(t->vtime);
 		/* Queued keep. No LLC rewrite so accounting stays on the */
-		/* enqueue LLC. Constrained wake carries the outcome count */
-		/* plus the orphan count with no move no loss. */
-		flow_kick_constrained(owner, hv, p, qllc);
+		/* enqueue LLC. Pinned uses the fast path that preempts past */
+		/* the tail with no gap check since the wait cannot run */
+		/* elsewhere, shared uses the constrained gap test. Orphan */
+		/* counts only when a live allowed owner takes a kick so a */
+		/* skip never inflates the orphan count. A race that loses */
+		/* the owner between the check and the kick stays a stats */
+		/* glitch with no move no loss. */
+		if (owner < 0 || !flow_cpu_allowed(owner, p) ||
+		    !flow_cpu_live((u32)owner)) {
+			flow_kick_constrained(owner, hv, p, qllc);
+			return;
+		}
+		if (flow_is_pinned(p))
+			flow_kick_pinned(owner, hv, p, qllc);
+		else
+			flow_kick_constrained(owner, hv, p, qllc);
 		flow_stat_inc(qllc, 18);
 		return;
 	}

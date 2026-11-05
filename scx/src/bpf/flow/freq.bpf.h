@@ -4,8 +4,10 @@
  *
  * Moved from main with no placement change. The hint needs the schedutil
  * governor and hardware support and never changes placement. Hist keeps
- * the last four raw samples as a shift ring for sizing. Hint is neutral
- * for the verifier with bounded integer math only and a bound of four.
+ * the last four raw samples as a shift ring for sizing with no reader
+ * in BPF by design as shadow verify for post mortem sizing only. Hint
+ * is neutral for the verifier with bounded integer math only and a bound
+ * of four.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,8 +27,10 @@ static __always_inline u64 flow_freq_smooth(u64 prior, u64 fresh)
 /* Fold one stop sample into the per CPU level. Used holds nanos burnt */
 /* this run. Wall holds nanos since the prior stop. Caps the raw ratio */
 /* at full speed then blends it. Writes the raw sample into the four */
-/* entry shift ring with integer moves only, newest at zero. Zero time */
-/* plus missing state plus zero wall keep the prior level with no change. */
+/* entry shift ring with integer moves only, newest at zero. The ring */
+/* has no reader in BPF and stays for sizing post mortem only with no */
+/* placement use. Zero time plus missing state plus zero wall keep the */
+/* prior level with no change. */
 static __always_inline void flow_freq_sample(u32 cpu, u64 used)
 {
 	struct flow_freq_state *st;

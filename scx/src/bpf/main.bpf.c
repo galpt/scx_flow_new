@@ -15,11 +15,14 @@
  * carry skips the penalty and exiting bypasses through early returns.
  * Pinned local wakes through the fast path with streak cover so a hold
  * ends. Stops that leave the task still runnable count as blocked on the
- * cached LLC with no vtime penalty. Streak counts full burns and ends in
- * a preempt at the bound. Hist keeps four raw samples for sizing. Mask
- * change on a queued task keeps the queue and wakes the owner with an
- * orphan count. A head that cannot run here forwards one wake with a
- * forward count. Stats are per LLC with queued plus overrun plus penalty
+ * cached LLC with no vtime penalty. Streak counts full burns capped at
+ * twice the pop retry bound with clean decay and ends in a preempt at
+ * the bound. Hist keeps four raw samples for sizing with no reader in
+ * BPF. Mask change on a queued task keeps the queue and wakes the owner
+ * through the pinned fast path for pinned waits else the constrained
+ * path with an orphan count only on a live allowed kick. A head that
+ * cannot run here forwards one wake with a forward count only on a live
+ * allowed owner at pick. Stats are per LLC with queued plus overrun plus penalty
  * plus escape charged to the enqueue LLC, orphan on the queued LLC, and
  * dispatched plus forward on the dispatch LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
@@ -89,5 +92,5 @@ SCX_OPS_DEFINE(flow_ops,
 /* Strict priority lowest vtime strand A with frozen steal hierarchy, */
 /* uniform postponement that moves the hog plus blocked tail with no */
 /* penalty, plus pinned fast path with streak plus hist plus orphan plus */
-/* forward, and no SMT probe. */
+/* forward valid owner only, and no SMT probe. */
 /* Docs only, no logic change. */
