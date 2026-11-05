@@ -7,7 +7,7 @@
  * queue order with one peek per queue. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
- * the task snapshot for the idle check. Stopping folds burnt
+ * the task snapshot. Stopping folds burnt
  * time into the burst estimate through the half blend.
  * Tick refreshes the remaining slice. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
@@ -311,6 +311,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	else
 		used = len - remain;
 	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
+	/* Pinned tasks keep the same fold with no separate path. */
 	t->burst_ns = est;
 	rs->slice_rem = remain;
 	t->slice_rem = remain;

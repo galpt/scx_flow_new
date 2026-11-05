@@ -87,7 +87,7 @@ struct flow_task_ctx {
 	u32 gpu_hint;
 	u32 pad;
 };
-/* Per CPU running view. A zero gen means empty. Reserved stays
+/* Per CPU running view. Gen counts runs. Reserved stays
  * zero. Prio mirrors the running task. */
 struct flow_running_state {
 	s64 vtime;

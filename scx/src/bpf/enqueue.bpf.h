@@ -12,7 +12,8 @@
  * sensitive tasks. Fresh times move past the per LLC floor. The
  * charge scales with the share and the extra amount is fixed. Each
  * enqueue sends at most one idle wake. A wake goes only to an idle
- * target, else it counts a skip with no wake. Local inserts are not
+ * target, else it counts a skip with no wake. The kernel idle flag
+ * decides the wake. Local inserts are not
  * counted in the shared gauge. Shared and fallback inserts count
  * the gauge, and fallback inserts also count fallback. Dequeue drops
  * the gauge on cancel. Masks are tested again before each wake, so
@@ -33,8 +34,6 @@
 #include "select.bpf.h"
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
-	u32 cpu;
-	struct flow_running_state *rs;
 	if (tgt < 0) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -47,9 +46,7 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	cpu = (u32)tgt;
-	rs = &flow_running_state[cpu];
-	if (rs->gen != 0) {
+	if (!scx_bpf_test_and_clear_cpu_idle(tgt)) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
