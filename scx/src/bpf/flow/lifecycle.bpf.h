@@ -364,18 +364,28 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	t->hist3 = flow_hist_push(t->hist3, sl == 0 ? 0 : 1);
 	rs = &flow_running_state[cpu];
 	rs->slice_rem = sl;
-	/* Streak step. No remain means the full slice burnt, so step the */
-	/* hold capped at twice the pop retry bound with no new knob and */
-	/* no wrap. A clean stop steps the hold down one so consecutive */
-	/* full burns still reach the bound but a clean run never sticks */
-	/* past the storm window. Placement plus vtime plus slice handling */
-	/* stay unchanged. */
+	/* Streak step on the stop edge only, one add per run epoch. No */
+	/* remain means the full award burnt, so step the hold by the */
+	/* award q capped at twice the pop retry bound with no new knob */
+	/* and no wrap. A clean stop steps the hold down one so */
+	/* consecutive full burns still reach the bound but a clean run */
+	/* never sticks past the storm window. The tick keeps remain only */
+	/* with no step so one burn never counts twice. Placement plus */
+	/* vtime plus slice handling stay unchanged. */
 	if (sl == 0) {
 		u32 s = rs->hog_streak;
 		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
+		u64 step = 1;
 
-		if (s < cap)
-			rs->hog_streak = s + 1;
+		if (t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
+			step = (u64)t->pad[0];
+		if (s < cap) {
+			u64 next = (u64)s + step;
+
+			if (next > (u64)cap)
+				next = (u64)cap;
+			rs->hog_streak = (u32)next;
+		}
 	} else {
 		if (rs->hog_streak > 0)
 			rs->hog_streak -= 1;
@@ -506,17 +516,11 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
 		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
 	rs->slice_rem = sl;
-	/* Streak step shares the stop cap at twice the pop retry bound */
-	/* with no new knob and no wrap. A mid slice tick with remain */
+	/* Tick keeps remain with no streak step. The stop edge above owns */
+	/* the one add per run epoch, so a burn that ticks at zero remain */
+	/* then stops never counts twice. A mid slice tick with remain */
 	/* keeps the hold since only a clean stop decays. Placement plus */
 	/* slice handling stay unchanged with no freq move. */
-	if (sl == 0) {
-		u32 s = rs->hog_streak;
-		u32 cap = (u32)FLOW_POP_RETRY_MAX * 2U;
-
-		if (s < cap)
-			rs->hog_streak = s + 1;
-	}
 }
 
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
