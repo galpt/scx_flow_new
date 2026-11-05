@@ -475,7 +475,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 					used = 0;
 				/* Raw burn steps wire the raw max lock with no */
 				/* knob: zero through four with only the top */
-				/* step at full taking growth. */
+				/* step at full taking growth. Used stays at or */
+				/* below denom at or below three slices so used */
+				/* times four stays near twelve million with no */
+				/* overflow and no wrap. */
 				raw = 0;
 				if (denom)
 					raw = used * (u64)FLOW_SCORE_RAW_MAX / denom;

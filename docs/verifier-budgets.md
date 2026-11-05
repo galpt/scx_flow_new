@@ -104,7 +104,9 @@ prior release with dispatch unchanged plus enqueue slightly down as a
 feature note with no shrink here: fresh zero plus q scaled denom plus
 one add per epoch necessarily touch the stop plus award paths, veristat
 still shows 26 of 26 pass with stacks within bound, WS proof recorded
-workspace only with no live run here. Bytecode plus ELF differences
+workspace only with no live run here. Attach the veristat CSV with the
+run when available. A veristat exit of minus 95 means the host lacks
+arena support in this env with no scheduler change needed. Bytecode plus ELF differences
 from comment edits land in comment plus line info only.
 Open deferred live with no run here: strict tail plus share plus soak
 gates with per award log join for books via deltas, one hundred twenty

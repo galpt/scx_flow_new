@@ -12,10 +12,13 @@
 # binary is built on each run with no checked in
 # binary. Set STRICT to 1 for the 120 second full
 # burn plus probe gate run with at least 3 repeats
-# each for probe plus control; the run also writes a
+# each for probe plus control, strict overrides quick
+# with QUICK forced to 0 plus DURATION to 120 plus
+# LEVELS to 1.0; the run also writes a
 # y_join template keyed by repeat plus seed plus
 # control for joining counter deltas to the per
 # award log, with share open until the log lands.
+# QUICK stays a 2 second 1 repeat smoke at target 1.0.
 # Defaults stay at or below 60 seconds. Extra share Y
 # stays as awarded extra to top band from counter deltas
 # joined to the per award log with one division alongside
@@ -71,9 +74,10 @@ else
     LEVELS="0.5 0.75 0.95 1.0 1.2 1.5"
 fi
 if [ "${STRICT}" = "1" ]; then
-    # Strict gate run wins over quick. Full burn plus probe for 120
+    # Strict overrides quick. Full burn plus probe for 120
     # seconds with at least 3 repeats each for probe plus control, so
-    # X plus Y plus Z read off the same soak. Fails loud below instead
+    # X plus Y plus Z read off the same soak. Forces QUICK to 0 plus
+    # DURATION to 120 plus LEVELS to 1.0. Fails loud below instead
     # of silently running short. Defaults above stay at or below 60.
     QUICK="0"
     DURATION="120"
@@ -125,21 +129,21 @@ groups = {}
 with open(src, newline='') as f:
     r = csv.DictReader(f)
     for row in r:
-        t = row['target_u']
-        groups.setdefault(t, []).append(row)
+        key = (row['target_u'], row['control'])
+        groups.setdefault(key, []).append(row)
 cols = ['completion', 'offered_util', 'exact_util']
 cols += ['effective_util', 'nvcsw', 'probe_avg_us']
 cols += ['probe_max_us', 'probe_p95_us', 'probe_p99_us', 'probe_over50', 'missed']
 with open(dst, 'w', newline='') as f:
     w = csv.writer(f)
-    head = ['target_u', 'n']
+    head = ['target_u', 'control', 'n']
     for c in cols:
         head += ['mean_' + c, 'ci95_' + c]
     w.writerow(head)
-    for t in sorted(groups, key=float):
-        rows = groups[t]
+    for (t, ctl) in sorted(groups, key=lambda k: (float(k[0]), int(k[1]))):
+        rows = groups[(t, ctl)]
         n = len(rows)
-        out = [t, n]
+        out = [t, ctl, n]
         for c in cols:
             xs = [float(x[c]) for x in rows]
             m = sum(xs) / n

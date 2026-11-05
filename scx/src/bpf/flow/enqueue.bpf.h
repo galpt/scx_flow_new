@@ -264,10 +264,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				/* with no live run here, weight fairness holds since */
 				/* base scales while extra stays uniform. */
 				if (rem_raw == 0 && !pinned) {
-					u64 score = 50;
+					u64 score = 0;
 					u64 prev = 0;
-					u64 ex = 1;
-					u64 q = 2;
+					u64 ex = 0;
+					u64 q = 1;
 					charged = flow_vtime_add_penalty(charged);
 					flow_stat_inc(llc, 14);
 					flow_stat_inc(llc, 15);
@@ -345,6 +345,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					/* second path. Per CPU prev stays reserved zero. */
 					flow_stat_add(llc, 24, ex);
 					flow_stat_add(llc, 25, q);
+				} else {
+					/* Non overrun keeps one quantum. Pad zero */
+					/* holds the current slice with no award */
+					/* while pad one keeps the sticky hold for */
+					/* the next award, so a stale three never */
+					/* steps the hold by three nor splits pair */
+					/* three against DSQ one. Steal stays */
+					/* untouched with no placement shift. */
+					t->pad[0] = 1;
 				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					/* Pair only floor. LLC order uses the vtime */
@@ -422,6 +431,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->strand = use_strand;
 		t->llc_id = use_llc;
 		t->gen = 0;
+		/* Fresh keeps one quantum with sticky hold. Same split */
+		/* fix as the carry non overrun above with no award. */
+		t->pad[0] = 1;
 	} else {
 		t->vtime = use_v;
 		t->deadline = use_d;
