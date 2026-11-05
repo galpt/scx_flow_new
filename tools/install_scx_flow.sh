@@ -28,6 +28,21 @@ need clang
 need rsync
 need git
 
+# Cgroup weight hooks need kernel 6.12 plus. Cgroup init order against
+# task init before 6.12 is unverified and would stick defaults, so refuse
+# older kernels before any clean or fetch.
+krel="$(uname -r)"
+kmaj="$(printf '%s' "${krel}" | cut -d . -f 1 | tr -cd '0-9')"
+kmin="$(printf '%s' "${krel}" | cut -d . -f 2 | tr -cd '0-9')"
+if [ -z "${kmaj}" ] || [ -z "${kmin}" ]; then
+    echo "refusing without a parsable kernel version from ${krel}" >&2
+    exit 1
+fi
+if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 12 ]; }; then
+    echo "refusing kernel ${krel}: need 6.12 plus for cgroup weight hooks" >&2
+    exit 1
+fi
+
 # Always start from a fresh workspace so no run reuses
 # an existing tree. Guard the remove against empty or root plus
 # whitespace plus glob plus relative paths, so only an absolute

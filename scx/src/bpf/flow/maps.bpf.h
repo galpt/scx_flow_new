@@ -4,8 +4,7 @@
  *
  * Moved from main plus one HASH for cgroup weights. All bounds stay fixed
  * with no knob. Single ownership through the queued flag is unchanged.
- * Single ownership through the queued flag is unchanged. Hotplug needs
- * restart, same risk as the pinned path.
+ * Hotplug needs restart, same risk as the pinned path.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -37,9 +36,10 @@ struct {
 
 /* Cgroup weight by kernfs id. Key is cgrp->kn->id, value holds the */
 /* clamped cpu.weight. Miss plus zero id plus zero value all read as */
-/* default, so an unknown kernel plus a missing entry fail closed to */
+/* default, so an unknown kernel plus a missing entry fail open to */
 /* 5.0.8 behavior. Sized for thousands of cgroups with no eviction. */
-/* Deleted on cgroup_exit so a reused id never reads a stale weight. */
+/* A full map misses to default with no stall. Deleted on cgroup_exit */
+/* so a reused id never reads a stale weight. */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 4096);

@@ -13,6 +13,9 @@
  * Maps plus task storage only with no arena use, so no TOUCH here.
  * Miss plus zero id plus zero weight all read as default, which keeps
  * 5.0.8 behavior whenever shares are unknown. Slice never scales.
+ * Enqueue reads the live map by id, so a plain echo weight lands on
+ * next enqueue with no move needed. Task cache is a hint only for
+ * move plus init, and a reversed start heals through the live read.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -69,6 +72,8 @@ static __always_inline u32 flow_cgroup_lookup(u64 cgid)
 }
 
 /* Task cached weight. Zero init plus invalid read as default. */
+/* Enqueue reads the live map by id, so this cache stays a hint only */
+/* for move plus init. */
 static __always_inline u32 flow_task_weight(struct flow_task_ctx *t)
 {
 	if (!t || t->cg_weight == (u32)FLOW_CGROUP_WEIGHT_INVALID)

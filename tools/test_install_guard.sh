@@ -84,6 +84,11 @@ grep -q 'src/bpf/lib' "${INST}" || fail "lib symlink missing"
 grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink target bad"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
 
+# Cgroup weight hooks need 6.12 plus with a parsable kernel check.
+grep -q '6\.12' "${INST}" || fail "kernel guard missing"
+grep -q 'uname -r' "${INST}" || fail "kernel uname guard missing"
+grep -q 'cgroup weight hooks' "${INST}" || fail "kernel cgroup comment missing"
+
 # Canonical plus allowlist guards stay present. The -m forms stay for
 # string canonicalization plus a symlink refuse covers the resolve gap.
 grep -q "realpath -m" "${INST}" || fail "realpath guard missing"

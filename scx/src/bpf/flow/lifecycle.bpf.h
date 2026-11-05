@@ -341,21 +341,24 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 }
 
 /* Seed one cgroup weight from the init args. Fires for every cgroup */
-/* including root at load. Null guards fail closed. Map failure keeps */
-/* default reads and returns no-mem, same as flash/forge storage. */
+/* including root at load. Every path returns zero so a bad arg plus */
+/* a missing id plus a full map never aborts cgroup creation or load. */
+/* A miss reads as default with 5.0.8 behavior. Map holds 4096 entries */
+/* with no eviction, so a full map also reads as default. Seeding order */
+/* with init_task is documented at init_task, and the live enqueue */
+/* lookup heals a reversed start with no sticky default. */
 s32 BPF_STRUCT_OPS(flow_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
 	u64 cgid;
 	u64 w;
 	if (!cgrp || !args)
-		return -EINVAL;
+		return 0;
 	cgid = flow_cgroup_cgid(cgrp);
 	if (!cgid)
 		return 0;
 	w = (u64)flow_cgroup_clamp(args->weight);
-	if (bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY))
-		return -ENOMEM;
+	(void)bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY);
 	return 0;
 }
 
@@ -386,8 +389,10 @@ void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
 	bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY);
 }
 
-/* Cache the destination weight on the moving task. Null dest plus */
-/* missing storage keep defaults with no move. */
+/* Cache the destination weight on the moving task. Null dest keeps */
+/* defaults with no move. Storage is created on miss so a task without */
+/* context still caches the move, which stays sleepable safe. Enqueue */
+/* reads the live map by id, so the cache is a hint only. */
 void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
@@ -396,7 +401,8 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 	(void)from;
 	if (!p)
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return;
 	if (!to) {
@@ -411,6 +417,12 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
 
 /* Seed the task weight cache at task init. Args carry the birth */
 /* cgroup the same way as flash/forge. Null cgroup keeps defaults. */
+/* Cgroup init runs for every cgroup including root at load, but order */
+/* against init_task before 6.12 is unverified. A task born before its */
+/* cgroup weight lands reads default, and the live enqueue lookup heals */
+/* on next enqueue with no sticky default. Needs 6.12 plus for the */
+/* cgroup hooks, checked by the installer. Enqueue never reads this */
+/* cache alone, so set_weight needs no move. */
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {

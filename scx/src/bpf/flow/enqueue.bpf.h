@@ -153,9 +153,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	/* and stay byte-identical. Charge plus fresh below scale the vtime */
 	/* increment by cpu.weight while seq plus publish plus insert plus */
 	/* kick stay unchanged. Slice never scales. Default weight 100 is */
-	/* exact identity with 5.0.8. Miss reads as default and fails */
-	/* closed. */
-	w = flow_task_weight(t);
+	/* exact identity with 5.0.8. Live lookup by id keeps a plain echo */
+	/* weight effective on next enqueue with no move needed. Miss reads */
+	/* as default and fails open. */
+	w = flow_cgroup_lookup(t->cgrp_id);
 	if (t->gen != 0 &&
 	 (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B) &&
 	 flow_llc_ok(t->llc_id) &&
@@ -211,11 +212,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			s64 fresh;
 			/* Scaled fresh. Gap from the pair sequence pays */
 			/* by weight, so heavy starts nearer last while */
-			/* light starts farther. Floor stays last plus */
-			/* one with max saturation, so no starvation. */
-			if (kv > last)
+			/* light starts farther. Tiny gaps can truncate to */
+			/* zero at heavy weights, so a scaled result at or */
+			/* below last steps to last plus one with max */
+			/* saturation, so sequence stays unique. Slice */
+			/* never scales. */
+			if (kv > last) {
 				fresh = flow_cgroup_charge(last, (u64)(kv - last), w);
-			else if (last == (s64)0x7fffffffffffffffLL)
+				if (fresh <= last) {
+					if (last == (s64)0x7fffffffffffffffLL)
+						fresh = last;
+					else
+						fresh = last + 1;
+				}
+			} else if (last == (s64)0x7fffffffffffffffLL)
 				fresh = last;
 			else
 				fresh = last + 1;
