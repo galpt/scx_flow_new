@@ -37,7 +37,7 @@ struct {
 /* Cgroup weight by kernfs id. Key is cgrp->kn->id, value holds the */
 /* clamped cpu.weight. Miss plus zero id plus zero value all read as */
 /* default, so an unknown kernel plus a missing entry fail open to */
-/* 5.0.8 behavior. Sized for thousands of cgroups with no eviction. */
+/* prior behavior. Sized for thousands of cgroups with no eviction. */
 /* A full map misses to default with no stall. Deleted on cgroup_exit */
 /* so a reused id never reads a stale weight. */
 struct {
@@ -66,7 +66,7 @@ s64 flow_dhq_seq[FLOW_MAX_PAIRS];
 /* Node per pair for hierarchy walk. Zero init. */
 u32 flow_pair_node[FLOW_MAX_PAIRS];
 
-/* 5.0.10 note: maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
+/* Maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
 /* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */
 /* single ownership. Docs only, no logic change. */
 

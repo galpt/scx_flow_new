@@ -53,7 +53,7 @@ static __always_inline bool flow_dsq_head_allowed(u64 dsq, u32 cpu)
 	return flow_cpu_allowed((s32)cpu, p);
 }
 
-/* 5.0.10 note: guards fail closed on null plus out of bound, no SMT */
+/* Guards fail closed on null plus out of bound, no SMT */
 /* probe runs, each CPU stands single. Docs only, no logic change. */
 
 #endif

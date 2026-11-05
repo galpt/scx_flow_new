@@ -5,7 +5,7 @@
  * Offsets 0:queued 1:dispatched 2:fallback 3:steal 4:fb_pair_full
  * 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay frozen for compat.
  * Tail 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip
- * is append-only for 5.0.8 with no bound change. Fallback equals 4 plus
+ * is append-only with no bound change. Fallback equals 4 plus
  * 5 plus 6. Steal equals 9 plus 10. Gauges 7:depth 8:cap use the
  * occupancy set helper, never inc. Unknown offsets return with no change.
  *
@@ -122,7 +122,7 @@ static __always_inline void flow_stale_account(u32 thief)
 	}
 }
 
-/* 5.0.10 note: stats 0 through 8 stay frozen with tail 9 through 13 */
+/* Stats 0 through 8 stay frozen with tail 9 through 13 */
 /* append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10, */
 /* gauges use set only. Docs only, no logic change. */
 

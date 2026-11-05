@@ -91,7 +91,7 @@ static __always_inline void flow_freq_apply(s32 cpu)
 	scx_bpf_cpuperf_set(cpu, (u32)hint);
 }
 
-/* 5.0.10 note: freq hint stays neutral for placement with bounded */
+/* Freq hint stays neutral for placement with bounded */
 /* integer math three parts prior plus one part fresh plus band full, */
 /* half, keep. Docs only, no logic change. */
 

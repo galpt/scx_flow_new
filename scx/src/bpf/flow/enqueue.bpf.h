@@ -153,7 +153,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	/* and stay byte-identical. Charge plus fresh below scale the vtime */
 	/* increment by cpu.weight while seq plus publish plus insert plus */
 	/* kick stay unchanged. Slice never scales. Default weight 100 is */
-	/* exact identity with 5.0.8. Live lookup by id keeps a plain echo */
+	/* exact identity with prior behavior. Live lookup by id keeps a plain echo */
 	/* weight effective on next enqueue with no move needed. Miss reads */
 	/* as default and fails open. */
 	w = flow_cgroup_lookup(t->cgrp_id);
@@ -313,7 +313,7 @@ insert_only:
 	}
 }
 
-/* 5.0.10 note: enqueue vtime budgets stay fixed slice 1ms plus preempt */
+/* Enqueue vtime budgets stay fixed slice 1ms plus preempt */
 /* threshold 500us plus tail 125us, weight scaling saturates with last */
 /* plus one floor, pinned plus exiting paths stay byte identical. */
 /* Docs only, no logic change. */

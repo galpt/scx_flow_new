@@ -58,7 +58,10 @@ for need_note in \
     grep -qF "${need_note}" "${REPO_DIR}/README.md" || fail "readme note missing ${need_note}"
 done
 
-# Flow headers stay present with 5.0.10 banners and no logic drift.
+# Flow headers stay present with timeless rationale and no logic drift.
+# Code comments stay version-agnostic like lavd plain prose: no X.Y.Z
+# in src/bpf plus build.rs. Version lives only in Cargo plus installer
+# plus guard plus CHANGELOG plus manifest.
 for need_flow in \
     "src/bpf/flow/cgroup.bpf.h" \
     "src/bpf/flow/dispatch.bpf.h" \
@@ -72,16 +75,21 @@ for need_flow in \
     "src/bpf/flow/steal.bpf.h" \
     "src/bpf/flow/vtime.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
-    grep -q "5\.0\.10 note" "${SRC_DIR}/${need_flow}" || fail "flow banner missing ${need_flow}"
+    grep -q "Docs only, no logic change." "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
 
-# Main plus intf plus build keep 5.0.10 banners with no logic change.
+# Main plus intf plus build keep timeless rationale with no logic change.
 for need_core in \
     "src/bpf/main.bpf.c" \
     "src/bpf/intf.h" \
     "build.rs"; do
-    grep -q "5\.0\.10 note" "${SRC_DIR}/${need_core}" || fail "core banner missing ${need_core}"
+    grep -q "Docs only" "${SRC_DIR}/${need_core}" || fail "core rationale missing ${need_core}"
 done
+
+# BPF plus build stay version-agnostic with no X.Y.Z string.
+if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs" 2>/dev/null; then
+    fail "version string in BPF comment"
+fi
 
 # Scheduler README stays byte identical with no doc drift.
 [ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "0d40abdd36be0c7b3393c8c45ffc86fdcb42b16ba6c73c704de206523dd2495a" ] || fail "scx README drifted"

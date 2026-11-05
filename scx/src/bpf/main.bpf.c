@@ -72,7 +72,7 @@ SCX_OPS_DEFINE(flow_ops,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");
 
-/* 5.0.10 note: thin entry with frozen include order maps, stats, guards, */
+/* Thin entry with frozen include order maps, stats, guards, */
 /* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
 /* Strict priority lowest vtime strand A with frozen steal hierarchy and */
 /* no SMT probe. Docs only, no logic change. */

@@ -12,7 +12,7 @@
  * plus init_task with args->cgroup, same shapes as flash/forge.
  * Maps plus task storage only with no arena use, so no TOUCH here.
  * Miss plus zero id plus zero weight all read as default, which keeps
- * 5.0.8 behavior whenever shares are unknown. Slice never scales.
+ * prior behavior whenever shares are unknown. Slice never scales.
  * Enqueue reads the live map by id, so a plain echo weight lands on
  * next enqueue with no move needed. Task cache is a hint only for
  * move plus init, and a reversed start heals through the live read.
@@ -117,7 +117,7 @@ static __always_inline s64 flow_cgroup_charge(s64 base, u64 used, u32 w)
 	return base + (s64)scaled;
 }
 
-/* 5.0.10 note: cgroup hooks need 6.12 plus, miss plus zero id plus zero */
+/* Cgroup hooks need 6.12 plus, miss plus zero id plus zero */
 /* value plus full map read as default, live lookup heals reversed start, */
 /* slice never scales. Docs only, no logic change. */
 

@@ -5,7 +5,7 @@
  * Moved from main with additive weight hooks only. Single ownership
  * through the queued flag is unchanged. Freq hint is neutral for
  * placement. Hotplug needs restart, same risk as the pinned path.
- * Unknown weights read as default with 5.0.8 behavior. Stats stay
+ * Unknown weights read as default with prior behavior. Stats stay
  * frozen with no new counter for shares.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -343,7 +343,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 /* Seed one cgroup weight from the init args. Fires for every cgroup */
 /* including root at load. Every path returns zero so a bad arg plus */
 /* a missing id plus a full map never aborts cgroup creation or load. */
-/* A miss reads as default with 5.0.8 behavior. Map holds 4096 entries */
+/* A miss reads as default with prior behavior. Map holds 4096 entries */
 /* with no eviction, so a full map also reads as default. Seeding order */
 /* with init_task is documented at init_task, and the live enqueue */
 /* lookup heals a reversed start with no sticky default. */
@@ -441,7 +441,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
 	return 0;
 }
 
-/* 5.0.10 note: lifecycle hotplug needs restart with tables seeded once, */
+/* Lifecycle hotplug needs restart with tables seeded once, */
 /* reinstall needs restart with no live transition, creation never aborts */
 /* on shares. Docs only, no logic change. */
 

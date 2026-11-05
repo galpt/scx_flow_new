@@ -86,7 +86,7 @@ static __always_inline void flow_kick_idle_only(s32 task_cpu,
 	flow_stat_inc(llc, 12);
 }
 
-/* 5.0.10 note: kick budgets stay threshold 500us plus tail 125us with */
+/* Kick budgets stay threshold 500us plus tail 125us with */
 /* per LLC 11 preempt, 12 idle, 13 skip, preempt never counted as steal. */
 /* Docs only, no logic change. */
 

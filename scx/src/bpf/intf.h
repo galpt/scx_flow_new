@@ -121,7 +121,7 @@ struct flow_cpu_ctx {
 };
 /* Per LLC counters. Offsets 0:queued 1:dispatched 2:fallback 3:steal */
 /* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap stay */
-/* stable for compat. Tail is append-only for 5.0.8 with no bound change. */
+/* stable for compat. Tail is append-only with no bound change. */
 /* 14 by u64 is 112 bytes. Fallback stays the aggregate of pair-full */
 /* plus duplicate plus stale, so fallback equals 4 plus 5 plus 6. */
 /* Steal stays the aggregate of pair plus LLC, so steal equals 9 plus 10. */
@@ -171,7 +171,7 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	return dsq >= (u64)FLOW_LLC_BASE &&
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
-/* 5.0.10 note: ABI stays frozen with fixed slice, preempt, pop retry, */
+/* ABI stays frozen with fixed slice, preempt, pop retry, */
 /* strand, DSQ, and cgroup weight constants plus frozen offsets 0-8 and */
 /* append only tail. Docs only, no logic change. */
 #endif
