@@ -273,8 +273,14 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 			strand = t->strand;
 	}
 	sl = p->scx.slice;
-	if (!sl || sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
+	/* Clamp holds the extended award bound at three quanta with no */
+	/* drop to one, so an awarded slice keeps its length here while a */
+	/* bad read still falls back to one. Stopping plus tick share the */
+	/* same three quantum clamp. */
+	if (!sl)
 		sl = (u64)FLOW_SLICE_NS;
+	else if (sl > (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA)
+		sl = (u64)FLOW_SLICE_NS * (u64)FLOW_MAX_QUANTA;
 	rs = &flow_running_state[cpu];
 	ng = rs->gen + 1;
 	if (ng == 0)
@@ -402,6 +408,14 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	/* about four and time about three and a half. Counts stay separate */
 	/* with no new bound beyond the streak cap. CPU only with no cross */
 	/* average. Fresh reads fifty with q two until the first count. */
+	/* Growth needs a full base burn with raw top, so an extended award */
+	/* that stops after one base slice with remain still takes decay. */
+	/* That self limit is intentional with no new knob: only a full */
+	/* extended burn earns growth. Latency history feeds the queue key */
+	/* offset only and never feeds the score here, so a latency task */
+	/* still needs a full burn for growth with no inversion. Merged */
+	/* means the raw burn hint shares the same blend with no second */
+	/* path, not a history feed. */
 	{
 		bool is_pinned = flow_is_pinned(p);
 		bool is_exiting = (p->flags & PF_EXITING) != 0;
@@ -434,10 +448,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 					used = (u64)FLOW_SLICE_NS - sl;
 				else
 					used = 0;
-				raw = used * 4ULL / (u64)FLOW_SLICE_NS;
-				if (raw > 4ULL)
-					raw = 4ULL;
-				if (raw == 4ULL) {
+				/* Raw burn steps wire the raw max lock with no */
+				/* knob: zero through four with only the top */
+				/* step at full taking growth. */
+				raw = used * (u64)FLOW_SCORE_RAW_MAX / (u64)FLOW_SLICE_NS;
+				if (raw > (u64)FLOW_SCORE_RAW_MAX)
+					raw = (u64)FLOW_SCORE_RAW_MAX;
+				if (raw == (u64)FLOW_SCORE_RAW_MAX) {
 					now_s = flow_score_growth(old);
 					if (es->n_growth < 0xffffffffffffffffULL)
 						es->n_growth += 1;

@@ -125,7 +125,10 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 			u64 vdsq = flow_llc_dsq(victim);
 			s32 owner = flow_first_allowed(p);
 			u64 bsl = (u64)FLOW_SLICE_NS;
-			if (t && t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
+			/* Award carry stays bounded at three quanta and skips */
+			/* pinned waits, so a stale pad on a pinned task never */
+			/* grants extra here. */
+			if (!flow_is_pinned(p) && t && t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
 				bsl = (u64)FLOW_SLICE_NS * (u64)t->pad[0];
 			if (!flow_dsq_ok(vdsq))
 				vdsq = (u64)FLOW_FALLBACK_DSQ;
@@ -137,7 +140,11 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 		dsq = flow_llc_dsq(llc);
 		{
 			u64 isl = (u64)FLOW_SLICE_NS;
-			if (t && t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
+			/* Same pinned guard as the bounce path above with the */
+			/* same three quantum bound. Slice length travels with */
+			/* the task to preserve the award across dispatch with */
+			/* no placement shift, score stays per CPU. */
+			if (!flow_is_pinned(p) && t && t->pad[0] >= 1 && t->pad[0] <= (u8)FLOW_MAX_QUANTA)
 				isl = (u64)FLOW_SLICE_NS * (u64)t->pad[0];
 			scx_bpf_dsq_insert_vtime(p, dsq, isl, ins_vtime, 0);
 		}
@@ -160,7 +167,8 @@ static __always_inline int flow_pop_to_local(scx_dhq_t *dhq, u32 llc, u32 strand
 /* Steal keeps bounded retry 4 with peek hint plus pop truth, */
 /* victim accounting saturates at zero, exiting uses minimal slice on the */
 /* same victim path. Awarded tasks keep one slice times q with no other */
-/* scale and no weight scale on the extra part. Order plus retry stay frozen. */
+/* scale and no weight scale on the extra part. Pinned waits keep one */
+/* slice with no award even on a stale pad. Order plus retry stay frozen. */
 /* Docs only, no logic change. */
 
 #endif

@@ -91,6 +91,9 @@ enum flow_consts {
 	/* Three levels name extra zero plus one plus two. Raw hint has */
 	/* five steps zero through four with only the top step at full. */
 	/* Lower steps merge into the same blend with no second path. */
+	/* Band count times width equals the top, levels equal max extra */
+	/* plus one, raw max bounds the burn steps, sample bound covers */
+	/* the blend window, wide cap covers the blend sum before clamp. */
 	FLOW_SCORE_BANDS = 4ULL,
 	FLOW_SCORE_WIDTH = 25ULL,
 	FLOW_SCORE_LEVELS = 3ULL,
@@ -249,6 +252,27 @@ struct flow_llc_stats {
 	u64 total_quanta;
 };
 #ifdef __BPF__
+/* Band locks hold at compile time with no runtime cost and no knob. */
+/* Bands times width equals the top, levels equal max extra plus one, */
+/* width equals the middle band edge, engage is three widths, release */
+/* is two widths, raw max bounds the burn steps, wide cap bounds three */
+/* times top plus full. Sample bound covers the blend window. */
+_Static_assert((unsigned long long)FLOW_SCORE_BANDS * (unsigned long long)FLOW_SCORE_WIDTH == (unsigned long long)FLOW_SCORE_HMAX,
+	       "bands times width equals top");
+_Static_assert((unsigned long long)FLOW_SCORE_LEVELS == (unsigned long long)FLOW_MAX_EXTRA + 1ULL,
+	       "levels equal max extra plus one");
+_Static_assert((unsigned long long)FLOW_SCORE_Q == (unsigned long long)FLOW_SCORE_WIDTH,
+	       "middle edge equals width");
+_Static_assert((unsigned long long)FLOW_SCORE_ENGAGE == 3ULL * (unsigned long long)FLOW_SCORE_WIDTH,
+	       "engage is three widths");
+_Static_assert((unsigned long long)FLOW_SCORE_RELEASE == 2ULL * (unsigned long long)FLOW_SCORE_WIDTH,
+	       "release is two widths");
+_Static_assert((unsigned long long)FLOW_SCORE_MAX == 3ULL * (unsigned long long)FLOW_SCORE_HMAX + 100ULL,
+	       "wide cap bounds the blend sum");
+_Static_assert((unsigned long long)FLOW_SCORE_RAW_MAX == 4ULL,
+	       "raw max bounds the burn steps");
+_Static_assert((unsigned long long)FLOW_SCORE_N == 8ULL,
+	       "sample bound covers the window");
 static __always_inline u64 flow_llc_dsq(u32 llc)
 {
 	return (u64)FLOW_LLC_BASE + (u64)llc;

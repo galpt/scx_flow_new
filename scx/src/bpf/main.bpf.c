@@ -28,9 +28,11 @@
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
  * pairs, LLC queues. Pair pops retry bounded with no loss on stale
- * entries. Offsets 0 through 16 stay frozen, tail 17 through 19 is
- * append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10.
- * No SMT probe runs and each CPU stands single with fail closed choice.
+ * entries. Offsets 0 through 23 stay frozen, tail 24 through 25 is
+ * append only with extra award plus total quanta, fallback equals
+ * 4 plus 5 plus 6, steal equals 9 plus 10, total equals 15 plus 24.
+ * Extra debt scales with q while counters keep event versus extra
+ * split. No SMT probe runs and each CPU stands single with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -90,7 +92,7 @@ SCX_OPS_DEFINE(flow_ops,
 /* Thin entry with frozen include order maps, stats, guards, */
 /* vtime, cgroup, freq, preempt, steal, lifecycle, enqueue, dispatch. */
 /* Strict priority lowest vtime strand A with frozen steal hierarchy, */
-/* uniform postponement that moves the hog plus blocked tail with no */
-/* penalty, plus pinned fast path with streak plus hist plus orphan plus */
-/* forward valid owner only, and no SMT probe. */
+/* scaled postponement with q plus blocked tail with no penalty, plus */
+/* pinned fast path with streak plus hist plus orphan plus forward valid */
+/* owner only, and no SMT probe. */
 /* Docs only, no logic change. */

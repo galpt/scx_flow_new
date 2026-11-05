@@ -44,7 +44,9 @@ static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 /* CPU at or beyond the count fails closed with no wake. Offline inside */
 /* the range also needs restart and stays scoped there. Head checks use */
 /* a single peek plus an allowed test at the caller with no helper, so */
-/* no second peek runs. */
+/* no second peek runs. Before init the count reads zero and every bound */
+/* CPU reads live fail open, which is safe since init seeds the count */
+/* before any queue use and early probes take no placement. */
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
 	u64 n;

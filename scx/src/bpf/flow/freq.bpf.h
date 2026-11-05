@@ -29,8 +29,10 @@ static __always_inline u64 flow_freq_smooth(u64 prior, u64 fresh)
 /* at full speed then blends it. Writes the raw sample into the four */
 /* entry shift ring with integer moves only, newest at zero. The ring */
 /* has no reader in BPF and stays for sizing post mortem only with no */
-/* placement use. Zero time plus missing state plus zero wall keep the */
-/* prior level with no change. */
+/* placement use, kept as shadow verify by design with no removal. Zero */
+/* time plus missing state plus zero wall keep the prior level. Cross CPU */
+/* streak plus forward races stay benign with no lock: a stale read only */
+/* misses or adds one preempt and self heals on the next stop. */
 static __always_inline void flow_freq_sample(u32 cpu, u64 used)
 {
 	struct flow_freq_state *st;

@@ -118,9 +118,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t) {
-		/* No context means no duplicate state exists. Exiting */
-		/* without context still needs no loss, so try local */
-		/* then fall back to the LLC queue with a minimal slice. */
+		/* No context means no duplicate state exists, so the queued */
+		/* guard has nothing to check and the insert below cannot */
+		/* double queue. Exiting without context still needs no loss, */
+		/* so try local then fall back to the LLC queue with a minimal */
+		/* slice. A later enqueue creates storage with no stale hold. */
 		if (p->flags & PF_EXITING) {
 			if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
@@ -247,6 +249,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				/* Order stays strict priority lowest boosted time */
 				/* with ties to strand A. Score plus hold give q of */
 				/* one plus extra with top first then middle then zero. */
+				/* Debt scales with q: one uniform slice now plus ex */
+				/* more below for a total of q, so a three quantum */
+				/* burn pays three slices and cannot hold the head */
+				/* three times longer on one slice of debt. Each add */
+				/* saturates at max with no wrap and no knob. Counters */
+				/* keep event versus extra split with fifteen at one */
+				/* per overrun plus twenty four at ex plus twenty five */
+				/* at q, so total still equals fifteen plus twenty */
+				/* four per award and on deltas. Streak escape still */
+				/* bounds the hold at the pop retry bound with clean */
+				/* decay, gap plus tail unchanged, tick keeps no */
+				/* preempt. Full soak gates stay OPEN deferred live */
+				/* with no live run here, weight fairness holds since */
+				/* base scales while extra stays uniform. */
 				if (rem_raw == 0 && !pinned) {
 					u64 score = 50;
 					u64 prev = 0;
@@ -258,20 +274,24 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					if (flow_cpu_ok(cpu)) {
 						struct flow_extra_state *es = &flow_extra_state[cpu];
 						u64 st = es->score;
-						u64 pv;
 						if (es->n_growth == 0 && es->n_decay == 0) {
 							st = 50;
 						} else if (st > (u64)FLOW_SCORE_HMAX) {
 							st = (u64)FLOW_SCORE_HMAX;
 						}
 						score = st;
-						pv = es->prev_extra;
-						if (pv > (u64)FLOW_MAX_EXTRA)
-							pv = 0;
+						/* Hold is single sourced from the task */
+						/* pad so the sticky travels with the */
+						/* task on migration while score stays */
+						/* per CPU with no cross average. The */
+						/* per CPU hold row stays as shadow for */
+						/* the future per award log and never */
+						/* feeds the award here. */
 						if (t->pad[1] <= (u8)2)
-							pv = (u64)t->pad[1];
-						prev = pv;
-						ex = flow_score_extra(st, pv);
+							prev = (u64)t->pad[1];
+						else
+							prev = 0;
+						ex = flow_score_extra(st, prev);
 						q = flow_score_quanta(ex);
 						if (q < 1ULL)
 							q = 1ULL;
@@ -279,8 +299,19 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 							q = (u64)FLOW_MAX_QUANTA;
 						if (ex > (u64)FLOW_MAX_EXTRA)
 							ex = (u64)FLOW_MAX_EXTRA;
-						es->prev_extra = ex;
+						/* Scale the debt with the award. */
+						/* Total penalty is q with saturation */
+						/* and no knob, so the hold cannot */
+						/* triple on one slice of debt. */
+						if (ex >= 1ULL)
+							charged = flow_vtime_add_penalty(charged);
+						if (ex >= 2ULL)
+							charged = flow_vtime_add_penalty(charged);
 					} else {
+						/* Invalid CPU fallback keeps a */
+						/* conservative fresh default at */
+						/* middle with no top award and */
+						/* bounded debt, documented. */
 						if (t->pad[1] <= (u8)2)
 							prev = (u64)t->pad[1];
 						else
@@ -288,6 +319,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 						score = 50;
 						ex = flow_score_extra(score, prev);
 						q = flow_score_quanta(ex);
+						if (q < 1ULL)
+							q = 1ULL;
+						if (q > (u64)FLOW_MAX_QUANTA)
+							q = (u64)FLOW_MAX_QUANTA;
+						if (ex > (u64)FLOW_MAX_EXTRA)
+							ex = (u64)FLOW_MAX_EXTRA;
+						if (ex >= 1ULL)
+							charged = flow_vtime_add_penalty(charged);
+						if (ex >= 2ULL)
+							charged = flow_vtime_add_penalty(charged);
 					}
 					extra_q = q;
 					t->pad[0] = (u8)q;
@@ -298,11 +339,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					/* penalty plus new extra per award and again on */
 					/* deltas with one addition. Score plus prev plus */
 					/* q stay in the per CPU row plus the task pad for */
-					/* the proof log with no second path. */
+					/* the future per award log with no second path. */
+					/* Score plus prev stay live for that log with no */
+					/* silence. */
 					flow_stat_add(llc, 24, ex);
 					flow_stat_add(llc, 25, q);
-					(void)score;
-					(void)prev;
 				}
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					/* Pair only floor. LLC order uses the vtime */

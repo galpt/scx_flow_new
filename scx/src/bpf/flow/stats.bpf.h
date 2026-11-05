@@ -46,9 +46,9 @@ static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 /* 10:llc plus kick split 11:preempt 12:idle 13:skip plus overrun event */
 /* 14 with penalty slices 15 one to one plus 16:blocked plus 17:escape */
 /* plus 18:orphan plus 19:forward plus 20:lat_boost plus 21:hog_hold plus */
-/* 22:lat_preempt plus 23:age_rescue are frozen with 24:extra_award plus */
-/* 25:total_quanta as the new tail. Extra holds q minus one, total holds */
-/* q, total equals old penalty plus new extra per award. */
+/* 22:lat_preempt plus 23:age_rescue are frozen. Tails 24:extra_award */
+/* plus 25:total_quanta take add only with q minus one plus q, so total */
+/* equals old penalty plus new extra per award. Inc never takes 24 or 25. */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -99,10 +99,9 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		cell = &st->lat_preempt;
 	else if (off == 23)
 		cell = &st->age_rescue;
-	else if (off == 24)
-		cell = &st->extra_award;
-	else if (off == 25)
-		cell = &st->total_quanta;
+	/* Tails 24 plus 25 take add only with no inc path, so an inc */
+	/* there returns with no change while add keeps the per award */
+	/* books checkable. */
 	else
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
@@ -153,8 +152,10 @@ static __always_inline void flow_occupancy_set(u32 llc, scx_dhq_t *dhq, u64 cap)
 }
 
 /* Decrement queued by one with saturation at zero. Stats only best effort. */
-/* A concurrent dec race stays a stats glitch with no loss and no wrap */
-/* beyond the zero check, so the total stays close. */
+/* A concurrent dec race between the zero check and the sub stays a stats */
+/* glitch with no loss and no wrap beyond the check, so the total stays */
+/* close. Queued never feeds placement, only sizing, so a missed or extra */
+/* dec self heals on the next inc with no lock and no retry loop. */
 static __always_inline void flow_queued_dec(u32 llc)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -171,7 +172,8 @@ static __always_inline void flow_queued_dec(u32 llc)
 /* victim takes the queued dec. Fallback counts the discard as the */
 /* aggregate plus the stale tail for the split. Queued stays charged to */
 /* the enqueue LLC while dispatched stays on the dispatch LLC, so thief */
-/* versus victim attribution stays explicit with no loss. */
+/* versus victim attribution stays explicit with no loss. The victim scan */
+/* shares the same stats only race as the dec above and self heals. */
 static __always_inline void flow_stale_account(u32 thief)
 {
 	u32 li;
