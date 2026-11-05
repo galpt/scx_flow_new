@@ -5,7 +5,10 @@
  * Moved from main with the enqueue LLC passed to kick helpers for
  * per LLC 11 plus 12 plus 13 counting. Predicates plus vtime carry
  * plus pair insert plus LLC spill plus occupancy are unchanged.
- * Single ownership through the queued flag is unchanged with no loss.
+ * Carry plus fresh vtime increments scale by cpu.weight with slice
+ * never scaled and default 100 as exact identity. Pinned plus exiting
+ * paths stay byte-identical. Single ownership through the queued flag
+ * is unchanged with no loss.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -17,6 +20,7 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 #include "vtime.bpf.h"
+#include "cgroup.bpf.h"
 #include "preempt.bpf.h"
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
@@ -34,6 +38,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 use_sl;
 	u32 use_strand;
 	u32 use_llc;
+	u32 w;
 	int carry = 0;
 	u32 pair_u = 0;
 	int have_pair = 0;
@@ -144,6 +149,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 	}
+	/* Weight shares start here. Pinned plus exiting above never scale */
+	/* and stay byte-identical. Charge plus fresh below scale the vtime */
+	/* increment by cpu.weight while seq plus publish plus insert plus */
+	/* kick stay unchanged. Slice never scales. Default weight 100 is */
+	/* exact identity with 5.0.8. Miss reads as default and fails */
+	/* closed. */
+	w = flow_task_weight(t);
 	if (t->gen != 0 &&
 	 (t->strand == (u32)FLOW_STRAND_A || t->strand == (u32)FLOW_STRAND_B) &&
 	 flow_llc_ok(t->llc_id) &&
@@ -165,14 +177,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 					used = 0;
 				if (used > (u64)FLOW_SLICE_NS)
 					used = (u64)FLOW_SLICE_NS;
-				charged = t->vtime;
-				if (used != 0) {
-					const s64 vmax = (s64)0x7fffffffffffffffLL;
-					if (charged <= vmax - (s64)used)
-						charged += (s64)used;
-					else
-						charged = vmax;
-				}
+				/* Scaled charge. Heavier pays less vtime for */
+				/* the same burnt slice. Saturation plus the */
+				/* monotonic floor below are unchanged. */
+				charged = flow_cgroup_charge(t->vtime, used, w);
 				if (have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 					s64 last = flow_dhq_seq[pair_u];
 					if (charged <= last) {
@@ -201,8 +209,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (dhq && have_pair && pair_u < (u32)FLOW_MAX_PAIRS) {
 			s64 last = flow_dhq_seq[pair_u];
 			s64 fresh;
+			/* Scaled fresh. Gap from the pair sequence pays */
+			/* by weight, so heavy starts nearer last while */
+			/* light starts farther. Floor stays last plus */
+			/* one with max saturation, so no starvation. */
 			if (kv > last)
-				fresh = kv;
+				fresh = flow_cgroup_charge(last, (u64)(kv - last), w);
 			else if (last == (s64)0x7fffffffffffffffLL)
 				fresh = last;
 			else

@@ -70,8 +70,19 @@ enum flow_consts {
 	FLOW_STRAND_B = 1ULL,
 	/* Queued bit in task flags. Set on enqueue, cleared on running and dequeue. */
 	FLOW_FLAG_QUEUED = 1ULL,
+	/* Cgroup weight default. Matches CGROUP_WEIGHT_DFL in */
+	/* include/linux/cgroup.h plus the v2 range doc [1, 10000] */
+	/* default 100 plus flash/forge CGROUP_WEIGHT_DFL 100. Zero */
+	/* is never a valid weight and fails closed to default. */
+	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
+	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
+	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
+	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
 };
 /* Per task state for the life of the task. Flags holds the queued bit. */
+/* Tail cgrp_id plus cg_weight carry the cpu.weight share. Zero init */
+/* means no cgroup seen and reads as default through the clamp. Stats */
+/* stay untouched with no new counter for shares. */
 struct flow_task_ctx {
 	s64 vtime;
 	s64 deadline;
@@ -81,6 +92,9 @@ struct flow_task_ctx {
 	u32 llc_id;
 	u32 flags;
 	u32 pad;
+	u64 cgrp_id;
+	u32 cg_weight;
+	u32 pad2;
 };
 /* Per CPU running snapshot for preempt compare. Zero means empty. */
 struct flow_running_state {

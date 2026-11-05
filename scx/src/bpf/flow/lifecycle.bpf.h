@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Flow task lifecycle plus init.
+ * Flow task lifecycle plus init with cgroup shares.
  *
- * Moved from main with no behavior change. Single ownership through
- * the queued flag is unchanged. Freq hint is neutral for placement.
- * Hotplug needs restart, same risk as the pinned path.
+ * Moved from main with additive weight hooks only. Single ownership
+ * through the queued flag is unchanged. Freq hint is neutral for
+ * placement. Hotplug needs restart, same risk as the pinned path.
+ * Unknown weights read as default with 5.0.8 behavior. Stats stay
+ * frozen with no new counter for shares.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -16,6 +18,7 @@
 #include "stats.bpf.h"
 #include "guards.bpf.h"
 #include "vtime.bpf.h"
+#include "cgroup.bpf.h"
 #include "freq.bpf.h"
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
@@ -203,6 +206,8 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->llc_id = 0;
 	t->flags = 0;
 	t->pad = 0;
+	/* Cgroup tail stays. Init plus move seed it, zero init reads as */
+	/* default, and membership never changes on enable. */
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -333,6 +338,95 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 {
 	bool idle = false;
 	return scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &idle);
+}
+
+/* Seed one cgroup weight from the init args. Fires for every cgroup */
+/* including root at load. Null guards fail closed. Map failure keeps */
+/* default reads and returns no-mem, same as flash/forge storage. */
+s32 BPF_STRUCT_OPS(flow_cgroup_init, struct cgroup *cgrp,
+		   struct scx_cgroup_init_args *args)
+{
+	u64 cgid;
+	u64 w;
+	if (!cgrp || !args)
+		return -EINVAL;
+	cgid = flow_cgroup_cgid(cgrp);
+	if (!cgid)
+		return 0;
+	w = (u64)flow_cgroup_clamp(args->weight);
+	if (bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY))
+		return -ENOMEM;
+	return 0;
+}
+
+/* Drop the weight entry so a reused id never reads stale shares. */
+void BPF_STRUCT_OPS(flow_cgroup_exit, struct cgroup *cgrp)
+{
+	u64 cgid;
+	if (!cgrp)
+		return;
+	cgid = flow_cgroup_cgid(cgrp);
+	if (!cgid)
+		return;
+	bpf_map_delete_elem(&cgrp_weight_stor, &cgid);
+}
+
+/* Track cpu.weight changes. Update creates, so a weight set before */
+/* init still lands. Clamp keeps the knob in range. */
+void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
+{
+	u64 cgid;
+	u64 w;
+	if (!cgrp)
+		return;
+	cgid = flow_cgroup_cgid(cgrp);
+	if (!cgid)
+		return;
+	w = (u64)flow_cgroup_clamp(weight);
+	bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY);
+}
+
+/* Cache the destination weight on the moving task. Null dest plus */
+/* missing storage keep defaults with no move. */
+void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p,
+		    struct cgroup *from, struct cgroup *to)
+{
+	struct flow_task_ctx *t;
+	u64 cgid;
+	(void)from;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	if (!to) {
+		t->cgrp_id = 0;
+		t->cg_weight = (u32)FLOW_CGROUP_WEIGHT_DFLT;
+		return;
+	}
+	cgid = flow_cgroup_cgid(to);
+	t->cgrp_id = cgid;
+	t->cg_weight = flow_cgroup_lookup(cgid);
+}
+
+/* Seed the task weight cache at task init. Args carry the birth */
+/* cgroup the same way as flash/forge. Null cgroup keeps defaults. */
+s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	struct flow_task_ctx *t;
+	u64 cgid = 0;
+	if (!p)
+		return 0;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				 BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!t)
+		return -ENOMEM;
+	if (args && args->cgroup)
+		cgid = flow_cgroup_cgid(args->cgroup);
+	t->cgrp_id = cgid;
+	t->cg_weight = flow_cgroup_lookup(cgid);
+	return 0;
 }
 
 #endif

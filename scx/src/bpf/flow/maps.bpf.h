@@ -2,7 +2,8 @@
 /*
  * Flow maps plus pair tables.
  *
- * Moved from main with no new map. All bounds stay fixed with no knob.
+ * Moved from main plus one HASH for cgroup weights. All bounds stay fixed
+ * with no knob. Single ownership through the queued flag is unchanged.
  * Single ownership through the queued flag is unchanged. Hotplug needs
  * restart, same risk as the pinned path.
  *
@@ -33,6 +34,18 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_llc_stats);
 } llc_stats_stor SEC(".maps");
+
+/* Cgroup weight by kernfs id. Key is cgrp->kn->id, value holds the */
+/* clamped cpu.weight. Miss plus zero id plus zero value all read as */
+/* default, so an unknown kernel plus a missing entry fail closed to */
+/* 5.0.8 behavior. Sized for thousands of cgroups with no eviction. */
+/* Deleted on cgroup_exit so a reused id never reads a stale weight. */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, u64);
+	__type(value, u64);
+} cgrp_weight_stor SEC(".maps");
 
 volatile u64 flow_nr_cpus;
 volatile u64 flow_nr_llcs;

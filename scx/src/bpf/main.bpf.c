@@ -4,12 +4,14 @@
  *
  * Thin entry with ordered includes and struct ops only. Placement
  * lives in flow headers with a lavd-style split: maps, stats,
- * guards, vtime, freq, preempt, steal, lifecycle, enqueue,
+ * guards, vtime, cgroup, freq, preempt, steal, lifecycle, enqueue,
  * dispatch. Tasks enter the pair queue by vtime, else fall back
  * to the LLC DSQ. Dispatch drains pair, then LLC, then fallback
  * safety net. Single LLC bypasses pairing and uses the LLC DSQ
- * directly. Stats are per LLC with queued charged to the enqueue
- * LLC and dispatched counted on the dispatch LLC. Pair mode is
+ * directly. Cgroup cpu.weight scales vtime charges with default 100
+ * as identity and slice never scaled. Stats are per LLC with queued
+ * charged to the enqueue LLC and dispatched counted on the dispatch
+ * LLC. Pair mode is
  * strict priority and picks the lowest vtime with ties going to
  * strand A. Stealing walks own pair, same node pairs, remote
  * pairs, LLC queues. Offsets 0-8 stay frozen, fallback equals
@@ -40,6 +42,7 @@ UEI_DEFINE(uei);
 #include "flow/stats.bpf.h"
 #include "flow/guards.bpf.h"
 #include "flow/vtime.bpf.h"
+#include "flow/cgroup.bpf.h"
 #include "flow/freq.bpf.h"
 #include "flow/preempt.bpf.h"
 #include "flow/steal.bpf.h"
@@ -55,6 +58,11 @@ SCX_OPS_DEFINE(flow_ops,
 	       .stopping		= (void *)flow_stopping,
 	       .tick			= (void *)flow_tick,
 	       .enable			= (void *)flow_enable,
+	       .init_task		= (void *)flow_init_task,
+	       .cgroup_init		= (void *)flow_cgroup_init,
+	       .cgroup_exit		= (void *)flow_cgroup_exit,
+	       .cgroup_move		= (void *)flow_cgroup_move,
+	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |
