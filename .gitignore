@@ -3,3 +3,5 @@ target/
 scx/Cargo.lock
 tools/edf_harness/results/
 tools/edf_harness/harness
+docs/
+CHANGELOG.md
