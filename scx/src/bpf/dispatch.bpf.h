@@ -7,9 +7,8 @@
  * queue order with one peek per queue. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
- * the task snapshot used by the kick check. Stopping folds burnt
- * time plus wait plus remain into the burst estimate through fixed
- * weights and tracks consecutive full burns.
+ * the task snapshot for the idle check. Stopping folds burnt
+ * time into the burst estimate through the half blend.
  * Tick refreshes the remaining slice. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
@@ -26,7 +25,7 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "srtf.bpf.h"
+#include "sjf.bpf.h"
 #include "cgroup.bpf.h"
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
@@ -51,11 +50,11 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 		flow_fwd_owner[slot] = owner;
 	}
 	if (owner < 0) {
-		flow_kick_constrained(owner, hv, ph, llc);
+		flow_kick_idle_only(owner, ph, llc);
 		return;
 	}
 	flow_stat_inc(llc, 14);
-	flow_kick_constrained(owner, hv, ph, llc);
+	flow_kick_idle_only(owner, ph, llc);
 }
 static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, u32 slot, int steal)
 {
@@ -272,8 +271,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->gen = ng;
 	rs->llc_id = llc;
 	rs->prio = t->prio;
-	if (flow_is_pinned(p))
-		rs->streak = 0;
+	rs->reserved = 0;
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
@@ -291,9 +289,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 remain;
 	u64 len;
 	u64 used;
-	u64 wait_ms;
-	u64 rem_ms;
-	u64 now;
 	u64 est;
 	(void)runnable;
 	if (task_cpu < 0)
@@ -311,29 +306,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		len = (u64)FLOW_SLICE_MIN_NS;
 	if (remain > len)
 		remain = len;
-	used = flow_hog_used(len, remain);
-	now = bpf_ktime_get_ns();
-	wait_ms = 0;
-	rem_ms = remain / (u64)1000000ULL;
-	if (now && t->enq_ns && now > t->enq_ns)
-		wait_ms = (now - t->enq_ns) / (u64)1000000ULL;
-	est = flow_pred_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS, wait_ms, rem_ms);
+	if (remain >= len)
+		used = 0;
+	else
+		used = len - remain;
+	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
 	t->burst_ns = est;
-	if (flow_is_pinned(p)) {
-		rs->streak = 0;
-		rs->slice_rem = remain;
-		if (runnable)
-			flow_stat_inc(rs->llc_id, 11);
-		return;
-	}
-	if (flow_hog_full(used, len, remain)) {
-		u32 cap = (u32)FLOW_STREAK_MAX * 2U;
-		if (rs->streak < cap)
-			rs->streak += 1;
-	} else {
-		if (rs->streak > 0)
-			rs->streak -= 1;
-	}
 	rs->slice_rem = remain;
 	t->slice_rem = remain;
 	if (runnable)
@@ -364,24 +342,13 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
-		s64 hv;
-		bool pinned = flow_is_pinned(p);
-		int olat = 0;
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
-		hv = READ_ONCE(t->vtime);
-		if (!pinned && READ_ONCE(t->prio) == (u32)FLOW_PRIO_LAT)
-			olat = 1;
-		if (olat)
-			hv = flow_lat_key(hv, 1);
 		if (owner < 0 || !flow_cpu_allowed(owner, p) || !flow_cpu_live((u32)owner)) {
-			flow_kick_constrained(owner, hv, p, qllc);
+			flow_kick_idle_only(owner, p, qllc);
 			return;
 		}
-		if (pinned)
-			flow_kick_pinned(owner, p, qllc);
-		else if (flow_kick_constrained(owner, hv, p, qllc) && olat)
-			flow_stat_inc(qllc, 17);
+		flow_kick_idle_only(owner, p, qllc);
 		flow_stat_inc(qllc, 13);
 		return;
 	}

@@ -5,7 +5,7 @@
 scx_flow places tasks by virtual time. Each LLC keeps four queues
 ordered by virtual time with equal times in insertion order, plus
 one fallback queue. Dispatch drains local first, then same node,
-then remote. Wakeups preempt on gap else wake idle. Slice is fixed.
+then remote. Wakeups wake idle only. Slice is fixed.
 
 ## Typical Use Cases
 

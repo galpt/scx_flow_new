@@ -12,8 +12,7 @@
  * sensitive queue slightly earlier, while the stored time is left
  * unchanged. A burst estimate tracks recent run time and selects
  * the queue. Slices hold one fixed quantum. Tasks
- * that wait long have their estimate halved. Tasks that burn
- * several full slices in a row move to a lower queue. The graphics
+ * that wait long have their estimate halved. The graphics
  * hint keeps tasks near their previous CPU. It does not change
  * ordering by itself.
  *
@@ -60,11 +59,8 @@ enum flow_consts {
 	FLOW_SJF_INIT_NS = 3000000ULL,
 	FLOW_SJF_FLOOR_NS = 5000ULL,
 	FLOW_SJF_CAP_NS = 1000000000ULL,
-	FLOW_PREEMPT_GAP_NS = 250000ULL,
-	FLOW_PREEMPT_TAIL_NS = 125000ULL,
 	FLOW_AGING_NS = 100000000ULL,
 	FLOW_STARVE_NS = 200000000ULL,
-	FLOW_STREAK_MAX = 4ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_LLC_BASE = 0x6000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
@@ -91,15 +87,15 @@ struct flow_task_ctx {
 	u32 gpu_hint;
 	u32 pad;
 };
-/* Per CPU running view. A zero gen means empty. Streak counts
- * consecutive full slice burns. Prio mirrors the running task. */
+/* Per CPU running view. A zero gen means empty. Reserved stays
+ * zero. Prio mirrors the running task. */
 struct flow_running_state {
 	s64 vtime;
 	u64 slice_rem;
 	u64 gen;
 	u32 llc_id;
 	u32 prio;
-	u32 streak;
+	u32 reserved;
 	u32 pad;
 };
 /* Per CPU seed from userspace. Holds the CPU id and the LLC and
@@ -115,13 +111,14 @@ struct flow_cpu_ctx {
  * moves to a local queue. Fallback counts fallback inserts. Steal
  * counts remote moves, with a split count kept on the thief.
  * Duplicate counts requeues dropped while already queued. Kick
- * counts preempt, idle, and skipped wakes. Overrun counts full
+ * counts idle and skipped wakes with the preempt count staying
+ * zero. Overrun counts full
  * slice burns. Penalty and extra record the charge for those burns,
  * and total records the quanta granted. Blocked counts stops that
- * leave the task runnable. Escape counts streak preempts. Orphan
+ * leave the task runnable. Escape stays zero. Orphan
  * counts mask change kicks. Forward counts heads passed to their
- * owner. Boost and hold describe the queue choice. Preempt counts
- * latency wins. Rescue counts aged waits. */
+ * owner. Boost and hold describe the queue choice. The latency win
+ * count stays zero. Rescue counts aged waits. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;

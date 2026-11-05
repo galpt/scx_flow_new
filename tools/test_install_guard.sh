@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.2" ] || fail "version not at 5.1.2"
+[ "${want}" = "5.1.3" ] || fail "version not at 5.1.3"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -75,7 +75,7 @@ for need_flow in \
     "src/bpf/fair.bpf.h" \
     "src/bpf/maps.bpf.h" \
     "src/bpf/select.bpf.h" \
-    "src/bpf/srtf.bpf.h" \
+    "src/bpf/sjf.bpf.h" \
     "src/bpf/stats.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
@@ -83,6 +83,7 @@ done
 [ ! -e "${SRC_DIR}/src/bpf/flow" ] || fail "flow dir reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/steal.bpf.h" ] || fail "steal helper reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/srtf.bpf.h" ] || fail "srtf header reappeared"
 
 # Main plus intf plus build keep scheduler rationale.
 for need_core in \
@@ -98,7 +99,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "e74641536aa3c28e66178472f0bf0e9478673bffe9404ce327fa6bab06172a1f" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "42e65202aa7cf7f1080cfd8ef885d8971cbc5c443e5b0f282c426fab07c9d2fd" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "18" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
@@ -227,75 +228,135 @@ grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary pre
 
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
-# CPU hog control stays with fixed integers and no knob. The detector
-# compares burnt nanos against awarded length, gates on four fixed
-# rounds through the streak bound, demotes one level with saturation,
-# and keeps the kick plus stats paths unchanged with no extra read.
-HOG_SRTF="${SRC_DIR}/src/bpf/srtf.bpf.h"
-HOG_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
-grep -q "flow_hog_used" "${HOG_SRTF}" || fail "hog used helper missing"
-grep -q "flow_hog_full" "${HOG_SRTF}" || fail "hog full helper missing"
-grep -q "flow_hog_rounds" "${HOG_SRTF}" || fail "hog rounds helper missing"
-grep -q "flow_hog_demote" "${HOG_SRTF}" || fail "hog demote helper missing"
-grep -q "flow_hog_demote" "${HOG_ENQ}" || fail "hog demote call missing"
-grep -q "flow_hog_rounds" "${HOG_ENQ}" || fail "hog rounds gate missing"
-grep -q "FLOW_STREAK_MAX" "${HOG_SRTF}" || fail "hog fixed rounds missing"
+# SJF stays non preemptive with fixed integers and no knob. The burst
+# keeps half of the old value and adds half of the sample, ages down
+# on long waits with a rescue on very long waits, picks one of four
+# queues by estimate plus age, and wakes idle targets only with a skip
+# otherwise. Stopping folds burnt time through the half blend with no
+# wait plus remain step. No streak plus no hog plus no demote is kept.
+SJF_HDR="${SRC_DIR}/src/bpf/sjf.bpf.h"
+SJF_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
+grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
+grep -q "flow_sjf_prio" "${SJF_HDR}" || fail "sjf prio missing"
+grep -q "flow_sjf_age" "${SJF_HDR}" || fail "sjf age missing"
+grep -q "FLOW_SJF_INIT_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf seed missing"
+grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf rescue missing"
+grep -q ">> 1" "${SJF_HDR}" || fail "sjf half blend missing"
+grep -q "FLOW_SLICE_MIN_NS \* 3" "${SJF_HDR}" || fail "sjf norm band missing"
+grep -q "FLOW_AGING_NS" "${SJF_HDR}" || fail "sjf batch band missing"
+grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${SJF_ENQ}" || fail "fixed slice missing"
+grep -q "quanta = 1" "${SJF_ENQ}" || fail "fixed quanta missing"
+grep -q "extra = 0" "${SJF_ENQ}" || fail "fixed extra missing"
+grep -q "flow_fair_charge" "${SJF_ENQ}" || fail "charge pass through missing"
+grep -q "flow_fair_extra" "${SJF_ENQ}" || fail "extra pass through missing"
+grep -q "flow_kick_idle_only" "${SJF_ENQ}" || fail "idle kick missing"
+grep -q "flow_sjf_next" "${DISP_HDR}" || fail "stopping blend missing"
+grep -q "reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved field missing"
+grep -q "rs->reserved = 0" "${DISP_HDR}" || fail "reserved zero missing"
+grep -q "flow_tick" "${DISP_HDR}" || fail "tick missing"
+if grep -q "flow_pred_next" "${SJF_HDR}" 2>/dev/null; then
+    fail "pred helper reappeared"
+fi
+if grep -q "flow_pred_next" "${DISP_HDR}" 2>/dev/null; then
+    fail "pred call reappeared"
+fi
+if grep -q "flow_hog_" "${SJF_HDR}" 2>/dev/null; then
+    fail "hog helper reappeared"
+fi
+if grep -q "flow_hog_" "${SJF_ENQ}" 2>/dev/null; then
+    fail "hog call reappeared"
+fi
+if grep -q "flow_hog_" "${DISP_HDR}" 2>/dev/null; then
+    fail "hog call reappeared"
+fi
+if grep -q "FLOW_STREAK_MAX" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "streak bound reappeared"
+fi
+if grep -q "FLOW_PREEMPT_GAP_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "gap constant reappeared"
+fi
+if grep -q "FLOW_PREEMPT_TAIL_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "tail constant reappeared"
+fi
+if grep -q "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "preempt kick reappeared"
+fi
+if grep -q "SCX_KICK_PREEMPT" "${DISP_HDR}" 2>/dev/null; then
+    fail "preempt kick reappeared"
+fi
+if grep -q "flow_kick_constrained" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "constrained kick reappeared"
+fi
+if grep -q "flow_kick_pinned" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "pinned kick reappeared"
+fi
+if grep -q "streak" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "streak field reappeared"
+fi
+if grep -q "streak" "${SJF_HDR}" 2>/dev/null; then
+    fail "streak helper reappeared"
+fi
+if grep -q "streak" "${SJF_ENQ}" 2>/dev/null; then
+    fail "streak use reappeared"
+fi
+if grep -q "streak" "${DISP_HDR}" 2>/dev/null; then
+    fail "streak use reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 6)" "${SJF_ENQ}" 2>/dev/null; then
+    fail "preempt count reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 6)" "${DISP_HDR}" 2>/dev/null; then
+    fail "preempt count reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 12)" "${SJF_ENQ}" 2>/dev/null; then
+    fail "escape count reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 12)" "${DISP_HDR}" 2>/dev/null; then
+    fail "escape count reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 17)" "${SJF_ENQ}" 2>/dev/null; then
+    fail "lat win count reappeared"
+fi
+if grep -q "flow_stat_inc(llc, 17)" "${DISP_HDR}" 2>/dev/null; then
+    fail "lat win count reappeared"
+fi
+if grep -q "flow_stat_inc(qllc, 17)" "${DISP_HDR}" 2>/dev/null; then
+    fail "lat win count reappeared"
+fi
+if grep -q "bpf_map_" "${SJF_HDR}" 2>/dev/null; then
+    fail "sjf map drift"
+fi
+if grep -q "BPF_STRUCT_OPS" "${SJF_HDR}" 2>/dev/null; then
+    fail "sjf prog drift"
+fi
+if grep -q "bpf_for" "${SJF_HDR}" 2>/dev/null; then
+    fail "sjf loop drift"
+fi
+if grep -q "for (" "${SJF_HDR}" 2>/dev/null; then
+    fail "sjf loop drift"
+fi
 
-# SRTF stutter fix stays with fixed integers and no knob. Seed at three
-# millis, rescue at two hundred millis, gap at two hundred fifty thousand,
-# half blend plus halve age through a shift by one, bands at three plus
-# nine plus one hundred millis, fixed one quantum slice with pass through
-# demote plus charge and a single kick.
-grep -q "FLOW_SJF_INIT_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf seed missing"
-grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf rescue missing"
-grep -q "FLOW_PREEMPT_GAP_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "srtf gap missing"
-grep -q ">> 1" "${HOG_SRTF}" || fail "srtf half blend missing"
-grep -q "FLOW_SLICE_MIN_NS \* 3" "${HOG_SRTF}" || fail "srtf norm band missing"
-grep -q "FLOW_AGING_NS" "${HOG_SRTF}" || fail "srtf batch band missing"
-grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${HOG_ENQ}" || fail "fixed slice missing"
-grep -q "quanta = 1" "${HOG_ENQ}" || fail "fixed quanta missing"
-grep -q "extra = 0" "${HOG_ENQ}" || fail "fixed extra missing"
-grep -q "flow_fair_charge" "${HOG_ENQ}" || fail "charge pass through missing"
-grep -q "flow_fair_extra" "${HOG_ENQ}" || fail "extra pass through missing"
-grep -q "flow_kick_constrained" "${HOG_ENQ}" || fail "single kick missing"
+# Stats output stays identical with frozen fields kept for order.
+# Twenty one counters stay in struct order at 168 bytes with total
+# matching penalty and extra combined per award.
+grep -q "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "frozen preempt field missing"
+grep -q "hog_escape" "${SRC_DIR}/src/bpf/intf.h" || fail "frozen escape field missing"
+grep -q "lat_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "frozen lat win field missing"
+grep -q "kick_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "hog_escape" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "lat_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "kick_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "hog_escape" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "lat_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 
-# Linear burst predictor stays with fixed weights and no knob. The helper
-# takes old plus sample plus wait plus remain, uses eight fractional bits
-# with straight line integer math, clamps between floor and cap, and falls
-# back to the half blend on saturation. Stopping calls it with wait plus
-# remain from the task clock plus slice. No map plus no program plus no
-# loop is added for the predictor.
-PRED_SRTF="${HOG_SRTF}"
-grep -q "flow_pred_next" "${PRED_SRTF}" || fail "pred helper missing"
-grep -q "wait_ms" "${PRED_SRTF}" || fail "pred wait missing"
-grep -q "rem_ms" "${PRED_SRTF}" || fail "pred remain missing"
-grep -q ">> 8" "${PRED_SRTF}" || fail "pred Q8 shift missing"
-grep -q "<< 7" "${PRED_SRTF}" || fail "pred old weight missing"
-grep -q "<< 2" "${PRED_SRTF}" || fail "pred wait weight missing"
-grep -q "<< 3" "${PRED_SRTF}" || fail "pred remain weight missing"
-grep -q "flow_sjf_next(old, sample)" "${PRED_SRTF}" || fail "pred fallback missing"
-grep -q "FLOW_SJF_FLOOR_NS" "${PRED_SRTF}" || fail "pred floor missing"
-grep -q "FLOW_SJF_CAP_NS" "${PRED_SRTF}" || fail "pred cap missing"
-grep -q "flow_pred_next" "${DISP_HDR}" || fail "pred call missing"
-grep -q "bpf_ktime_get_ns" "${DISP_HDR}" || fail "pred clock missing"
-if grep -q "bpf_map_" "${PRED_SRTF}" 2>/dev/null; then
-    fail "pred map drift"
-fi
-if grep -q "BPF_STRUCT_OPS" "${PRED_SRTF}" 2>/dev/null; then
-    fail "pred prog drift"
-fi
-if grep -q "bpf_for" "${PRED_SRTF}" 2>/dev/null; then
-    fail "pred loop drift"
-fi
-if grep -q "for (" "${PRED_SRTF}" 2>/dev/null; then
-    fail "pred loop drift"
-fi
+# Ops stay at sixteen with no probe added.
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "16" ] || fail "ops count drifted"
 
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
 # with a per LLC floor and a latency shift. Short jobs keep half of
-# the old value and add half of the sample. Kicks keep gap
-# and tail and escape.
+# the old value and add half of the sample. Wakes go idle only with
+# a skip otherwise and no gap plus tail plus escape.
 grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/intf.h" || fail "prio count missing"
 grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf/intf.h" || fail "prio queue helper missing"
 grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
@@ -303,13 +364,14 @@ grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra mis
 grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
 grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
 grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "lat shift helper missing"
-grep -q "flow_sjf_next" "${HOG_SRTF}" || fail "sjf blend missing"
+grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
 grep -q "FLOW_SJF_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf init missing"
 grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
 grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
-grep -q "insertion order" "${HOG_ENQ}" || fail "insertion order missing"
-grep -q "fallback queue" "${HOG_ENQ}" || fail "fallback path missing"
-grep -q "FLOW_STREAK_MAX" "${HOG_ENQ}" || fail "streak bound missing"
+grep -q "insertion order" "${SJF_ENQ}" || fail "insertion order missing"
+grep -q "fallback queue" "${SJF_ENQ}" || fail "fallback path missing"
+grep -q "kick_idle" "${SRC_DIR}/src/bpf/intf.h" || fail "idle count missing"
+grep -q "kick_skip" "${SRC_DIR}/src/bpf/intf.h" || fail "skip count missing"
 
 # Dead helpers stay removed. The plain queue helper and the cached
 # weight reader have no caller and must not return.
@@ -328,7 +390,7 @@ fi
 # Local placements run before ownership so a local cancel never drops
 # a gauge that was never raised. The flag take must come after the
 # local returns.
-if ! grep -q "without the queued bit" "${HOG_ENQ}" 2>/dev/null; then
+if ! grep -q "without the queued bit" "${SJF_ENQ}" 2>/dev/null; then
     fail "local ownership order missing"
 fi
 

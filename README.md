@@ -58,31 +58,29 @@ hint read from init args. Enqueue places by virtual time into one of
 four per LLC queues and one fallback queue. Enqueue reads the weight
 map by id on every insert, so a weight change applies to the next
 enqueue. A missing entry, a zero id, a zero value, or a full map
-reads as the default share. The burst estimate keeps most of the old
-value and adds a small part of the fresh sample. It starts from a
-middle value and is clamped to a floor and a ceiling. The estimate
+reads as the default share. The burst estimate keeps half of the old
+value and adds half of the fresh sample. It starts from a
+fixed seed and is clamped to a floor and a ceiling. The estimate
 and the wait age select one of four queues. Long waits lower the
 estimate and very long waits reset it. Latency tasks queue with an
 earlier key while the stored time is left unchanged. Pinned and
 exiting tasks use the local queue first. Pinned tasks wait on the
 allowed local queue with a single slice. Exiting tasks use a short
 slice on the allowed local queue and the queue for their target
-otherwise. Other tasks join the queue for their target with a slice
-of one to three quanta. Running records the per CPU snapshot and the
-queue and clears the queued bit. Dispatch already dropped the gauge
-for shared moves and local inserts were never counted. Stopping folds
-burnt time into the estimate and tracks consecutive full burns. Tick
+otherwise. Other tasks join the queue for their target with a single
+slice. Running records the per CPU snapshot with reserved zero and
+the queue and clears the queued bit. Dispatch already dropped the
+gauge for shared moves and local inserts were never counted. Stopping
+folds burnt time into the estimate through the half blend. Tick
 refreshes the remaining slice. Dequeue drops the gauge on cancel.
 Exit records through the exit info helper. Cgroup init, move, set
 weight, and exit keep shares current. Reads that miss fall back to
 the default. Ownership is held through the queued bit. A requeue
-that finds the bit set is dropped and counted as a duplicate. The
-kick compares shifted keys on both sides with a fixed gap and tail
-and counts a latency win when a latency task preempts. The pinned
-kick preempts past the tail. A streak at the bound turns an idle
-wake into a preempt and counts an escape. A mask change on a queued
-task keeps the queue and wakes the new owner, counting the wake when
-the owner is usable.
+that finds the bit set is dropped and counted as a duplicate. Each
+enqueue sends at most one idle wake. A wake goes only to an idle
+target, else it counts a skip with no wake. A mask change on a queued
+task keeps the queue and wakes the new owner when the owner is usable,
+counting the wake.
 
 A CPU that arrives late needs a restart. CPU and LLC tables are
 written once at init within fixed bounds, so an offline or added CPU
@@ -97,13 +95,12 @@ adds saturate at the top. The per LLC floor keeps fresh times unique
 through a short compare and swap loop. Weight scaling splits used
 nanos into slice units and rest so the multiply stays in range, then
 caps at the top. Short job smoothing uses integer math that keeps
-most of the old value and adds a small part of the sample. The
+half of the old value and adds half of the sample. The
 latency offset subtracts one fixed slice with saturation at zero. The
 queued gauge drops through a short compare and swap loop that never
-goes below zero and writes back the last value on contention. Preempt
-needs a gap of at least one million nanos past a tail of one hundred
-twenty five thousand nanos with both sides shifted by one fixed slice
-of three million nanos for latency tasks. The exiting slice stays at
+goes below zero and writes back the last value on contention. Wakes go
+only to idle targets with no preempt. A busy target counts a skip with
+no wake. The exiting slice stays at
 one thousand nanos. Stats count twenty one counters in struct order
 at 168 bytes with total matching penalty and extra combined per
 award. The build carries a thin glue and eight area headers with

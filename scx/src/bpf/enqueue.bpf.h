@@ -11,12 +11,14 @@
  * is left unchanged while the queue key is earlier for latency
  * sensitive tasks. Fresh times move past the per LLC floor. The
  * charge scales with the share and the extra amount is fixed. Each
- * enqueue sends at most one kick. Local inserts are not counted in
- * the shared gauge. Shared and fallback inserts count the gauge,
- * and fallback inserts also count fallback. Dequeue drops the gauge
- * on cancel. The kick compares shifted keys on both sides and uses
- * the runner queue to shift the runner side. Enqueue reads the
- * cgroup map on every insert. The birth id comes from init args.
+ * enqueue sends at most one idle wake. A wake goes only to an idle
+ * target, else it counts a skip with no wake. Local inserts are not
+ * counted in the shared gauge. Shared and fallback inserts count
+ * the gauge, and fallback inserts also count fallback. Dequeue drops
+ * the gauge on cancel. Masks are tested again before each wake, so
+ * a task is never kicked toward a CPU outside its current mask.
+ * Enqueue reads the cgroup map on every insert. The birth id comes
+ * from init args.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,125 +28,13 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "srtf.bpf.h"
+#include "sjf.bpf.h"
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
-static __always_inline int flow_kick_constrained(s32 tgt, s64 use_v, struct task_struct *p, u32 llc)
-{
-	u32 cpu;
-	struct flow_running_state *rs;
-	u64 gap;
-	if (tgt < 0) {
-		flow_stat_inc(llc, 8);
-		return 0;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
-		return 0;
-	}
-	cpu = (u32)tgt;
-	if (!flow_cpu_live(cpu)) {
-		flow_stat_inc(llc, 8);
-		return 0;
-	}
-	rs = &flow_running_state[cpu];
-	if (rs->gen == 0)
-		goto idle;
-	if (rs->slice_rem <= (u64)FLOW_PREEMPT_TAIL_NS)
-		goto idle;
-	{
-		s64 run_v = rs->vtime;
-		int run_lat = (rs->prio == (u32)FLOW_PRIO_LAT);
-		s64 run_key = flow_lat_key(run_v, run_lat);
-		if (run_key <= use_v)
-			goto idle;
-		gap = (u64)(run_key - use_v);
-	}
-	if (gap >= (u64)FLOW_PREEMPT_GAP_NS) {
-		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-		flow_stat_inc(llc, 6);
-		return 1;
-	}
-idle:
-	if (rs->gen != 0 && rs->streak >= (u32)FLOW_STREAK_MAX) {
-		if (!flow_cpu_allowed(tgt, p)) {
-			flow_stat_inc(llc, 8);
-			return 0;
-		}
-		if (!flow_cpu_live((u32)tgt)) {
-			flow_stat_inc(llc, 8);
-			return 0;
-		}
-		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-		flow_stat_inc(llc, 6);
-		flow_stat_inc(llc, 12);
-		return 1;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
-		return 0;
-	}
-	if (!flow_cpu_live((u32)tgt)) {
-		flow_stat_inc(llc, 8);
-		return 0;
-	}
-	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-	flow_stat_inc(llc, 7);
-	return 0;
-}
-static __always_inline void flow_kick_pinned(s32 tgt, struct task_struct *p, u32 llc)
-{
-	u32 cpu;
-	struct flow_running_state *rs;
-	if (tgt < 0) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	cpu = (u32)tgt;
-	if (!flow_cpu_live(cpu)) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	rs = &flow_running_state[cpu];
-	if (rs->gen == 0)
-		goto idle;
-	if (rs->slice_rem <= (u64)FLOW_PREEMPT_TAIL_NS)
-		goto idle;
-	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-	flow_stat_inc(llc, 6);
-	return;
-idle:
-	if (rs->gen != 0 && rs->streak >= (u32)FLOW_STREAK_MAX) {
-		if (!flow_cpu_allowed(tgt, p)) {
-			flow_stat_inc(llc, 8);
-			return;
-		}
-		if (!flow_cpu_live((u32)tgt)) {
-			flow_stat_inc(llc, 8);
-			return;
-		}
-		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-		flow_stat_inc(llc, 6);
-		flow_stat_inc(llc, 12);
-		return;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	if (!flow_cpu_live((u32)tgt)) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-	flow_stat_inc(llc, 7);
-}
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
+	u32 cpu;
+	struct flow_running_state *rs;
 	if (tgt < 0) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -154,6 +44,12 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 		return;
 	}
 	if (!flow_cpu_live((u32)tgt)) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	cpu = (u32)tgt;
+	rs = &flow_running_state[cpu];
+	if (rs->gen != 0) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -250,7 +146,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			{
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)pcpu;
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-				flow_kick_pinned(first, p, pllc);
+				flow_kick_idle_only(first, p, pllc);
 				return;
 			}
 		}
@@ -300,17 +196,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		slice_len = (u64)FLOW_SLICE_MIN_NS;
 		quanta = 1;
 		extra = 0;
-		if (cpu_ok) {
-			struct flow_running_state *rs = &flow_running_state[(u32)tgt];
-			if (rs->gen != 0 && flow_hog_rounds(rs->streak)) {
-				u64 dem = flow_hog_demote(extra);
-				if (dem != extra) {
-					extra = dem;
-					quanta = extra + 1;
-					slice_len = quanta * (u64)FLOW_SLICE_MIN_NS;
-				}
-			}
-		}
 		t->enq_ns = now ? now : 1;
 	}
 	{
@@ -355,8 +240,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!cpu_ok || tgt < 0) {
 			return;
 		}
-		if (flow_kick_constrained(tgt, key_v, p, llc) && is_lat)
-			flow_stat_inc(llc, 17);
+		flow_kick_idle_only(tgt, p, llc);
 		return;
 	}
 insert_only:
