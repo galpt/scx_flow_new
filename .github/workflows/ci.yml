@@ -67,6 +67,8 @@ jobs:
       - name: Sync overlay lockfile
         working-directory: /tmp/opencode/scx
         run: cargo update -p scx_flow
+      - name: Guard
+        run: bash tools/test_install_guard.sh
       - name: Format
         working-directory: /tmp/opencode/scx
         run: cargo fmt -p scx_flow --check

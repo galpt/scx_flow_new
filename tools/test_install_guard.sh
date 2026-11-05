@@ -41,6 +41,56 @@ for need_lib in \
     [ -s "${SRC_DIR}/${need_lib}" ] || fail "lib scaffold missing ${need_lib}"
 done
 
+# Docs stay present as additive narrative with no knob change.
+for need_doc in \
+    "docs/lifecycle.md" \
+    "docs/verifier-budgets.md"; do
+    [ -s "${REPO_DIR}/${need_doc}" ] || fail "docs scaffold missing ${need_doc}"
+done
+
+# Top README keeps lifecycle plus budgets plus reinstall plus kernel plus lock notes.
+for need_note in \
+    "## Lifecycle" \
+    "## Verifier budgets" \
+    "## Reinstall safety" \
+    "## Kernel support" \
+    "## Cargo lock note"; do
+    grep -qF "${need_note}" "${REPO_DIR}/README.md" || fail "readme note missing ${need_note}"
+done
+
+# Flow headers stay present with 5.0.10 banners and no logic drift.
+for need_flow in \
+    "src/bpf/flow/cgroup.bpf.h" \
+    "src/bpf/flow/dispatch.bpf.h" \
+    "src/bpf/flow/enqueue.bpf.h" \
+    "src/bpf/flow/freq.bpf.h" \
+    "src/bpf/flow/guards.bpf.h" \
+    "src/bpf/flow/lifecycle.bpf.h" \
+    "src/bpf/flow/maps.bpf.h" \
+    "src/bpf/flow/preempt.bpf.h" \
+    "src/bpf/flow/stats.bpf.h" \
+    "src/bpf/flow/steal.bpf.h" \
+    "src/bpf/flow/vtime.bpf.h"; do
+    [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
+    grep -q "5\.0\.10 note" "${SRC_DIR}/${need_flow}" || fail "flow banner missing ${need_flow}"
+done
+
+# Main plus intf plus build keep 5.0.10 banners with no logic change.
+for need_core in \
+    "src/bpf/main.bpf.c" \
+    "src/bpf/intf.h" \
+    "build.rs"; do
+    grep -q "5\.0\.10 note" "${SRC_DIR}/${need_core}" || fail "core banner missing ${need_core}"
+done
+
+# Scheduler README stays byte identical with no doc drift.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "0d40abdd36be0c7b3393c8c45ffc86fdcb42b16ba6c73c704de206523dd2495a" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "17" ] || fail "scx README lines drifted"
+
+# Harness stays present with no logic change.
+[ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
+[ -s "${REPO_DIR}/tools/edf_harness/run.sh" ] || fail "harness scaffold missing run.sh"
+
 # Deleted Rust mirrors stay deleted with no reappearance.
 # The flow facade plus its helpers stay deleted with constants in
 # config.rs, so any return fails closed here before any build.
