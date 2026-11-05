@@ -49,10 +49,12 @@ static int cmp_u64(const void *a, const void *b)
 #define HARNESS_JITTER_MAX_NS (1ULL * 1000ULL * 1000ULL)
 /* Probe period in nanos at 10ms with no knob. */
 #define HARNESS_PROBE_NS (10ULL * 1000ULL * 1000ULL)
-/* Per thread counts for one run. */
+/* Per thread counts for one run. Missed counts releases skipped past */
+/* the deadline with no catch up, so a miss never storms later work. */
 struct thread_out {
     uint64_t released;
     uint64_t completed;
+    uint64_t missed;
     uint64_t sum_released_ns;
     uint64_t sum_completed_ns;
     double sum_ratio;
@@ -196,6 +198,8 @@ static void *worker_idx(void *arg)
             if (burn_end <= deadline) {
                 out->completed += 1;
                 out->sum_completed_ns += aet;
+            } else {
+                out->missed += 1;
             }
             if (burn_end < release + period) {
                 now = sleep_until(release + period);
@@ -297,6 +301,7 @@ int main(int argc, char **argv)
     long ncpu = 0;
     uint64_t total_released = 0;
     uint64_t total_completed = 0;
+    uint64_t total_missed = 0;
     uint64_t total_released_ns = 0;
     uint64_t total_completed_ns = 0;
     double total_ratio = 0.0;
@@ -417,6 +422,7 @@ int main(int argc, char **argv)
     for (i = 0; i < nthreads; i++) {
         total_released += st.outs[i].released;
         total_completed += st.outs[i].completed;
+        total_missed += st.outs[i].missed;
         total_released_ns += st.outs[i].sum_released_ns;
         total_completed_ns += st.outs[i].sum_completed_ns;
         total_ratio += st.outs[i].sum_ratio;
@@ -465,6 +471,15 @@ int main(int argc, char **argv)
     }
     snprintf(csv_path, sizeof(csv_path), "%s.csv", prefix);
     snprintf(json_path, sizeof(json_path), "%s.json", prefix);
+    if (st.probe.count == 0) {
+        fprintf(stderr, "no probe samples\n");
+        pthread_barrier_destroy(&st.start_bar);
+        free(st.probe.delays);
+        free(st.outs);
+        free(wargs);
+        free(threads);
+        return 1;
+    }
     csv = fopen(csv_path, "w");
     if (!csv) {
         perror("csv open");
@@ -474,17 +489,17 @@ int main(int argc, char **argv)
     fprintf(csv, "completion,offered_util,exact_util,");
     fprintf(csv, "effective_util,nvcsw,nivcsw,probe_count,");
     fprintf(csv, "probe_avg_us,probe_max_us,probe_p95_us,probe_p99_us,");
-    fprintf(csv, "probe_over50,control,sched\n");
+    fprintf(csv, "probe_over50,missed,control,sched\n");
     fprintf(csv, "%d,%ld,%.3f,%" PRIu64 ",%" PRIu64 ",",
         nthreads, ncpu, wall_secs, total_released,
         total_completed);
     fprintf(csv, "%.6f,%.6f,%.6f,%.6f,%ld,%ld,",
         completion, util_offered, util_exact,
         util_effective, total_nvcsw, total_nivcsw);
-    fprintf(csv, "%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%d,%s\n",
+    fprintf(csv, "%" PRIu64 ",%.3f,%.3f,%.3f,%.3f,%" PRIu64 ",%" PRIu64 ",%d,%s\n",
         st.probe.count, probe_avg_us,
         probe_max_us, probe_p95_us, probe_p99_us, probe_over50,
-        control, sched_state);
+        total_missed, control, sched_state);
     fclose(csv);
     json = fopen(json_path, "w");
     if (!json) {
@@ -499,6 +514,8 @@ int main(int argc, char **argv)
         total_released);
     fprintf(json, "  \"completed\": %" PRIu64 ",\n",
         total_completed);
+    fprintf(json, "  \"missed\": %" PRIu64 ",\n",
+        total_missed);
     fprintf(json, "  \"completion\": %.6f,\n", completion);
     fprintf(json, "  \"offered_util\": %.6f,\n", util_offered);
     fprintf(json, "  \"exact_util\": %.6f,\n", util_exact);
@@ -520,8 +537,8 @@ int main(int argc, char **argv)
     fprintf(json, "}\n");
     fclose(json);
     printf("done n=%d released=%" PRIu64 " completed=%" PRIu64
-        " completion=%.4f offered=%.4f exact=%.4f",
-        nthreads, total_released, total_completed,
+        " missed=%" PRIu64 " completion=%.4f offered=%.4f exact=%.4f",
+        nthreads, total_released, total_completed, total_missed,
         completion, util_offered, util_exact);
     printf(" effective=%.4f nvcsw=%ld probe_avg=%.1fus",
         util_effective, total_nvcsw, probe_avg_us);
