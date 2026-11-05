@@ -26,7 +26,7 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "sjf.bpf.h"
+#include "srtf.bpf.h"
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
 static __always_inline int flow_kick_constrained(s32 tgt, s64 use_v, struct task_struct *p, u32 llc)

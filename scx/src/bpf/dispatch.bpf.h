@@ -25,7 +25,7 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "sjf.bpf.h"
+#include "srtf.bpf.h"
 #include "cgroup.bpf.h"
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {

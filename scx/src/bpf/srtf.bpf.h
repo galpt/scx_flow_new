@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Short job tracking for the flow scheduler.
+ * Shortest remaining time tracking for the flow scheduler.
  *
- * Each task keeps a burst estimate. The estimate mixes the old
+ * Each task keeps a remaining time estimate. The estimate mixes the old
  * value with the fresh sample, keeping most of the old value and
  * adding a small part of the sample. It starts from a middle value
- * and is clamped to a floor and a ceiling. Small estimates select
+ * and is clamped to a floor and a ceiling. Small remaining times select
  * the latency queue and large estimates select the batch queues.
- * Waits that grow long lower the estimate, and waits that grow very
- * long reset it and count a rescue. Tasks that burn several full
- * slices in a row move down one queue. All math uses integers.
+ * The queue choice preempts through the kick path. Waits that grow
+ * long lower the estimate, and waits that grow very long reset it
+ * and count a rescue. Tasks that burn several full slices in a row
+ * move down one queue. All math uses integers.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
-#ifndef __FLOW_SJF_BPF_H
-#define __FLOW_SJF_BPF_H
+#ifndef __FLOW_SRTF_BPF_H
+#define __FLOW_SRTF_BPF_H
 #include "intf.h"
 #include "maps.bpf.h"
 #include "stats.bpf.h"

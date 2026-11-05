@@ -75,7 +75,7 @@ for need_flow in \
     "src/bpf/fair.bpf.h" \
     "src/bpf/maps.bpf.h" \
     "src/bpf/select.bpf.h" \
-    "src/bpf/sjf.bpf.h" \
+    "src/bpf/srtf.bpf.h" \
     "src/bpf/stats.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
@@ -231,15 +231,15 @@ grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary pre
 # compares burnt nanos against awarded length, gates on four fixed
 # rounds through the streak bound, demotes one level with saturation,
 # and keeps the kick plus stats paths unchanged with no extra read.
-HOG_SJF="${SRC_DIR}/src/bpf/sjf.bpf.h"
+HOG_SRTF="${SRC_DIR}/src/bpf/srtf.bpf.h"
 HOG_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
-grep -q "flow_hog_used" "${HOG_SJF}" || fail "hog used helper missing"
-grep -q "flow_hog_full" "${HOG_SJF}" || fail "hog full helper missing"
-grep -q "flow_hog_rounds" "${HOG_SJF}" || fail "hog rounds helper missing"
-grep -q "flow_hog_demote" "${HOG_SJF}" || fail "hog demote helper missing"
+grep -q "flow_hog_used" "${HOG_SRTF}" || fail "hog used helper missing"
+grep -q "flow_hog_full" "${HOG_SRTF}" || fail "hog full helper missing"
+grep -q "flow_hog_rounds" "${HOG_SRTF}" || fail "hog rounds helper missing"
+grep -q "flow_hog_demote" "${HOG_SRTF}" || fail "hog demote helper missing"
 grep -q "flow_hog_demote" "${HOG_ENQ}" || fail "hog demote call missing"
 grep -q "flow_hog_rounds" "${HOG_ENQ}" || fail "hog rounds gate missing"
-grep -q "FLOW_STREAK_MAX" "${HOG_SJF}" || fail "hog fixed rounds missing"
+grep -q "FLOW_STREAK_MAX" "${HOG_SRTF}" || fail "hog fixed rounds missing"
 
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
@@ -253,7 +253,7 @@ grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra mis
 grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
 grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
 grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "lat shift helper missing"
-grep -q "flow_sjf_next" "${HOG_SJF}" || fail "sjf blend missing"
+grep -q "flow_sjf_next" "${HOG_SRTF}" || fail "sjf blend missing"
 grep -q "FLOW_SJF_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf init missing"
 grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
 grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
