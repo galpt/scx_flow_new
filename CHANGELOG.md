@@ -1,5 +1,59 @@
 # Changelog
 
+## 5.0.16
+
+WS-only accounting with fresh zero plus q scaled burn plus one add per epoch.
+
+Culprit is a burn score that reads fresh tasks at middle with q two on
+no evidence while the burn denom stays at one base slice under extended
+awards, plus a hold that steps once per stop and once per tick so a burn
+that ticks at zero remain then stops counts twice. A fresh task holds an
+unearned extra quantum, a partial extended burn self limits by luck of
+the clamp rather than by award fraction, and the hold escapes late or
+double counts at the edge. The fix reads fresh score zero with q one
+until the first count, amending the locked fresh fifty q two rule since
+no burn has been seen yet, scales the burn denom with the pad award q in
+one through three else one with saturation so growth needs a full
+awarded burn with raw top while a partial burn still decays, steps the
+hold by the award q on the stop edge only with one add per epoch capped
+at twice the pop retry bound while the tick keeps remain with no step,
+keeps voluntary plus empty wait precedence through decay with separate
+growth plus decay counts, and wires harness missed counts plus a strict
+one hundred twenty second full burn plus probe mode with at least three
+repeats each for probe plus control plus a y_join template with share
+open until the per award log lands. Task state keeps seventy two bytes
+with pad carrying q plus hold, per CPU rows keep score plus shadow plus
+separate growth plus decay counts, counters stay at twenty four extra
+award plus twenty five total quanta for two hundred eight bytes with
+zero through twenty three frozen, fallback equals four plus five plus
+six, steal equals nine plus ten, total equals fifteen plus twenty four.
+Knob free with saturation and no wrap, append only stats, pinned FIFO
+with bypass, frozen order, restart only for hotplug plus reinstall.
+Slice runs one slice times q with no weight scale on extra and no order
+shift, steal preserves slice length, escape still fires at the pop retry
+bound. TrackB ringbuf stays deferred on verifier budget with no new map
+or program, so Y stays open on deltas only with books checkable.
+
+Version syncs Cargo plus installer plus guard to 5.0.16 with the fork ref
+b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork galpt/scx frozen. The
+overlay Cargo lock stays stale by design and syncs through cargo update
+minus p scx_flow before any locked build. The installer still requires
+6.12 plus for cgroup hooks while 7.2 plus stays the subsystem
+recommendation. Reinstall needs a restart with no live transition.
+Rollback retains the prior 5.0.15 snapshot append only. The exit dump
+length flag stays optional with default zero preserving dump size.
+
+Verification is workspace only with no live mutation, no force, no
+reboot, and no push: live load stays untouched with the scheduler state
+disabled. Guard plus fmt plus clippy plus build plus test plus smoke
+plus veristat twenty six of twenty six pass with stack max one hundred
+sixty at or below five hundred twelve bytes, dispatch insn unchanged at
+fourteen thousand two hundred forty eight with enqueue slightly down at
+seventeen thousand nine hundred fifty seven. Rollback stays append only.
+
+Base is archive/5.0.15 at 12129f383738bb1a75da392cab5f152e75dd93e6 with
+no other tree change.
+
 ## 5.0.15
 
 Bounded extra quanta with hysteresis plus scaled debt and single source hold.

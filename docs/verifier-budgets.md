@@ -76,12 +76,14 @@ classifier uses bit math only with no loop and no map use, and the offset
 subtracts one fixed slice with zero saturation one shot with no
 accumulation. Score stays per CPU with no cross average while the hold
 travels in the task pad with steal preserving slice length only, pinned
-keeps one slice with no award even on a stale pad, invalid CPU keeps a
-conservative middle default. Growth needs a full base burn with raw top
-so a partial extended burn still decays by design with no inversion from
-latency history. Streak caps at
-twice the pop retry bound with clean decay so a hold ends but never
-sticks, now with debt scaled to q. Userspace folds all tails with
+keeps one slice with no award even on a stale pad, a fresh CPU reads
+zero with q one until the first count, invalid CPU keeps the same fresh
+zero default. Growth needs a full awarded burn with raw top against the
+q scaled denom so a partial burn still decays by design with no
+inversion from latency history. Streak steps by the award q on the stop
+edge only with one add per epoch at twice the pop retry bound with
+clean decay so a hold ends but never sticks, the tick keeps remain with
+no step, now with debt scaled to q. Userspace folds all tails with
 len guards at two hundred plus two hundred eight for twenty four plus
 twenty five alongside one sixty eight plus one seventy six plus one eighty
 four plus one ninety two so harness can correlate boost growth with latency
@@ -96,16 +98,19 @@ heap with no unbounded search so bounded hierarchy stands in, and timers
 plus reclaim with no async path so enqueue postponement plus work conserving
 steal stand in. The build carries 26 programs with 16 flow plus 10 lib,
 all passing with no new program added
-for documentation. Stacks stay at or below five hundred twelve bytes,
-hot path growth past the two percent note is accepted as a feature
-waiver with no shrink here: extra award plus hysteresis plus scaled debt
-necessarily add branches on the enqueue path, veristat still shows 26 of
-26 pass with stacks within bound, WS perf proof stays owed with no live
-run here. Bytecode plus ELF differences from comment edits land
-in comment plus line info only.
+for documentation. Stacks stay at or below five hundred twelve bytes
+with a measured max of one hundred sixty, hot path insn holds near the
+prior release with dispatch unchanged plus enqueue slightly down as a
+feature note with no shrink here: fresh zero plus q scaled denom plus
+one add per epoch necessarily touch the stop plus award paths, veristat
+still shows 26 of 26 pass with stacks within bound, WS proof recorded
+workspace only with no live run here. Bytecode plus ELF differences
+from comment edits land in comment plus line info only.
 Open deferred live with no run here: strict tail plus share plus soak
-gates with per award log join for share via deltas, one hundred twenty
-second full burn plus probe for all five questions, WS perf sizing.
+gates with per award log join for books via deltas, one hundred twenty
+second full burn plus probe for all five questions with a y_join
+template wired, Y open on deltas only until the per award log lands,
+WS perf sizing.
 Accepted exceptions with no history rewrite: tracked docs plus changelog
 stay committed with forward ignore only, per CPU hold row stays shadow,
 queued dec stays stats only self healing, no context insert stays no loss,

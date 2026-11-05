@@ -48,11 +48,18 @@ never sticks past the storm window. Stopping folds burnt
 nanos into the smoothed frequency hint and counts a stop that leaves the
 task still runnable as blocked on the cached LLC with no fresh lookup
 and no vtime penalty, so blocking never shifts the deadline. A stop with
-no remain steps the hold capped at twice the pop retry bound, while a
-clean stop steps the hold down one so a clean run never sticks past the
-storm window. Runnable covers preemptions
+no remain steps the hold by the pad award q capped at twice the pop
+retry bound, while a clean stop steps the hold down one so a clean run
+never sticks past the storm window. The step runs on the stop edge only
+with one add per run epoch. Runnable covers preemptions
 plus slice expiry plus migrations, and an invalid cached LLC falls back
-to zero with no loss. The same stop records the yield bit for the next
+to zero with no loss. The same stop scores the burn on its CPU with
+no cross average: a fresh CPU reads zero with q one until the first
+count, a voluntary stop plus an empty wait take decay first, and a burn
+accounts used against the pad award q in one through three else one
+times one slice with saturation, so only a full awarded burn with raw
+top takes growth while a partial burn takes decay with separate growth
+plus decay counts. The same stop records the yield bit for the next
 classify with no remain recording a burn else a yield. Enqueue stamps the wait start with the monotonic
 clock with no vtime shift, and a zero clock clears to unknown with
 running treating zero as no decay. Hist keeps the last four raw samples
@@ -75,10 +82,10 @@ queue with no rewrite and wakes the owner through the pinned fast path
 for pinned waits else the constrained path
 with an orphan count only on a live allowed kick. A mask change wake for
 a latency task uses the boosted key and counts a latency win on a preempt
-with the class in hand. Tick steps the hold on
-a full burn capped at twice the pop retry bound with no freq
-move and refreshes the remaining slice, keeping the hold on a mid slice
-tick since only a clean stop decays. Dequeue clears the
+with the class in hand. Tick keeps remain with no streak step and no
+freq move and refreshes the remaining slice, keeping the hold on a mid
+slice tick since only a clean stop decays; the stop edge owns the one
+add per run epoch. Dequeue clears the
 queued flag. Exit records through the exit info helper. Single ownership
 holds through the queued flag with duplicate requeues dropped and no loss.
 
