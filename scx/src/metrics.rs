@@ -13,11 +13,13 @@ use crate::stats::Metrics;
 /// Fold one LLC value into the aggregate.
 /// Counters use wrapping add. Depth plus cap also sum with wrapping
 /// add to keep base parity across LLCs. Short reads keep prior state
-/// with no trap. Offsets 0-16 stay frozen, tail 17-19 is append-only.
+/// with no trap. Offsets 0-19 stay frozen, tail 20-23 is append-only.
 /// Tail 14 counts overrun events and 15 counts penalty slices charged
 /// one to one by design, so the two stay equal while keeping event
 /// versus cost split for later share work. Tail 17 counts streak
 /// preempts, 18 counts mask change kicks, 19 counts head forwards.
+/// Tail 20 counts latency takes, 21 counts hog keeps, 22 counts
+/// latency preempt wins, 23 counts age rescues.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -93,6 +95,22 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() >= 160 {
         let v = u64::from_ne_bytes(val[152..160].try_into().unwrap_or([0u8; 8]));
         out.hol_forward = out.hol_forward.wrapping_add(v);
+    }
+    if val.len() >= 168 {
+        let v = u64::from_ne_bytes(val[160..168].try_into().unwrap_or([0u8; 8]));
+        out.lat_boost = out.lat_boost.wrapping_add(v);
+    }
+    if val.len() >= 176 {
+        let v = u64::from_ne_bytes(val[168..176].try_into().unwrap_or([0u8; 8]));
+        out.hog_hold = out.hog_hold.wrapping_add(v);
+    }
+    if val.len() >= 184 {
+        let v = u64::from_ne_bytes(val[176..184].try_into().unwrap_or([0u8; 8]));
+        out.lat_preempt = out.lat_preempt.wrapping_add(v);
+    }
+    if val.len() >= 192 {
+        let v = u64::from_ne_bytes(val[184..192].try_into().unwrap_or([0u8; 8]));
+        out.age_rescue = out.age_rescue.wrapping_add(v);
     }
 }
 
