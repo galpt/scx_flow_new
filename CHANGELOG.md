@@ -1,5 +1,52 @@
 # Changelog
 
+## 5.0.15
+
+Bounded extra quanta with hysteresis plus scaled debt and single source hold.
+
+Culprit is a shared queue where a full burn hog holds the head while the
+debt stays at one slice for up to three slices of run, the hold mixes per
+CPU score with per task sticky, and the running clamp drops long slices.
+The fix awards one base plus zero through two extra quanta from a per CPU
+burn score with top engage plus sticky hold plus middle bands, scales the
+overrun debt to q with saturating adds so a three quantum burn pays three
+slices, single sources the hold in the task pad with score staying per CPU
+and slice length preserved across dispatch with a pinned guard, clamps
+running at three quanta with no drop, wires band locks at compile time
+with raw max use, keeps extra tails add only with total equals penalty
+plus extra, fixes harness percentile rank plus calloc cleanup, syncs the
+core offset banner, and documents queued plus no context plus exit dump
+plus pre init plus shadow ring plus cross CPU races as accepted with live
+soak plus share log plus WS perf deferred open with no live run here.
+
+Task state keeps seventy two bytes with pad carrying q plus hold, per CPU
+rows keep score plus hold shadow plus separate growth plus decay counts,
+counters append twenty four extra award plus twenty five total quanta for
+two hundred eight bytes with zero through twenty three frozen, fallback
+equals four plus five plus six, steal equals nine plus ten, total equals
+fifteen plus twenty four. Knob free with saturation and no wrap, append
+only stats, pinned FIFO with bypass, frozen order, restart only for
+hotplug plus reinstall. Fallback keeps raw keys with no boost if the
+verifier regresses. Slice runs one slice times q with no weight scale on
+extra and no order shift.
+
+Version syncs Cargo plus installer plus guard to 5.0.15 with the fork ref
+b0efa3f614c0187df4cb3202d7b514d401f77d2a plus fork galpt/scx frozen. The
+overlay Cargo lock stays stale by design and syncs through cargo update
+minus p scx_flow before any locked build. The installer still requires
+6.12 plus for cgroup hooks while 7.2 plus stays the subsystem
+recommendation. Reinstall needs a restart with no live transition.
+Rollback retains the prior 5.0.14 snapshot append only. The exit dump
+length flag stays optional with default zero preserving dump size.
+
+Verification is build plus verify only with no live mutation, no force,
+no reboot, and no push. Guard plus fmt plus clippy plus build plus test
+plus smoke plus veristat twenty six of twenty six pass with stack at or
+below five hundred twelve bytes and hot path growth accepted as a feature
+waiver with WS perf still owed. Rollback stays append only.
+
+Base is archive/5.0.14 at f0543c160 with no other tree change.
+
 ## 5.0.14
 
 Latency boost with three bit history plus one slice offset and four tail counters.
