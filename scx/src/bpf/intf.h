@@ -83,6 +83,29 @@ enum flow_consts {
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
+	/* Bounded extra quanta with no knob. Total runs one base plus */
+	/* zero through two extra for one through three quanta. */
+	FLOW_MAX_QUANTA = 3ULL,
+	FLOW_MAX_EXTRA = 2ULL,
+	/* Score bands with no knob. Four bands each span twenty five. */
+	/* Three levels name extra zero plus one plus two. Raw hint has */
+	/* five steps zero through four with only the top step at full. */
+	/* Lower steps merge into the same blend with no second path. */
+	FLOW_SCORE_BANDS = 4ULL,
+	FLOW_SCORE_WIDTH = 25ULL,
+	FLOW_SCORE_LEVELS = 3ULL,
+	FLOW_SCORE_RAW_MAX = 4ULL,
+	/* Score scale top with no knob. Band width plus engage plus */
+	/* release plus sample bound plus wide cap stay fixed. Engage */
+	/* takes the top from below, release keeps the hold from above. */
+	/* Sample bound covers the blend window, wide cap covers the */
+	/* blend sum before the clamp with floor on both paths. */
+	FLOW_SCORE_HMAX = 100ULL,
+	FLOW_SCORE_Q = 25ULL,
+	FLOW_SCORE_ENGAGE = 75ULL,
+	FLOW_SCORE_RELEASE = 50ULL,
+	FLOW_SCORE_N = 8ULL,
+	FLOW_SCORE_MAX = 400ULL,
 };
 /* Per task state for the life of the task. Flags holds the queued bit. */
 /* Hist holds the last three yield bits in bits zero through two with */
@@ -141,6 +164,17 @@ struct flow_freq_state {
 	u64 level;
 	u64 hist[4];
 };
+/* Per CPU extra score with zero init and no cross use. Score holds zero */
+/* through one hundred. Prev holds zero through two for the last award. */
+/* Growth plus decay counts stay separate for proof with no shared path. */
+/* Each CPU keeps its own row with no average across CPUs. Persisted */
+/* across events. Four by eight is 32 bytes. */
+struct flow_extra_state {
+	u64 score;
+	u64 prev_extra;
+	u64 n_growth;
+	u64 n_decay;
+};
 /* Per CPU view seeded once from userspace. Small with no frozen row. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
@@ -152,8 +186,11 @@ struct flow_cpu_ctx {
 /* 4:fb_pair_full 5:fb_duplicate 6:fb_stale 7:dhq_depth 8:dhq_cap */
 /* 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip */
 /* 14:overrun 15:domino_penalty 16:blocked 17:hog_escape 18:orphan_kick */
-/* 19:hol_forward stay stable for compat. Tail is append-only with no */
-/* bound change. Twenty four by u64 is 192 bytes. Fallback */
+/* 19:hol_forward 20:lat_boost 21:hog_hold 22:lat_preempt 23:age_rescue */
+/* stay stable for compat. Tail is append-only with no bound change. */
+/* 24:extra_award 25:total_quanta only append with zero through twenty */
+/* three frozen. Twenty six by u64 is 208 bytes. Twenty five by u64 is */
+/* 200 bytes with twenty four present. Fallback */
 /* stays the aggregate of pair-full plus duplicate plus stale, so fallback */
 /* equals 4 plus 5 plus 6. Steal stays the aggregate of pair plus LLC, so */
 /* steal equals 9 plus 10. fb_pair_full counts pair DHQ full spills to the */
@@ -179,7 +216,10 @@ struct flow_cpu_ctx {
 /* no move no loss. lat_boost counts enqueues that take the latency key. */
 /* hog_hold counts enqueues that keep the raw key as hogs. lat_preempt */
 /* counts preempts won by a latency task on the boosted gap. age_rescue */
-/* counts old waits that step the hold down. */
+/* counts old waits that step the hold down. Extra award holds q minus */
+/* one beyond the first. Total quanta holds q for the run. The total is */
+/* the sum of the old penalty plus the new extra with one addition per */
+/* award and again on deltas. Pinned fast path never awards extra. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
@@ -205,6 +245,8 @@ struct flow_llc_stats {
 	u64 hog_hold;
 	u64 lat_preempt;
 	u64 age_rescue;
+	u64 extra_award;
+	u64 total_quanta;
 };
 #ifdef __BPF__
 static __always_inline u64 flow_llc_dsq(u32 llc)
@@ -232,8 +274,10 @@ static __always_inline bool flow_dsq_ok(u64 dsq)
 	       dsq < (u64)FLOW_LLC_BASE + (u64)FLOW_MAX_LLCS;
 }
 /* ABI stays frozen with fixed slice, latency offset, preempt, pop retry, */
-/* strand, DSQ, and cgroup weight constants plus frozen offsets 0 through 19 */
-/* and append only tail 20 through 23. History plus running flag reuse spare */
-/* bytes with no size change. Docs only, no logic change. */
+/* strand, DSQ, and cgroup weight constants plus frozen offsets 0 through 23 */
+/* and append only tail 24 through 25. History plus running flag reuse spare */
+/* bytes with no size change. Extra tails hold q minus one plus q with the */
+/* sum checkable per award. Per CPU extra rows stay zero init with no cross */
+/* average. Docs only, no logic change. */
 #endif
 #endif

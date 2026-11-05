@@ -61,6 +61,10 @@ u64 flow_pair_cap[FLOW_MAX_PAIRS];
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 /* Per CPU hint state. Zero init means empty. Persists across events. */
 struct flow_freq_state flow_freq_state[FLOW_MAX_CPUS];
+/* Per CPU extra score. Zero init means fresh fifty with no hold. Each */
+/* CPU keeps its own row with no average across CPUs. Score stays zero */
+/* through one hundred, prev stays zero through two, counts stay separate. */
+struct flow_extra_state flow_extra_state[FLOW_MAX_CPUS];
 /* Per pair last vtime for monotonic unique assign. Zero init. */
 s64 flow_dhq_seq[FLOW_MAX_PAIRS];
 /* Node per pair for hierarchy walk. Zero init. */
@@ -75,7 +79,8 @@ s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];
 
 /* Maps bounds stay fixed 1024 CPUs, 64 LLCs, 8 nodes, */
 /* 32 pairs plus 4096 weight entries with no eviction, queued flag holds */
-/* single ownership. Appended tails stay in place with no new map. */
+/* single ownership. Appended tails stay in place with no new map. Extra */
+/* rows stay zero init per CPU with no cross average. */
 /* Docs only, no logic change. */
 
 #endif

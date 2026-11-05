@@ -7,7 +7,11 @@
  * Tail 9:steal_pair 10:steal_llc 11:kick_preempt 12:kick_idle 13:kick_skip
  * 14:overrun 15:domino_penalty 16:blocked 17:hog_escape 18:orphan_kick
  * 19:hol_forward stays frozen, tail 20:lat_boost 21:hog_hold
- * 22:lat_preempt 23:age_rescue is append-only with no bound change.
+ * 22:lat_preempt 23:age_rescue stays frozen, tail 24:extra_award
+ * 25:total_quanta is append-only with no bound change. Extra holds q
+ * minus one, total holds q, total equals old penalty plus new extra
+ * with one addition per award and again on deltas. Pinned fast path
+ * never awards extra.
  * Overrun counts events and penalty counts slices charged one to one by
  * design. Fallback equals 4 plus 5 plus 6. Steal equals 9 plus 10. Gauges
  * 7:depth 8:cap use the occupancy set helper, never inc. Overrun plus
@@ -41,8 +45,10 @@ static __always_inline struct flow_llc_stats *flow_stats_for(u32 llc)
 /* 8:cap use the occupancy set helper, never inc. Steal split 9:pair */
 /* 10:llc plus kick split 11:preempt 12:idle 13:skip plus overrun event */
 /* 14 with penalty slices 15 one to one plus 16:blocked plus 17:escape */
-/* plus 18:orphan plus 19:forward are frozen with 20:lat_boost plus */
-/* 21:hog_hold plus 22:lat_preempt plus 23:age_rescue as the new tail. */
+/* plus 18:orphan plus 19:forward plus 20:lat_boost plus 21:hog_hold plus */
+/* 22:lat_preempt plus 23:age_rescue are frozen with 24:extra_award plus */
+/* 25:total_quanta as the new tail. Extra holds q minus one, total holds */
+/* q, total equals old penalty plus new extra per award. */
 static __always_inline void flow_stat_inc(u32 llc, u64 off)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);
@@ -93,9 +99,32 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		cell = &st->lat_preempt;
 	else if (off == 23)
 		cell = &st->age_rescue;
+	else if (off == 24)
+		cell = &st->extra_award;
+	else if (off == 25)
+		cell = &st->total_quanta;
 	else
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
+}
+
+/* Add an award amount to the tail. Extra takes q minus one, total takes */
+/* q, so total equals old penalty plus new extra per award. Offsets zero */
+/* through twenty three stay frozen with no add use. Unknown offsets */
+/* return with no change. Amount zero keeps prior counts with no move. */
+static __always_inline void flow_stat_add(u32 llc, u64 off, u64 val)
+{
+	struct flow_llc_stats *st = flow_stats_for(llc);
+	u64 *cell;
+	if (!st || !val)
+		return;
+	if (off == 24)
+		cell = &st->extra_award;
+	else if (off == 25)
+		cell = &st->total_quanta;
+	else
+		return;
+	__sync_fetch_and_add(cell, val);
 }
 
 /* Count one fallback cause. Keeps fallback as the aggregate for compat */
@@ -163,8 +192,9 @@ static __always_inline void flow_stale_account(u32 thief)
 	}
 }
 
-/* Stats 0 through 19 stay frozen with tail 20 through 23 */
+/* Stats 0 through 23 stay frozen with tail 24 through 25 */
 /* append only, fallback equals 4 plus 5 plus 6, steal equals 9 plus 10, */
-/* gauges use set only. Docs only, no logic change. */
+/* total equals 15 plus 24 per award, gauges use set only. */
+/* Docs only, no logic change. */
 
 #endif
