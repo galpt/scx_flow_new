@@ -5,9 +5,13 @@
 # on the host CPU count with average burst plus period.
 # All threads run with the default policy with no
 # realtime use. One probe thread wakes each 10ms for
-# a light baseline. Set CONTROL to 1 to mark runs as
+# a light baseline with p95 plus p99 plus over50 for
+# strict gates. Set CONTROL to 1 to mark runs as
 # control for A and B comparison. The binary is built
-# on each run with no checked in binary.
+# on each run with no checked in binary. Extra share Y
+# stays as awarded extra to top band from counter deltas
+# joined to the per award log with one division alongside
+# this summary, not hog completion.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
@@ -59,7 +63,7 @@ else
 fi
 SUMMARY="${OUTDIR}/summary.csv"
 STATS="${OUTDIR}/summary_stats.csv"
-echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,control,sched,repeat,seed" > "${SUMMARY}"
+echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,probe_p95_us,probe_p99_us,probe_over50,control,sched,repeat,seed" > "${SUMMARY}"
 for target in ${LEVELS}; do
     N="$(calc_n "${target}")"
     echo "level target ${target} threads ${N} duration" \
@@ -94,7 +98,7 @@ with open(src, newline='') as f:
         groups.setdefault(t, []).append(row)
 cols = ['completion', 'offered_util', 'exact_util']
 cols += ['effective_util', 'nvcsw', 'probe_avg_us']
-cols += ['probe_max_us']
+cols += ['probe_max_us', 'probe_p95_us', 'probe_p99_us', 'probe_over50']
 with open(dst, 'w', newline='') as f:
     w = csv.writer(f)
     head = ['target_u', 'n']

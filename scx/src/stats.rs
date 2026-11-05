@@ -95,13 +95,19 @@ pub struct Metrics {
     #[stat(desc = "Old waits that step the hold down")]
     #[serde(default)]
     pub age_rescue: u64,
+    #[stat(desc = "Extra quanta beyond the first as q minus one")]
+    #[serde(default)]
+    pub extra_award: u64,
+    #[stat(desc = "Total quanta for the run as q")]
+    #[serde(default)]
+    pub total_quanta: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={} lat_boost={} hog_hold={} lat_preempt={} age_rescue={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_pair_full={} fb_duplicate={} fb_stale={} dhq_depth={} dhq_cap={} steal_pair={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={} lat_boost={} hog_hold={} lat_preempt={} age_rescue={} extra_award={} total_quanta={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
@@ -127,6 +133,8 @@ impl Metrics {
             self.hog_hold,
             self.lat_preempt,
             self.age_rescue,
+            self.extra_award,
+            self.total_quanta,
         )?;
         Ok(())
     }
@@ -158,6 +166,8 @@ impl Metrics {
             hog_hold: self.hog_hold.wrapping_sub(rhs.hog_hold),
             lat_preempt: self.lat_preempt.wrapping_sub(rhs.lat_preempt),
             age_rescue: self.age_rescue.wrapping_sub(rhs.age_rescue),
+            extra_award: self.extra_award.wrapping_sub(rhs.extra_award),
+            total_quanta: self.total_quanta.wrapping_sub(rhs.total_quanta),
         }
     }
 }

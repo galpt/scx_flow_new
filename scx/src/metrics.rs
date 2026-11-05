@@ -13,13 +13,15 @@ use crate::stats::Metrics;
 /// Fold one LLC value into the aggregate.
 /// Counters use wrapping add. Depth plus cap also sum with wrapping
 /// add to keep base parity across LLCs. Short reads keep prior state
-/// with no trap. Offsets 0-19 stay frozen, tail 20-23 is append-only.
+/// with no trap. Offsets 0-23 stay frozen, tail 24-25 is append-only.
 /// Tail 14 counts overrun events and 15 counts penalty slices charged
 /// one to one by design, so the two stay equal while keeping event
 /// versus cost split for later share work. Tail 17 counts streak
 /// preempts, 18 counts mask change kicks, 19 counts head forwards.
 /// Tail 20 counts latency takes, 21 counts hog keeps, 22 counts
-/// latency preempt wins, 23 counts age rescues.
+/// latency preempt wins, 23 counts age rescues. Tail 24 counts extra
+/// as q minus one, 25 counts total as q, so total equals old penalty
+/// plus new extra per award and again on deltas.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -111,6 +113,14 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() >= 192 {
         let v = u64::from_ne_bytes(val[184..192].try_into().unwrap_or([0u8; 8]));
         out.age_rescue = out.age_rescue.wrapping_add(v);
+    }
+    if val.len() >= 200 {
+        let v = u64::from_ne_bytes(val[192..200].try_into().unwrap_or([0u8; 8]));
+        out.extra_award = out.extra_award.wrapping_add(v);
+    }
+    if val.len() >= 208 {
+        let v = u64::from_ne_bytes(val[200..208].try_into().unwrap_or([0u8; 8]));
+        out.total_quanta = out.total_quanta.wrapping_add(v);
     }
 }
 
