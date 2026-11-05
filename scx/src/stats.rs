@@ -170,6 +170,26 @@ impl Metrics {
             total_quanta: self.total_quanta.wrapping_sub(rhs.total_quanta),
         }
     }
+
+    /// Books check on an interval window: total equals penalty plus extra.
+    /// Awards land exactly on non pinned overruns, so the summed window
+    /// keeps total minus penalty minus extra at zero with wrapping math.
+    pub fn award_books_ok(&self, rhs: &Self) -> bool {
+        let total = self.total_quanta.wrapping_sub(rhs.total_quanta);
+        let penalty = self.domino_penalty.wrapping_sub(rhs.domino_penalty);
+        let extra = self.extra_award.wrapping_sub(rhs.extra_award);
+        total == penalty.wrapping_add(extra)
+    }
+
+    /// Extra award plus total quanta deltas for share work.
+    /// Top band share stays open: deltas carry no score at award time,
+    /// so Y needs the per award log which stays deferred.
+    pub fn extra_deltas(&self, rhs: &Self) -> (u64, u64) {
+        (
+            self.extra_award.wrapping_sub(rhs.extra_award),
+            self.total_quanta.wrapping_sub(rhs.total_quanta),
+        )
+    }
 }
 
 /// Stats printer loop for the monitor flag.
@@ -199,4 +219,69 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_ops("top", StatsOps { open, close: None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::fold_llc_val;
+
+    fn awarded(extra: u64, total: u64, penalty: u64) -> Metrics {
+        Metrics {
+            extra_award: extra,
+            total_quanta: total,
+            domino_penalty: penalty,
+            overrun: penalty,
+            ..Metrics::default()
+        }
+    }
+
+    #[test]
+    fn books_hold_for_single_quantum_award() {
+        let prev = Metrics::default();
+        let cur = awarded(0, 1, 1);
+        assert!(cur.award_books_ok(&prev));
+        assert_eq!(cur.extra_deltas(&prev), (0, 1));
+    }
+
+    #[test]
+    fn books_hold_for_three_quantum_award() {
+        let prev = Metrics::default();
+        let cur = awarded(2, 3, 1);
+        assert!(cur.award_books_ok(&prev));
+        assert_eq!(cur.extra_deltas(&prev), (2, 3));
+    }
+
+    #[test]
+    fn books_fail_on_mismatched_window() {
+        let prev = Metrics::default();
+        let cur = awarded(2, 4, 1);
+        assert!(!cur.award_books_ok(&prev));
+    }
+
+    #[test]
+    fn fold_len_guards_keep_tails_append_only() {
+        let mut short = Metrics::default();
+        let mut buf192 = [0u8; 192];
+        buf192[184..192].copy_from_slice(&1u64.to_ne_bytes());
+        fold_llc_val(&mut short, &buf192);
+        assert_eq!(short.extra_award, 0);
+        assert_eq!(short.total_quanta, 0);
+        assert_eq!(short.age_rescue, 1);
+
+        let mut extra_only = Metrics::default();
+        let mut buf200 = [0u8; 200];
+        buf200[192..200].copy_from_slice(&7u64.to_ne_bytes());
+        fold_llc_val(&mut extra_only, &buf200);
+        assert_eq!(extra_only.extra_award, 7);
+        assert_eq!(extra_only.total_quanta, 0);
+
+        let mut both = Metrics::default();
+        let mut buf208 = [0u8; 208];
+        buf208[192..200].copy_from_slice(&7u64.to_ne_bytes());
+        buf208[200..208].copy_from_slice(&9u64.to_ne_bytes());
+        fold_llc_val(&mut both, &buf208);
+        assert_eq!(both.extra_award, 7);
+        assert_eq!(both.total_quanta, 9);
+    }
 }
