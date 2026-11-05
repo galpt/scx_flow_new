@@ -10,6 +10,8 @@
  * forward with a live allowed owner at pick on the dispatch LLC with
  * outcome split into preempt plus idle plus skip. Pair steals count through the steal
  * helper with 9. Queued_dec stays on the victim with saturation at zero.
+ * Peeked keys already carry the one slice latency offset, so the forward
+ * kick compares boosted keys on both sides with no extra shift here.
  * No knob with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -28,6 +30,9 @@
 /* Empty stays silent with no counter move. One wake per head plus owner */
 /* keeps no storm with no move no loss. Preempt when the owner runs far */
 /* ahead past the tail, else wake idle, else count a skip with no wake. */
+/* The peeked key already carries the latency offset and the kick boosts */
+/* the running side from its flag, so both sides compare boosted with no */
+/* stamp shift here. */
 /* Forward counts attempts with a live allowed owner at pick on the */
 /* dispatch LLC with no order change, outcome splits into preempt plus */
 /* idle plus skip so attempts never read as successes alone. No valid */
@@ -242,7 +247,9 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 /* Dispatch order stays frozen own pair, same node pairs, */
 /* remote pairs, own LLC queue, remote LLC queues, fallback safety net. */
 /* Steal 9 plus 10 plus hol forward 19 valid owner only accounting */
-/* unchanged in order. Forward attempts with no valid owner keep */
+/* unchanged in order. Pair pops pick the lowest boosted key with ties */
+/* to strand A and the sequence keeps first in first out within a class. */
+/* Forward attempts with no valid owner keep */
 /* coalescing with no count so a future valid head retries. */
 /* Docs only, no logic change. */
 

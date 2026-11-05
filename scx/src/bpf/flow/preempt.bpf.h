@@ -10,11 +10,16 @@
  * check, since a pinned wait cannot run elsewhere. A streak at or above
  * the pop retry bound turns an idle wake into a preempt so a hold ends.
  * 11 counts preempt kicks, 12 counts idle kicks, 13 counts skips with no
- * wake, 17 counts streak preempts. Preempt is not counted as steal. Kick
+ * wake, 17 counts streak preempts. Preempt is not counted as steal. The
+ * constrained kick returns one on a preempt else zero, so enqueue plus
+ * mask callers with the class in hand count latency wins with no extra
+ * lookup while forward plus steal callers drop the return. Kick
  * validates the target first and skips when no allowed CPU exists so an
  * offline or disallowed target never takes a wake. Allowed implies within
  * bounds, so the not-ok early skip keeps the base idle-path outcome of no
- * wake while counting it. No knob with fail closed choice.
+ * wake while counting it. The gap test boosts both sides with the one
+ * slice offset, so latency wins ties by one slice while hog versus hog
+ * keeps the old test. No knob with fail closed choice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,16 +30,23 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "guards.bpf.h"
+#include "vtime.bpf.h"
 
 /* Constrained kick to the allowed live target only. Preempts when the */
 /* running vtime is ahead by at least the threshold past the tail, */
-/* else wakes idle. A streak at or above the pop retry bound turns the */
-/* idle path into a preempt so a hold ends. Skips with no wake when no */
-/* allowed live target exists. The idle path re-validates after the */
-/* preempt test so a mask change between pick and kick never takes an */
-/* off mask wake. Overlap is intentional. */
-static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
-						  struct task_struct *p, u32 llc)
+/* else wakes idle. The running side takes the same one slice offset */
+/* when it runs a latency task, so both sides compare boosted keys and */
+/* latency wins ties by one slice while hog versus hog keeps the old */
+/* test with no shape change. A streak at or above the pop retry bound */
+/* turns the idle path into a preempt so a hold ends. Skips with no wake */
+/* when no allowed live target exists. The idle path re-validates after */
+/* the preempt test so a mask change between pick and kick never takes */
+/* an off mask wake. Overlap is intentional. Returns one when a preempt */
+/* kick fires else zero, so callers with the class in hand count latency */
+/* wins with no extra lookup. Forward plus steal callers drop the return */
+/* and keep the preempt count with no latency split. */
+static __always_inline int flow_kick_constrained(s32 tgt, s64 use_v,
+						 struct task_struct *p, u32 llc)
 {
 	u32 cpu;
 	struct flow_running_state *rs;
@@ -42,29 +54,33 @@ static __always_inline void flow_kick_constrained(s32 tgt, s64 use_v,
 
 	if (tgt < 0) {
 		flow_stat_inc(llc, 13);
-		return;
+		return 0;
 	}
 	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 13);
-		return;
+		return 0;
 	}
 	cpu = (u32)tgt;
 	if (!flow_cpu_live(cpu)) {
 		flow_stat_inc(llc, 13);
-		return;
+		return 0;
 	}
 	rs = &flow_running_state[cpu];
 	if (rs->gen == 0)
 		goto idle;
 	if (rs->slice_rem <= (u64)FLOW_PREEMPT_TAIL)
 		goto idle;
-	if (rs->vtime <= use_v)
-		goto idle;
-	gap = (u64)(rs->vtime - use_v);
+	{
+		s64 run_v = rs->lat ? flow_vtime_boost(rs->vtime, 1) : rs->vtime;
+
+		if (run_v <= use_v)
+			goto idle;
+		gap = (u64)(run_v - use_v);
+	}
 	if (gap >= (u64)FLOW_PREEMPT_THRESH) {
 		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 		flow_stat_inc(llc, 11);
-		return;
+		return 1;
 	}
 idle:
 	/* Streak escalation. A CPU that keeps burning full slices holds the */
@@ -74,29 +90,30 @@ idle:
 	if (rs->gen != 0 && rs->hog_streak >= (u32)FLOW_POP_RETRY_MAX) {
 		if (!flow_cpu_allowed(tgt, p)) {
 			flow_stat_inc(llc, 13);
-			return;
+			return 0;
 		}
 		if (!flow_cpu_live((u32)tgt)) {
 			flow_stat_inc(llc, 13);
-			return;
+			return 0;
 		}
 		scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 		flow_stat_inc(llc, 11);
 		flow_stat_inc(llc, 17);
-		return;
+		return 1;
 	}
 	/* Re-validation keeps an off mask wake out when the mask changes */
 	/* between pick and kick. Bound overlap with live is intentional. */
 	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 13);
-		return;
+		return 0;
 	}
 	if (!flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 13);
-		return;
+		return 0;
 	}
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 12);
+	return 0;
 }
 
 /* Pinned kick to the allowed live target only. Preempts at once when a */
@@ -201,9 +218,11 @@ static __always_inline void flow_kick_idle_only(s32 task_cpu,
 	flow_stat_inc(llc, 12);
 }
 
-/* Kick budgets stay threshold 500us plus tail 125us with */
-/* per LLC 11 preempt, 12 idle, 13 skip plus 17 escape, preempt never */
-/* counted as steal. Pinned preempts past the tail with no gap check. */
-/* Docs only, no logic change. */
+/* Kick budgets stay threshold 500us plus tail 125us plus latency offset */
+/* 1ms with per LLC 11 preempt, 12 idle, 13 skip plus 17 escape, preempt */
+/* never counted as steal. The gap test boosts both sides so latency */
+/* wins ties by one slice, and the constrained return lets enqueue plus */
+/* mask callers count 22 for latency wins. Pinned preempts past the tail */
+/* with no gap check. Docs only, no logic change. */
 
 #endif
