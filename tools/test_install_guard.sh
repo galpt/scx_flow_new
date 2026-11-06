@@ -543,7 +543,10 @@ fi
 if grep -q "tcc->llc_id\|t2->llc_id" "${DISP_HDR}" 2>/dev/null; then
     fail "dead cpu scan reappeared"
 fi
-grep -q "st->queued) == 0" "${DISP_HDR}" || fail "empty llc bail missing"
+# Drain peeks every queue with no gauge skip.
+if grep -q "flow_stats_for(victim)" "${DISP_HDR}" 2>/dev/null; then
+    fail "gauge bail reappeared"
+fi
 
 # Select rechecks the winning pick against the current mask.
 grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"

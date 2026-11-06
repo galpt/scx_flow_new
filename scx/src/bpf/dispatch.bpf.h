@@ -87,11 +87,6 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 static __always_inline int flow_drain_llc(u32 cpu, u32 llc, u32 victim, int steal)
 {
 	u32 pr;
-	struct flow_llc_stats *st = flow_stats_for(victim);
-
-	/* An empty LLC has nothing to peek, skip its queues. */
-	if (st && READ_ONCE(st->queued) == 0)
-		return 0;
 	for (pr = 0; pr < (u32)FLOW_PRIO_COUNT; pr++) {
 		u64 dsq = flow_llc_dsq_prio(victim, pr);
 		u32 slot = victim;
