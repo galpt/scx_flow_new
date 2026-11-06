@@ -13,8 +13,8 @@
  * unchanged. A burst estimate tracks recent run time and selects
  * the queue. Slices hold one fixed quantum. Tasks
  * that wait long have their estimate halved. The graphics
- * hint keeps tasks near their previous CPU. It does not change
- * ordering by itself. Wait history keeps per CPU queue waits by
+ * hint keeps tasks near their previous CPU with zero or one
+ * only. It favors staying near without forcing placement. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
@@ -53,16 +53,16 @@ enum flow_consts {
 	FLOW_PRIO_NORM = 1ULL,
 	FLOW_PRIO_BATCH = 2ULL,
 	FLOW_PRIO_IDLE = 3ULL,
-	FLOW_SLICE_MIN_NS = 3000000ULL,
+	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,
 	FLOW_FAIR_BASE_NS = 20000ULL,
 	FLOW_FAIR_EXTRA_NS = 1000ULL,
-	FLOW_LAT_OFF_NS = 3000000ULL,
+	FLOW_LAT_OFF_NS = 1000000ULL,
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
-	FLOW_SJF_INIT_NS = 3000000ULL,
+	FLOW_SJF_INIT_NS = 1000000ULL,
 	FLOW_SJF_FLOOR_NS = 5000ULL,
 	FLOW_SJF_CAP_NS = 1000000000ULL,
 	FLOW_AGING_NS = 100000000ULL,

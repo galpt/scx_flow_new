@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.4" ] || fail "version not at 5.1.4"
+[ "${want}" = "5.1.5" ] || fail "version not at 5.1.5"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -228,6 +228,68 @@ grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
 grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
 
+# Cache keeps LLC first drain with fixed tie order. The drain keeps
+# own LLC first then same node then remote then fallback, prios drain
+# in fixed order, the pick keeps the hint when allowed else the first
+# near target, and ties keep the first CPU in fixed order with the
+# previous CPU winning when allowed.
+grep -q "drains its own LLC" "${DISP_HDR}" || fail "cache drain prose missing"
+grep -q "fixed" "${DISP_HDR}" || fail "cache fixed prose missing"
+grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
+grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
+if ! grep -q "score < best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "tie order drifted"
+fi
+if grep -q "score <= best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "tie order not fixed"
+fi
+
+# Single CPU stands with no sibling probe and fail closed choice.
+# No sibling topology probe runs, each CPU stands single, and a miss
+# fails closed with no move through the shared picker.
+grep -q "No sibling probe" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smt prose missing"
+grep -q "fail closed" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smt fail closed prose missing"
+if grep -q "sibling" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    case "$(grep "sibling" "${SRC_DIR}/src/bpf/select.bpf.h")" in
+        *"No sibling probe"*) ;;
+        *) fail "smt probe drift" ;;
+    esac
+fi
+if grep -q "smt\|SMT\|sibling_cpu\|topology_sibling" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
+    fail "smt probe reappeared"
+fi
+
+# Graphics hint stays hint only with zero or one. The hint favors
+# staying near the previous CPU and never forces placement, reads as
+# zero or one only, and only narrows a distant pick to the same node.
+grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
+grep -q "zero or one" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu fixed prose missing"
+grep -q "zero or one" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu fixed select prose missing"
+grep -q "flow_gpu_hint" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu helper missing"
+grep -q 't->gpu_hint != 0' "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu fixed read missing"
+grep -q 'if (gpu && score > 1)' "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu hint clamp missing"
+if grep -q "gpu.*force\|force.*gpu" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    case "$(grep "gpu.*force\|force.*gpu" "${SRC_DIR}/src/bpf/select.bpf.h")" in
+        *"never"*"force"*|*"never forces"*) ;;
+        *) fail "gpu force drift" ;;
+    esac
+fi
+
+# Frequency stays governor only with no placement steer. Only a fixed
+# hint that never sends zero may reach the governor, and no other
+# frequency call steers placement.
+grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
+grep -q "never steers" "${DISP_HDR}" || fail "freq dispatch prose missing"
+grep -q "never sends zero" "${DISP_HDR}" || fail "freq never zero prose missing"
+if grep -q "cpuperf" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+    if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+        fail "freq call not set only"
+    fi
+fi
+if grep -q "scx_bpf_cpufreq\|bpf_cpufreq\|freq_set\|perf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+    fail "freq steer reappeared"
+fi
+
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
 # SJF stays non preemptive with fixed integers and no knob. The burst
@@ -244,7 +306,10 @@ grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
 grep -q "flow_sjf_prio" "${SJF_HDR}" || fail "sjf prio missing"
 grep -q "flow_sjf_age" "${SJF_HDR}" || fail "sjf age missing"
 grep -q "flow_sjf_remain" "${SJF_HDR}" || fail "sjf remain missing"
-grep -q "FLOW_SJF_INIT_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf seed missing"
+grep -q "FLOW_SLICE_MIN_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
+grep -q "FLOW_SJF_INIT_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf seed missing"
+grep -q "FLOW_LAT_OFF_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lat shift missing"
+grep -q "FLOW_AGING_NS = 100000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf aging kept missing"
 grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf rescue missing"
 grep -q ">> 1" "${SJF_HDR}" || fail "sjf half blend missing"
 grep -q "FLOW_SLICE_MIN_NS \* 3" "${SJF_HDR}" || fail "sjf norm band missing"

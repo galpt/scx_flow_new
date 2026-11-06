@@ -4,12 +4,16 @@
  *
  * The pick keeps the hint when the hint is allowed and online.
  * Otherwise it scans the seed view once and prefers the same LLC,
- * then the same node, then a distant CPU. When no hint is usable,
+ * then the same node, then a distant CPU. Ties keep the first CPU
+ * in fixed order. When no hint is usable,
  * CPUs on the primary node are preferred. The graphics hint favors
- * staying near the previous CPU. It never forces placement. Every
+ * staying near the previous CPU with zero or one only. It never
+ * forces placement. No sibling probe runs and each CPU stands
+ * single with fail closed choice. Every
  * check returns minus one on failure. Masks are tested again before
  * each wake, so a task is never kicked toward a CPU outside its
- * current mask. The pick stores a provisional wait kind from the
+ * current mask. Frequency stays with the governor and never steers
+ * placement. The pick stores a provisional wait kind from the
  * last queue choice with pinned tasks keeping the pinned kind.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>

@@ -4,12 +4,15 @@
  *
  * Each CPU drains its own LLC queues first, then queues on the same
  * node, then distant queues, then fallback. Each queue drains in
- * queue order with one peek per queue. A head that cannot run here
+ * queue order with one peek per queue and prios drain in fixed
+ * order. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot and counts the enqueue to run wait. Dispatch
  * counts the enqueue to dispatch wait on the moving CPU. Stopping
  * folds burnt time into the burst estimate through the half blend.
+ * Frequency stays with the governor and never steers placement.
+ * Only a fixed hint that never sends zero may reach the governor.
  * Tick refreshes the remaining slice. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
