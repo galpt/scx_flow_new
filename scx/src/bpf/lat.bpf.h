@@ -42,7 +42,8 @@ static __always_inline u32 flow_lat_bucket(u64 delta)
 static __always_inline void flow_lat_record(u32 cpu, u32 kind, u32 bucket, u32 is_run)
 {
 	struct flow_lat_hist *hist;
-	u64 base;
+	u64 half;
+	u64 step;
 	u64 idx;
 	if (!flow_cpu_ok(cpu))
 		return;
@@ -55,10 +56,17 @@ static __always_inline void flow_lat_record(u32 cpu, u32 kind, u32 bucket, u32 i
 	hist = bpf_map_lookup_elem(&lat_hist, &cpu);
 	if (!hist)
 		return;
-	base = (u64)is_run * (u64)FLOW_LAT_KINDS * (u64)FLOW_LAT_BUCKETS;
-	idx = base + (u64)kind * (u64)FLOW_LAT_BUCKETS + (u64)bucket;
+	/* Build the index in two adds so each bound stays checked. */
+	__asm__ volatile("" : "+r"(kind), "+r"(bucket), "+r"(is_run));
+	step = (u64)kind * (u64)FLOW_LAT_BUCKETS + (u64)bucket;
+	if (step >= (u64)FLOW_LAT_KINDS * (u64)FLOW_LAT_BUCKETS)
+		return;
+	half = (u64)is_run * (u64)FLOW_LAT_KINDS * (u64)FLOW_LAT_BUCKETS;
+	__asm__ volatile("" : "+r"(step), "+r"(half));
+	idx = half + step;
 	if (idx >= (u64)FLOW_HIST_LEN)
 		return;
+	__asm__ volatile("" : "+r"(idx));
 	__sync_fetch_and_add(&hist->cells[idx], 1ULL);
 }
 static __always_inline void flow_lat_store(struct flow_task_ctx *t, u32 prio, int pinned)
