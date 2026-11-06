@@ -18,7 +18,7 @@
  * decides the wake. Local inserts are not
  * counted in the shared gauge. Shared and fallback inserts count
  * the gauge, and fallback inserts also count fallback. Dequeue drops
- * the gauge on cancel. Masks are tested again before each wake, so
+ * the gauge and the hint on cancel. Masks are tested again before each wake, so
  * a task is never kicked toward a CPU outside its current mask.
  * Enqueue reads the cgroup map on every insert. The birth id comes
  * from init args. Enqueue finalizes the wait kind with the full
@@ -216,6 +216,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		quanta = 1;
 		extra = 0;
 	}
+	/* Short runs with long waits keep the hint. */
+	if (!no_cpu)
+		flow_gpu_update(t, now, prio);
 	{
 		/* Fallback queues are FIFO, their tasks skip the floor. */
 		s64 base = t->vtime;
@@ -311,6 +314,7 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 		if (!flow_llc_ok(dllc))
 			dllc = 0;
 		flow_queued_dec(dllc);
+		flow_gpu_clear(t);
 	}
 }
 #endif

@@ -8,7 +8,9 @@
  * in fixed order. When no hint is usable,
  * CPUs on the primary node are preferred. The graphics hint favors
  * staying near the previous CPU with zero or one only. It never
- * forces placement. No sibling probe runs and each CPU stands
+ * forces placement. Short runs with long waits set it. It is dropped
+ * on init and on mask change, a stale wait reads as none, and
+ * a miss falls back to the scan. No sibling probe runs and each CPU stands
  * single with fail closed choice. Every
  * check returns minus one on failure. Masks are tested again before
  * each wake, so a task is never kicked toward a CPU outside its
@@ -80,9 +82,86 @@ static __always_inline bool flow_is_primary(u32 node)
 }
 static __always_inline int flow_gpu_hint(struct flow_task_ctx *t)
 {
+	u64 stamp;
+	u64 now;
 	if (!t)
 		return 0;
-	return t->gpu_hint != 0;
+	if (t->gpu_hint != 0) {
+		stamp = READ_ONCE(t->enq_ns);
+		if (!stamp)
+			return 0;
+		now = scx_bpf_now();
+		if (!now || now <= stamp)
+			return 0;
+		if (now - stamp >= (u64)FLOW_AGING_NS)
+			return 0;
+		return 1;
+	}
+	return 0;
+}
+static __always_inline void flow_gpu_clear(struct flow_task_ctx *t)
+{
+	if (!t)
+		return;
+	t->gpu_hint = 0;
+}
+/* Short runs with long waits keep the hint, else drop it. */
+static __always_inline void flow_gpu_update(struct flow_task_ctx *t, u64 now, u32 prio)
+{
+	u64 burst;
+	u64 stamp;
+	u64 delta;
+	u64 rem;
+	u32 kind;
+	if (!t)
+		return;
+	if (!now) {
+		t->gpu_hint = 0;
+		return;
+	}
+	burst = READ_ONCE(t->burst_ns);
+	stamp = READ_ONCE(t->enq_ns);
+	rem = READ_ONCE(t->slice_rem);
+	kind = READ_ONCE(t->lat_kind);
+	if (!stamp) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (now <= stamp) {
+		t->gpu_hint = 0;
+		return;
+	}
+	delta = now - stamp;
+	if (burst > (u64)FLOW_SJF_INIT_NS) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (burst > (u64)FLOW_SLICE_MIN_NS) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (delta < (u64)FLOW_AGING_NS) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (delta >= (u64)FLOW_STARVE_NS) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (!rem || rem > (u64)FLOW_SLICE_MIN_NS) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (prio != (u32)FLOW_PRIO_LAT) {
+		t->gpu_hint = 0;
+		return;
+	}
+	if (kind == (u32)FLOW_LAT_PINNED || kind == (u32)FLOW_LAT_EXITING ||
+	    kind == (u32)FLOW_LAT_FALLBACK) {
+		t->gpu_hint = 0;
+		return;
+	}
+	t->gpu_hint = 1;
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {

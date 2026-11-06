@@ -316,6 +316,8 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
+	/* The hint names the old CPU, drop it on a mask change. */
+	flow_gpu_clear(t);
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
@@ -378,7 +380,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->prio = (u32)FLOW_PRIO_NORM;
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
-	t->gpu_hint = 0;
+	flow_gpu_clear(t);
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
@@ -402,7 +404,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->cg_weight = flow_cgroup_lookup(cgid);
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
-	t->gpu_hint = 0;
+	flow_gpu_clear(t);
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
