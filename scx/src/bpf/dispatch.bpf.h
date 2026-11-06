@@ -7,8 +7,9 @@
  * queue order with one peek per queue. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
- * the task snapshot. Stopping folds burnt
- * time into the burst estimate through the half blend.
+ * the task snapshot and counts the enqueue to run wait. Dispatch
+ * counts the enqueue to dispatch wait on the moving CPU. Stopping
+ * folds burnt time into the burst estimate through the half blend.
  * Tick refreshes the remaining slice. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
@@ -27,6 +28,7 @@
 #include "fair.bpf.h"
 #include "sjf.bpf.h"
 #include "cgroup.bpf.h"
+#include "lat.bpf.h"
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
@@ -66,6 +68,9 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 		return 0;
 	}
 	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
+		struct flow_task_ctx *lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+		if (lt)
+			flow_lat_observe(cpu, lt, bpf_ktime_get_ns(), 0);
 		flow_stat_inc(llc, 1);
 		flow_queued_dec(victim);
 		if (steal) {
@@ -205,6 +210,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 					}
 				}
 				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
+					if (pt)
+						flow_lat_observe(c, pt, bpf_ktime_get_ns(), 0);
 					flow_stat_inc(llc, 1);
 					if (have_owner) {
 						flow_queued_dec(vllc);
@@ -275,6 +282,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
+	flow_lat_observe(cpu, t, bpf_ktime_get_ns(), 1);
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
 	 * ownership. */
@@ -393,7 +401,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
 	t->gpu_hint = 0;
-	t->pad = 0;
+	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -417,7 +425,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
 	t->gpu_hint = 0;
-	t->pad = 0;
+	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	p->scx.dsq_vtime = 0;
 	return 0;
 }

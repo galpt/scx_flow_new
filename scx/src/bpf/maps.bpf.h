@@ -5,10 +5,12 @@
  * Task storage holds one entry per task. CPU storage holds the seed
  * view written at startup. LLC storage holds per LLC counters.
  * Weight storage holds shares by group id. A missing entry reads
- * as the default share. Globals hold the running view, the per LLC
- * floor, the per LLC node, and the forward coalescing state.
- * The CPU and LLC tables are written once, so a CPU that arrives
- * late needs a restart to be seen.
+ * as the default share. Wait history holds per CPU queue waits by
+ * kind and bucket for run plus dispatch halves. Globals hold the
+ * running view, the per LLC floor, the per LLC node, and the
+ * forward coalescing state. The CPU plus LLC plus wait tables are
+ * written once, so a CPU that arrives late needs a restart to be
+ * seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -39,6 +41,12 @@ struct {
 	__type(key, u64);
 	__type(value, u64);
 } cgrp_weight_stor SEC(".maps");
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, FLOW_MAX_CPUS);
+	__type(key, u32);
+	__type(value, struct flow_lat_hist);
+} lat_hist SEC(".maps");
 volatile u64 flow_nr_cpus;
 volatile u64 flow_nr_llcs;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];

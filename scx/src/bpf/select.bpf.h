@@ -9,7 +9,8 @@
  * staying near the previous CPU. It never forces placement. Every
  * check returns minus one on failure. Masks are tested again before
  * each wake, so a task is never kicked toward a CPU outside its
- * current mask.
+ * current mask. The pick stores a provisional wait kind from the
+ * last queue choice with pinned tasks keeping the pinned kind.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -18,6 +19,7 @@
 #include "intf.h"
 #include "maps.bpf.h"
 #include "stats.bpf.h"
+#include "lat.bpf.h"
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
 	if (!p)
@@ -94,8 +96,12 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (!p)
 		return hint;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (t)
+	if (t) {
+		int pinned = flow_is_pinned(p) ? 1 : 0;
+		u32 pk = READ_ONCE(t->prio);
 		gpu = flow_gpu_hint(t);
+		flow_lat_store(t, pk, pinned);
+	}
 	tgt = flow_constrained_target(hint, p);
 	if (tgt >= 0)
 		return tgt;

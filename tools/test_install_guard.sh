@@ -74,6 +74,7 @@ for need_flow in \
     "src/bpf/dispatch.bpf.h" \
     "src/bpf/enqueue.bpf.h" \
     "src/bpf/fair.bpf.h" \
+    "src/bpf/lat.bpf.h" \
     "src/bpf/maps.bpf.h" \
     "src/bpf/select.bpf.h" \
     "src/bpf/sjf.bpf.h" \
@@ -357,6 +358,48 @@ grep -q "lat_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
 grep -q "kick_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 grep -q "hog_escape" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 grep -q "lat_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+
+# Wait hist stays scoped with five maps and nine headers.
+# The wait map is one array past the base tables with per CPU
+# run plus dispatch halves. Top keeps twenty one counters.
+[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "maps count drifted"
+[ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "9" ] || fail "headers count drifted"
+grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lat include missing"
+grep -q "lat_hist" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map missing"
+grep -q "BPF_MAP_TYPE_ARRAY" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map type missing"
+grep -q "FLOW_LAT_KINDS = 9" "${SRC_DIR}/src/bpf/intf.h" || fail "wait kinds missing"
+grep -q "FLOW_LAT_BUCKETS = 8" "${SRC_DIR}/src/bpf/intf.h" || fail "wait buckets missing"
+grep -q "FLOW_HIST_LEN = 144" "${SRC_DIR}/src/bpf/intf.h" || fail "wait hist len missing"
+grep -q "lat_kind" "${SRC_DIR}/src/bpf/intf.h" || fail "wait task tail missing"
+grep -q "flow_lat_hist" "${SRC_DIR}/src/bpf/intf.h" || fail "wait hist struct missing"
+grep -q "flow_lat_bucket" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait bucket missing"
+grep -q "flow_lat_record" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait record missing"
+grep -q "flow_lat_store" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait store missing"
+grep -q "flow_lat_finalize" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait finalize missing"
+grep -q "flow_lat_observe" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait observe missing"
+grep -q "flow_lat_store" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select store missing"
+grep -q "flow_lat_finalize" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "enqueue finalize missing"
+grep -q "flow_lat_observe" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "dispatch observe missing"
+grep -q "LatMetrics" "${SRC_DIR}/src/stats.rs" || fail "lat stats missing"
+grep -q '"lat"' "${SRC_DIR}/src/stats.rs" || fail "lat endpoint missing"
+grep -q "LatMetrics" "${SRC_DIR}/src/metrics.rs" || fail "lat fold missing"
+grep -q "FLOW_HIST_LEN" "${SRC_DIR}/src/metrics.rs" || fail "hist len use missing"
+grep -q "fold_lat_val" "${SRC_DIR}/src/metrics.rs" || fail "lat fold helper missing"
+grep -q "collect_lat" "${SRC_DIR}/src/metrics.rs" || fail "lat collect missing"
+grep -q "LatMetrics" "${SRC_DIR}/src/run.rs" || fail "run lat missing"
+grep -q "LatMetrics" "${SRC_DIR}/src/main.rs" || fail "help stats lat missing"
+if grep -q "for (" "${SRC_DIR}/src/bpf/lat.bpf.h" 2>/dev/null; then
+    fail "wait loop drift"
+fi
+if grep -q "bpf_for" "${SRC_DIR}/src/bpf/lat.bpf.h" 2>/dev/null; then
+    fail "wait loop drift"
+fi
+if grep -q "bpf_map_" "${SRC_DIR}/src/bpf/lat.bpf.h" 2>/dev/null; then
+    case "$(grep "bpf_map_" "${SRC_DIR}/src/bpf/lat.bpf.h")" in
+        *bpf_map_lookup_elem*) ;;
+        *) fail "wait map drift" ;;
+    esac
+fi
 
 # Ops stay at sixteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "16" ] || fail "ops count drifted"

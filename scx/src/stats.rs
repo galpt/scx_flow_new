@@ -175,28 +175,91 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     )
 }
 
+/// Wait hist for run plus dispatch halves by kind times bucket.
+#[stat_doc]
+#[derive(Clone, Debug, Serialize, Deserialize, Stats)]
+pub struct LatMetrics {
+    #[stat(desc = "Wait hist run plus dispatch by kind times bucket")]
+    pub lat_hist: Vec<u64>,
+}
+
+impl Default for LatMetrics {
+    fn default() -> Self {
+        Self {
+            lat_hist: vec![0; crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize],
+        }
+    }
+}
+
+impl LatMetrics {
+    /// Interval delta with wrapping math per cell.
+    pub fn delta(&self, rhs: &Self) -> Self {
+        let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
+        let mut out = vec![0u64; want];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let a = self.lat_hist.get(i).copied().unwrap_or(0);
+            let b = rhs.lat_hist.get(i).copied().unwrap_or(0);
+            *slot = a.wrapping_sub(b);
+        }
+        Self { lat_hist: out }
+    }
+}
+
 /// Server data for the stats server.
-pub fn server_data() -> StatsServerData<(), Metrics> {
-    let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {
-        req_ch.send(())?;
-        let mut prev = res_ch.recv()?;
-        let read: Box<dyn StatsReader<(), Metrics>> = Box::new(move |_args, (req_ch, res_ch)| {
+pub fn server_data() -> StatsServerData<(), (Metrics, LatMetrics)> {
+    let open_top: Box<dyn StatsOpener<(), (Metrics, LatMetrics)>> =
+        Box::new(move |(req_ch, res_ch)| {
             req_ch.send(())?;
-            let cur = res_ch.recv()?;
-            let delta = cur.delta(&prev);
-            prev = cur;
-            delta.to_json()
+            let (cur, _) = res_ch.recv()?;
+            let mut prev: Metrics = cur;
+            let read: Box<dyn StatsReader<(), (Metrics, LatMetrics)>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    req_ch.send(())?;
+                    let (cur, _) = res_ch.recv()?;
+                    let delta = cur.delta(&prev);
+                    prev = cur;
+                    delta.to_json()
+                });
+            Ok(read)
         });
-        Ok(read)
-    });
+    let open_lat: Box<dyn StatsOpener<(), (Metrics, LatMetrics)>> =
+        Box::new(move |(req_ch, res_ch)| {
+            req_ch.send(())?;
+            let (_, cur) = res_ch.recv()?;
+            let mut prev: LatMetrics = cur;
+            let read: Box<dyn StatsReader<(), (Metrics, LatMetrics)>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    req_ch.send(())?;
+                    let (_, cur) = res_ch.recv()?;
+                    let delta = cur.delta(&prev);
+                    prev = cur;
+                    delta.to_json()
+                });
+            Ok(read)
+        });
     StatsServerData::new()
         .add_meta(Metrics::meta())
-        .add_ops("top", StatsOps { open, close: None })
+        .add_meta(LatMetrics::meta())
+        .add_ops(
+            "top",
+            StatsOps {
+                open: open_top,
+                close: None,
+            },
+        )
+        .add_ops(
+            "lat",
+            StatsOps {
+                open: open_lat,
+                close: None,
+            },
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::fold_lat_val;
     use crate::metrics::fold_llc_val;
 
     fn awarded(extra: u64, total: u64, penalty: u64) -> Metrics {
@@ -256,5 +319,46 @@ mod tests {
         fold_llc_val(&mut both, &buf168);
         assert_eq!(both.extra_award, 7);
         assert_eq!(both.total_quanta, 9);
+    }
+
+    #[test]
+    fn lat_default_len_is_hist_len() {
+        let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
+        let cur = LatMetrics::default();
+        assert_eq!(cur.lat_hist.len(), want);
+        assert_eq!(want, 144);
+    }
+
+    #[test]
+    fn lat_fold_uses_discovered_count() {
+        let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
+        let mut out = LatMetrics::default();
+        let mut full = vec![0u8; want * 8];
+        full[0..8].copy_from_slice(&3u64.to_ne_bytes());
+        full[(want - 1) * 8..want * 8].copy_from_slice(&5u64.to_ne_bytes());
+        fold_lat_val(&mut out, &full);
+        assert_eq!(out.lat_hist[0], 3);
+        assert_eq!(out.lat_hist[want - 1], 5);
+
+        let mut short = LatMetrics::default();
+        let tiny = vec![0u8; 16];
+        fold_lat_val(&mut short, &tiny);
+        assert_eq!(short.lat_hist[0], 0);
+        assert_eq!(short.lat_hist[1], 0);
+        assert_eq!(short.lat_hist.len(), want);
+    }
+
+    #[test]
+    fn lat_delta_wraps_per_cell() {
+        let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
+        let mut cur = LatMetrics::default();
+        let mut prev = LatMetrics::default();
+        cur.lat_hist[0] = 5;
+        prev.lat_hist[0] = 3;
+        cur.lat_hist[want - 1] = 1;
+        prev.lat_hist[want - 1] = 2;
+        let d = cur.delta(&prev);
+        assert_eq!(d.lat_hist[0], 2);
+        assert_eq!(d.lat_hist[want - 1], 1u64.wrapping_sub(2));
     }
 }

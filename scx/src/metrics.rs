@@ -8,6 +8,7 @@
 use log::warn;
 
 use crate::BpfSkel;
+use crate::stats::LatMetrics;
 use crate::stats::Metrics;
 
 /// Fold one LLC value into the aggregate.
@@ -118,6 +119,45 @@ pub fn collect(skel: &BpfSkel<'_>) -> Metrics {
         };
         fold_llc_val(&mut out, &val);
         if llc + 1 >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+/// Fold one CPU wait hist into the aggregate.
+/// Cells use wrapping add. Short reads keep prior state.
+/// The discovered count from the map value bounds the fold
+/// with the shared hist length as the top.
+pub fn fold_lat_val(out: &mut LatMetrics, val: &[u8]) {
+    let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
+    if out.lat_hist.len() < want {
+        out.lat_hist.resize(want, 0);
+    }
+    let (chunks, _) = val.as_chunks::<8>();
+    for (slot, chunk) in out.lat_hist.iter_mut().zip(chunks) {
+        let v = u64::from_ne_bytes(*chunk);
+        *slot = slot.wrapping_add(v);
+    }
+}
+
+/// Sum per CPU wait hists into one view.
+/// A failed map read warns and keeps zeros for that CPU.
+pub fn collect_lat(skel: &BpfSkel<'_>) -> LatMetrics {
+    use libbpf_rs::MapCore;
+    let mut out = LatMetrics::default();
+    for cpu in 0..crate::bpf_intf::flow_consts_FLOW_MAX_CPUS {
+        let key = cpu.to_ne_bytes();
+        let val = match skel.maps.lat_hist.lookup(&key, libbpf_rs::MapFlags::ANY) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!("lat read failed for cpu {cpu}: {e:#}");
+                continue;
+            }
+        };
+        fold_lat_val(&mut out, &val);
+        if cpu + 1 >= 1024 {
             break;
         }
     }

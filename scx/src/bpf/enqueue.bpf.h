@@ -21,7 +21,9 @@
  * the gauge on cancel. Masks are tested again before each wake, so
  * a task is never kicked toward a CPU outside its current mask.
  * Enqueue reads the cgroup map on every insert. The birth id comes
- * from init args.
+ * from init args. Enqueue finalizes the wait kind with the full
+ * path and stamps the wait start with the full clock with zero
+ * stored as one.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,6 +36,7 @@
 #include "sjf.bpf.h"
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
+#include "lat.bpf.h"
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
 	if (tgt < 0) {
@@ -122,6 +125,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (p->flags & PF_EXITING) {
 		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
+			flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, bpf_ktime_get_ns());
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
 			flow_kick_idle_only(tgt, p, llc);
 			return;
@@ -144,6 +148,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 			{
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)pcpu;
+				flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, bpf_ktime_get_ns());
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 				flow_kick_idle_only(first, p, pllc);
 				return;
@@ -160,6 +165,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		t->llc_id = llc;
+		flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, bpf_ktime_get_ns());
 		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS, (u64)raw_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
@@ -170,6 +176,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (pinned) {
 		u64 dsq = (u64)FLOW_FALLBACK_DSQ;
 		t->llc_id = llc;
+		flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, bpf_ktime_get_ns());
 		scx_bpf_dsq_insert(p, dsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 		flow_stat_inc(llc, 0);
 		flow_stat_inc(llc, 2);
@@ -201,7 +208,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		slice_len = (u64)FLOW_SLICE_MIN_NS;
 		quanta = 1;
 		extra = 0;
-		t->enq_ns = now ? now : 1;
 	}
 	{
 		s64 base = t->vtime;
@@ -232,12 +238,20 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	{
 		u64 dsq;
+		u32 final_kind;
 		if (!cpu_ok || tgt < 0)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
 			dsq = flow_llc_dsq_prio(llc, prio);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
+		if (dsq == (u64)FLOW_FALLBACK_DSQ)
+			final_kind = (u32)FLOW_LAT_FALLBACK;
+		else if (!flow_prio_ok(prio))
+			final_kind = (u32)FLOW_LAT_OTHER;
+		else
+			final_kind = prio;
+		flow_lat_finalize(t, final_kind, now);
 		scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)key_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)

@@ -14,7 +14,13 @@
  * the queue. Slices hold one fixed quantum. Tasks
  * that wait long have their estimate halved. The graphics
  * hint keeps tasks near their previous CPU. It does not change
- * ordering by itself.
+ * ordering by itself. Wait history keeps per CPU queue waits by
+ * kind and bucket with slice based edges. Kinds cover shared
+ * queues plus pinned plus exiting plus fallback plus early plus
+ * unknown. Buckets split waits by length with slice fractions
+ * and multiples. The task tail holds the wait kind for the next
+ * observe step. The wait table is sized for every CPU with run
+ * plus dispatch halves.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -65,6 +71,18 @@ enum flow_consts {
 	FLOW_LLC_BASE = 0x6000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
 	FLOW_FLAG_QUEUED = 1ULL,
+	FLOW_LAT_KINDS = 9ULL,
+	FLOW_LAT_BUCKETS = 8ULL,
+	FLOW_HIST_LEN = 144ULL,
+	FLOW_LAT_LAT = 0ULL,
+	FLOW_LAT_NORM = 1ULL,
+	FLOW_LAT_BATCH = 2ULL,
+	FLOW_LAT_IDLE = 3ULL,
+	FLOW_LAT_PINNED = 4ULL,
+	FLOW_LAT_EXITING = 5ULL,
+	FLOW_LAT_FALLBACK = 6ULL,
+	FLOW_LAT_OTHER = 7ULL,
+	FLOW_LAT_UNKNOWN = 8ULL,
 };
 /* Per task state. Vtime is charged service. Slice holds the time
  * left in the current quantum. Gen identifies the running instance.
@@ -72,7 +90,7 @@ enum flow_consts {
  * Prio holds the selected queue. Burst holds the recent run time
  * estimate. Enq holds the last enqueue time. Cgrp holds the group
  * id and share hint. A zero id means no group was recorded. Gpu
- * holds a placement hint. */
+ * holds a placement hint. Lat holds the wait kind for history. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -85,7 +103,13 @@ struct flow_task_ctx {
 	u64 burst_ns;
 	u64 enq_ns;
 	u32 gpu_hint;
-	u32 pad;
+	u32 lat_kind;
+};
+/* Wait history for one CPU. Cells hold run waits then dispatch
+ * waits by kind times bucket. The length covers two halves of
+ * kinds times buckets. */
+struct flow_lat_hist {
+	u64 cells[FLOW_HIST_LEN];
 };
 /* Per CPU running view. Gen counts runs. Reserved stays
  * zero. Prio mirrors the running task. */
