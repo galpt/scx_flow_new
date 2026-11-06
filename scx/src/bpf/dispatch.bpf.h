@@ -10,10 +10,14 @@
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot and counts the enqueue to run wait. Dispatch
  * counts the enqueue to dispatch wait on the moving CPU. Stopping
- * folds burnt time into the burst estimate through the half blend.
- * Frequency stays with the governor and never steers placement.
- * Only a fixed hint that never sends zero may reach the governor.
- * Tick refreshes the remaining slice. A mask change on a queued
+ * folds burnt time into the burst estimate through the half blend
+ * and charges partial use into the stored time with the same value
+ * mirrored beside it. A fully burnt slice pays on the next enqueue
+ * instead, so no burn pays twice. Frequency stays with the governor
+ * and never steers placement. Only a fixed hint that never sends zero
+ * may reach the governor. Tick charges the burnt delta into
+ * the stored time and moves the remaining slice forward with the
+ * same value mirrored beside it. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
  * the fallback queue and records the node of each LLC. CPUs that
@@ -250,6 +254,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
+	/* The stored time did not move, refresh the mirror beside it. */
+	scx_bpf_task_set_dsq_vtime(p, t->vtime);
 	flow_lat_observe(cpu, t, scx_bpf_now(), 1);
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
@@ -289,6 +295,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
 	/* Pinned tasks keep the same fold with no separate path. */
 	t->burst_ns = est;
+	/* Partial use pays here, scaled by the share with saturation. A
+	 * fully burnt slice pays on the next enqueue instead, and the
+	 * tick already moved the remaining slice forward, so stopping
+	 * charges only the tail past the last tick. */
+	if (used && remain) {
+		u64 cgid = READ_ONCE(t->cgrp_id);
+		s64 nv = flow_fair_charge(t->vtime, used, flow_cgroup_lookup(cgid));
+		t->vtime = nv;
+		scx_bpf_task_set_dsq_vtime(p, nv);
+	}
 	rs->slice_rem = remain;
 	t->slice_rem = remain;
 	if (runnable)
@@ -298,14 +314,35 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
+	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
+	u64 cur;
+	u64 last;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
 	rs = &flow_running_state[cpu];
-	rs->slice_rem = p->scx.slice;
+	cur = p->scx.slice;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t) {
+		rs->slice_rem = cur;
+		return;
+	}
+	/* Charge the burnt delta and move the remaining slice forward, so
+	 * stopping later charges only the tail past this tick. A slice
+	 * already at zero pays on the next enqueue instead. */
+	last = READ_ONCE(t->slice_rem);
+	if (cur && cur < last) {
+		u64 delta = last - cur;
+		u64 cgid = READ_ONCE(t->cgrp_id);
+		s64 nv = flow_fair_charge(t->vtime, delta, flow_cgroup_lookup(cgid));
+		t->vtime = nv;
+		t->slice_rem = cur;
+		scx_bpf_task_set_dsq_vtime(p, nv);
+	}
+	rs->slice_rem = cur;
 }
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
 {
@@ -316,8 +353,6 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	/* The hint names the old CPU, drop it on a mask change. */
-	flow_gpu_clear(t);
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
@@ -380,7 +415,6 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->prio = (u32)FLOW_PRIO_NORM;
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
-	flow_gpu_clear(t);
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
@@ -396,7 +430,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 		cgid = flow_cgroup_cgid(args->cgroup);
 	t->vtime = 0;
 	t->slice_rem = 0;
-	t->gen = 1;
+	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
 	t->prio = (u32)FLOW_PRIO_NORM;
@@ -404,7 +438,6 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->cg_weight = flow_cgroup_lookup(cgid);
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
-	flow_gpu_clear(t);
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;

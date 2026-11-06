@@ -6,9 +6,7 @@
  * default. The group id comes from the cgroup node. Enqueue reads
  * the map on every insert, so a share change applies to the next
  * enqueue. A missing entry reads as the default. Move and init
- * record the id and a hint for later reads. The stored time is
- * left unchanged for every task. The queue key is earlier for
- * latency sensitive tasks.
+ * record the id and a hint for later reads.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

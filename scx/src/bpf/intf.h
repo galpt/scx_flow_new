@@ -8,13 +8,11 @@
  * read from the cgroup map on each enqueue. A task pays for the
  * time it burns, scaled by its share, with a small extra amount
  * added per quantum. Fresh virtual times move past a per LLC floor
- * so two tasks never share the same value. Tasks judged latency
- * sensitive queue slightly earlier, while the stored time is left
- * unchanged. A burst estimate tracks recent run time and selects
- * the queue. Slices hold one fixed quantum. Tasks
- * that wait long have their estimate halved. The graphics
- * hint keeps tasks near their previous CPU with zero or one
- * only. It favors staying near without forcing placement. Wait history keeps per CPU queue waits by
+ * so two tasks never share the same value. A burst estimate tracks
+ * recent run time and selects the queue, with short estimates first
+ * and long estimates last. Slices hold one fixed quantum. Tasks
+ * that wait long have their estimate halved, and tasks that wait
+ * very long start over with a rescue counted. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
@@ -57,12 +55,13 @@ enum flow_consts {
 	FLOW_EXIT_SLICE_NS = 1000ULL,
 	FLOW_FAIR_BASE_NS = 20000ULL,
 	FLOW_FAIR_EXTRA_NS = 1000ULL,
-	FLOW_LAT_OFF_NS = 1000000ULL,
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
 	FLOW_SJF_INIT_NS = 1000000ULL,
+	FLOW_SJF_LAT_NS = 500000ULL,
+	FLOW_SJF_BATCH_NS = 20000000ULL,
 	FLOW_SJF_FLOOR_NS = 5000ULL,
 	FLOW_SJF_CAP_NS = 1000000000ULL,
 	FLOW_AGING_NS = 100000000ULL,
@@ -89,8 +88,8 @@ enum flow_consts {
  * Llc records the last enqueue target. Flags holds the queued bit.
  * Prio holds the selected queue. Burst holds the recent run time
  * estimate. Enq holds the last enqueue time. Cgrp holds the group
- * id and share hint. A zero id means no group was recorded. Gpu
- * holds a placement hint. Lat holds the wait kind for history. */
+ * id and share hint. A zero id means no group was recorded. Lat
+ * holds the wait kind for history. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -102,7 +101,6 @@ struct flow_task_ctx {
 	u64 cgrp_id;
 	u64 burst_ns;
 	u64 enq_ns;
-	u32 gpu_hint;
 	u32 lat_kind;
 };
 /* Wait history for one CPU. Cells hold run waits then dispatch

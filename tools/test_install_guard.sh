@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.7" ] || fail "version not at 5.1.7"
+[ "${want}" = "5.1.8" ] || fail "version not at 5.1.8"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -101,8 +101,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "42e65202aa7cf7f1080cfd8ef885d8971cbc5c443e5b0f282c426fab07c9d2fd" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "18" ] || fail "scx README lines drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "02dea237752e7f8974fcb996ba49f205bdec2a2492ec5c042f350241cbed5795" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
@@ -259,20 +259,10 @@ if grep -q "smt\|SMT\|sibling_cpu\|topology_sibling" "${SRC_DIR}/src/bpf/dispatc
     fail "smt probe reappeared"
 fi
 
-# Graphics hint stays hint only with zero or one. The hint favors
-# staying near the previous CPU and never forces placement, reads as
-# zero or one only, and only narrows a distant pick to the same node.
-grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
-grep -q "zero or one" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu fixed prose missing"
-grep -q "zero or one" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu fixed select prose missing"
-grep -q "flow_gpu_hint" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu helper missing"
-grep -q 't->gpu_hint != 0' "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu fixed read missing"
-grep -q 'if (gpu && score > 1)' "${SRC_DIR}/src/bpf/select.bpf.h" || fail "gpu hint clamp missing"
-if grep -q "gpu.*force\|force.*gpu" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    case "$(grep "gpu.*force\|force.*gpu" "${SRC_DIR}/src/bpf/select.bpf.h")" in
-        *"never"*"force"*|*"never forces"*) ;;
-        *) fail "gpu force drift" ;;
-    esac
+# No graphics hint remains. Placement uses the previous CPU plus
+# the seed scan only, with no per task hint stored anywhere.
+if grep -rqi "gpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "gpu hint reappeared"
 fi
 
 # Frequency stays governor only with no placement steer. Only a fixed
@@ -308,12 +298,17 @@ grep -q "flow_sjf_age" "${SJF_HDR}" || fail "sjf age missing"
 grep -q "flow_sjf_remain" "${SJF_HDR}" || fail "sjf remain missing"
 grep -q "FLOW_SLICE_MIN_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
 grep -q "FLOW_SJF_INIT_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf seed missing"
-grep -q "FLOW_LAT_OFF_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lat shift missing"
+grep -q "FLOW_SJF_LAT_NS = 500000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf lat edge missing"
+grep -q "FLOW_SJF_BATCH_NS = 20000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf batch edge missing"
+if grep -q "FLOW_LAT_OFF_NS\|flow_lat_key\|500001\|1000001\|20000001" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "lat shift reappeared"
+fi
 grep -q "FLOW_AGING_NS = 100000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf aging kept missing"
 grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf rescue missing"
 grep -q ">> 1" "${SJF_HDR}" || fail "sjf half blend missing"
-grep -q "FLOW_SLICE_MIN_NS \* 3" "${SJF_HDR}" || fail "sjf norm band missing"
-grep -q "FLOW_AGING_NS" "${SJF_HDR}" || fail "sjf batch band missing"
+grep -q "< (u64)FLOW_SJF_LAT_NS" "${SJF_HDR}" || fail "sjf lat band missing"
+grep -q "<= (u64)FLOW_SJF_INIT_NS" "${SJF_HDR}" || fail "sjf norm band missing"
+grep -q "<= (u64)FLOW_SJF_BATCH_NS" "${SJF_HDR}" || fail "sjf batch band missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${SJF_ENQ}" || fail "fixed slice missing"
 grep -q "quanta = 1" "${SJF_ENQ}" || fail "fixed quanta missing"
 grep -q "extra = 0" "${SJF_ENQ}" || fail "fixed extra missing"
@@ -324,7 +319,6 @@ grep -q "flow_sjf_remain" "${SJF_ENQ}" || fail "remain use missing"
 grep -q "used_last" "${SJF_ENQ}" || fail "remain burnt missing"
 grep -q "FLOW_SJF_FLOOR_NS" "${SJF_HDR}" || fail "sjf floor missing"
 grep -q "flow_seq_floor" "${SJF_ENQ}" || fail "floor key missing"
-grep -q "flow_lat_key" "${SJF_ENQ}" || fail "lat key missing"
 grep -q "flow_sjf_next" "${DISP_HDR}" || fail "stopping blend missing"
 grep -q "reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved field missing"
 grep -q "rs->reserved = 0" "${DISP_HDR}" || fail "reserved zero missing"
@@ -480,11 +474,12 @@ grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missi
 grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra missing"
 grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
 grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
-grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "lat shift helper missing"
+if grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
+    fail "lat shift helper reappeared"
+fi
 grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
 grep -q "FLOW_SJF_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf init missing"
 grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
-grep -q "gpu_hint" "${SRC_DIR}/src/bpf/intf.h" || fail "gpu hint missing"
 grep -q "insertion order" "${SJF_ENQ}" || fail "insertion order missing"
 grep -q "fallback queue" "${SJF_ENQ}" || fail "fallback path missing"
 grep -q "kick_idle" "${SRC_DIR}/src/bpf/intf.h" || fail "idle count missing"

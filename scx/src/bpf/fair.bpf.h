@@ -6,10 +6,8 @@
  * is the same for every task. Values saturate at the top. Fresh
  * times move past the per LLC floor through a short compare and
  * swap loop, so each stored time is unique. If the loop does not
- * win, the last observed value is written back directly. Latency
- * sensitive tasks queue with an earlier key while the stored time
- * is left unchanged. The floor rises over time and never moves
- * backward for a given LLC.
+ * win, the last observed value is written back directly. The floor
+ * rises over time and never moves backward for a given LLC.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -99,14 +97,5 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 		flow_llc_seq[llc] = want;
 		return want;
 	}
-}
-static __always_inline s64 flow_lat_key(s64 raw, int is_lat)
-{
-	s64 off = (s64)FLOW_LAT_OFF_NS;
-	if (!is_lat)
-		return raw;
-	if (raw > off)
-		return raw - off;
-	return 0;
 }
 #endif

@@ -7,18 +7,17 @@
  * code adds no extra tie handling. Pinned tasks join the local queue
  * in order with a single slice. Exiting tasks use the local queue
  * when allowed and the LLC queue otherwise with a short slice. Tasks
- * that have no usable CPU join the fallback queue. The stored time
- * is left unchanged while the queue key is earlier for latency
- * sensitive tasks. Fresh times move past the per LLC floor. Queue
- * choice uses remaining time from the aged estimate minus the burnt
- * part with saturation at the floor. The
+ * that have no usable CPU join the fallback queue. The queue key
+ * is the stored virtual time. Fresh tasks move past the per LLC
+ * floor. Queue choice uses remaining time from the aged estimate
+ * minus the burnt part with saturation at the floor. The
  * charge scales with the share and the extra amount is fixed. Each
  * enqueue sends at most one idle wake. A wake goes only to an idle
  * target, else it counts a skip with no wake. The kernel idle flag
  * decides the wake. Local inserts are not
  * counted in the shared gauge. Shared and fallback inserts count
  * the gauge, and fallback inserts also count fallback. Dequeue drops
- * the gauge and the hint on cancel. Masks are tested again before each wake, so
+ * the gauge on cancel. Masks are tested again before each wake, so
  * a task is never kicked toward a CPU outside its current mask.
  * Enqueue reads the cgroup map on every insert. The birth id comes
  * from init args. Enqueue finalizes the wait kind with the full
@@ -65,14 +64,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 llc = 0;
 	u32 cpu_ok = 0;
 	s64 raw_v;
-	s64 key_v;
 	u64 slice_len;
 	u64 quanta = 1;
 	u64 extra = 0;
 	u32 prio = (u32)FLOW_PRIO_NORM;
 	u32 w = (u32)FLOW_CGROUP_WEIGHT_DFLT;
 	u64 now;
-	int is_lat = 0;
 	bool pinned = false;
 	struct flow_task_ctx *t;
 	u32 old_flags;
@@ -207,8 +204,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!flow_prio_ok(prio))
 			prio = (u32)FLOW_PRIO_NORM;
 		t->burst_ns = est;
-		is_lat = (prio == (u32)FLOW_PRIO_LAT);
-		if (is_lat)
+		if (prio == (u32)FLOW_PRIO_LAT)
 			flow_stat_inc(llc, 15);
 		else
 			flow_stat_inc(llc, 16);
@@ -216,18 +212,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		quanta = 1;
 		extra = 0;
 	}
-	/* Short runs with long waits keep the hint. */
-	if (!no_cpu)
-		flow_gpu_update(t, now, prio);
 	{
-		/* Fallback queues are FIFO, their tasks skip the floor. */
+		/* Fresh tasks join the order past the floor. The charged path
+		 * skips the floor for tasks with no usable CPU, and fallback
+		 * inserts ignore the key and stay FIFO. */
 		s64 base = t->vtime;
 		u64 use_len = slice_len;
-		if (t->gen == 0 || base == 0) {
-			s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-			raw_v = floored;
-			if (raw_v <= 0)
-				raw_v = floored;
+		if (t->gen == 0) {
+			/* Fresh tasks never burnt anything, only join the order. */
+			raw_v = flow_seq_floor(llc, base);
 			t->vtime = raw_v;
 		} else if (t->slice_rem == 0) {
 			s64 charged = flow_fair_charge(base, use_len, w);
@@ -245,7 +238,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->slice_rem = slice_len;
 		t->llc_id = llc;
 		t->prio = prio;
-		key_v = flow_lat_key(raw_v, is_lat);
+		/* Mirror the stored time so later reads see the same value. */
+		scx_bpf_task_set_dsq_vtime(p, raw_v);
 	}
 	{
 		u64 dsq;
@@ -266,7 +260,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			scx_bpf_dsq_insert(p, dsq, slice_len, enq_flags);
 		else
-			scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)key_v, enq_flags);
+			scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)raw_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);
@@ -314,7 +308,6 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 		if (!flow_llc_ok(dllc))
 			dllc = 0;
 		flow_queued_dec(dllc);
-		flow_gpu_clear(t);
 	}
 }
 #endif

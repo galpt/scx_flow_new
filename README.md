@@ -10,7 +10,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/build.rs` build helper
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
-- `scx/src/bpf/` eight area headers in one directory
+- `scx/src/bpf/` nine area headers in one directory
 - `scx/src/bpf/lib` is not present: helpers come from workspace headers
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
