@@ -189,8 +189,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	now = scx_bpf_now();
 	w = flow_cgroup_lookup(t->cgrp_id);
 	{
-		int rescued = 0;
-		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc, &rescued);
+		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc, 0);
 		u64 est = aged;
 		u64 old_rem = t->slice_rem;
 		u64 used_last = 0;
