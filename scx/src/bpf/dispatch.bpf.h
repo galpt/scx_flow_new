@@ -63,7 +63,7 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 }
 static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, u32 slot, int steal)
 {
-	struct task_struct *ph = scx_bpf_dsq_peek(dsq);
+	struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
 	if (!ph)
 		return 0;
 	if (!flow_cpu_allowed((s32)cpu, ph)) {
@@ -73,7 +73,7 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
 		struct flow_task_ctx *lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
 		if (lt)
-			flow_lat_observe(cpu, lt, bpf_ktime_get_ns(), 0);
+			flow_lat_observe(cpu, lt, scx_bpf_now(), 0);
 		flow_stat_inc(llc, 1);
 		flow_queued_dec(victim);
 		if (steal) {
@@ -87,6 +87,11 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 static __always_inline int flow_drain_llc(u32 cpu, u32 llc, u32 victim, int steal)
 {
 	u32 pr;
+	struct flow_llc_stats *st = flow_stats_for(victim);
+
+	/* An empty LLC has nothing to peek, skip its queues. */
+	if (st && READ_ONCE(st->queued) == 0)
+		return 0;
 	for (pr = 0; pr < (u32)FLOW_PRIO_COUNT; pr++) {
 		u64 dsq = flow_llc_dsq_prio(victim, pr);
 		u32 slot = victim;
@@ -131,51 +136,16 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	bpf_for(li, 0, FLOW_MAX_LLCS) {
 		u32 nd;
-		struct flow_cpu_ctx *cc;
-		u32 onode;
 		if (li == llc)
 			continue;
 		if ((u64)li >= READ_ONCE(flow_nr_llcs))
 			break;
 		if (!flow_llc_ok(li))
 			continue;
-		cc = NULL;
-		{
-			u32 ci;
-			bpf_for(ci, 0, FLOW_MAX_CPUS) {
-				u32 k = ci;
-				struct flow_cpu_ctx *tcc;
-				if ((u64)ci >= READ_ONCE(flow_nr_cpus) && READ_ONCE(flow_nr_cpus))
-					break;
-				tcc = bpf_map_lookup_elem(&cpu_ctx_stor, &k);
-				if (!tcc)
-					continue;
-				if (READ_ONCE(tcc->llc_id) == li) {
-					cc = tcc;
-					break;
-				}
-			}
-		}
-		(void)cc;
+		/* Node IDs are cached at init, no per-CPU walk here. */
 		nd = READ_ONCE(flow_llc_node[li]);
-		if (!flow_node_ok(nd)) {
-			u32 ci2;
-			bpf_for(ci2, 0, FLOW_MAX_CPUS) {
-				u32 k2 = ci2;
-				struct flow_cpu_ctx *t2;
-				if ((u64)ci2 >= READ_ONCE(flow_nr_cpus) && READ_ONCE(flow_nr_cpus))
-					break;
-				t2 = bpf_map_lookup_elem(&cpu_ctx_stor, &k2);
-				if (!t2)
-					continue;
-				if (READ_ONCE(t2->llc_id) == li) {
-					onode = READ_ONCE(t2->node_id);
-					if (flow_node_ok(onode))
-						nd = onode;
-					break;
-				}
-			}
-		}
+		if (!flow_node_ok(nd))
+			continue;
 		if (nd != node)
 			continue;
 		if (flow_drain_llc(c, llc, li, 1))
@@ -196,7 +166,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 	}
 	{
-		struct task_struct *ph = scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
+		struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
 		if (ph) {
 			if (!flow_cpu_allowed((s32)c, ph)) {
 				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
@@ -214,7 +184,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 				}
 				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
 					if (pt)
-						flow_lat_observe(c, pt, bpf_ktime_get_ns(), 0);
+						flow_lat_observe(c, pt, scx_bpf_now(), 0);
 					flow_stat_inc(llc, 1);
 					if (have_owner) {
 						flow_queued_dec(vllc);
@@ -285,7 +255,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
-	flow_lat_observe(cpu, t, bpf_ktime_get_ns(), 1);
+	flow_lat_observe(cpu, t, scx_bpf_now(), 1);
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
 	 * ownership. */
@@ -397,6 +367,16 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	v = (s64)p->scx.dsq_vtime;
 	t->vtime = v;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+	if (!t->cgrp_id) {
+		struct cgroup *cg = scx_bpf_task_cgroup(p);
+
+		/* The kfunc hands back a reference, drop it after the read. */
+		if (cg) {
+			t->cgrp_id = flow_cgroup_cgid(cg);
+			t->cg_weight = flow_cgroup_lookup(t->cgrp_id);
+			bpf_cgroup_release(cg);
+		}
+	}
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
@@ -429,7 +409,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->enq_ns = 0;
 	t->gpu_hint = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
-	p->scx.dsq_vtime = 0;
+	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)

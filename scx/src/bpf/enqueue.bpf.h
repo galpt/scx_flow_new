@@ -93,6 +93,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 		cpu_ok = 1;
 	}
+	bool no_cpu = !cpu_ok || tgt < 0;
 	raw_v = (s64)p->scx.dsq_vtime;
 	pinned = flow_is_pinned(p);
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
@@ -108,7 +109,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				u64 dsq = tgt < 0 ? (u64)FLOW_FALLBACK_DSQ : flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
 				if (!flow_dsq_ok(dsq))
 					dsq = (u64)FLOW_FALLBACK_DSQ;
-				scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS, (u64)raw_v, enq_flags);
+				if (dsq == (u64)FLOW_FALLBACK_DSQ)
+					scx_bpf_dsq_insert(p, dsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
+				else
+					scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS, (u64)raw_v, enq_flags);
 				flow_stat_inc(llc, 0);
 				if (dsq == (u64)FLOW_FALLBACK_DSQ)
 					flow_stat_inc(llc, 2);
@@ -125,7 +129,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (p->flags & PF_EXITING) {
 		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
-			flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, bpf_ktime_get_ns());
+			flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, scx_bpf_now());
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
 			flow_kick_idle_only(tgt, p, llc);
 			return;
@@ -148,7 +152,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 			{
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)pcpu;
-				flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, bpf_ktime_get_ns());
+				flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, scx_bpf_now());
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 				flow_kick_idle_only(first, p, pllc);
 				return;
@@ -165,8 +169,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		t->llc_id = llc;
-		flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, bpf_ktime_get_ns());
-		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS, (u64)raw_v, enq_flags);
+		flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, scx_bpf_now());
+		if (dsq == (u64)FLOW_FALLBACK_DSQ)
+			scx_bpf_dsq_insert(p, dsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
+		else
+			scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_EXIT_SLICE_NS, (u64)raw_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);
@@ -176,13 +183,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (pinned) {
 		u64 dsq = (u64)FLOW_FALLBACK_DSQ;
 		t->llc_id = llc;
-		flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, bpf_ktime_get_ns());
+		flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, scx_bpf_now());
 		scx_bpf_dsq_insert(p, dsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 		flow_stat_inc(llc, 0);
 		flow_stat_inc(llc, 2);
 		return;
 	}
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	w = flow_cgroup_lookup(t->cgrp_id);
 	{
 		int rescued = 0;
@@ -210,10 +217,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		extra = 0;
 	}
 	{
+		/* Fallback queues are FIFO, their tasks skip the floor. */
 		s64 base = t->vtime;
 		u64 use_len = slice_len;
 		if (t->gen == 0 || base == 0) {
-			s64 floored = flow_seq_floor(llc, base);
+			s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
 			raw_v = floored;
 			if (raw_v <= 0)
 				raw_v = floored;
@@ -221,7 +229,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		} else if (t->slice_rem == 0) {
 			s64 charged = flow_fair_charge(base, use_len, w);
 			charged = flow_fair_extra(charged, extra);
-			charged = flow_seq_floor(llc, charged);
+			charged = no_cpu ? charged : flow_seq_floor(llc, charged);
 			raw_v = charged;
 			t->vtime = charged;
 			flow_stat_inc(llc, 9);
@@ -239,7 +247,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		u64 dsq;
 		u32 final_kind;
-		if (!cpu_ok || tgt < 0)
+		if (no_cpu)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
 			dsq = flow_llc_dsq_prio(llc, prio);
@@ -252,11 +260,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		else
 			final_kind = prio;
 		flow_lat_finalize(t, final_kind, now);
-		scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)key_v, enq_flags);
+		if (dsq == (u64)FLOW_FALLBACK_DSQ)
+			scx_bpf_dsq_insert(p, dsq, slice_len, enq_flags);
+		else
+			scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)key_v, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);
-		if (!cpu_ok || tgt < 0) {
+		if (no_cpu) {
 			return;
 		}
 		flow_kick_idle_only(tgt, p, llc);
@@ -267,13 +278,16 @@ insert_only:
 		u64 dsq;
 		u64 sl = (u64)FLOW_SLICE_MIN_NS;
 		s64 k = raw_v;
-		if (!cpu_ok || tgt < 0)
+		if (no_cpu)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
 			dsq = flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
-		scx_bpf_dsq_insert_vtime(p, dsq, sl, (u64)k, enq_flags);
+		if (dsq == (u64)FLOW_FALLBACK_DSQ)
+			scx_bpf_dsq_insert(p, dsq, sl, enq_flags);
+		else
+			scx_bpf_dsq_insert_vtime(p, dsq, sl, (u64)k, enq_flags);
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);

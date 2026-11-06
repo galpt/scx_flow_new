@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.5" ] || fail "version not at 5.1.5"
+[ "${want}" = "5.1.6" ] || fail "version not at 5.1.6"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -149,10 +149,10 @@ grep -q 'src/bpf/lib' "${INST}" || fail "lib symlink missing"
 grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink target bad"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
 
-# Cgroup weight hooks need 6.12 plus with a parsable kernel check.
-grep -q '6\.12' "${INST}" || fail "kernel guard missing"
+# Kernels below 7.1 are refused with a parsable kernel check.
+grep -q '7\.1' "${INST}" || fail "kernel gate missing"
 grep -q 'uname -r' "${INST}" || fail "kernel uname guard missing"
-grep -q 'cgroup weight hooks' "${INST}" || fail "kernel cgroup comment missing"
+grep -q 'compat shims' "${INST}" || fail "kernel compat comment missing"
 
 # Canonical plus allowlist guards stay present. The -m forms stay for
 # string canonicalization plus a symlink refuse covers the resolve gap.
@@ -526,5 +526,31 @@ fi
 if ! grep -q "matches the upstream" "${INST}" 2>/dev/null; then
     fail "fork provenance comment missing"
 fi
+
+# Fallback stays FIFO only with no vtime insert naming the fallback queue.
+if grep -q "insert_vtime.*FALLBACK\|FALLBACK.*insert_vtime" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "fallback vtime insert reappeared"
+fi
+grep -q "scx_bpf_dsq_insert(p, dsq" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "fallback fifo insert missing"
+
+# Peek goes through the compat helper with no raw call left.
+grep -q "__COMPAT_scx_bpf_dsq_peek" "${DISP_HDR}" || fail "compat peek missing"
+if grep -q "[^_]scx_bpf_dsq_peek(" "${DISP_HDR}" 2>/dev/null; then
+    fail "raw peek reappeared"
+fi
+
+# Dispatch reads the node from the init cache with no per-CPU walk.
+if grep -q "tcc->llc_id\|t2->llc_id" "${DISP_HDR}" 2>/dev/null; then
+    fail "dead cpu scan reappeared"
+fi
+grep -q "st->queued) == 0" "${DISP_HDR}" || fail "empty llc bail missing"
+
+# Select rechecks the winning pick against the current mask.
+grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
+
+# Task init resolves the cgroup through compat and clears vtime through compat.
+grep -q "scx_bpf_task_cgroup(p)" "${DISP_HDR}" || fail "task cgroup compat missing"
+grep -q "scx_bpf_task_set_dsq_vtime" "${DISP_HDR}" || fail "dsq vtime setter missing"
+grep -q "scx_bpf_now()" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "compat clock missing"
 
 echo "guard tests passed"

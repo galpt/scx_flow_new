@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.1.5"
+VER="5.1.6"
 # Pinned fork ref, same as repo CI.
 # The commit id matches the upstream sched-ext/scx main id used in CI.
 # The installer fetches from the galpt/scx mirror while CI fetches from
@@ -32,9 +32,8 @@ need clang
 need rsync
 need git
 
-# Cgroup weight hooks need kernel 6.12 plus. Cgroup init order against
-# task init before 6.12 is unverified and would stick defaults, so refuse
-# older kernels before any clean or fetch.
+# Kernels below 7.1 are refused. The peek path needs the fixed
+# kfunc there, and the compat shims used here target that floor.
 krel="$(uname -r)"
 kmaj="$(printf '%s' "${krel}" | cut -d . -f 1 | tr -cd '0-9')"
 kmin="$(printf '%s' "${krel}" | cut -d . -f 2 | tr -cd '0-9')"
@@ -42,8 +41,8 @@ if [ -z "${kmaj}" ] || [ -z "${kmin}" ]; then
     echo "refusing without a parsable kernel version from ${krel}" >&2
     exit 1
 fi
-if [ "${kmaj}" -lt 6 ] || { [ "${kmaj}" -eq 6 ] && [ "${kmin}" -lt 12 ]; }; then
-    echo "refusing kernel ${krel}: need 6.12 plus for cgroup weight hooks" >&2
+if [ "${kmaj}" -lt 7 ] || { [ "${kmaj}" -eq 7 ] && [ "${kmin}" -lt 1 ]; }; then
+    echo "refusing kernel ${krel}: need 7.1 plus for peek and compat kfuncs" >&2
     exit 1
 fi
 

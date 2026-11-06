@@ -94,6 +94,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	s32 best = -1;
 	int best_score = 99;
 	u32 c;
+	u64 nr = READ_ONCE(flow_nr_cpus);
 	struct flow_task_ctx *t;
 	int gpu = 0;
 	(void)wake_flags;
@@ -132,7 +133,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		u32 l;
 		u32 n;
 		int score;
-		if ((u64)c >= READ_ONCE(flow_nr_cpus) && READ_ONCE(flow_nr_cpus))
+		if (nr && (u64)c >= nr)
 			break;
 		if (!flow_cpu_live(c))
 			continue;
@@ -165,7 +166,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 				break;
 		}
 	}
-	if (best >= 0)
+	/* The mask can change while scanning, test the pick again. */
+	if (best >= 0 && flow_cpu_allowed(best, p))
 		return best;
 	return flow_first_allowed(p);
 }
