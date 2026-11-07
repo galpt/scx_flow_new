@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.8" ] || fail "version not at 5.1.8"
+[ "${want}" = "5.1.9" ] || fail "version not at 5.1.9"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -421,6 +421,9 @@ grep -q "lat_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifte
 # Wait hist stays scoped with five maps and nine headers.
 # The wait map is one array past the base tables with per CPU
 # run plus dispatch halves. Top keeps twenty one counters.
+# Bandwidth library maps live in workspace lib sources through
+# the symlinked dir and use angled includes, so the repo counts
+# stay at five maps and nine quoted headers.
 [ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "maps count drifted"
 [ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "9" ] || fail "headers count drifted"
 grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lat include missing"
@@ -429,7 +432,10 @@ grep -q "BPF_MAP_TYPE_ARRAY" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map t
 grep -q "FLOW_LAT_KINDS = 9" "${SRC_DIR}/src/bpf/intf.h" || fail "wait kinds missing"
 grep -q "FLOW_LAT_BUCKETS = 8" "${SRC_DIR}/src/bpf/intf.h" || fail "wait buckets missing"
 grep -q "FLOW_HIST_LEN = 144" "${SRC_DIR}/src/bpf/intf.h" || fail "wait hist len missing"
-grep -q "lat_kind" "${SRC_DIR}/src/bpf/intf.h" || fail "wait task tail missing"
+# Task state lives in the maps header so the bandwidth block can
+# stay first at offset zero without pulling workspace headers into
+# bindings. The hist struct stays shared.
+grep -q "lat_kind" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait task tail missing"
 grep -q "flow_lat_hist" "${SRC_DIR}/src/bpf/intf.h" || fail "wait hist struct missing"
 grep -q "flow_lat_bucket" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait bucket missing"
 grep -q "flow_lat_record" "${SRC_DIR}/src/bpf/lat.bpf.h" || fail "wait record missing"
@@ -460,8 +466,9 @@ if grep -q "bpf_map_" "${SRC_DIR}/src/bpf/lat.bpf.h" 2>/dev/null; then
     esac
 fi
 
-# Ops stay at sixteen with no probe added.
-[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "16" ] || fail "ops count drifted"
+# Ops stay at eighteen with no probe added. The bandwidth library
+# needs exit task plus set bandwidth beside the prior sixteen.
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "18" ] || fail "ops count drifted"
 
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
@@ -550,5 +557,33 @@ grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "p
 grep -q "scx_bpf_task_cgroup(p)" "${DISP_HDR}" || fail "task cgroup compat missing"
 grep -q "scx_bpf_task_set_dsq_vtime" "${DISP_HDR}" || fail "dsq vtime setter missing"
 grep -q "scx_bpf_now()" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "compat clock missing"
+
+# Bandwidth follows the admin limit through the shared library with
+# no vendored copy. The include reads like the core header, the
+# task block stays first at offset zero, and all control calls are
+# present with aging plus rescue kept.
+grep -q '#include <lib/cgroup.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "bandwidth include missing"
+grep -q '#include <lib/cgroup.h>' "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "bandwidth maps include missing"
+grep -q "scx_task_cgroup_bw bw;" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "bandwidth block missing"
+grep -q "flow_cgroup_throttled" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth gate missing"
+grep -q "scx_cgroup_bw_lib_init" "${DISP_HDR}" || fail "bandwidth lib init missing"
+grep -q "scx_cgroup_bw_init" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth init missing"
+grep -q "scx_cgroup_bw_exit" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth exit missing"
+grep -q "scx_cgroup_bw_set" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth set missing"
+grep -q "scx_cgroup_bw_move" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth move missing"
+grep -q "scx_cgroup_bw_throttled" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth throttle missing"
+grep -q "scx_cgroup_bw_put_aside" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth aside missing"
+grep -q "scx_cgroup_bw_reenqueue" "${DISP_HDR}" || fail "bandwidth requeue missing"
+grep -q "scx_cgroup_bw_consume" "${DISP_HDR}" || fail "bandwidth consume missing"
+grep -q "scx_cgroup_bw_cancel" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "bandwidth cancel missing"
+grep -q "SCX_CGROUP_BW_CANCEL_DROP" "${DISP_HDR}" || fail "bandwidth drop missing"
+grep -q "SCX_CGROUP_BW_CANCEL_UNLINK" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "bandwidth unlink missing"
+grep -q "REGISTER_SCX_CGROUP_BW_ENQUEUE_CB" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "bandwidth register missing"
+grep -q "flow_enqueue_cb" "${DISP_HDR}" || fail "bandwidth enqueue cb missing"
+grep -q "flow_exit_task" "${DISP_HDR}" || fail "bandwidth exit task missing"
+grep -q "flow_cgroup_set_bandwidth" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "bandwidth op missing"
+grep -q "FLOW_STARVE_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "rescue kept missing"
+grep -q "FLOW_AGING_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "aging kept missing"
+[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
 echo "guard tests passed"

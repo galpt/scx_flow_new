@@ -6,11 +6,13 @@
  * the ops table. Each LLC has four queues and there is one fallback
  * queue. Ties leave in insertion order. Tables are written once, so
  * a CPU that arrives late needs a restart to be seen. Settings live
- * in the shared header.
+ * in the shared header. Bandwidth control follows the admin cpu max
+ * through the shared library.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
+#include <lib/cgroup.h>
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include "intf.h"
@@ -36,10 +38,12 @@ SCX_OPS_DEFINE(flow_ops,
 	       .set_cpumask		= (void *)flow_set_cpumask,
 	       .enable			= (void *)flow_enable,
 	       .init_task		= (void *)flow_init_task,
+	       .exit_task		= (void *)flow_exit_task,
 	       .cgroup_init		= (void *)flow_cgroup_init,
 	       .cgroup_exit		= (void *)flow_cgroup_exit,
 	       .cgroup_move		= (void *)flow_cgroup_move,
 	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
+	       .cgroup_set_bandwidth	= (void *)flow_cgroup_set_bandwidth,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |
@@ -48,3 +52,5 @@ SCX_OPS_DEFINE(flow_ops,
 					  SCX_OPS_ALLOW_QUEUED_WAKEUP,
 	       .timeout_ms		= (u32)FLOW_OPS_TIMEOUT_MS,
 	       .name			= "flow");
+int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx);
+REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(flow_enqueue_cb);

@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::Skel;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
@@ -40,6 +41,7 @@ pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), (Metrics, LatMetrics)>,
+    _arenalib: scx_arena::ArenaLib,
 }
 
 impl<'a> Scheduler<'a> {
@@ -59,12 +61,15 @@ impl<'a> Scheduler<'a> {
             Ok(text) => info!("Topology: {text}"),
             Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
         }
+        let arenalib = scx_arena::ArenaLib::setup(skel.object_mut(), 0, 0, 1024)
+            .context("failed to init arena for bandwidth control")?;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
+            _arenalib: arenalib,
         })
     }
 

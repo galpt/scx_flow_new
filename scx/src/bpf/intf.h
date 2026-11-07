@@ -83,26 +83,6 @@ enum flow_consts {
 	FLOW_LAT_OTHER = 7ULL,
 	FLOW_LAT_UNKNOWN = 8ULL,
 };
-/* Per task state. Vtime is charged service. Slice holds the time
- * left in the current quantum. Gen identifies the running instance.
- * Llc records the last enqueue target. Flags holds the queued bit.
- * Prio holds the selected queue. Burst holds the recent run time
- * estimate. Enq holds the last enqueue time. Cgrp holds the group
- * id and share hint. A zero id means no group was recorded. Lat
- * holds the wait kind for history. */
-struct flow_task_ctx {
-	s64 vtime;
-	u64 slice_rem;
-	u64 gen;
-	u32 llc_id;
-	u32 flags;
-	u32 prio;
-	u32 cg_weight;
-	u64 cgrp_id;
-	u64 burst_ns;
-	u64 enq_ns;
-	u32 lat_kind;
-};
 /* Wait history for one CPU. Cells hold run waits then dispatch
  * waits by kind times bucket. The length covers two halves of
  * kinds times buckets. */

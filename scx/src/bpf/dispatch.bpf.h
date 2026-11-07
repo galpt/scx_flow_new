@@ -15,13 +15,15 @@
  * mirrored beside it. The tick charges the burnt delta and folds
  * it into the estimate, then moves the remaining slice forward
  * with the same value mirrored beside it, so stopping charges
- * only the tail past the last tick. Frequency stays with the
- * governor and never steers placement. Only a fixed hint that
- * never sends zero may reach the governor. A mask change on a queued
- * task keeps the queue and wakes the new owner, counting the wake
- * when the owner is usable. Init creates four queues per LLC and
- * the fallback queue and records the node of each LLC. CPUs that
- * arrive late need a restart to be seen.
+ * only the tail past the last tick. Bandwidth control follows the
+ * admin limit. Throttled tasks wait aside and rejoin through the
+ * requeue path. Used time is reported as it burns. Frequency stays
+ * with the governor and never steers placement. Only a fixed hint
+ * that never sends zero may reach the governor. A mask change on
+ * a queued task keeps the queue and wakes the new owner, counting
+ * the wake when the owner is usable. Init creates four queues per
+ * LLC and the fallback queue and records the node of each LLC.
+ * CPUs that arrive late need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -115,6 +117,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	c = (u32)cpu;
 	if (!flow_cpu_ok(c))
 		return;
+	scx_cgroup_bw_reenqueue();
 	{
 		u32 key = c;
 		struct flow_cpu_ctx *cc;
@@ -303,6 +306,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		s64 nv = flow_fair_charge(t->vtime, used, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
+		scx_cgroup_bw_consume(p, (u64)t, used);
 	}
 	rs->slice_rem = remain;
 	t->slice_rem = remain;
@@ -341,8 +345,11 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		t->burst_ns = flow_sjf_next(t->burst_ns, delta);
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
+		scx_cgroup_bw_consume(p, (u64)t, delta);
 	}
 	rs->slice_rem = cur;
+	if (flow_cgroup_throttled(p, t, false, 0) == -EAGAIN)
+		scx_bpf_task_set_slice(p, 0);
 }
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
 {
@@ -399,6 +406,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	v = (s64)p->scx.dsq_vtime;
 	t->vtime = v;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+	t->pid = p->pid;
 	if (!t->cgrp_id) {
 		struct cgroup *cg = scx_bpf_task_cgroup(p);
 
@@ -439,7 +447,54 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
+	t->pid = p->pid;
 	scx_bpf_task_set_dsq_vtime(p, 0);
+	return 0;
+}
+void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
+{
+	struct flow_task_ctx *t;
+	(void)args;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	if (scx_cgroup_bw_is_task_throttled((u64)t))
+		scx_cgroup_bw_cancel((u64)t, SCX_CGROUP_BW_CANCEL_DROP);
+}
+int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
+{
+	struct flow_task_ctx *t = (struct flow_task_ctx *)ctx;
+	u64 dsq;
+	u32 llc;
+	u32 prio;
+	s64 vtime;
+	s32 tgt;
+	if (!p || !t)
+		return 0;
+	llc = READ_ONCE(t->llc_id);
+	if (!flow_llc_ok(llc))
+		llc = 0;
+	prio = READ_ONCE(t->prio);
+	if (!flow_prio_ok(prio))
+		prio = (u32)FLOW_PRIO_NORM;
+	vtime = READ_ONCE(t->vtime);
+	tgt = flow_first_allowed(p);
+	if (tgt < 0 || !flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt))
+		dsq = (u64)FLOW_FALLBACK_DSQ;
+	else
+		dsq = flow_llc_dsq_prio(llc, prio);
+	if (!flow_dsq_ok(dsq))
+		dsq = (u64)FLOW_FALLBACK_DSQ;
+	if (dsq == (u64)FLOW_FALLBACK_DSQ)
+		scx_bpf_dsq_insert(p, dsq, (u64)FLOW_SLICE_MIN_NS, 0);
+	else
+		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_MIN_NS, (u64)vtime, 0);
+	flow_stat_inc(llc, 0);
+	if (dsq == (u64)FLOW_FALLBACK_DSQ)
+		flow_stat_inc(llc, 2);
+	flow_kick_idle_only(tgt, p, llc);
 	return 0;
 }
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
@@ -531,6 +586,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 				break;
 			}
 		}
+	}
+	{
+		struct scx_cgroup_bw_config cfg = {
+			.verbose = 0,
+		};
+		int ret = scx_cgroup_bw_lib_init(&cfg);
+		if (ret)
+			return ret;
 	}
 	return 0;
 }

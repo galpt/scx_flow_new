@@ -21,9 +21,10 @@
  * a task is never kicked toward a CPU outside its current mask.
  * Enqueue reads the cgroup map on shared and fallback inserts. The
  * birth id comes
- * from init args. Enqueue finalizes the wait kind with the full
- * path and stamps the wait start with the full clock with zero
- * stored as one.
+ * from init args. Throttled tasks wait aside under the admin limit
+ * and rejoin through the requeue path. Enqueue finalizes the wait
+ * kind with the full path and stamps the wait start with the full
+ * clock with zero stored as one.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -245,6 +246,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->prio = prio;
 		/* Mirror the stored time so later reads see the same value. */
 		scx_bpf_task_set_dsq_vtime(p, raw_v);
+		if (flow_cgroup_throttled(p, t, true, (u64)raw_v) == -EAGAIN) {
+			__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+			return;
+		}
 	}
 	{
 		u64 dsq;
@@ -314,5 +319,7 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 			dllc = 0;
 		flow_queued_dec(dllc);
 	}
+	if (scx_cgroup_bw_is_task_throttled((u64)t))
+		scx_cgroup_bw_cancel((u64)t, SCX_CGROUP_BW_CANCEL_UNLINK);
 }
 #endif
