@@ -19,6 +19,7 @@ use libbpf_rs::skel::Skel;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::NR_CPU_IDS;
 use scx_utils::UserExitInfo;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -68,16 +69,23 @@ impl<'a> Scheduler<'a> {
                 scx_utils::setup_cgroup_bw(skel.open_object_mut(), "flow_cgroup_set_bandwidth")
                     .context("failed to setup cpu.max")?;
             info!("cpu.max support: {bw:?}");
+            // Seed the arena cpu count before load freezes rodata.
+            skel.maps.rodata_data.as_mut().unwrap().nr_cpu_ids = *NR_CPU_IDS as u32;
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         match crate::topology::seed_topology(&mut skel) {
             Ok(text) => info!("Topology: {text}"),
             Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
         }
-        // Task state lives in the arena with the bandwidth block
-        // first. The size matches the BPF layout above.
-        let arenalib = scx_arena::ArenaLib::setup(skel.object_mut(), 192, 0, 1024)
-            .context("failed to init arena for bandwidth control")?;
+        // BPF arrays size to FLOW_MAX_CPUS at 1024 while the arena
+        // mask stops at 640, so the arena takes the host cpu count.
+        let arenalib = scx_arena::ArenaLib::setup(
+            skel.object_mut(),
+            192, // must match BPF flow_task_ctx
+            0,
+            *NR_CPU_IDS,
+        )
+        .context("failed to init arena for bandwidth control")?;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
         Ok(Self {
