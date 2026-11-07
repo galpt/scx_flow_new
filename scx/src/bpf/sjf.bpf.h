@@ -63,17 +63,13 @@ static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)
 		return (u32)FLOW_PRIO_BATCH;
 	return (u32)FLOW_PRIO_IDLE;
 }
-static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc, int *rescued)
+static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc)
 {
 	u64 age = 0;
-	if (rescued)
-		*rescued = 0;
 	if (!now || !wait_ns || now <= wait_ns)
 		return est;
 	age = now - wait_ns;
 	if (age >= (u64)FLOW_STARVE_NS) {
-		if (rescued)
-			*rescued = 1;
 		flow_stat_inc(llc, 18);
 		return (u64)FLOW_SJF_INIT_NS;
 	}

@@ -8,7 +8,7 @@
  * in order with a single slice. Exiting tasks use the local queue
  * when allowed and the LLC queue otherwise with a short slice. Tasks
  * that have no usable CPU join the fallback queue. The queue key
- * is the stored virtual time. Fresh tasks move past the per LLC
+ * is the stored virtual time. Shared inserts move past the per LLC
  * floor. Queue choice uses remaining time from the aged estimate
  * minus the burnt part with saturation at the floor. The
  * charge scales with the share and the extra amount is fixed. Each
@@ -19,7 +19,8 @@
  * the gauge, and fallback inserts also count fallback. Dequeue drops
  * the gauge on cancel. Masks are tested again before each wake, so
  * a task is never kicked toward a CPU outside its current mask.
- * Enqueue reads the cgroup map on every insert. The birth id comes
+ * Enqueue reads the cgroup map on shared and fallback inserts. The
+ * birth id comes
  * from init args. Enqueue finalizes the wait kind with the full
  * path and stamps the wait start with the full clock with zero
  * stored as one.
@@ -189,14 +190,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	now = scx_bpf_now();
 	w = flow_cgroup_lookup(t->cgrp_id);
 	{
-		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc, 0);
+		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc);
 		u64 est = aged;
 		u64 old_rem = t->slice_rem;
 		u64 used_last = 0;
 		u64 rem;
 		if (!t->burst_ns)
 			est = (u64)FLOW_SJF_INIT_NS;
-		if (old_rem < (u64)FLOW_SLICE_MIN_NS)
+		if (t->gen == 0)
+			used_last = 0;
+		else if (old_rem < (u64)FLOW_SLICE_MIN_NS)
 			used_last = (u64)FLOW_SLICE_MIN_NS - old_rem;
 		rem = flow_sjf_remain(aged, used_last);
 		prio = flow_sjf_prio(rem, t->enq_ns, now);
@@ -212,16 +215,18 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		extra = 0;
 	}
 	{
-		/* Fresh tasks join the order past the floor. The charged path
-		 * skips the floor for tasks with no usable CPU, and fallback
-		 * inserts ignore the key and stay FIFO. */
+		/* Shared inserts join the order past the floor. Tasks with no
+		 * usable CPU skip the floor, and fallback inserts ignore the
+		 * key and stay FIFO. */
 		s64 base = t->vtime;
-		u64 use_len = slice_len;
+		u64 use_len = 0;
 		if (t->gen == 0) {
 			/* Fresh tasks never burnt anything, only join the order. */
-			raw_v = flow_seq_floor(llc, base);
+			raw_v = no_cpu ? base : flow_seq_floor(llc, base);
 			t->vtime = raw_v;
 		} else if (t->slice_rem == 0) {
+			/* The tail already paid at the tick plus stopping, so only
+			 * the unpaid part charges here. */
 			s64 charged = flow_fair_charge(base, use_len, w);
 			charged = flow_fair_extra(charged, extra);
 			charged = no_cpu ? charged : flow_seq_floor(llc, charged);
@@ -232,7 +237,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			flow_stat_add(llc, 19, extra);
 			flow_stat_add(llc, 20, quanta);
 		} else {
-			raw_v = base;
+			raw_v = no_cpu ? base : flow_seq_floor(llc, base);
+			t->vtime = raw_v;
 		}
 		t->slice_rem = slice_len;
 		t->llc_id = llc;

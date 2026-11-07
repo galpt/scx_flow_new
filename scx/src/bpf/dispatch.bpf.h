@@ -11,13 +11,13 @@
  * the task snapshot and counts the enqueue to run wait. Dispatch
  * counts the enqueue to dispatch wait on the moving CPU. Stopping
  * folds burnt time into the burst estimate through the half blend
- * and charges partial use into the stored time with the same value
- * mirrored beside it. A fully burnt slice pays on the next enqueue
- * instead, so no burn pays twice. Frequency stays with the governor
- * and never steers placement. Only a fixed hint that never sends zero
- * may reach the governor. Tick charges the burnt delta into
- * the stored time and moves the remaining slice forward with the
- * same value mirrored beside it. A mask change on a queued
+ * and charges use into the stored time with the same value
+ * mirrored beside it. The tick charges the burnt delta and folds
+ * it into the estimate, then moves the remaining slice forward
+ * with the same value mirrored beside it, so stopping charges
+ * only the tail past the last tick. Frequency stays with the
+ * governor and never steers placement. Only a fixed hint that
+ * never sends zero may reach the governor. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Init creates four queues per LLC and
  * the fallback queue and records the node of each LLC. CPUs that
@@ -295,11 +295,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
 	/* Pinned tasks keep the same fold with no separate path. */
 	t->burst_ns = est;
-	/* Partial use pays here, scaled by the share with saturation. A
-	 * fully burnt slice pays on the next enqueue instead, and the
-	 * tick already moved the remaining slice forward, so stopping
-	 * charges only the tail past the last tick. */
-	if (used && remain) {
+	/* Use pays here, scaled by the share with saturation. The tick
+	 * already moved the remaining slice forward, so this charges
+	 * only the tail past the last tick. */
+	if (used) {
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		s64 nv = flow_fair_charge(t->vtime, used, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
@@ -330,15 +329,16 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->slice_rem = cur;
 		return;
 	}
-	/* Charge the burnt delta and move the remaining slice forward, so
-	 * stopping later charges only the tail past this tick. A slice
-	 * already at zero pays on the next enqueue instead. */
+	/* Charge the burnt delta and fold it into the estimate, then move
+	 * the remaining slice forward, so stopping later charges only
+	 * the tail past this tick. */
 	last = READ_ONCE(t->slice_rem);
 	if (cur && cur < last) {
 		u64 delta = last - cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		s64 nv = flow_fair_charge(t->vtime, delta, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
+		t->burst_ns = flow_sjf_next(t->burst_ns, delta);
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 	}
