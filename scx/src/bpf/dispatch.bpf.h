@@ -4,16 +4,21 @@
  *
  * Each CPU drains its own LLC queues first, then queues on the same
  * node, then distant queues, then fallback. Each queue drains in
- * queue order with one peek per queue and prios drain in fixed
- * order. A head that cannot run here
+ * queue order and prios drain in fixed
+ * order. Long waiting batch and idle heads drain before normal.
+ * Overdue tasks stay in the first queue, so the first queue still
+ * drains first. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot with the slack at running time and counts the
  * enqueue to run wait. Dispatch
- * counts the enqueue to dispatch wait on the moving CPU. Stopping
+ * counts the enqueue to dispatch wait on the moving CPU with one
+ * clock read in running. Stopping
  * burns the used time from remain down to a floor
  * and charges use into the stored time with the same value
- * mirrored beside it. The tick charges the burnt delta and burns
+ * mirrored beside it. A runnable yield with no burnt time still
+ * moves the stored time forward by one. The tick charges the
+ * burnt delta and burns
  * it from remain, then moves the remaining slice forward
  * with the same value mirrored beside it, so stopping charges
  * only the tail past the last tick. Frequency stays with the
@@ -98,12 +103,51 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 	}
 	return 0;
 }
+static __always_inline bool flow_wait_long(u64 enq, u64 now)
+{
+	if (!enq || !now)
+		return false;
+	if (now <= enq)
+		return false;
+	return now - enq > (u64)FLOW_LST_REL_NS;
+}
+static __always_inline bool flow_head_long(u64 dsq, u64 now)
+{
+	struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+	struct flow_task_ctx *lt;
+	u64 enq;
+	if (!ph)
+		return false;
+	lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+	if (!lt)
+		return false;
+	enq = READ_ONCE(lt->enq_ns);
+	return flow_wait_long(enq, now);
+}
 static __always_inline int flow_drain_llc(u32 cpu, u32 llc, u32 victim, int steal)
 {
+	u64 dsq;
+	u32 slot;
+	u64 now;
 	u32 pr;
-	for (pr = 0; pr < (u32)FLOW_PRIO_COUNT; pr++) {
-		u64 dsq = flow_llc_dsq_prio(victim, pr);
-		u32 slot = victim;
+	dsq = flow_llc_dsq_prio(victim, (u32)FLOW_PRIO_LAT);
+	slot = victim;
+	if (slot > (u32)FLOW_MAX_LLCS)
+		slot = (u32)FLOW_MAX_LLCS;
+	if (flow_dsq_ok(dsq) && flow_try_move(cpu, llc, victim, dsq, slot, steal))
+		return 1;
+	now = scx_bpf_now();
+	dsq = flow_llc_dsq_prio(victim, (u32)FLOW_PRIO_BATCH);
+	if (flow_dsq_ok(dsq) && flow_head_long(dsq, now) &&
+	    flow_try_move(cpu, llc, victim, dsq, slot, steal))
+		return 1;
+	dsq = flow_llc_dsq_prio(victim, (u32)FLOW_PRIO_IDLE);
+	if (flow_dsq_ok(dsq) && flow_head_long(dsq, now) &&
+	    flow_try_move(cpu, llc, victim, dsq, slot, steal))
+		return 1;
+	for (pr = 1; pr < (u32)FLOW_PRIO_COUNT; pr++) {
+		dsq = flow_llc_dsq_prio(victim, pr);
+		slot = victim;
 		if (!flow_dsq_ok(dsq))
 			continue;
 		if (slot > (u32)FLOW_MAX_LLCS)
@@ -229,6 +273,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_running_state *rs;
 	u64 sl;
 	u64 ng;
+	u64 now;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -255,13 +300,14 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	ng = rs->gen + 1;
 	if (ng == 0)
 		ng = 1;
+	now = scx_bpf_now();
 	rs->vtime = t->vtime;
 	rs->slice_rem = sl;
 	rs->gen = ng;
 	rs->llc_id = llc;
 	rs->prio = t->prio;
 	rs->reserved = 0;
-	rs->slack = flow_lst_slack(READ_ONCE(t->deadline_ns), scx_bpf_now(),
+	rs->slack = flow_lst_slack(READ_ONCE(t->deadline_ns), now,
 				   READ_ONCE(t->remain_ns));
 	t->gen = ng;
 	t->slice_rem = sl;
@@ -270,7 +316,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		t->home_cpu = (s32)cpu;
 	/* The stored time did not move, refresh the mirror beside it. */
 	scx_bpf_task_set_dsq_vtime(p, t->vtime);
-	flow_lat_observe(cpu, t, scx_bpf_now(), 1);
+	flow_lat_observe(cpu, t, now, 1);
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
 	 * ownership. */
@@ -286,7 +332,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 len;
 	u64 used;
 	u64 rem;
-	(void)runnable;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -320,10 +365,16 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	t->remain_ns = rem;
 	/* Use pays here, scaled by the share with saturation. The tick
 	 * already moved the remaining slice forward, so this charges
-	 * only the tail past the last tick. */
+	 * only the tail past the last tick. A runnable yield with no
+	 * burnt time still moves the stored time forward by one, so
+	 * repeated yields cannot hold the queue head. */
 	if (used) {
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		s64 nv = flow_fair_charge(t->vtime, used, flow_cgroup_lookup(cgid));
+		t->vtime = nv;
+		scx_bpf_task_set_dsq_vtime(p, nv);
+	} else if (runnable) {
+		s64 nv = flow_fair_cap_add(t->vtime, 1);
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 	}

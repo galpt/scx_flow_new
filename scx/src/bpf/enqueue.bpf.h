@@ -12,12 +12,15 @@
  * floor. Queue choice uses slack from deadline minus now minus
  * remain with saturation in fixed bands. The
  * charge scales with the share and the extra amount is fixed. Each
- * shared enqueue first checks the running slack on the target for a
- * gap win and kicks for preempt on a win, else it sends at most one
- * idle wake. A wake goes only to an idle target, else it counts a
+ * shared enqueue first checks the hold, then the idle flag, then
+ * the running slack on the target for a gap win. Holds gate gap
+ * wins and count a skip. Idle targets take an idle wake and never
+ * preempt. Each running instance kicks at most once. A gap win
+ * kicks for preempt on a win, else it counts a skip with no wake.
+ * Overdue tasks stay in the first queue with a fresh span. A wake
+ * goes only to an idle target, else it counts a
  * skip with no wake. The kernel idle flag decides the idle wake.
- * A preempt kick bypasses the hold and counts preempt on both the
- * kick and laxity counters. Preempts stay in the same LLC with an
+ * Preempts stay in the same LLC with an
  * allowed live target. Local inserts are not
  * counted in the shared gauge. Shared and fallback inserts count
  * the gauge, and fallback inserts also count fallback. Dequeue drops
@@ -146,29 +149,52 @@ static __always_inline void flow_kick_lst(s32 tgt, struct task_struct *p, u32 ll
 	struct flow_running_state *rs;
 	u64 rgen;
 	u32 rllc;
+	u32 last;
 	s64 run_slack;
 	s64 need;
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
-	if (tgt >= 0 && p && flow_cpu_ok((u32)tgt) && flow_cpu_allowed(tgt, p) &&
-	    flow_cpu_live((u32)tgt)) {
-		rs = &flow_running_state[(u32)tgt];
-		rgen = READ_ONCE(rs->gen);
-		rllc = READ_ONCE(rs->llc_id);
-		if (rgen && flow_llc_ok(rllc) && rllc == llc) {
-			run_slack = READ_ONCE(rs->slack);
-			if (new_slack > vmax - (s64)FLOW_LST_PREEMPT_GAP_NS)
-				need = vmax;
-			else
-				need = new_slack + (s64)FLOW_LST_PREEMPT_GAP_NS;
-			if (need < run_slack) {
-				scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-				flow_stat_inc(llc, 6);
-				flow_stat_inc(llc, 17);
-				return;
-			}
-		}
+	if (tgt < 0 || !p || !flow_cpu_ok((u32)tgt) || !flow_cpu_allowed(tgt, p) ||
+	    !flow_cpu_live((u32)tgt)) {
+		flow_kick_checked(tgt, p, llc);
+		return;
 	}
-	flow_kick_checked(tgt, p, llc);
+	if (flow_wait_hold(tgt, p)) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
+		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
+		flow_stat_inc(llc, 7);
+		return;
+	}
+	rs = &flow_running_state[(u32)tgt];
+	rgen = READ_ONCE(rs->gen);
+	rllc = READ_ONCE(rs->llc_id);
+	if (!rgen || !flow_llc_ok(rllc) || rllc != llc) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	last = READ_ONCE(rs->pad);
+	if ((u32)rgen == last) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	run_slack = READ_ONCE(rs->slack);
+	if (new_slack > vmax - (s64)FLOW_LST_PREEMPT_GAP_NS)
+		need = vmax;
+	else
+		need = new_slack + (s64)FLOW_LST_PREEMPT_GAP_NS;
+	if (need >= run_slack) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	if (__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen) != last) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
+	flow_stat_inc(llc, 6);
+	flow_stat_inc(llc, 17);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
@@ -311,6 +337,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u64 rem = READ_ONCE(t->remain_ns);
 		u64 dl = READ_ONCE(t->deadline_ns);
 		s64 slack;
+		bool over = false;
 		if (!rem)
 			rem = (u64)FLOW_LST_INIT_NS;
 		rem = flow_lst_clamp_rem(rem);
@@ -324,9 +351,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			dl = now + (u64)FLOW_LST_REL_NS;
 			if (dl < now)
 				dl = ~0ULL;
+			over = true;
 		}
 		slack = flow_lst_slack(dl, now, rem);
 		prio = flow_lst_prio(slack);
+		if (over)
+			prio = (u32)FLOW_PRIO_LAT;
 		if (!flow_prio_ok(prio))
 			prio = (u32)FLOW_PRIO_NORM;
 		t->remain_ns = rem;

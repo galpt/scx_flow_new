@@ -13,11 +13,16 @@
  * clamped to a floor. Deadline adds a fixed span to the enqueue
  * time and is kept until it passes, then a fresh span is added and
  * an overdue count grows with an escape count for the fresh span.
- * Slack is deadline minus now minus remain with saturation. Small
+ * Overdue tasks stay in the first queue. Long waiting batch and
+ * idle heads drain before normal. Slack is deadline minus now minus
+ * remain with saturation. Small
  * slack takes the first queue with larger slack placed further back
  * in fixed bands. Slices hold one fixed quantum. A shared enqueue
  * with slack ahead of the running slack by a gap kicks for preempt
- * with idle wakes otherwise. Wait history keeps per CPU queue waits by
+ * with idle wakes otherwise. Holds gate gap wins. Idle targets take
+ * idle wakes. Each running instance kicks at most once. A runnable
+ * yield with no burnt time still moves the stored time forward by
+ * one. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
@@ -118,8 +123,9 @@ struct flow_lat_hist {
 	u64 cells[FLOW_HIST_LEN];
 };
 /* Per CPU running view. Gen counts runs. Reserved stays
- * zero. Prio mirrors the running task. Slack holds the task slack
- * at running time for gap checks. */
+ * zero. Prio mirrors the running task. Pad holds the last kicked
+ * generation, so each run kicks at most once. Slack holds the task
+ * slack at running time for gap checks. */
 struct flow_running_state {
 	s64 vtime;
 	u64 slice_rem;

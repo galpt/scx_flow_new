@@ -453,6 +453,30 @@ if grep -q "for (" "${LST_HDR}" 2>/dev/null; then
     fail "lst loop drift"
 fi
 
+# Overdue stays urgent with holds gating gap wins and one kick per run.
+# Overdue tasks stay in the first queue with a fresh span, holds gate
+# gap wins, idle targets take idle wakes, each run kicks at most once,
+# long waiting batch and idle heads drain before normal, running uses
+# one clock read, and a runnable yield with no burn still moves time.
+grep -q "Overdue tasks stay" "${SRC_DIR}/src/bpf/intf.h" || fail "overdue hold prose missing"
+grep -q "Holds gate gap wins" "${SRC_DIR}/src/bpf/intf.h" || fail "hold gate prose missing"
+grep -q "Each running instance kicks at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "kick bound prose missing"
+grep -q "Long waiting batch" "${SRC_DIR}/src/bpf/intf.h" || fail "wait ceiling prose missing"
+grep -q "Pad holds the last kicked" "${SRC_DIR}/src/bpf/intf.h" || fail "kick cookie prose missing"
+grep -q "Holds gate gap" "${LST_ENQ}" || fail "enqueue hold gate prose missing"
+grep -q "Overdue tasks stay" "${LST_ENQ}" || fail "enqueue overdue prose missing"
+grep -q "Each running instance kicks at most once" "${LST_ENQ}" || fail "enqueue kick bound prose missing"
+grep -q "flow_wait_hold(tgt, p)" "${LST_ENQ}" || fail "hold gate call missing"
+grep -q "scx_bpf_test_and_clear_cpu_idle(tgt)" "${LST_ENQ}" || fail "idle consume missing"
+grep -q "rs->pad" "${LST_ENQ}" || fail "kick cookie missing"
+grep -q "over = true" "${LST_ENQ}" || fail "overdue flag missing"
+grep -q "prio = (u32)FLOW_PRIO_LAT" "${LST_ENQ}" || fail "overdue lat hold missing"
+grep -q "flow_wait_long" "${DISP_HDR}" || fail "wait ceiling helper missing"
+grep -q "flow_head_long" "${DISP_HDR}" || fail "head wait helper missing"
+grep -q "Long waiting batch" "${DISP_HDR}" || fail "drain ceiling prose missing"
+grep -q "flow_lat_observe(cpu, t, now, 1)" "${DISP_HDR}" || fail "single clock observe missing"
+grep -q "flow_fair_cap_add(t->vtime, 1)" "${DISP_HDR}" || fail "yield advance missing"
+
 # Stats keep order with laxity names at the same offsets.
 # Twenty one counters stay in struct order at 168 bytes with total
 # matching penalty and extra combined per award.
