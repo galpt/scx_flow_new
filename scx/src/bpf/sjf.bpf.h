@@ -2,17 +2,14 @@
 /*
  * Shortest job tracking for the flow scheduler.
  *
- * Each task keeps a burst estimate. The estimate mixes the old
- * value with the fresh sample, keeping half of the old value and
- * adding half of the sample. It starts from a fixed seed
- * and is clamped to a floor and a ceiling. Estimates under half
- * a millisecond select the latency queue, up to a millisecond the
- * normal queue, up to twenty milliseconds the batch queue, and the
- * rest the idle queue. The queue choice wakes idle targets only with no preempt.
- * Waits that grow long halve the estimate, and waits that grow
- * very long reset it and count a rescue. Remaining takes the aged
- * estimate minus the burnt part with saturation at the floor.
- * All math uses integers.
+ * Each task keeps a burst estimate. Samples below old mix one
+ * quarter old with three quarters sample, else three quarters
+ * old with one quarter sample through shifts from a fixed seed
+ * clamped to a floor and a ceiling. Estimates under half a
+ * millisecond select latency, up to a millisecond normal, up to
+ * twenty milliseconds batch, else idle. Long waits halve, very
+ * long waits halve again, count a rescue, and select normal.
+ * Remaining is aged minus burnt at floor. All math uses integers.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -33,9 +30,11 @@ static __always_inline u64 flow_sjf_next(u64 old, u64 sample)
 {
 	u64 s = flow_sjf_clamp(sample ? sample : (u64)FLOW_SJF_INIT_NS);
 	u64 o = old ? flow_sjf_clamp(old) : (u64)FLOW_SJF_INIT_NS;
-	u64 keep = o - (o >> 1);
-	u64 add = s >> 1;
-	u64 v = keep + add;
+	u64 v;
+	if (s < o)
+		v = (o >> 2) + (s >> 1) + (s >> 2);
+	else
+		v = o + ((s - o) >> 2);
 	return flow_sjf_clamp(v);
 }
 static __always_inline u64 flow_sjf_remain(u64 aged, u64 used)
@@ -54,7 +53,7 @@ static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)
 	if (now && wait_ns && now > wait_ns)
 		age = now - wait_ns;
 	if (age >= (u64)FLOW_STARVE_NS)
-		return (u32)FLOW_PRIO_LAT;
+		return (u32)FLOW_PRIO_NORM;
 	if (est < (u64)FLOW_SJF_LAT_NS)
 		return (u32)FLOW_PRIO_LAT;
 	if (est <= (u64)FLOW_SJF_INIT_NS)
@@ -70,8 +69,9 @@ static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc)
 		return est;
 	age = now - wait_ns;
 	if (age >= (u64)FLOW_STARVE_NS) {
+		u64 v = est - (est >> 1);
 		flow_stat_inc(llc, 18);
-		return (u64)FLOW_SJF_INIT_NS;
+		return flow_sjf_clamp(v);
 	}
 	if (age >= (u64)FLOW_AGING_NS) {
 		u64 v = est - (est >> 1);

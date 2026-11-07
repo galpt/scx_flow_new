@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.8" ] || fail "version not at 5.1.8"
+[ "${want}" = "5.1.11" ] || fail "version not at 5.1.11"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -283,13 +283,14 @@ fi
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
 # SJF stays non preemptive with fixed integers and no knob. The burst
-# keeps half of the old value and adds half of the sample, ages down
-# on long waits with a rescue on very long waits, picks one of four
-# queues by remaining plus age, and wakes idle targets only with a skip
-# otherwise. Remaining takes the aged estimate minus the burnt part
-# with saturation at the floor. Stopping folds burnt time through
-# the half blend with no wait plus remain step. No streak plus no hog
-# plus no demote is kept.
+# moves toward the sample with one quarter weight when the sample is
+# below old and one quarter the other way otherwise, halves on long
+# waits and halves again with a rescue on very long waits while
+# selecting normal, picks one of four queues by remaining plus age,
+# and wakes idle targets only with a skip otherwise. Remaining takes
+# the aged estimate minus the burnt part with saturation at the floor.
+# Stopping folds burnt time through the quarter blend with no wait
+# plus remain step. No streak plus no hog plus no demote is kept.
 SJF_HDR="${SRC_DIR}/src/bpf/sjf.bpf.h"
 SJF_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
 grep -q "flow_sjf_next" "${SJF_HDR}" || fail "sjf blend missing"
@@ -306,6 +307,7 @@ fi
 grep -q "FLOW_AGING_NS = 100000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf aging kept missing"
 grep -q "FLOW_STARVE_NS = 200000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "sjf rescue missing"
 grep -q ">> 1" "${SJF_HDR}" || fail "sjf half blend missing"
+grep -q ">> 2" "${SJF_HDR}" || fail "sjf quarter blend missing"
 grep -q "< (u64)FLOW_SJF_LAT_NS" "${SJF_HDR}" || fail "sjf lat band missing"
 grep -q "<= (u64)FLOW_SJF_INIT_NS" "${SJF_HDR}" || fail "sjf norm band missing"
 grep -q "<= (u64)FLOW_SJF_BATCH_NS" "${SJF_HDR}" || fail "sjf batch band missing"
@@ -465,9 +467,9 @@ fi
 
 # Queues are four per LLC and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
-# with a per LLC floor and a latency shift. Short jobs keep half of
-# the old value and add half of the sample. Wakes go idle only with
-# a skip otherwise and no gap plus tail plus escape.
+# with a per LLC floor and a latency shift. Short samples mix one
+# quarter old with three quarters sample else the reverse. Wakes go
+# idle only with a skip otherwise and no gap plus tail plus escape.
 grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/intf.h" || fail "prio count missing"
 grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf/intf.h" || fail "prio queue helper missing"
 grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
