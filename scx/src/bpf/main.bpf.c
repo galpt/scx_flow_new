@@ -2,18 +2,23 @@
 /*
  * Flow scheduler entry.
  *
- * Thin glue that pulls in eleven area headers in order and declares
- * the ops table. Each CPU has two queues in balanced mode and there
- * is one fallback queue. Ties leave in insertion order. Laxity sets
- * the strand with gap preempts for shared tasks. Tables are written
- * once, so a CPU that arrives late needs a restart to be seen.
- * Settings live in the shared header.
+ * Thin glue that pulls in nine area headers in order and declares
+ * the ops table. Each CPU owns one upstream queue in balanced mode
+ * with two strands and there is one fallback queue. Ties leave in
+ * insertion order. Laxity sets the strand with gap preempts for
+ * shared tasks. Queues come from the upstream double helix library
+ * and placement follows the upstream topology library. Tables are
+ * written once, so a CPU that arrives late needs a restart to be
+ * seen. Settings live in the shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
+#include <bpf_arena_common.bpf.h>
+#include <lib/dhq.h>
+#include <lib/topology.h>
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
@@ -24,8 +29,6 @@ UEI_DEFINE(uei);
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include "select.bpf.h"
-#include "dhq.bpf.h"
-#include "topology.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"
 SCX_OPS_DEFINE(flow_ops,

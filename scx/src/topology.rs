@@ -3,7 +3,8 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
-//! Maps topology LLC and node ids to BPF indices.
+//! Seeds cluster hints for the BPF view. Cache and node identity
+//! come from the upstream topology tree built by the arena library.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -82,8 +83,9 @@ fn cpu_ccx(topo: &Topology, llc_ids: &[usize]) -> BTreeMap<usize, u32> {
 }
 
 /// Seed one CPU row per online CPU into the BPF view.
-/// Maps topology LLC and node ids to contiguous indices for the
-/// BPF bounds. Cluster ids split each LLC every four cores.
+/// Writes the CPU id plus the cluster hint; cache and node come
+/// from the upstream tree. The cluster stays here as an interim
+/// until it moves into the tree data pointer.
 /// Failures return an error.
 pub fn seed_topology(skel: &mut BpfSkel<'_>) -> Result<String> {
     use libbpf_rs::MapCore;
@@ -110,22 +112,16 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>) -> Result<String> {
         if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
             continue;
         }
-        let entry = match topo.all_cpus.get(&cpu) {
-            Some(v) => v,
-            None => continue,
-        };
-        let llc = llc_ids.iter().position(|v| *v == entry.llc_id).unwrap_or(0) as u32;
-        let node = node_ids
-            .iter()
-            .position(|v| *v == entry.node_id)
-            .unwrap_or(0) as u32;
+        if !topo.all_cpus.contains_key(&cpu) {
+            continue;
+        }
         let ccx = ccx_map.get(&cpu).copied().unwrap_or(0);
         let key = (cpu as u32).to_ne_bytes();
         let mut val = [0u8; 16];
         val[0..4].copy_from_slice(&(cpu as u32).to_ne_bytes());
-        val[4..8].copy_from_slice(&llc.to_ne_bytes());
-        val[8..12].copy_from_slice(&node.to_ne_bytes());
-        val[12..16].copy_from_slice(&ccx.to_ne_bytes());
+        val[4..8].copy_from_slice(&ccx.to_ne_bytes());
+        val[8..12].copy_from_slice(&0u32.to_ne_bytes());
+        val[12..16].copy_from_slice(&0u32.to_ne_bytes());
         skel.maps
             .cpu_ctx_stor
             .update(&key, &val, libbpf_rs::MapFlags::ANY)

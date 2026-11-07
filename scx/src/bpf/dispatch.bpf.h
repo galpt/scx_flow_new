@@ -27,9 +27,10 @@
  * never sends zero may reach the governor. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Tasks that already ran favor their
- * first CPU. Init creates two queues per CPU and the fallback
- * queue and records the node of each LLC. CPUs that arrive late
- * need a restart to be seen.
+ * first CPU. Init creates one queue per CPU and the fallback
+ * queue. Queues use the upstream library in virtual time mode with
+ * balanced drains. Liveness comes from the upstream tree, so CPUs
+ * that arrive late need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -44,8 +45,9 @@
 #include "lst.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
-#include "dhq.bpf.h"
-#include "topology.bpf.h"
+#include <lib/dhq.h>
+#include <lib/topology.h>
+#include <lib/sdt_alloc.h>
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
@@ -83,28 +85,70 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 	flow_stat_inc(llc, 14);
 	flow_kick_idle_only(owner, ph, llc);
 }
-static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, u32 slot, int steal)
+static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq_t *dhq,
+					     u64 strand, u32 slot, int steal)
 {
-	struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+	u64 peeked;
+	struct task_struct *ph;
+	struct task_struct *p;
+	struct flow_task_ctx *lt;
+	u64 slice;
+	u64 popped;
+	if (!dhq)
+		return 0;
+	if (slot > (u32)FLOW_MAX_LLCS)
+		return 0;
+	peeked = scx_dhq_peek_strand(dhq, strand);
+	if (!peeked)
+		return 0;
+	ph = bpf_task_from_pid((s32)peeked);
 	if (!ph)
 		return 0;
 	if (!flow_cpu_allowed((s32)cpu, ph)) {
 		flow_forward_from_peeked(ph, llc, slot);
+		bpf_task_release(ph);
 		return 0;
 	}
-	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
-		struct flow_task_ctx *lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-		if (lt)
-			flow_lat_observe(cpu, lt, scx_bpf_now(), 0);
-		flow_stat_inc(llc, 1);
-		flow_queued_dec(victim);
-		if (steal) {
-			flow_stat_inc(llc, 3);
-			flow_stat_inc(llc, 5);
+	bpf_task_release(ph);
+	popped = scx_dhq_pop_strand(dhq, strand);
+	if (!popped)
+		return 0;
+	p = bpf_task_from_pid((s32)popped);
+	if (!p)
+		return 0;
+	if (!flow_cpu_allowed((s32)cpu, p)) {
+		flow_forward_from_peeked(p, llc, slot);
+		/* Keep the task alive through the fallback queue. */
+		lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		if (lt) {
+			u64 s = READ_ONCE(lt->slice_rem);
+			if (s)
+				slice = s;
 		}
-		return 1;
+		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, 0);
+		flow_stat_inc(llc, 2);
+		bpf_task_release(p);
+		return 0;
 	}
-	return 0;
+	lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (lt)
+		flow_lat_observe(cpu, lt, scx_bpf_now(), 0);
+	slice = (u64)FLOW_SLICE_MIN_NS;
+	if (lt) {
+		u64 s = READ_ONCE(lt->slice_rem);
+		if (s)
+			slice = s;
+	}
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
+	bpf_task_release(p);
+	flow_stat_inc(llc, 1);
+	flow_queued_dec(vllc);
+	if (steal) {
+		flow_stat_inc(llc, 3);
+		flow_stat_inc(llc, 5);
+	}
+	return 1;
 }
 static __always_inline bool flow_wait_long(u64 enq, u64 now)
 {
@@ -114,88 +158,95 @@ static __always_inline bool flow_wait_long(u64 enq, u64 now)
 		return false;
 	return now - enq > (u64)FLOW_LST_REL_NS;
 }
-static __always_inline bool flow_head_long(u64 dsq, u64 now)
+static __always_inline bool flow_head_long_dhq(scx_dhq_t *dhq, u64 strand, u64 now)
 {
-	struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek(dsq);
+	u64 peeked;
+	struct task_struct *ph;
 	struct flow_task_ctx *lt;
 	u64 enq;
+	bool out = false;
+	if (!dhq || !now)
+		return false;
+	peeked = scx_dhq_peek_strand(dhq, strand);
+	if (!peeked)
+		return false;
+	ph = bpf_task_from_pid((s32)peeked);
 	if (!ph)
 		return false;
 	lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-	if (!lt)
+	if (!lt) {
+		bpf_task_release(ph);
 		return false;
+	}
 	enq = READ_ONCE(lt->enq_ns);
-	return flow_wait_long(enq, now);
+	out = flow_wait_long(enq, now);
+	bpf_task_release(ph);
+	return out;
 }
 static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal)
 {
-	u64 dsq_a;
-	u64 dsq_b;
+	scx_dhq_t *dhq;
+	u64 h;
+	int na;
+	int nb;
+	u64 ca;
+	u64 cb;
 	u64 first;
 	u64 second;
+	int vllc;
+	u32 vuse;
 	u32 slot;
-	u32 vllc;
-	u32 vkey;
-	struct flow_cpu_ctx *vcc;
-	s32 qa;
-	s32 qb;
-	u64 na;
-	u64 nb;
-	u64 pick;
 	u64 now;
-	if (!flow_topo_online(victim, READ_ONCE(flow_nr_cpus)))
+	if (!flow_cpu_ok(victim) || !flow_cpu_live(victim))
 		return 0;
-	if (!READ_ONCE(flow_dhq_live[victim]))
+	h = READ_ONCE(flow_dhqs[victim]);
+	if (!h)
 		return 0;
-	if (!flow_cpu_ok(victim))
+	dhq = (scx_dhq_t *)h;
+	vllc = topo_cpu_to_llc_id(victim);
+	if (vllc < 0 || !flow_llc_ok((u32)vllc))
 		return 0;
-	vkey = victim;
-	vcc = bpf_map_lookup_elem(&cpu_ctx_stor, &vkey);
-	if (!vcc)
+	vuse = (u32)vllc;
+	slot = (u32)FLOW_MAX_LLCS;
+	na = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_A);
+	nb = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_B);
+	ca = na < 0 ? 0ULL : (u64)na;
+	cb = nb < 0 ? 0ULL : (u64)nb;
+	if (!ca && !cb)
 		return 0;
-	vllc = READ_ONCE(vcc->llc_id);
-	if (!flow_llc_ok(vllc))
-		return 0;
-	slot = vllc;
-	if (slot > (u32)FLOW_MAX_LLCS)
-		slot = (u32)FLOW_MAX_LLCS;
-	dsq_a = flow_dhq_id(victim, (u32)FLOW_DHQ_STRAND_A);
-	dsq_b = flow_dhq_id(victim, (u32)FLOW_DHQ_STRAND_B);
-	if (!flow_dsq_ok(dsq_a) || !flow_dsq_ok(dsq_b))
-		return 0;
-	qa = scx_bpf_dsq_nr_queued(dsq_a);
-	qb = scx_bpf_dsq_nr_queued(dsq_b);
-	na = qa < 0 ? 0ULL : (u64)qa;
-	nb = qb < 0 ? 0ULL : (u64)qb;
-	if (flow_dhq_pick_mode() != (u64)FLOW_DHQ_MODE_BALANCED) {
-		if (flow_try_move(cpu, llc, vllc, dsq_a, slot, steal))
-			return 1;
-		now = scx_bpf_now();
-		if (flow_head_long(dsq_b, now) &&
-		    flow_try_move(cpu, llc, vllc, dsq_b, slot, steal))
-			return 1;
-		if (flow_try_move(cpu, llc, vllc, dsq_b, slot, steal))
-			return 1;
-		return 0;
-	}
-	pick = flow_dhq_balanced_pick(na, nb);
-	if (na == nb || (na == nb + 1ULL)) {
-		now = scx_bpf_now();
-		if (flow_head_long(dsq_b, now))
-			pick = (u64)FLOW_DHQ_STRAND_B;
-		else if (na == nb)
-			pick = (u64)FLOW_DHQ_STRAND_A;
-	}
-	if (pick == (u64)FLOW_DHQ_STRAND_A) {
-		first = dsq_a;
-		second = dsq_b;
+	/* Balanced drains take the larger strand first. Ties keep the
+	 * first strand unless the second head waited long, so long
+	 * batch and idle heads drain before normal on ties. */
+	if (cb > ca) {
+		first = (u64)SCX_DHQ_STRAND_B;
+		second = (u64)SCX_DHQ_STRAND_A;
+	} else if (ca > cb) {
+		if (ca == cb + 1ULL) {
+			now = scx_bpf_now();
+			if (flow_head_long_dhq(dhq, (u64)SCX_DHQ_STRAND_B, now)) {
+				first = (u64)SCX_DHQ_STRAND_B;
+				second = (u64)SCX_DHQ_STRAND_A;
+			} else {
+				first = (u64)SCX_DHQ_STRAND_A;
+				second = (u64)SCX_DHQ_STRAND_B;
+			}
+		} else {
+			first = (u64)SCX_DHQ_STRAND_A;
+			second = (u64)SCX_DHQ_STRAND_B;
+		}
 	} else {
-		first = dsq_b;
-		second = dsq_a;
+		now = scx_bpf_now();
+		if (flow_head_long_dhq(dhq, (u64)SCX_DHQ_STRAND_B, now)) {
+			first = (u64)SCX_DHQ_STRAND_B;
+			second = (u64)SCX_DHQ_STRAND_A;
+		} else {
+			first = (u64)SCX_DHQ_STRAND_A;
+			second = (u64)SCX_DHQ_STRAND_B;
+		}
 	}
-	if (flow_try_move(cpu, llc, vllc, first, slot, steal))
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, first, slot, steal))
 		return 1;
-	if (flow_try_move(cpu, llc, vllc, second, slot, steal))
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, second, slot, steal))
 		return 1;
 	return 0;
 }
@@ -203,100 +254,70 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 c;
 	u32 llc = 0;
-	u32 node = 0;
 	u32 victim;
 	u32 li;
+	int v;
+	struct topo_iter hint_iter;
+	topo_ptr hint_node = 0;
+	topo_ptr walk = 0;
 	(void)prev;
+	scx_arena_subprog_init();
 	if (cpu < 0)
 		return;
 	c = (u32)cpu;
-	if (!flow_cpu_ok(c))
+	if (!flow_cpu_ok(c) || !flow_cpu_live(c))
 		return;
-	{
-		u32 key = c;
-		struct flow_cpu_ctx *cc;
-		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-		if (!cc)
-			return;
-		{
-			u32 tmp = READ_ONCE(cc->llc_id);
-			if (!flow_llc_ok(tmp))
-				return;
-			llc = tmp;
+	v = topo_cpu_to_llc_id(c);
+	if (v < 0 || !flow_llc_ok((u32)v))
+		return;
+	llc = (u32)v;
+	if (topo_all && topo_contains(topo_all, c)) {
+		TOPO_FOR_EACH_NODE(&hint_iter, walk) {
+			if (topo_contains(walk, c)) {
+				hint_node = walk;
+				break;
+			}
 		}
-		node = READ_ONCE(cc->node_id);
-		if (!flow_node_ok(node))
-			node = 0;
 	}
 	if (flow_drain_cpu(c, llc, c, 0))
 		return;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		u32 vllc;
-		u32 vkey;
-		struct flow_cpu_ctx *vcc;
-		if ((u64)victim >= READ_ONCE(flow_nr_cpus))
-			break;
+		int vl;
 		if (victim == c)
 			continue;
-		if (!flow_topo_online(victim, READ_ONCE(flow_nr_cpus)))
+		if (!flow_cpu_live(victim))
 			continue;
-		if (!READ_ONCE(flow_dhq_live[victim]))
-			continue;
-		vkey = victim;
-		vcc = bpf_map_lookup_elem(&cpu_ctx_stor, &vkey);
-		if (!vcc)
-			continue;
-		vllc = READ_ONCE(vcc->llc_id);
-		if (!flow_llc_ok(vllc) || vllc != llc)
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || (u32)vl != llc)
 			continue;
 		if (flow_drain_cpu(c, llc, victim, 1))
 			return;
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		u32 vllc;
-		u32 vkey;
-		struct flow_cpu_ctx *vcc;
-		if ((u64)victim >= READ_ONCE(flow_nr_cpus))
-			break;
+		int vl;
 		if (victim == c)
 			continue;
-		if (!flow_topo_online(victim, READ_ONCE(flow_nr_cpus)))
+		if (!flow_cpu_live(victim))
 			continue;
-		if (!READ_ONCE(flow_dhq_live[victim]))
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
 			continue;
-		vkey = victim;
-		vcc = bpf_map_lookup_elem(&cpu_ctx_stor, &vkey);
-		if (!vcc)
-			continue;
-		vllc = READ_ONCE(vcc->llc_id);
-		if (!flow_llc_ok(vllc) || vllc == llc)
-			continue;
-		/* Node IDs are cached at init, no per-CPU walk here. */
-		if (!flow_topo_same_node(READ_ONCE(flow_llc_node[vllc]), node))
+		/* Node identity comes from the tree with no per-CPU walk here. */
+		if (!hint_node || !topo_contains(hint_node, victim))
 			continue;
 		if (flow_drain_cpu(c, llc, victim, 1))
 			return;
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		u32 vllc;
-		u32 vkey;
-		struct flow_cpu_ctx *vcc;
-		if ((u64)victim >= READ_ONCE(flow_nr_cpus))
-			break;
+		int vl;
 		if (victim == c)
 			continue;
-		if (!flow_topo_online(victim, READ_ONCE(flow_nr_cpus)))
+		if (!flow_cpu_live(victim))
 			continue;
-		if (!READ_ONCE(flow_dhq_live[victim]))
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
 			continue;
-		vkey = victim;
-		vcc = bpf_map_lookup_elem(&cpu_ctx_stor, &vkey);
-		if (!vcc)
-			continue;
-		vllc = READ_ONCE(vcc->llc_id);
-		if (!flow_llc_ok(vllc) || vllc == llc)
-			continue;
-		if (flow_topo_same_node(READ_ONCE(flow_llc_node[vllc]), node))
+		if (hint_node && topo_contains(hint_node, victim))
 			continue;
 		if (flow_drain_cpu(c, llc, victim, 1))
 			return;
@@ -327,8 +348,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 					} else {
 						bpf_for(li, 0, FLOW_MAX_LLCS) {
 							struct flow_llc_stats *st;
-							if ((u64)li >= READ_ONCE(flow_nr_llcs))
-								break;
 							if (!flow_llc_ok(li))
 								continue;
 							st = flow_stats_for(li);
@@ -350,30 +369,26 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
 	struct flow_task_ctx *t;
-	struct flow_cpu_ctx *cc;
 	u32 llc = 0;
-	u32 key;
 	struct flow_running_state *rs;
 	u64 sl;
 	u64 ng;
 	u64 now;
+	int v;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
+	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	key = cpu;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (cc) {
-		u32 tmp = READ_ONCE(cc->llc_id);
-		if (flow_llc_ok(tmp))
-			llc = tmp;
-	} else if (flow_llc_ok(t->llc_id)) {
+	v = topo_cpu_to_llc_id(cpu);
+	if (v >= 0 && flow_llc_ok((u32)v))
+		llc = (u32)v;
+	else if (flow_llc_ok(t->llc_id))
 		llc = t->llc_id;
-	}
 	sl = p->scx.slice;
 	if (!sl)
 		sl = (u64)FLOW_SLICE_MIN_NS;
@@ -515,6 +530,7 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	(void)mask;
 	if (!p)
 		return;
+	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
@@ -536,21 +552,15 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 		t->slice_rem = (u64)FLOW_EXIT_SLICE_NS;
 	{
 		s32 tgt = flow_first_allowed(p);
-		u32 cpu;
-		struct flow_cpu_ctx *cc;
-		u32 llc;
+		int v;
 		if (tgt < 0)
 			return;
 		if (!flow_cpu_live((u32)tgt))
 			return;
-		cpu = (u32)tgt;
-		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &cpu);
-		if (!cc)
+		v = topo_cpu_to_llc_id((u32)tgt);
+		if (v < 0 || !flow_llc_ok((u32)v))
 			return;
-		llc = READ_ONCE(cc->llc_id);
-		if (!flow_llc_ok(llc))
-			return;
-		t->llc_id = llc;
+		t->llc_id = (u32)v;
 	}
 }
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
@@ -615,10 +625,9 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	u64 n;
-	u64 want = 0;
 	s32 cpu;
-	u32 llc;
 	n = scx_bpf_nr_cpu_ids();
+	scx_arena_subprog_init();
 	if (n == 0) {
 		scx_bpf_error("no CPUs found");
 		return -EINVAL;
@@ -627,95 +636,44 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	flow_nr_cpus = n;
+	/* The arena library must be ready before any queue is built.
+	 * Userspace sets up the arena and the topology tree before load,
+	 * so a missing tree fails closed here with no partial queues. */
+	if (!topo_all) {
+		scx_bpf_error("topology tree missing");
+		return -ENODEV;
+	}
 	/* Thread shape keeps the userspace seed with the source default on miss. */
 	flow_ccx_prefer = 1;
 	flow_wait_allow = 1;
 	flow_home_stick = 1;
-	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		u32 key;
-		struct flow_cpu_ctx *cc;
-		u32 id;
-		if (cpu < 0)
-			continue;
-		if ((u64)cpu >= n)
-			break;
-		key = (u32)cpu;
-		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-		if (!cc)
-			continue;
-		id = READ_ONCE(cc->llc_id);
-		if (!flow_llc_ok(id))
-			continue;
-		if ((u64)id + 1 > want)
-			want = (u64)id + 1;
-	}
-	if (want == 0)
-		want = 1;
-	if (want > (u64)FLOW_MAX_LLCS) {
-		scx_bpf_error("LLC count over bound");
-		return -E2BIG;
-	}
-	flow_nr_llcs = want;
-	if ((u64)FLOW_DHQ_PERCPU_CAP == 0ULL || (u64)FLOW_FALLBACK_CAP == 0ULL ||
-	    flow_dhq_max_imbalance() == 0ULL) {
-		scx_bpf_error("queue cap over bound");
-		return -EINVAL;
-	}
-	if (flow_dhq_pick_mode() != (u64)FLOW_DHQ_MODE_BALANCED) {
-		scx_bpf_error("queue mode over bound");
-		return -EINVAL;
-	}
-	if (n * 2ULL + 1ULL > 4096ULL) {
-		scx_bpf_error("queue count over bound");
+	if (n > 512ULL) {
+		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		u32 strand;
+		scx_dhq_t *dhq;
 		if ((u64)cpu >= n)
 			break;
 		if (cpu < 0)
 			continue;
-		for (strand = 0; strand < 2; strand++) {
-			u64 dsq = flow_dhq_id((u32)cpu, strand);
-			s32 ret;
-			if (!flow_dhq_ok((u32)cpu, strand) || !flow_dsq_ok(dsq)) {
-				scx_bpf_error("dsq id over bound");
-				return -EINVAL;
-			}
-			ret = scx_bpf_create_dsq(dsq, -1);
-			if (ret < 0 && ret != -EEXIST) {
-				scx_bpf_error("dsq create failed");
-				return ret;
-			}
+		if (!flow_cpu_live((u32)cpu))
+			continue;
+		/* One upstream queue per CPU in virtual time mode with
+		 * balanced drains and a small imbalance cap. */
+		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, 256ULL,
+							   (u64)SCX_DHQ_MODE_BALANCED, 8ULL);
+		if (!dhq) {
+			scx_bpf_error("queue create failed");
+			return -ENOMEM;
 		}
-		flow_dhq_live[cpu] = 1ULL;
+		flow_dhqs[(u32)cpu] = (u64)dhq;
 	}
 	{
 		s32 ret = scx_bpf_create_dsq((u64)FLOW_FALLBACK_DSQ, -1);
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("fallback dsq create failed");
 			return ret;
-		}
-	}
-	bpf_for(llc, 0, FLOW_MAX_LLCS) {
-		u32 c2;
-		if ((u64)llc >= want)
-			break;
-		bpf_for(c2, 0, FLOW_MAX_CPUS) {
-			struct flow_cpu_ctx *cc;
-			u32 key = c2;
-			if ((u64)c2 >= n)
-				break;
-			cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-			if (!cc)
-				continue;
-			if (READ_ONCE(cc->llc_id) == llc) {
-				u32 node = READ_ONCE(cc->node_id);
-				if (flow_node_ok(node))
-					flow_llc_node[llc] = node;
-				break;
-			}
 		}
 	}
 	return 0;
@@ -725,20 +683,11 @@ void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
 	s32 cpu;
 	UEI_RECORD(uei, info);
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		u32 strand;
-		if ((u64)cpu >= READ_ONCE(flow_nr_cpus))
-			break;
 		if (cpu < 0)
 			continue;
-		if (!READ_ONCE(flow_dhq_live[(u32)cpu]))
+		if (!READ_ONCE(flow_dhqs[(u32)cpu]))
 			continue;
-		for (strand = 0; strand < 2; strand++) {
-			u64 dsq = flow_dhq_id((u32)cpu, strand);
-			if (!flow_dsq_ok(dsq))
-				continue;
-			scx_bpf_destroy_dsq(dsq);
-		}
-		flow_dhq_live[(u32)cpu] = 0ULL;
+		flow_dhqs[(u32)cpu] = 0ULL;
 	}
 	scx_bpf_destroy_dsq((u64)FLOW_FALLBACK_DSQ);
 }

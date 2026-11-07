@@ -2,7 +2,7 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU has two queues ordered by virtual time. Ties leave in
+ * Each CPU owns one upstream queue ordered by virtual time. Ties leave in
  * insertion order. One fallback queue holds tasks that have no
  * usable CPU. Pinned tasks run on their local queue. Shares are
  * read from the cgroup map on each enqueue. A task pays for the
@@ -35,7 +35,9 @@
  * more tasks on one side than the other. Steal moves in topology
  * order with local first then same node then remote. Balanced mode
  * drains the larger strand first with a long batch head promoted
- * on ties.
+ * on ties. Queues come from the upstream double helix library in
+ * virtual time mode with balanced drains, and placement follows the
+ * upstream topology library with liveness from the same tree.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -68,15 +70,7 @@ enum flow_consts {
 	FLOW_PRIO_NORM = 1ULL,
 	FLOW_PRIO_BATCH = 2ULL,
 	FLOW_PRIO_IDLE = 3ULL,
-	FLOW_DHQ_STRAND_A = 0ULL,
-	FLOW_DHQ_STRAND_B = 1ULL,
-	FLOW_DHQ_STRAND_AUTO = 2ULL,
-	FLOW_DHQ_MODE_ALTERNATING = 0ULL,
-	FLOW_DHQ_MODE_PRIORITY = 1ULL,
-	FLOW_DHQ_MODE_BALANCED = 2ULL,
-	FLOW_DHQ_PERCPU_CAP = 256ULL,
 	FLOW_FALLBACK_CAP = 1024ULL,
-	FLOW_DHQ_MAX_IMBALANCE = 8ULL,
 	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,
 	FLOW_FAIR_BASE_NS = 20000ULL,
@@ -92,7 +86,6 @@ enum flow_consts {
 	FLOW_LST_NORM_NS = 1000000ULL,
 	FLOW_LST_BATCH_NS = 10000000ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
-	FLOW_DHQ_BASE = 0x6200ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
 	FLOW_FLAG_QUEUED = 1ULL,
 	FLOW_LAT_KINDS = 9ULL,
@@ -152,13 +145,16 @@ struct flow_running_state {
 	u32 pad;
 	s64 slack;
 };
-/* Per CPU seed from userspace. Holds the CPU id plus the LLC plus
- * node plus cluster indices assigned at startup. */
+/* Per CPU seed from userspace. Holds the CPU id plus the cluster
+ * index assigned at startup. Cache and node placement come from the
+ * upstream topology tree, so no cached copy lives here. The cluster
+ * index stays here as an interim until it moves into the tree data
+ * pointer, which needs a non-zero data size at tree build time. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
-	u32 llc_id;
-	u32 node_id;
 	u32 ccx_id;
+	u32 reserved;
+	u32 pad;
 };
 /* Per LLC counters. The order matches the userspace reader.
  * Queued counts tasks waiting in shared queues. Dispatched counts
@@ -197,10 +193,6 @@ struct flow_llc_stats {
 	u64 total_quanta;
 };
 #ifdef __BPF__
-static __always_inline u64 flow_dhq_id(u32 cpu, u32 strand)
-{
-	return (u64)FLOW_DHQ_BASE + (u64)cpu * 2ULL + (u64)strand;
-}
 static __always_inline bool flow_llc_ok(u32 llc)
 {
 	return llc < (u32)FLOW_MAX_LLCS;
@@ -216,20 +208,6 @@ static __always_inline bool flow_node_ok(u32 node)
 static __always_inline bool flow_prio_ok(u32 prio)
 {
 	return prio < (u32)FLOW_PRIO_COUNT;
-}
-static __always_inline bool flow_strand_ok(u32 strand)
-{
-	return strand <= (u32)FLOW_DHQ_STRAND_B;
-}
-static __always_inline bool flow_dhq_ok(u32 cpu, u32 strand)
-{
-	return flow_cpu_ok(cpu) && flow_strand_ok(strand);
-}
-static __always_inline bool flow_dsq_ok(u64 dsq)
-{
-	return (dsq >= (u64)FLOW_DHQ_BASE &&
-		dsq < (u64)FLOW_DHQ_BASE + (u64)FLOW_MAX_CPUS * 2ULL) ||
-	       dsq == (u64)FLOW_FALLBACK_DSQ;
 }
 #endif
 #endif

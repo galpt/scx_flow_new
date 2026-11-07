@@ -14,9 +14,12 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::Skel;
 use log::info;
 use log::warn;
+use scx_arena::ArenaLib;
 use scx_stats::prelude::*;
+use scx_utils::NR_CPU_IDS;
 use scx_utils::UserExitInfo;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -34,12 +37,15 @@ use crate::stats::Metrics;
 
 /*
  * Scheduler holds the skeleton, the link, and the stats server.
- * It drives the run loop until shutdown or exit.
+ * It drives the run loop until shutdown or exit. The arena library
+ * stays alive for the whole run so queue and topology memory stays
+ * valid while the scheduler is attached.
  */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), (Metrics, LatMetrics)>,
+    _arenalib: ArenaLib,
 }
 
 impl<'a> Scheduler<'a> {
@@ -63,6 +69,12 @@ impl<'a> Scheduler<'a> {
             }
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
+        // Build the arena and the topology tree before any queue exists.
+        // The BPF init fails closed when the tree is missing, so a setup
+        // failure here never reaches attach.
+        let task_size = std::mem::size_of::<crate::bpf_intf::flow_task_ctx>();
+        let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)
+            .context("arena setup failed")?;
         match crate::topology::seed_topology(&mut skel) {
             Ok(text) => info!("Topology: {text}"),
             Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
@@ -73,6 +85,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
+            _arenalib: arenalib,
         })
     }
 

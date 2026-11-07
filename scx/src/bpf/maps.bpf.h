@@ -3,18 +3,20 @@
  * Tables for the flow scheduler.
  *
  * Task storage holds one entry per task. CPU storage holds the seed
- * view written at startup. LLC storage holds per LLC counters.
- * Weight storage holds shares by group id. A missing entry reads
- * as the default share. Wait history holds per CPU queue waits by
- * kind and bucket for run plus dispatch halves. Globals hold the
- * running view, the per LLC floor, the per LLC node, the
- * per CPU queue handles, the forward coalescing state, and four
- * switches for cluster choice plus distant wake hold plus thread
- * shape plus home stick. A zero handle means the CPU is offline
- * or its queues were never built. Thread shape defaults on so
+ * view written at startup with the cluster index only; cache and node
+ * placement come from the upstream topology tree. LLC storage holds
+ * per LLC counters. Weight storage holds shares by group id. A missing
+ * entry reads as the default share. Wait history holds per CPU queue
+ * waits by kind and bucket for run plus dispatch halves. Globals hold
+ * the running view, the per LLC floor, the per CPU queue handles as
+ * upstream queue pointers in arena memory, the forward coalescing
+ * state, and four switches for cluster choice plus distant wake hold
+ * plus thread shape plus home stick. A zero handle means the CPU is
+ * offline or its queue was never built. Thread shape defaults on so
  * a missed seed stays conservative. The CPU plus LLC plus wait
  * tables are written once, so a CPU that arrives late needs
- * a restart to be seen.
+ * a restart to be seen. Liveness comes from the topology tree, so no
+ * separate live table is kept.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -51,16 +53,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_lat_hist);
 } lat_hist SEC(".maps");
-volatile u64 flow_nr_cpus;
-volatile u64 flow_nr_llcs;
 volatile u64 flow_ccx_prefer;
 volatile u64 flow_wait_allow;
 volatile u64 flow_smt_enabled = 1;
 volatile u64 flow_home_stick;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];
-u32 flow_llc_node[FLOW_MAX_LLCS];
-u64 flow_dhq_live[FLOW_MAX_CPUS];
+u64 flow_dhqs[FLOW_MAX_CPUS];
 u64 flow_fwd_pid[FLOW_MAX_LLCS + 1];
 s64 flow_fwd_vtime[FLOW_MAX_LLCS + 1];
 s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];

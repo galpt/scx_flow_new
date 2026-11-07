@@ -3,12 +3,13 @@
  * Placement for the flow scheduler.
  *
  * The pick first tries the previous CPU when it is allowed and
- * online. Otherwise it scans the seed view once and prefers the
- * same LLC, then the same node, then a distant CPU. Ties keep the
- * first CPU in fixed order. Within the same LLC the scan favors
- * the same cluster, with the tie favor kept even when threads
- * share cores and only the fast pick gated on single threads.
- * A task that already ran favors its first CPU
+ * online. Otherwise it scans once and prefers the same LLC, then
+ * the same node, then a distant CPU. Cache and node identity come
+ * from the upstream topology tree with cluster hints from the seed
+ * view. Ties keep the first CPU in fixed order. Within the same LLC
+ * the scan favors the same cluster, with the tie favor kept even
+ * when threads share cores and only the fast pick gated on single
+ * threads. A task that already ran favors its first CPU
  * on ties. When no hint is usable, CPUs on the primary node are
  * preferred and a miss falls back to the scan. No sibling probe
  * runs and each CPU stands single with fail closed choice. Every
@@ -26,6 +27,7 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "lat.bpf.h"
+#include <lib/sdt_alloc.h>
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
 	if (!p)
@@ -48,13 +50,11 @@ static __always_inline bool flow_cpu_allowed(s32 cpu, struct task_struct *p)
 }
 static __always_inline bool flow_cpu_live(u32 cpu)
 {
-	u64 n;
 	if (!flow_cpu_ok(cpu))
 		return false;
-	n = READ_ONCE(flow_nr_cpus);
-	if (n && (u64)cpu >= n)
+	if (!topo_all)
 		return false;
-	return true;
+	return topo_contains(topo_all, cpu) ? true : false;
 }
 static __always_inline s32 flow_first_allowed(struct task_struct *p)
 {
@@ -80,12 +80,34 @@ static __always_inline bool flow_is_primary(u32 node)
 {
 	return node == 0;
 }
+static __always_inline int flow_hint_llc(s32 hint)
+{
+	int v;
+	if (hint < 0 || !flow_cpu_ok((u32)hint))
+		return -1;
+	if (!topo_all)
+		return -1;
+	v = topo_cpu_to_llc_id((u32)hint);
+	if (v < 0 || !flow_llc_ok((u32)v))
+		return -1;
+	return v;
+}
+static __always_inline u32 flow_cpu_ccx(u32 cpu)
+{
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
+		return 0;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return 0;
+	return READ_ONCE(cc->ccx_id);
+}
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 hint = prev_cpu;
 	s32 tgt;
-	u32 hint_llc = 0;
-	u32 hint_node = 0;
+	int hint_llc = -1;
 	u32 hint_ccx = 0;
 	bool have_hint_topo = false;
 	s32 best = -1;
@@ -97,11 +119,14 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	bool use_ccx;
 	bool smt_on;
 	u32 c;
-	u64 nr = READ_ONCE(flow_nr_cpus);
+	struct topo_iter hint_iter;
+	topo_ptr hint_node = 0;
+	topo_ptr walk = 0;
 	struct flow_task_ctx *t;
 	(void)wake_flags;
 	if (!p)
 		return hint;
+	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (t) {
 		int pinned = flow_is_pinned(p) ? 1 : 0;
@@ -120,56 +145,48 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	tgt = flow_constrained_target(hint, p);
 	if (tgt >= 0)
 		return tgt;
-	{
-		u32 key;
-		struct flow_cpu_ctx *cc;
-		if (hint >= 0 && flow_cpu_ok((u32)hint)) {
-			key = (u32)hint;
-			cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-			if (cc) {
-				u32 l = READ_ONCE(cc->llc_id);
-				u32 n = READ_ONCE(cc->node_id);
-				if (flow_llc_ok(l) && flow_node_ok(n)) {
-					hint_llc = l;
-					hint_node = n;
-					hint_ccx = READ_ONCE(cc->ccx_id);
-					have_hint_topo = true;
-				}
+	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
+	    topo_contains(topo_all, (u32)hint)) {
+		hint_llc = flow_hint_llc(hint);
+		hint_ccx = flow_cpu_ccx((u32)hint);
+		TOPO_FOR_EACH_NODE(&hint_iter, walk) {
+			if (topo_contains(walk, (u32)hint)) {
+				hint_node = walk;
+				break;
 			}
 		}
+		if (hint_llc >= 0 || hint_node)
+			have_hint_topo = true;
 	}
 	bpf_for(c, 0, FLOW_MAX_CPUS) {
-		struct flow_cpu_ctx *cc;
-		u32 key = c;
 		u32 l;
-		u32 n;
 		u32 cx;
 		int score;
-		if (nr && (u64)c >= nr)
-			break;
+		int vllc;
+		bool same_node = false;
 		if (!flow_cpu_live(c))
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
 			continue;
-		cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-		if (!cc)
+		vllc = topo_cpu_to_llc_id(c);
+		if (vllc < 0 || !flow_llc_ok((u32)vllc))
 			continue;
-		l = READ_ONCE(cc->llc_id);
-		n = READ_ONCE(cc->node_id);
-		cx = READ_ONCE(cc->ccx_id);
-		if (!flow_llc_ok(l))
-			continue;
+		l = (u32)vllc;
+		cx = flow_cpu_ccx(c);
+		if (hint_node && topo_contains(hint_node, c))
+			same_node = true;
 		score = 3;
 		if (have_hint_topo) {
-			if (l == hint_llc)
+			if (hint_llc >= 0 && l == (u32)hint_llc)
 				score = 0;
-			else if (n == hint_node)
+			else if (same_node)
 				score = 1;
 			else
 				score = 2;
-			if (!smt_on && use_ccx && l == hint_llc && cx == hint_ccx)
+			if (!smt_on && use_ccx && hint_llc >= 0 &&
+			    l == (u32)hint_llc && cx == hint_ccx)
 				score = -1;
-		} else if (flow_is_primary(n)) {
+		} else if (flow_is_primary(0)) {
 			score = 2;
 		}
 		if (score < best_score) {
