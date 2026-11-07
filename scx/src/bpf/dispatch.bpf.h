@@ -8,12 +8,13 @@
  * order. A head that cannot run here
  * sends one wake to its owner and stays queued. Remote moves count
  * on the thief and drop the gauge on the source. Running records
- * the task snapshot and counts the enqueue to run wait. Dispatch
+ * the task snapshot with the slack at running time and counts the
+ * enqueue to run wait. Dispatch
  * counts the enqueue to dispatch wait on the moving CPU. Stopping
- * folds burnt time into the burst estimate through the quarter blend
+ * burns the used time from remain down to a floor
  * and charges use into the stored time with the same value
- * mirrored beside it. The tick charges the burnt delta and folds
- * it into the estimate, then moves the remaining slice forward
+ * mirrored beside it. The tick charges the burnt delta and burns
+ * it from remain, then moves the remaining slice forward
  * with the same value mirrored beside it, so stopping charges
  * only the tail past the last tick. Frequency stays with the
  * governor and never steers placement. Only a fixed hint that
@@ -34,7 +35,7 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "sjf.bpf.h"
+#include "lst.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
@@ -260,6 +261,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->llc_id = llc;
 	rs->prio = t->prio;
 	rs->reserved = 0;
+	rs->slack = flow_lst_slack(READ_ONCE(t->deadline_ns), scx_bpf_now(),
+				   READ_ONCE(t->remain_ns));
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
@@ -282,7 +285,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 remain;
 	u64 len;
 	u64 used;
-	u64 est;
+	u64 rem;
 	(void)runnable;
 	if (task_cpu < 0)
 		return;
@@ -303,9 +306,18 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		used = 0;
 	else
 		used = len - remain;
-	est = flow_sjf_next(t->burst_ns, used ? used : (u64)FLOW_SJF_FLOOR_NS);
-	/* Pinned tasks keep the same fold with no separate path. */
-	t->burst_ns = est;
+	rem = READ_ONCE(t->remain_ns);
+	if (!rem)
+		rem = (u64)FLOW_LST_INIT_NS;
+	rem = flow_lst_clamp_rem(rem);
+	if (used) {
+		if (used >= rem)
+			rem = (u64)FLOW_LST_FLOOR_NS;
+		else
+			rem -= used;
+		rem = flow_lst_clamp_rem(rem);
+	}
+	t->remain_ns = rem;
 	/* Use pays here, scaled by the share with saturation. The tick
 	 * already moved the remaining slice forward, so this charges
 	 * only the tail past the last tick. */
@@ -340,16 +352,24 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->slice_rem = cur;
 		return;
 	}
-	/* Charge the burnt delta and fold it into the estimate, then move
+	/* Charge the burnt delta and burn it from remain, then move
 	 * the remaining slice forward, so stopping later charges only
 	 * the tail past this tick. */
 	last = READ_ONCE(t->slice_rem);
 	if (cur && cur < last) {
 		u64 delta = last - cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
+		u64 rem = READ_ONCE(t->remain_ns);
 		s64 nv = flow_fair_charge(t->vtime, delta, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
-		t->burst_ns = flow_sjf_next(t->burst_ns, delta);
+		if (!rem)
+			rem = (u64)FLOW_LST_INIT_NS;
+		rem = flow_lst_clamp_rem(rem);
+		if (delta >= rem)
+			rem = (u64)FLOW_LST_FLOOR_NS;
+		else
+			rem -= delta;
+		t->remain_ns = flow_lst_clamp_rem(rem);
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 	}
@@ -425,10 +445,11 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->llc_id = 0;
 	t->flags = 0;
 	t->prio = (u32)FLOW_PRIO_NORM;
-	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
+	t->remain_ns = (u64)FLOW_LST_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	t->home_cpu = -1;
+	t->deadline_ns = 0;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -449,10 +470,11 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->prio = (u32)FLOW_PRIO_NORM;
 	t->cgrp_id = cgid;
 	t->cg_weight = flow_cgroup_lookup(cgid);
-	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
+	t->remain_ns = (u64)FLOW_LST_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	t->home_cpu = -1;
+	t->deadline_ns = 0;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }

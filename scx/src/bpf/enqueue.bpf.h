@@ -9,13 +9,16 @@
  * when allowed and the LLC queue otherwise with a short slice. Tasks
  * that have no usable CPU join the fallback queue. The queue key
  * is the stored virtual time. Shared inserts move past the per LLC
- * floor. Queue choice uses remaining time from the aged estimate
- * minus the burnt part with saturation at the floor, lifted by
- * waiting time against scaled bounds. The
+ * floor. Queue choice uses slack from deadline minus now minus
+ * remain with saturation in fixed bands. The
  * charge scales with the share and the extra amount is fixed. Each
- * enqueue sends at most one idle wake. A wake goes only to an idle
- * target, else it counts a skip with no wake. The kernel idle flag
- * decides the wake. Local inserts are not
+ * shared enqueue first checks the running slack on the target for a
+ * gap win and kicks for preempt on a win, else it sends at most one
+ * idle wake. A wake goes only to an idle target, else it counts a
+ * skip with no wake. The kernel idle flag decides the idle wake.
+ * A preempt kick bypasses the hold and counts preempt on both the
+ * kick and laxity counters. Preempts stay in the same LLC with an
+ * allowed live target. Local inserts are not
  * counted in the shared gauge. Shared and fallback inserts count
  * the gauge, and fallback inserts also count fallback. Dequeue drops
  * the gauge on cancel. Masks are tested again before each wake, so
@@ -37,7 +40,7 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "sjf.bpf.h"
+#include "lst.bpf.h"
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include "lat.bpf.h"
@@ -138,6 +141,35 @@ static __always_inline void flow_kick_checked(s32 tgt, struct task_struct *p, u3
 	}
 	flow_kick_idle_only(tgt, p, llc);
 }
+static __always_inline void flow_kick_lst(s32 tgt, struct task_struct *p, u32 llc, s64 new_slack)
+{
+	struct flow_running_state *rs;
+	u64 rgen;
+	u32 rllc;
+	s64 run_slack;
+	s64 need;
+	const s64 vmax = (s64)0x7fffffffffffffffLL;
+	if (tgt >= 0 && p && flow_cpu_ok((u32)tgt) && flow_cpu_allowed(tgt, p) &&
+	    flow_cpu_live((u32)tgt)) {
+		rs = &flow_running_state[(u32)tgt];
+		rgen = READ_ONCE(rs->gen);
+		rllc = READ_ONCE(rs->llc_id);
+		if (rgen && flow_llc_ok(rllc) && rllc == llc) {
+			run_slack = READ_ONCE(rs->slack);
+			if (new_slack > vmax - (s64)FLOW_LST_PREEMPT_GAP_NS)
+				need = vmax;
+			else
+				need = new_slack + (s64)FLOW_LST_PREEMPT_GAP_NS;
+			if (need < run_slack) {
+				scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
+				flow_stat_inc(llc, 6);
+				flow_stat_inc(llc, 17);
+				return;
+			}
+		}
+	}
+	flow_kick_checked(tgt, p, llc);
+}
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 task_cpu;
@@ -151,6 +183,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 prio = (u32)FLOW_PRIO_NORM;
 	u32 w = (u32)FLOW_CGROUP_WEIGHT_DFLT;
 	u64 now;
+	s64 new_slack = 0;
 	bool pinned = false;
 	struct flow_task_ctx *t;
 	u32 old_flags;
@@ -201,9 +234,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		goto insert_only;
 	}
 	/* CREATE zero-inits new entries, so repair home to unset. A zero
-	 * burst marks a fresh entry; running then records the first CPU
+	 * remain marks a fresh entry; running then records the first CPU
 	 * instead of sticking to the zero CPU. */
-	if (!READ_ONCE(t->burst_ns) && READ_ONCE(t->home_cpu) == 0)
+	if (!READ_ONCE(t->remain_ns) && READ_ONCE(t->home_cpu) == 0)
 		t->home_cpu = -1;
 	/* Local placements run before ownership is taken. A task on a
 	 * local queue is not counted in the shared gauge, so it leaves
@@ -275,22 +308,30 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	now = scx_bpf_now();
 	w = flow_cgroup_lookup(t->cgrp_id);
 	{
-		u64 aged = flow_sjf_age(t->burst_ns ? t->burst_ns : (u64)FLOW_SJF_INIT_NS, t->enq_ns, now, llc);
-		u64 est = aged;
-		u64 old_rem = t->slice_rem;
-		u64 used_last = 0;
-		u64 rem;
-		if (!t->burst_ns)
-			est = (u64)FLOW_SJF_INIT_NS;
-		if (t->gen == 0)
-			used_last = 0;
-		else if (old_rem < (u64)FLOW_SLICE_MIN_NS)
-			used_last = (u64)FLOW_SLICE_MIN_NS - old_rem;
-		rem = flow_sjf_remain(aged, used_last);
-		prio = flow_sjf_prio(rem, t->enq_ns, now);
+		u64 rem = READ_ONCE(t->remain_ns);
+		u64 dl = READ_ONCE(t->deadline_ns);
+		s64 slack;
+		if (!rem)
+			rem = (u64)FLOW_LST_INIT_NS;
+		rem = flow_lst_clamp_rem(rem);
+		if (!dl) {
+			dl = now + (u64)FLOW_LST_REL_NS;
+			if (dl < now)
+				dl = ~0ULL;
+		} else if (now && dl <= now) {
+			flow_stat_inc(llc, 18);
+			flow_stat_inc(llc, 12);
+			dl = now + (u64)FLOW_LST_REL_NS;
+			if (dl < now)
+				dl = ~0ULL;
+		}
+		slack = flow_lst_slack(dl, now, rem);
+		prio = flow_lst_prio(slack);
 		if (!flow_prio_ok(prio))
 			prio = (u32)FLOW_PRIO_NORM;
-		t->burst_ns = est;
+		t->remain_ns = rem;
+		t->deadline_ns = dl;
+		new_slack = slack;
 		if (prio == (u32)FLOW_PRIO_LAT)
 			flow_stat_inc(llc, 15);
 		else
@@ -357,7 +398,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (no_cpu) {
 			return;
 		}
-		flow_kick_checked(tgt, p, llc);
+		flow_kick_lst(tgt, p, llc, new_slack);
 		return;
 	}
 insert_only:

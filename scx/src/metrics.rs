@@ -62,7 +62,7 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     }
     if val.len() >= 104 {
         let v = u64::from_ne_bytes(val[96..104].try_into().unwrap_or([0u8; 8]));
-        out.hog_escape = out.hog_escape.wrapping_add(v);
+        out.lst_escape = out.lst_escape.wrapping_add(v);
     }
     if val.len() >= 112 {
         let v = u64::from_ne_bytes(val[104..112].try_into().unwrap_or([0u8; 8]));
@@ -74,19 +74,19 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     }
     if val.len() >= 128 {
         let v = u64::from_ne_bytes(val[120..128].try_into().unwrap_or([0u8; 8]));
-        out.lat_boost = out.lat_boost.wrapping_add(v);
+        out.lst_urgent = out.lst_urgent.wrapping_add(v);
     }
     if val.len() >= 136 {
         let v = u64::from_ne_bytes(val[128..136].try_into().unwrap_or([0u8; 8]));
-        out.hog_hold = out.hog_hold.wrapping_add(v);
+        out.lst_hold = out.lst_hold.wrapping_add(v);
     }
     if val.len() >= 144 {
         let v = u64::from_ne_bytes(val[136..144].try_into().unwrap_or([0u8; 8]));
-        out.lat_preempt = out.lat_preempt.wrapping_add(v);
+        out.lst_preempt = out.lst_preempt.wrapping_add(v);
     }
     if val.len() >= 152 {
         let v = u64::from_ne_bytes(val[144..152].try_into().unwrap_or([0u8; 8]));
-        out.age_rescue = out.age_rescue.wrapping_add(v);
+        out.lst_overdue = out.lst_overdue.wrapping_add(v);
     }
     if val.len() >= 160 {
         let v = u64::from_ne_bytes(val[152..160].try_into().unwrap_or([0u8; 8]));

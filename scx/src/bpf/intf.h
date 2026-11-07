@@ -8,11 +8,16 @@
  * read from the cgroup map on each enqueue. A task pays for the
  * time it burns, scaled by its share, with a small extra amount
  * added per quantum. Fresh virtual times move past a per LLC floor
- * so two tasks never share the same value. A burst estimate tracks
- * recent run time and selects the queue, with short estimates first
- * and long estimates last. Slices hold one fixed quantum. Tasks
- * that wait long have their estimate halved once with a rescue
- * counted. Wait history keeps per CPU queue waits by
+ * so two tasks never share the same value. Remain tracks the time
+ * left for the current deadline with a fresh value of one slice
+ * clamped to a floor. Deadline adds a fixed span to the enqueue
+ * time and is kept until it passes, then a fresh span is added and
+ * an overdue count grows with an escape count for the fresh span.
+ * Slack is deadline minus now minus remain with saturation. Small
+ * slack takes the first queue with larger slack placed further back
+ * in fixed bands. Slices hold one fixed quantum. A shared enqueue
+ * with slack ahead of the running slack by a gap kicks for preempt
+ * with idle wakes otherwise. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
@@ -59,15 +64,12 @@ enum flow_consts {
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
-	FLOW_SJF_INIT_NS = 1000000ULL,
-	FLOW_SJF_LAT_NS = 500000ULL,
-	FLOW_SJF_BATCH_NS = 20000000ULL,
-	FLOW_SJF_FLOOR_NS = 5000ULL,
-	FLOW_SJF_CAP_NS = 1000000000ULL,
-	FLOW_AGING_NS = 100000000ULL,
-	FLOW_STARVE_NS = 200000000ULL,
-	FLOW_HRRN_NORM_MULT = 1ULL,
-	FLOW_HRRN_LAT_MULT = 3ULL,
+	FLOW_LST_REL_NS = 20000000ULL,
+	FLOW_LST_INIT_NS = 1000000ULL,
+	FLOW_LST_FLOOR_NS = 5000ULL,
+	FLOW_LST_PREEMPT_GAP_NS = 1000000ULL,
+	FLOW_LST_NORM_NS = 1000000ULL,
+	FLOW_LST_BATCH_NS = 10000000ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_LLC_BASE = 0x6000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
@@ -88,11 +90,12 @@ enum flow_consts {
 /* Per task state. Vtime is charged service. Slice holds the time
  * left in the current quantum. Gen identifies the running instance.
  * Llc records the last enqueue target. Flags holds the queued bit.
- * Prio holds the selected queue. Burst holds the recent run time
- * estimate. Enq holds the last enqueue time. Cgrp holds the group
- * id and share hint. A zero id means no group was recorded. Lat
- * holds the wait kind for history. Home holds the first CPU that
- * ran the task with minus one when unset. */
+ * Prio holds the selected queue. Remain holds the time left for
+ * the current deadline. Enq holds the last enqueue time. Cgrp holds
+ * the group id and share hint. A zero id means no group was recorded.
+ * Lat holds the wait kind for history. Home holds the first CPU that
+ * ran the task with minus one when unset. Deadline holds the time by
+ * which remain should run with zero meaning unset. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -102,10 +105,11 @@ struct flow_task_ctx {
 	u32 prio;
 	u32 cg_weight;
 	u64 cgrp_id;
-	u64 burst_ns;
+	u64 remain_ns;
 	u64 enq_ns;
 	u32 lat_kind;
 	s32 home_cpu;
+	u64 deadline_ns;
 };
 /* Wait history for one CPU. Cells hold run waits then dispatch
  * waits by kind times bucket. The length covers two halves of
@@ -114,7 +118,8 @@ struct flow_lat_hist {
 	u64 cells[FLOW_HIST_LEN];
 };
 /* Per CPU running view. Gen counts runs. Reserved stays
- * zero. Prio mirrors the running task. */
+ * zero. Prio mirrors the running task. Slack holds the task slack
+ * at running time for gap checks. */
 struct flow_running_state {
 	s64 vtime;
 	u64 slice_rem;
@@ -123,6 +128,7 @@ struct flow_running_state {
 	u32 prio;
 	u32 reserved;
 	u32 pad;
+	s64 slack;
 };
 /* Per CPU seed from userspace. Holds the CPU id plus the LLC plus
  * node plus cluster indices assigned at startup. */
@@ -137,14 +143,14 @@ struct flow_cpu_ctx {
  * moves to a local queue. Fallback counts fallback inserts. Steal
  * counts remote moves, with a split count kept on the thief.
  * Duplicate counts requeues dropped while already queued. Kick
- * counts idle and skipped wakes with the preempt count staying
- * zero. Overrun counts full
+ * counts preempt plus idle and skipped wakes. Overrun counts full
  * slice burns. Penalty and extra record the charge for those burns,
  * and total records the quanta granted. Blocked counts stops that
- * leave the task runnable. Escape stays zero. Orphan
+ * leave the task runnable. Escape counts fresh spans after an
+ * overdue deadline. Orphan
  * counts mask change kicks. Forward counts heads passed to their
- * owner. Boost and hold describe the queue choice. The latency win
- * count stays zero. Rescue counts aged waits. */
+ * owner. Urgent and hold describe the queue choice. Preempt counts
+ * gap wins on enqueue. Overdue counts deadlines seen past now. */
 struct flow_llc_stats {
 	u64 queued;
 	u64 dispatched;
@@ -158,13 +164,13 @@ struct flow_llc_stats {
 	u64 overrun;
 	u64 domino_penalty;
 	u64 blocked;
-	u64 hog_escape;
+	u64 lst_escape;
 	u64 orphan_kick;
 	u64 hol_forward;
-	u64 lat_boost;
-	u64 hog_hold;
-	u64 lat_preempt;
-	u64 age_rescue;
+	u64 lst_urgent;
+	u64 lst_hold;
+	u64 lst_preempt;
+	u64 lst_overdue;
 	u64 extra_award;
 	u64 total_quanta;
 };

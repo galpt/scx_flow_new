@@ -4,7 +4,8 @@
  *
  * Thin glue that pulls in nine area headers in order and declares
  * the ops table. Each LLC has four queues and there is one fallback
- * queue. Ties leave in insertion order. Tables are written once, so
+ * queue. Ties leave in insertion order. Laxity sets the queue with
+ * gap preempts for shared tasks. Tables are written once, so
  * a CPU that arrives late needs a restart to be seen. Settings live
  * in the shared header.
  *
@@ -19,7 +20,7 @@ UEI_DEFINE(uei);
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "sjf.bpf.h"
+#include "lst.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include "select.bpf.h"

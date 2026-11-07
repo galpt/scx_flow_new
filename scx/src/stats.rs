@@ -59,27 +59,27 @@ pub struct Metrics {
     #[stat(desc = "Stops that leave the task still runnable")]
     #[serde(default)]
     pub blocked: u64,
-    #[stat(desc = "Streak preempts that end a hold")]
+    #[stat(desc = "Fresh spans after an overdue deadline")]
     #[serde(default)]
-    pub hog_escape: u64,
+    pub lst_escape: u64,
     #[stat(desc = "Mask change kicks for queued tasks")]
     #[serde(default)]
     pub orphan_kick: u64,
     #[stat(desc = "Forwards where the head cannot run here")]
     #[serde(default)]
     pub hol_forward: u64,
-    #[stat(desc = "Enqueues that take the latency key")]
+    #[stat(desc = "Enqueues with urgent slack")]
     #[serde(default)]
-    pub lat_boost: u64,
-    #[stat(desc = "Enqueues that keep the raw key")]
+    pub lst_urgent: u64,
+    #[stat(desc = "Enqueues with roomy slack")]
     #[serde(default)]
-    pub hog_hold: u64,
-    #[stat(desc = "Preempts won by a latency task")]
+    pub lst_hold: u64,
+    #[stat(desc = "Gap preempts won on enqueue")]
     #[serde(default)]
-    pub lat_preempt: u64,
-    #[stat(desc = "Aged waits that lower the estimate")]
+    pub lst_preempt: u64,
+    #[stat(desc = "Deadlines seen past now")]
     #[serde(default)]
-    pub age_rescue: u64,
+    pub lst_overdue: u64,
     #[stat(desc = "Extra quanta beyond the first")]
     #[serde(default)]
     pub extra_award: u64,
@@ -92,7 +92,7 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_duplicate={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} hog_escape={} orphan_kick={} hol_forward={} lat_boost={} hog_hold={} lat_preempt={} age_rescue={} extra_award={} total_quanta={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_duplicate={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} lst_escape={} orphan_kick={} hol_forward={} lst_urgent={} lst_hold={} lst_preempt={} lst_overdue={} extra_award={} total_quanta={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
@@ -106,13 +106,13 @@ impl Metrics {
             self.overrun,
             self.domino_penalty,
             self.blocked,
-            self.hog_escape,
+            self.lst_escape,
             self.orphan_kick,
             self.hol_forward,
-            self.lat_boost,
-            self.hog_hold,
-            self.lat_preempt,
-            self.age_rescue,
+            self.lst_urgent,
+            self.lst_hold,
+            self.lst_preempt,
+            self.lst_overdue,
             self.extra_award,
             self.total_quanta,
         )?;
@@ -141,13 +141,13 @@ impl Metrics {
             overrun: self.overrun.wrapping_sub(rhs.overrun),
             domino_penalty: self.domino_penalty.wrapping_sub(rhs.domino_penalty),
             blocked: self.blocked.wrapping_sub(rhs.blocked),
-            hog_escape: self.hog_escape.wrapping_sub(rhs.hog_escape),
+            lst_escape: self.lst_escape.wrapping_sub(rhs.lst_escape),
             orphan_kick: self.orphan_kick.wrapping_sub(rhs.orphan_kick),
             hol_forward: self.hol_forward.wrapping_sub(rhs.hol_forward),
-            lat_boost: self.lat_boost.wrapping_sub(rhs.lat_boost),
-            hog_hold: self.hog_hold.wrapping_sub(rhs.hog_hold),
-            lat_preempt: self.lat_preempt.wrapping_sub(rhs.lat_preempt),
-            age_rescue: self.age_rescue.wrapping_sub(rhs.age_rescue),
+            lst_urgent: self.lst_urgent.wrapping_sub(rhs.lst_urgent),
+            lst_hold: self.lst_hold.wrapping_sub(rhs.lst_hold),
+            lst_preempt: self.lst_preempt.wrapping_sub(rhs.lst_preempt),
+            lst_overdue: self.lst_overdue.wrapping_sub(rhs.lst_overdue),
             extra_award: self.extra_award.wrapping_sub(rhs.extra_award),
             total_quanta: self.total_quanta.wrapping_sub(rhs.total_quanta),
         }
@@ -310,7 +310,7 @@ mod tests {
         fold_llc_val(&mut short, &buf152);
         assert_eq!(short.extra_award, 0);
         assert_eq!(short.total_quanta, 0);
-        assert_eq!(short.age_rescue, 1);
+        assert_eq!(short.lst_overdue, 1);
 
         let mut extra_only = Metrics::default();
         let mut buf160 = [0u8; 160];
