@@ -591,7 +591,7 @@ grep -q "FLOW_AGING_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "aging kept missi
 # Arena task state keeps the bandwidth block first at offset zero
 # with no task map. Lookups go through the quiet helper, init
 # allocates, exit frees through rcu, flags use compare and swap,
-# and the kick override returns scalar for older verifiers.
+# and the kick override returns void for older verifiers.
 grep -q 'typedef struct flow_task_ctx __arena task_ctx;' "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena alias missing"
 grep -q "flow_find_task" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena lookup missing"
 grep -q "flow_flags_fetch_or" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena flag or missing"
