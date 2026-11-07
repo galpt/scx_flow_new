@@ -58,6 +58,9 @@ jobs:
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
+          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          test -L /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
       - name: Sync overlay lockfile
         working-directory: /tmp/opencode/scx
@@ -107,6 +110,9 @@ jobs:
           rsync -a --delete --exclude /target/ scx/ /tmp/opencode/scx/scheds/experimental/scx_flow/
           rm -f /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
           ln -s ../../../LICENSE /tmp/opencode/scx/scheds/experimental/scx_flow/LICENSE
+          rm -rf /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          ln -s ../../../../../lib /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
+          test -L /tmp/opencode/scx/scheds/experimental/scx_flow/src/bpf/lib
           grep -q '"scheds/experimental/scx_flow"' /tmp/opencode/scx/Cargo.toml
       - name: Sync overlay lockfile
         working-directory: /tmp/opencode/scx
