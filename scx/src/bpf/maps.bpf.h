@@ -10,7 +10,8 @@
  * running view, the per LLC floor, the per LLC node, the
  * forward coalescing state, and four switches for cluster
  * choice plus distant wake hold plus thread shape plus home
- * stick. The CPU plus LLC plus wait tables are written once,
+ * stick. Thread shape defaults on so a missed seed stays
+ * conservative. The CPU plus LLC plus wait tables are written once,
  * so a CPU that arrives late needs a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -52,7 +53,7 @@ volatile u64 flow_nr_cpus;
 volatile u64 flow_nr_llcs;
 volatile u64 flow_ccx_prefer;
 volatile u64 flow_wait_allow;
-volatile u64 flow_smt_enabled;
+volatile u64 flow_smt_enabled = 1;
 volatile u64 flow_home_stick;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];

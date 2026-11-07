@@ -472,6 +472,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -E2BIG;
 	}
 	flow_nr_cpus = n;
+	/* Thread shape keeps the userspace seed with the source default on miss. */
 	flow_ccx_prefer = 1;
 	flow_wait_allow = 1;
 	flow_home_stick = 1;

@@ -15,6 +15,10 @@ use scx_utils::Topology;
 use crate::BpfSkel;
 
 /// Cores grouped per cluster. Fixed width keeps the seed stable.
+/// Width four is a heuristic: real clusters of eight split in two,
+/// which keeps locality without ever merging distant cores. The
+/// topology view has no cluster id, so the seed sorts cores by id
+/// within each LLC and splits every four for a stable map.
 const GROUP_WIDTH: usize = 4;
 
 /// True when any core holds more than one CPU.
@@ -35,7 +39,8 @@ fn chunk_index(pos: usize) -> usize {
 
 /// Map each CPU to a cluster id inside its LLC.
 /// Cores sort by id within each LLC and split every four.
-/// Ids count up across LLCs in LLC order.
+/// Ids count up across LLCs in LLC order. Splits stay safe: a
+/// larger cluster becomes two neighbors, never a distant merge.
 fn cpu_ccx(topo: &Topology, llc_ids: &[usize]) -> BTreeMap<usize, u32> {
     let mut cores_per_llc: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
     for cpu in topo.all_cpus.values() {

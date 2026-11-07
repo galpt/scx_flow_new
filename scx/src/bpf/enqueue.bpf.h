@@ -24,6 +24,9 @@
  * from init args. Enqueue finalizes the wait kind with the full
  * path and stamps the wait start with the full clock with zero
  * stored as one. Distant wakes hold when the target drains fast.
+ * Long waits suppress one hold then decay, and holds count a skip.
+ * New storage repairs home to unset for the first run. Holds stay
+ * distant only with the same cluster excluded.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -116,6 +119,14 @@ static __always_inline bool flow_wait_hold(s32 tgt, struct task_struct *p)
 	l7 = READ_ONCE(h->cells[base + 7]);
 	if ((s0 || s1) && !l6 && !l7)
 		return true;
+	/* Longs suppress one hold then decay, so one old long never
+	 * blocks holds forever. Holds count a skip for observability. */
+	if (l6 || l7) {
+		__sync_fetch_and_and(&h->cells[base], 0ULL);
+		__sync_fetch_and_and(&h->cells[base + 1], 0ULL);
+		__sync_fetch_and_and(&h->cells[base + 6], 0ULL);
+		__sync_fetch_and_and(&h->cells[base + 7], 0ULL);
+	}
 	return false;
 }
 static __always_inline void flow_kick_checked(s32 tgt, struct task_struct *p, u32 llc)
@@ -188,6 +199,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 		goto insert_only;
 	}
+	/* CREATE zero-inits new entries, so repair home to unset. A zero
+	 * burst marks a fresh entry; running then records the first CPU
+	 * instead of sticking to the zero CPU. */
+	if (!READ_ONCE(t->burst_ns) && READ_ONCE(t->home_cpu) == 0)
+		t->home_cpu = -1;
 	/* Local placements run before ownership is taken. A task on a
 	 * local queue is not counted in the shared gauge, so it leaves
 	 * without the queued bit. Shared and fallback inserts take the

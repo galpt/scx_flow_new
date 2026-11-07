@@ -55,9 +55,10 @@ impl<'a> Scheduler<'a> {
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
         {
+            // Thread shape defaults on in BPF so a missed seed stays conservative.
             let smt_on = crate::topology::detect_smt().unwrap_or(true);
-            match skel.maps.bss_data.as_mut() {
-                Some(bss) => bss.flow_smt_enabled = if smt_on { 1 } else { 0 },
+            match skel.maps.data_data.as_mut() {
+                Some(data) => data.flow_smt_enabled = if smt_on { 1 } else { 0 },
                 None => warn!("smt seed missed, using kernel default"),
             }
         }

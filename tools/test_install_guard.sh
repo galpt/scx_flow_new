@@ -553,4 +553,29 @@ grep -q "scx_bpf_task_cgroup(p)" "${DISP_HDR}" || fail "task cgroup compat missi
 grep -q "scx_bpf_task_set_dsq_vtime" "${DISP_HDR}" || fail "dsq vtime setter missing"
 grep -q "scx_bpf_now()" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "compat clock missing"
 
+# Fresh storage repairs home to unset so running records the first CPU.
+# A zero burst with a zero home marks a fresh entry that would stick to CPU0.
+grep -q "home_cpu = -1" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "home repair missing"
+grep -q "burst_ns.*home_cpu" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "home repair guard missing"
+
+# Thread shape defaults on so a missed seed stays conservative.
+# Userspace seeds the data section before load with the kernel default on miss.
+grep -q "flow_smt_enabled = 1" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "smt default missing"
+grep -q "data_data" "${SRC_DIR}/src/run.rs" || fail "smt seed drifted"
+grep -q "flow_smt_enabled" "${SRC_DIR}/src/run.rs" || fail "smt seed drifted"
+if grep -q "bss_data.*flow_smt_enabled" "${SRC_DIR}/src/run.rs" 2>/dev/null; then
+    fail "smt seed section drifted"
+fi
+
+# Distant holds decay after one long so a single old long never blocks holds.
+# Holds count a skip with the same cluster excluded and longs bounding.
+grep -q "fetch_and_and.*cells" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "hold decay missing"
+grep -q "suppress one hold then decay" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "hold decay prose missing"
+
+# Cluster width stays heuristic with the tie favor kept on shared threads.
+# Width four splits larger clusters without ever merging distant cores,
+# and only the fast pick is gated on single threads.
+grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
+grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
+
 echo "guard tests passed"

@@ -6,7 +6,9 @@
  * online. Otherwise it scans the seed view once and prefers the
  * same LLC, then the same node, then a distant CPU. Ties keep the
  * first CPU in fixed order. Within the same LLC the scan favors
- * the same cluster. A task that already ran favors its first CPU
+ * the same cluster, with the tie favor kept even when threads
+ * share cores and only the fast pick gated on single threads.
+ * A task that already ran favors its first CPU
  * on ties. When no hint is usable, CPUs on the primary node are
  * preferred and a miss falls back to the scan. No sibling probe
  * runs and each CPU stands single with fail closed choice. Every
@@ -180,6 +182,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			if (score == 0 && (!use_ccx || best_same))
 				break;
 		} else if (score == best_score) {
+			/* Tie favor stays even with threads on; only the fast pick is gated. */
 			bool cur_same = have_hint_topo && use_ccx && cx == hint_ccx;
 			bool cur_home = use_home && (s32)c == home;
 			if (cur_same && !best_same) {
