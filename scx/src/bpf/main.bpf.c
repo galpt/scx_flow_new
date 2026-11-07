@@ -54,3 +54,18 @@ SCX_OPS_DEFINE(flow_ops,
 	       .name			= "flow");
 int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx);
 REGISTER_SCX_CGROUP_BW_ENQUEUE_CB(flow_enqueue_cb);
+/* Wake a CPU after bandwidth replenishment. The timer calls here
+ * when the built-in idle knob stays off, so the override claims an
+ * idle CPU through the kernel picker and kicks it for dispatch. */
+void scx_cgroup_bw_kick_idle_cb(void)
+{
+	const struct cpumask *online;
+	s32 cpu;
+	online = scx_bpf_get_online_cpumask();
+	cpu = scx_bpf_pick_idle_cpu(online, SCX_PICK_IDLE_CORE);
+	if (cpu == -EBUSY)
+		cpu = scx_bpf_pick_idle_cpu(online, 0);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	scx_bpf_put_cpumask(online);
+}

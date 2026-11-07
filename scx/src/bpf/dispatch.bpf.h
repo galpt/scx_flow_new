@@ -77,7 +77,7 @@ static __always_inline int flow_try_move(u32 cpu, u32 llc, u32 victim, u64 dsq, 
 		return 0;
 	}
 	if (scx_bpf_dsq_move_to_local(dsq, 0)) {
-		struct flow_task_ctx *lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+		task_ctx *lt = flow_find_task(ph);
 		if (lt)
 			flow_lat_observe(cpu, lt, scx_bpf_now(), 0);
 		flow_stat_inc(llc, 1);
@@ -107,6 +107,7 @@ static __always_inline int flow_drain_llc(u32 cpu, u32 llc, u32 victim, int stea
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
+	scx_arena_subprog_init();
 	u32 c;
 	u32 llc = 0;
 	u32 node = 0;
@@ -173,10 +174,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			if (!flow_cpu_allowed((s32)c, ph)) {
 				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
 			} else {
-				struct flow_task_ctx *pt;
+				task_ctx *pt;
 				u32 vllc = llc;
 				int have_owner = 0;
-				pt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+				pt = flow_find_task(ph);
 				if (pt) {
 					u32 q = READ_ONCE(pt->llc_id);
 					if (flow_llc_ok(q)) {
@@ -213,9 +214,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 }
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
+	scx_arena_subprog_init();
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	struct flow_cpu_ctx *cc;
 	u32 llc = 0;
 	u32 key;
@@ -227,7 +229,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = flow_find_task(p);
 	if (!t)
 		return;
 	key = cpu;
@@ -263,13 +265,14 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
 	 * ownership. */
-	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+	flow_flags_fetch_and(t, (u32)~(u32)FLOW_FLAG_QUEUED);
 }
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 {
+	scx_arena_subprog_init();
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	struct flow_running_state *rs;
 	u64 remain;
 	u64 len;
@@ -281,7 +284,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = flow_find_task(p);
 	if (!t)
 		return;
 	rs = &flow_running_state[cpu];
@@ -315,9 +318,10 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 }
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
+	scx_arena_subprog_init();
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	struct flow_running_state *rs;
 	u64 cur;
 	u64 last;
@@ -328,7 +332,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		return;
 	rs = &flow_running_state[cpu];
 	cur = p->scx.slice;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = flow_find_task(p);
 	if (!t) {
 		rs->slice_rem = cur;
 		return;
@@ -353,11 +357,12 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 }
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
 {
-	struct flow_task_ctx *t;
+	scx_arena_subprog_init();
+	task_ctx *t;
 	(void)mask;
 	if (!p)
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = flow_find_task(p);
 	if (!t)
 		return;
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
@@ -396,11 +401,12 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 }
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	s64 v;
 	if (!p)
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	scx_arena_subprog_init();
+	t = flow_find_task(p);
 	if (!t)
 		return;
 	v = (s64)p->scx.dsq_vtime;
@@ -425,13 +431,14 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 }
-s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	u64 cgid = 0;
 	if (!p)
 		return 0;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	scx_arena_subprog_init();
+	t = (task_ctx *)scx_task_alloc(p);
 	if (!t)
 		return 0;
 	if (args && args->cgroup)
@@ -453,18 +460,21 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 }
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
 {
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	(void)args;
 	if (!p)
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	scx_arena_subprog_init();
+	t = flow_find_task(p);
 	if (!t)
 		return;
 	scx_cgroup_bw_cancel((u64)t, SCX_CGROUP_BW_CANCEL_DROP);
+	scx_task_free_rcu(p);
 }
 int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 {
-	struct flow_task_ctx *t = (struct flow_task_ctx *)ctx;
+	scx_arena_subprog_init();
+	task_ctx *t = (task_ctx *)ctx;
 	u64 dsq;
 	u32 llc;
 	u32 prio;
@@ -486,7 +496,7 @@ int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 	if (!flow_prio_ok(prio))
 		prio = (u32)FLOW_PRIO_NORM;
 	vtime = READ_ONCE(t->vtime);
-	old = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
+	old = flow_flags_fetch_or(t, (u32)FLOW_FLAG_QUEUED);
 	if (old & (u32)FLOW_FLAG_QUEUED) {
 		flow_fb_inc(llc, 4);
 		return 0;

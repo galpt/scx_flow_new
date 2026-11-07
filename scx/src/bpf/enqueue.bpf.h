@@ -73,10 +73,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 w = (u32)FLOW_CGROUP_WEIGHT_DFLT;
 	u64 now;
 	bool pinned = false;
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	u32 old_flags;
 	if (!p)
 		return;
+	scx_arena_subprog_init();
 	task_cpu = scx_bpf_task_cpu(p);
 	if (task_cpu < 0)
 		task_cpu = bpf_get_smp_processor_id();
@@ -95,7 +96,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	bool no_cpu = !cpu_ok || tgt < 0;
 	raw_v = (s64)p->scx.dsq_vtime;
 	pinned = flow_is_pinned(p);
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	t = flow_find_task(p);
 	if (!t) {
 		if (p->flags & PF_EXITING) {
 			if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
@@ -168,7 +169,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			}
 		}
 	}
-	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
+	old_flags = flow_flags_fetch_or(t, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
 		flow_fb_inc(llc, 4);
 		return;
@@ -257,7 +258,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		/* Mirror the stored time so later reads see the same value. */
 		scx_bpf_task_set_dsq_vtime(p, raw_v);
 		if (flow_cgroup_throttled(p, t, true, (u64)raw_v) != 0) {
-			__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+			flow_flags_fetch_and(t, (u32)~(u32)FLOW_FLAG_QUEUED);
 			return;
 		}
 	}
@@ -320,15 +321,16 @@ insert_only:
 }
 void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 {
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	u32 old;
 	(void)deq_flags;
 	if (!p)
 		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	scx_arena_subprog_init();
+	t = flow_find_task(p);
 	if (!t)
 		return;
-	old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+	old = flow_flags_fetch_and(t, (u32)~(u32)FLOW_FLAG_QUEUED);
 	if (old & (u32)FLOW_FLAG_QUEUED) {
 		u32 dllc = READ_ONCE(t->llc_id);
 		if (!flow_llc_ok(dllc))

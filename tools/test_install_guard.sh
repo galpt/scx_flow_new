@@ -418,13 +418,15 @@ grep -q "kick_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drift
 grep -q "hog_escape" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 grep -q "lat_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 
-# Wait hist stays scoped with five maps and nine headers.
+# Wait hist stays scoped with four maps and nine headers.
 # The wait map is one array past the base tables with per CPU
 # run plus dispatch halves. Top keeps twenty one counters.
-# Bandwidth library maps live in workspace lib sources through
-# the symlinked dir and use angled includes, so the repo counts
-# stay at five maps and nine quoted headers.
-[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "maps count drifted"
+# Task state lives in the arena with the bandwidth block first
+# at offset zero, so no task map remains in the repo. Bandwidth
+# library maps plus the arena task map live in workspace lib
+# sources through the symlinked dir and use angled includes, so
+# the repo counts stay at four maps and nine quoted headers.
+[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "4" ] || fail "maps count drifted"
 [ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "9" ] || fail "headers count drifted"
 grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lat include missing"
 grep -q "lat_hist" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map missing"
@@ -585,6 +587,36 @@ grep -q "flow_cgroup_set_bandwidth" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "b
 grep -q "FLOW_STARVE_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "rescue kept missing"
 grep -q "FLOW_AGING_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "aging kept missing"
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
+
+# Arena task state keeps the bandwidth block first at offset zero
+# with no task map. Lookups go through the quiet helper, init
+# allocates, exit frees through rcu, flags use compare and swap,
+# and the kick override returns scalar for older verifiers.
+grep -q 'typedef struct flow_task_ctx __arena task_ctx;' "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena alias missing"
+grep -q "flow_find_task" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena lookup missing"
+grep -q "flow_flags_fetch_or" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena flag or missing"
+grep -q "flow_flags_fetch_and" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "arena flag and missing"
+grep -q "scx_task_alloc" "${DISP_HDR}" || fail "arena alloc missing"
+grep -q "scx_task_free_rcu" "${DISP_HDR}" || fail "arena free missing"
+grep -q "scx_arena_subprog_init" "${DISP_HDR}" || fail "arena init missing"
+grep -q "scx_arena_subprog_init" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "arena enqueue init missing"
+grep -q "scx_cgroup_bw_kick_idle_cb" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "kick missing"
+grep -q "scx_bpf_pick_idle_cpu" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "kick picker missing"
+if grep -q "task_ctx_stor" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>/dev/null; then
+    fail "task map reappeared"
+fi
+if grep -q "BPF_LOCAL_STORAGE_GET_F_CREATE" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
+    fail "task create reappeared"
+fi
+if grep -q "BPF_LOCAL_STORAGE_GET_F_CREATE" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "task create reappeared"
+fi
+if grep -q "__sync_fetch_and_or(&t->flags" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
+    fail "flag fetch or reappeared"
+fi
+if grep -q "__sync_fetch_and_or(&t->flags" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
+    fail "flag fetch or reappeared"
+fi
 
 # Bottle emulation stays key only with fixed head plus tail and no knob.
 # The helper ranks by band with short at head plus middle raw plus long

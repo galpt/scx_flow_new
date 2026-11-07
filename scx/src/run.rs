@@ -74,7 +74,9 @@ impl<'a> Scheduler<'a> {
             Ok(text) => info!("Topology: {text}"),
             Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
         }
-        let arenalib = scx_arena::ArenaLib::setup(skel.object_mut(), 0, 0, 1024)
+        // Task state lives in the arena with the bandwidth block
+        // first. The size matches the BPF layout above.
+        let arenalib = scx_arena::ArenaLib::setup(skel.object_mut(), 192, 0, 1024)
             .context("failed to init arena for bandwidth control")?;
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;

@@ -69,7 +69,7 @@ static __always_inline void flow_lat_record(u32 cpu, u32 kind, u32 bucket, u32 i
 	__asm__ volatile("" : "+r"(idx));
 	__sync_fetch_and_add(&hist->cells[idx], 1ULL);
 }
-static __always_inline void flow_lat_store(struct flow_task_ctx *t, u32 prio, int pinned)
+static __always_inline void flow_lat_store(task_ctx *t, u32 prio, int pinned)
 {
 	if (!t)
 		return;
@@ -82,7 +82,7 @@ static __always_inline void flow_lat_store(struct flow_task_ctx *t, u32 prio, in
 	else
 		t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 }
-static __always_inline void flow_lat_finalize(struct flow_task_ctx *t, u32 kind, u64 now)
+static __always_inline void flow_lat_finalize(task_ctx *t, u32 kind, u64 now)
 {
 	if (!t)
 		return;
@@ -91,7 +91,7 @@ static __always_inline void flow_lat_finalize(struct flow_task_ctx *t, u32 kind,
 	t->lat_kind = kind;
 	t->enq_ns = now ? now : 1;
 }
-static __always_inline void flow_lat_observe(u32 cpu, struct flow_task_ctx *t, u64 now, u32 is_run)
+static __always_inline void flow_lat_observe(u32 cpu, task_ctx *t, u64 now, u32 is_run)
 {
 	u64 stamp;
 	u64 delta;

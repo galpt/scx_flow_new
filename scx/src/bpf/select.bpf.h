@@ -78,6 +78,7 @@ static __always_inline bool flow_is_primary(u32 node)
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	scx_arena_subprog_init();
 	s32 hint = prev_cpu;
 	s32 tgt;
 	u32 hint_llc = 0;
@@ -87,11 +88,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	int best_score = 99;
 	u32 c;
 	u64 nr = READ_ONCE(flow_nr_cpus);
-	struct flow_task_ctx *t;
+	task_ctx *t;
 	(void)wake_flags;
 	if (!p)
 		return hint;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	t = flow_find_task(p);
 	if (t) {
 		int pinned = flow_is_pinned(p) ? 1 : 0;
 		u32 pk = READ_ONCE(t->prio);

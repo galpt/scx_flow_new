@@ -2,8 +2,8 @@
 /*
  * Tables for the flow scheduler.
  *
- * Task storage holds one entry per task. The entry starts with the
- * bandwidth block so control calls see it at offset zero. CPU
+ * Task state lives in the arena with the bandwidth block first
+ * at offset zero so control calls see it without a lookup. CPU
  * storage holds the seed view written at startup. LLC storage holds
  * per LLC counters. Weight storage holds shares by group id. A
  * missing entry reads as the default share. Wait history holds per
@@ -18,7 +18,10 @@
 #ifndef __FLOW_MAPS_BPF_H
 #define __FLOW_MAPS_BPF_H
 #include "intf.h"
+#include <bpf_arena_common.bpf.h>
 #include <lib/cgroup.h>
+#include <lib/sdt_task.h>
+#include <lib/sdt_alloc.h>
 /* Per task state. Bw holds the bandwidth block and stays first
  * so control calls see it at offset zero. Pid holds the task id
  * for requeue lookup. Vtime is charged service. Slice holds the
@@ -43,14 +46,70 @@ struct flow_task_ctx {
 	u32 lat_kind;
 	pid_t pid;
 };
-/* Alias used by the bandwidth requeue registration. */
-typedef struct flow_task_ctx task_ctx;
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct flow_task_ctx);
-} task_ctx_stor SEC(".maps");
+/* Arena alias used by the bandwidth requeue registration and all
+ * task lookups. The block stays first at offset zero. */
+typedef struct flow_task_ctx __arena task_ctx;
+/* Quiet lookup for any task. Returns null when the task never
+ * went through init or already left, so callers stay fail closed
+ * with no error spam. */
+static __always_inline task_ctx *flow_find_task(struct task_struct *p)
+{
+	if (!p)
+		return NULL;
+	return (task_ctx *)__scx_task_data(p);
+}
+/* Test and set bits with a short compare and swap loop. The arena
+ * rejects fetch-or and fetch-and helpers, so the loop keeps the same
+ * atomic test while using only compare and swap. Falls back to the
+ * last observed value when the loop loses. */
+static __always_inline u32 flow_flags_fetch_or(task_ctx *t, u32 val)
+{
+	u32 old;
+	int i;
+	if (!t)
+		return 0;
+	old = READ_ONCE(t->flags);
+	for (i = 0; i < 4; i++) {
+		u32 want = old | val;
+		u32 prev = __sync_val_compare_and_swap(&t->flags, old, want);
+		if (prev == old)
+			return old;
+		old = prev;
+	}
+	{
+		u32 last = READ_ONCE(t->flags);
+		u32 want = last | val;
+		if (last != want)
+			t->flags = want;
+		return last;
+	}
+}
+/* Test and clear bits with a short compare and swap loop. The arena
+ * rejects fetch-and helpers, so the loop keeps the same atomic test
+ * while using only compare and swap. Falls back to the last
+ * observed value when the loop loses. */
+static __always_inline u32 flow_flags_fetch_and(task_ctx *t, u32 val)
+{
+	u32 old;
+	int i;
+	if (!t)
+		return 0;
+	old = READ_ONCE(t->flags);
+	for (i = 0; i < 4; i++) {
+		u32 want = old & val;
+		u32 prev = __sync_val_compare_and_swap(&t->flags, old, want);
+		if (prev == old)
+			return old;
+		old = prev;
+	}
+	{
+		u32 last = READ_ONCE(t->flags);
+		u32 want = last & val;
+		if (last != want)
+			t->flags = want;
+		return last;
+	}
+}
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, FLOW_MAX_CPUS);
