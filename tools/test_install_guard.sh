@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.9" ] || fail "version not at 5.1.9"
+[ "${want}" = "5.1.10" ] || fail "version not at 5.1.10"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -585,5 +585,42 @@ grep -q "flow_cgroup_set_bandwidth" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "b
 grep -q "FLOW_STARVE_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "rescue kept missing"
 grep -q "FLOW_AGING_NS" "${SRC_DIR}/src/bpf/sjf.bpf.h" || fail "aging kept missing"
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
+
+# Bottle emulation stays key only with fixed head plus tail and no knob.
+# The helper ranks by band with short at head plus middle raw plus long
+# at tail, keeps long waits raw for rescue, saturates the tail in one
+# shot, runs with no walk plus no task write, and both inserts use one
+# call each past the throttle gate with pinned plus exiting plus
+# fallback on raw keys.
+grep -q "FLOW_WB_HEAD_NS = 20000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "wb head missing"
+grep -q "FLOW_WB_TAIL_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "wb tail missing"
+grep -q "bottle offset" "${SRC_DIR}/src/bpf/intf.h" || fail "wb prose missing"
+grep -q "flow_wb_key" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb helper missing"
+grep -q "FLOW_PRIO_LAT" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb lat band missing"
+grep -q "FLOW_PRIO_NORM" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb norm band missing"
+grep -q "FLOW_PRIO_BATCH" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb batch band missing"
+grep -q "FLOW_PRIO_IDLE" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb idle band missing"
+grep -q "FLOW_STARVE_NS" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb rescue missing"
+grep -q "FLOW_WB_HEAD_NS" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb head use missing"
+grep -q "FLOW_WB_TAIL_NS" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb tail use missing"
+grep -q "flow_fair_cap_add" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "wb saturating missing"
+[ "$(grep -c "flow_wb_key" "${SRC_DIR}/src/bpf/enqueue.bpf.h" | tr -d ' ')" = "1" ] || fail "wb enqueue calls drifted"
+[ "$(grep -c "flow_wb_key" "${SRC_DIR}/src/bpf/dispatch.bpf.h" | tr -d ' ')" = "1" ] || fail "wb dispatch calls drifted"
+grep -q "stored time left raw" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "wb stored raw prose missing"
+grep -q "stored time" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "wb cb stored prose missing"
+grep -q "exiting || pinned" "${DISP_HDR}" || fail "wb pinned exiting guard missing"
+if grep -q "bpf_for" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
+    fail "wb walk reappeared"
+fi
+if grep -q "bpf_map_" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
+    fail "wb map drift"
+fi
+if grep -q "t->" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
+    fail "wb task write reappeared"
+fi
+[ "$(grep -c "for (" "${SRC_DIR}/src/bpf/fair.bpf.h" | tr -d ' ')" = "2" ] || fail "wb loop drifted"
+thr_line="$(grep -n "flow_cgroup_throttled" "${SRC_DIR}/src/bpf/enqueue.bpf.h" | head -n 1 | cut -d : -f 1)"
+wb_line="$(grep -n "flow_wb_key" "${SRC_DIR}/src/bpf/enqueue.bpf.h" | head -n 1 | cut -d : -f 1)"
+[ "${thr_line}" -lt "${wb_line}" ] || fail "wb throttle order drifted"
 
 echo "guard tests passed"

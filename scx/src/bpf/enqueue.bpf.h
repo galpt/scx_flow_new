@@ -264,6 +264,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		u64 dsq;
 		u32 final_kind;
+		u64 wait_ns = t->enq_ns;
 		if (no_cpu)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
@@ -279,8 +280,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		flow_lat_finalize(t, final_kind, now);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			scx_bpf_dsq_insert(p, dsq, slice_len, enq_flags);
-		else
-			scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)raw_v, enq_flags);
+		else {
+			/* Bottle moves the queue key alone past the throttle
+			 * gate with the stored time left raw. Pinned plus
+			 * exiting plus fallback leave through early paths. */
+			s64 qkey = flow_wb_key(raw_v, prio, wait_ns, now);
+			scx_bpf_dsq_insert_vtime(p, dsq, slice_len, (u64)qkey, enq_flags);
+		}
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);

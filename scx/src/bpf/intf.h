@@ -10,7 +10,10 @@
  * added per quantum. Fresh virtual times move past a per LLC floor
  * so two tasks never share the same value. A burst estimate tracks
  * recent run time and selects the queue, with short estimates first
- * and long estimates last. Slices hold one fixed quantum. Tasks
+ * and long estimates last. Slices hold one fixed quantum. Queue
+ * keys carry a fixed bottle offset by band in one channel with the
+ * short band at the head and the long bands at the tail, while the
+ * stored time stays raw with no slice change. Tasks
  * that wait long have their estimate halved, and tasks that wait
  * very long start over with a rescue counted. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
@@ -66,6 +69,8 @@ enum flow_consts {
 	FLOW_SJF_CAP_NS = 1000000000ULL,
 	FLOW_AGING_NS = 100000000ULL,
 	FLOW_STARVE_NS = 200000000ULL,
+	FLOW_WB_HEAD_NS = 20000ULL,
+	FLOW_WB_TAIL_NS = 1000000ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_LLC_BASE = 0x6000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,

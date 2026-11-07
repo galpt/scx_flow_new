@@ -7,7 +7,9 @@
  * times move past the per LLC floor through a short compare and
  * swap loop, so each stored time is unique. If the loop does not
  * win, the last observed value is written back directly. The floor
- * rises over time and never moves backward for a given LLC.
+ * rises over time and never moves backward for a given LLC. Queue
+ * keys carry a fixed bottle offset by band in one channel with no
+ * slice change, so the stored time stays raw.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -97,5 +99,33 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 		flow_llc_seq[llc] = want;
 		return want;
 	}
+}
+/* Bottle key for one queue insert. Short band sits at the head
+ * with a saturating pull forward, middle band stays, long bands
+ * sit at the tail with one saturating push back. Long waits keep
+ * the raw key so rescue order stays. The stored time is untouched,
+ * only the queue key moves. */
+static __always_inline s64 flow_wb_key(s64 key, u32 prio, u64 wait_ns, u64 now)
+{
+	const s64 vmin = (s64)0x8000000000000000ULL;
+	s64 off;
+	u64 age = 0;
+	if (now && wait_ns && now > wait_ns)
+		age = now - wait_ns;
+	if (age >= (u64)FLOW_STARVE_NS)
+		return key;
+	if (prio == (u32)FLOW_PRIO_LAT) {
+		off = (s64)(u64)FLOW_WB_HEAD_NS;
+		if (off <= 0)
+			return key;
+		if (key <= vmin + off)
+			return vmin;
+		return key - off;
+	}
+	if (prio == (u32)FLOW_PRIO_NORM)
+		return key;
+	if (prio == (u32)FLOW_PRIO_BATCH || prio == (u32)FLOW_PRIO_IDLE)
+		return flow_fair_cap_add(key, (u64)FLOW_WB_TAIL_NS);
+	return key;
 }
 #endif

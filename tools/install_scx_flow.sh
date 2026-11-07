@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.1.9"
+VER="5.1.10"
 # Pinned fork ref, same as repo CI.
 # The commit id matches the upstream sched-ext/scx main id used in CI.
 # The installer fetches from the galpt/scx mirror while CI fetches from

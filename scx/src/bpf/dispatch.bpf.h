@@ -474,6 +474,7 @@ int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 	u64 now;
 	u64 slice;
 	u32 kind;
+	u64 wait_ns;
 	bool exiting;
 	bool pinned;
 	if (!p || !t)
@@ -520,11 +521,19 @@ int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 		kind = prio;
 	}
 	now = scx_bpf_now();
+	wait_ns = READ_ONCE(t->enq_ns);
 	flow_lat_finalize(t, kind, now);
 	if (dsq == (u64)FLOW_FALLBACK_DSQ)
 		scx_bpf_dsq_insert(p, dsq, slice, 0);
-	else
+	else if (exiting || pinned)
 		scx_bpf_dsq_insert_vtime(p, dsq, slice, (u64)vtime, 0);
+	else {
+		/* Bottle moves the queue key alone with the stored time
+		 * left raw. Exiting plus pinned plus fallback keep the
+		 * raw key through the paths above. */
+		s64 qkey = flow_wb_key(vtime, prio, wait_ns, now);
+		scx_bpf_dsq_insert_vtime(p, dsq, slice, (u64)qkey, 0);
+	}
 	flow_stat_inc(llc, 0);
 	if (dsq == (u64)FLOW_FALLBACK_DSQ)
 		flow_stat_inc(llc, 2);
