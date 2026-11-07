@@ -10,7 +10,7 @@
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot and counts the enqueue to run wait. Dispatch
  * counts the enqueue to dispatch wait on the moving CPU. Stopping
- * folds burnt time into the burst estimate through the half blend
+ * folds burnt time into the burst estimate through the quarter blend
  * and charges use into the stored time with the same value
  * mirrored beside it. The tick charges the burnt delta and folds
  * it into the estimate, then moves the remaining slice forward

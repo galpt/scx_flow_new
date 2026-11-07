@@ -12,7 +12,7 @@
  * recent run time and selects the queue, with short estimates first
  * and long estimates last. Slices hold one fixed quantum. Tasks
  * that wait long have their estimate halved, and tasks that wait
- * very long start over with a rescue counted. Wait history keeps per CPU queue waits by
+ * very long halve again with a rescue counted. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
