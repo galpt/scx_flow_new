@@ -8,11 +8,13 @@
  * as the default share. Wait history holds per CPU queue waits by
  * kind and bucket for run plus dispatch halves. Globals hold the
  * running view, the per LLC floor, the per LLC node, the
- * forward coalescing state, and four switches for cluster
- * choice plus distant wake hold plus thread shape plus home
- * stick. Thread shape defaults on so a missed seed stays
- * conservative. The CPU plus LLC plus wait tables are written once,
- * so a CPU that arrives late needs a restart to be seen.
+ * per CPU queue handles, the forward coalescing state, and four
+ * switches for cluster choice plus distant wake hold plus thread
+ * shape plus home stick. A zero handle means the CPU is offline
+ * or its queues were never built. Thread shape defaults on so
+ * a missed seed stays conservative. The CPU plus LLC plus wait
+ * tables are written once, so a CPU that arrives late needs
+ * a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -58,6 +60,7 @@ volatile u64 flow_home_stick;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];
 u32 flow_llc_node[FLOW_MAX_LLCS];
+u64 flow_dhq_live[FLOW_MAX_CPUS];
 u64 flow_fwd_pid[FLOW_MAX_LLCS + 1];
 s64 flow_fwd_vtime[FLOW_MAX_LLCS + 1];
 s32 flow_fwd_owner[FLOW_MAX_LLCS + 1];

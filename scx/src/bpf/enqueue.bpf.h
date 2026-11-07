@@ -2,14 +2,15 @@
 /*
  * Queueing for the flow scheduler.
  *
- * Shared tasks join the LLC queue of the constrained target in time
- * order. The kernel keeps insertion order for equal times, so the
- * code adds no extra tie handling. Pinned tasks join the local queue
- * in order with a single slice. Exiting tasks use the local queue
- * when allowed and the LLC queue otherwise with a short slice. Tasks
- * that have no usable CPU join the fallback queue. The queue key
- * is the stored virtual time. Shared inserts move past the per LLC
- * floor. Queue choice uses slack from deadline minus now minus
+ * Shared tasks join the per CPU queue of the constrained target
+ * in time order. The kernel keeps insertion order for equal times,
+ * so the code adds no extra tie handling. Urgent tasks take the
+ * first strand and the rest take the second strand. Pinned tasks
+ * join the local queue in order with a single slice. Exiting tasks
+ * use the local queue when allowed and the owner queue otherwise
+ * with a short slice. Tasks that have no usable CPU join the
+ * fallback queue. The queue key is the stored virtual time. Shared
+ * inserts move past the per LLC floor. Queue choice uses slack from deadline minus now minus
  * remain with saturation in fixed bands. The
  * charge scales with the share and the extra amount is fixed. Each
  * shared enqueue first checks the hold, then the idle flag, then
@@ -17,7 +18,7 @@
  * wins and count a skip. Idle targets take an idle wake and never
  * preempt. Each running instance kicks at most once. A gap win
  * kicks for preempt on a win, else it counts a skip with no wake.
- * Overdue tasks stay in the first queue with a fresh span. A wake
+ * Overdue tasks stay on the first strand with a fresh span. A wake
  * goes only to an idle target, else it counts a
  * skip with no wake. The kernel idle flag decides the idle wake.
  * Preempts stay in the same LLC with an
@@ -47,6 +48,33 @@
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include "lat.bpf.h"
+#include "lib/dhq.bpf.h"
+static __always_inline u64 flow_enqueue_dhq_or_fallback(s32 tgt, u32 strand)
+{
+	u64 dsq_a;
+	u64 dsq_b;
+	s32 qa;
+	s32 qb;
+	u64 my;
+	u64 other;
+	if (tgt < 0 || !flow_dhq_ok((u32)tgt, strand))
+		return (u64)FLOW_FALLBACK_DSQ;
+	if (!READ_ONCE(flow_dhq_live[(u32)tgt]))
+		return (u64)FLOW_FALLBACK_DSQ;
+	dsq_a = flow_dhq_id((u32)tgt, (u32)FLOW_DHQ_STRAND_A);
+	dsq_b = flow_dhq_id((u32)tgt, (u32)FLOW_DHQ_STRAND_B);
+	if (!flow_dsq_ok(dsq_a) || !flow_dsq_ok(dsq_b))
+		return (u64)FLOW_FALLBACK_DSQ;
+	qa = scx_bpf_dsq_nr_queued(dsq_a);
+	qb = scx_bpf_dsq_nr_queued(dsq_b);
+	my = strand == (u32)FLOW_DHQ_STRAND_A ? (qa < 0 ? 0ULL : (u64)qa) : (qb < 0 ? 0ULL : (u64)qb);
+	other = strand == (u32)FLOW_DHQ_STRAND_A ? (qb < 0 ? 0ULL : (u64)qb) : (qa < 0 ? 0ULL : (u64)qa);
+	if (flow_dhq_over_imbalance(my, other))
+		return (u64)FLOW_FALLBACK_DSQ;
+	if (strand == (u32)FLOW_DHQ_STRAND_A)
+		return dsq_a;
+	return dsq_b;
+}
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
 	if (tgt < 0) {
@@ -243,7 +271,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				return;
 			}
 			{
-				u64 dsq = tgt < 0 ? (u64)FLOW_FALLBACK_DSQ : flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
+				u64 dsq = flow_enqueue_dhq_or_fallback(tgt, (u32)FLOW_DHQ_STRAND_B);
 				if (!flow_dsq_ok(dsq))
 					dsq = (u64)FLOW_FALLBACK_DSQ;
 				if (dsq == (u64)FLOW_FALLBACK_DSQ)
@@ -307,7 +335,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	if (p->flags & PF_EXITING) {
-		u64 dsq = tgt < 0 ? (u64)FLOW_FALLBACK_DSQ : flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
+		u64 dsq = flow_enqueue_dhq_or_fallback(tgt, (u32)FLOW_DHQ_STRAND_B);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		t->llc_id = llc;
@@ -373,7 +401,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts ignore the
-		 * key and stay FIFO. */
+		 * key and stay FIFO. Each owner queue holds at most two
+		 * hundred fifty six tasks. */
 		s64 base = t->vtime;
 		u64 use_len = 0;
 		if (t->gen == 0) {
@@ -405,10 +434,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		u64 dsq;
 		u32 final_kind;
+		u64 strand64;
+		u32 strand;
+		strand64 = flow_dhq_strand_for_prio(prio);
+		strand = strand64 > (u64)FLOW_DHQ_STRAND_B ? (u32)FLOW_DHQ_STRAND_B : (u32)strand64;
+		if (!flow_strand_ok(strand))
+			strand = (u32)FLOW_DHQ_STRAND_B;
 		if (no_cpu)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
-			dsq = flow_llc_dsq_prio(llc, prio);
+			dsq = flow_enqueue_dhq_or_fallback(tgt, strand);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
@@ -436,10 +471,11 @@ insert_only:
 		u64 dsq;
 		u64 sl = (u64)FLOW_SLICE_MIN_NS;
 		s64 k = raw_v;
+		u32 strand = (u32)FLOW_DHQ_STRAND_B;
 		if (no_cpu)
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		else
-			dsq = flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
+			dsq = flow_enqueue_dhq_or_fallback(tgt, strand);
 		if (!flow_dsq_ok(dsq))
 			dsq = (u64)FLOW_FALLBACK_DSQ;
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)

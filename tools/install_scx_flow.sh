@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.2.0"
+VER="5.2.1"
 # Pinned fork ref, same as repo CI.
 # The commit id matches the upstream sched-ext/scx main id used in CI.
 # The installer fetches from the galpt/scx mirror while CI fetches from
@@ -211,12 +211,8 @@ echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
-# Fork keeps lib plus license as symlinks with no real copy.
-# The scheduler needs no vendored sources: all helpers come from
-# workspace headers, so only the include path plus the license link
-# are set up here.
-rm -rf "${DEST}/src/bpf/lib"
-ln -s ../../../../../lib "${DEST}/src/bpf/lib"
+# Per CPU queue helpers live in src/bpf/lib with no vendored copy.
+# Only the license link is set up here.
 rm -f "${DEST}/LICENSE"
 ln -s ../../../LICENSE "${DEST}/LICENSE"
 

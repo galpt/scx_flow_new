@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.0" ] || fail "version not at 5.2.0"
+[ "${want}" = "5.2.1" ] || fail "version not at 5.2.1"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -34,9 +34,12 @@ for need_file in \
     [ -s "${SRC_DIR}/${need_file}" ] || fail "scaffold missing ${need_file}"
 done
 
-# No vendored sources remain: all helpers come from workspace headers.
-# Any return of the old lib dir fails closed here before any build.
-[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
+# Per CPU helpers live in src/bpf/lib with no vendored copy.
+# A missing lib file fails closed here before any build.
+[ -s "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" ] || fail "dhq header missing"
+[ -s "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" ] || fail "dhq source missing"
+[ -s "${SRC_DIR}/src/bpf/lib/topology.bpf.h" ] || fail "topology header missing"
+[ -s "${SRC_DIR}/src/bpf/lib/topology.bpf.c" ] || fail "topology source missing"
 
 # Docs plus changelog plus todos stay untracked with no re-leak.
 # History remains public in prior commits; tips carry no docs blobs.
@@ -78,13 +81,16 @@ for need_flow in \
     "src/bpf/maps.bpf.h" \
     "src/bpf/select.bpf.h" \
     "src/bpf/lst.bpf.h" \
-    "src/bpf/stats.bpf.h"; do
+    "src/bpf/stats.bpf.h" \
+    "src/bpf/lib/dhq.bpf.h" \
+    "src/bpf/lib/topology.bpf.h" \
+    "src/bpf/lib/dhq.bpf.c" \
+    "src/bpf/lib/topology.bpf.c"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
 [ ! -e "${SRC_DIR}/src/bpf/flow" ] || fail "flow dir reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/steal.bpf.h" ] || fail "steal helper reappeared"
-[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/srtf.bpf.h" ] || fail "srtf header reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/sjf.bpf.h" ] || fail "sjf header reappeared"
 
@@ -102,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "03a95950adddd4a716819ff02213ead116b889a0760400a198de09f8a3421aec" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c156d2f121d741870a14489083f1e63f5621420054eb028cbd8a9e522f199629" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
@@ -145,10 +151,15 @@ grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 grep -q 'FORK="https://github.com/galpt/scx"' "${INST}" || fail "fork remote missing"
 grep -q 'pinned fork ref' "${INST}" || fail "fork pin comment missing"
 
-# Fork keeps lib include path plus license as symlinks with no real copy.
-grep -q 'src/bpf/lib' "${INST}" || fail "lib symlink missing"
-grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink target bad"
+# Per CPU helpers stay in tree with only the license link.
+grep -q 'Per CPU queue helpers' "${INST}" || fail "lib prose missing"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
+if grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" 2>/dev/null; then
+    fail "vendored lib symlink reappeared"
+fi
+if grep -q 'rm -rf "${DEST}/src/bpf/lib"' "${INST}" 2>/dev/null; then
+    fail "lib remove reappeared"
+fi
 
 # Kernels below 7.1 are refused with a parsable kernel check.
 grep -q '7\.1' "${INST}" || fail "kernel gate missing"
@@ -220,22 +231,23 @@ if [ -n "${HOME:-}" ]; then
 fi
 
 # Ordered drain stays fail closed with forward wakes. Each CPU drains
-# its own LLC prios first, then same node LLCs, then remote LLCs, then
-# fallback, with one forward wake per unrunnable head and no move.
+# its own per CPU queues first, then same LLC, then same node, then
+# remote, then fallback, with one forward wake per unrunnable head.
 DISP_HDR="${SRC_DIR}/src/bpf/dispatch.bpf.h"
-grep -q "flow_drain_llc" "${DISP_HDR}" || fail "drain helper missing"
+grep -q "flow_drain_cpu" "${DISP_HDR}" || fail "drain helper missing"
 grep -q "flow_try_move" "${DISP_HDR}" || fail "move helper missing"
 grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing"
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
 grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
 
-# Cache keeps LLC first drain with fixed tie order. The drain keeps
-# own LLC first then same node then remote then fallback, prios drain
-# in fixed order, the pick keeps the hint when allowed else the first
-# near target, and ties keep the first CPU in fixed order with the
-# previous CPU winning when allowed.
-grep -q "drains its own LLC" "${DISP_HDR}" || fail "cache drain prose missing"
-grep -q "fixed" "${DISP_HDR}" || fail "cache fixed prose missing"
+# Topology keeps local first drain with balanced strands. The drain keeps
+# own CPU first then same LLC then same node then remote then fallback,
+# strands drain balanced with the larger side first, the pick keeps
+# the hint when allowed else the first near target, and ties keep
+# the first CPU in fixed order with the previous CPU winning when allowed.
+grep -q "drains its own per CPU" "${DISP_HDR}" || fail "cache drain prose missing"
+grep -q "larger side first" "${DISP_HDR}" || fail "balanced prose missing"
+grep -q "balanced" "${DISP_HDR}" || fail "balanced mode prose missing"
 grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
 grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
 if ! grep -q "score < best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
@@ -332,6 +344,12 @@ if grep -q "FLOW_LAT_OFF_NS\|flow_lat_key\|500001\|1000001\|20000001" "${SRC_DIR
 fi
 if grep -q "float" "${LST_HDR}" 2>/dev/null; then
     fail "float reappeared"
+fi
+if grep -qi "float" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" "${SRC_DIR}/src/bpf/lib/topology.bpf.h" "${SRC_DIR}/src/bpf/lib/topology.bpf.c" 2>/dev/null; then
+    fail "float reappeared in lib"
+fi
+if grep -q "ledger\|balancer\|warmth" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "extra table reappeared"
 fi
 if grep -q "double" "${LST_HDR}" 2>/dev/null; then
     fail "double reappeared"
@@ -454,7 +472,7 @@ if grep -q "for (" "${LST_HDR}" 2>/dev/null; then
 fi
 
 # Overdue stays urgent with holds gating gap wins and one kick per run.
-# Overdue tasks stay in the first queue with a fresh span, holds gate
+# Overdue tasks stay on the first strand with a fresh span, holds gate
 # gap wins, idle targets take idle wakes, each run kicks at most once,
 # long waiting batch and idle heads drain before normal, running uses
 # one clock read, and a runnable yield with no burn still moves time.
@@ -512,8 +530,13 @@ fi
 # The wait map is one array past the base tables with per CPU
 # run plus dispatch halves. Top keeps twenty one counters.
 [ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "maps count drifted"
-[ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "9" ] || fail "headers count drifted"
+[ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "11" ] || fail "headers count drifted"
 grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lat include missing"
+grep -q 'include "lib/dhq.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "dhq include missing"
+grep -q 'include "lib/topology.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "topology include missing"
+grep -q 'add_source.*dhq.bpf.c' "${SRC_DIR}/build.rs" || fail "dhq source missing"
+grep -q 'add_source.*topology.bpf.c' "${SRC_DIR}/build.rs" || fail "topology source missing"
+grep -q 'compile_link_gen' "${SRC_DIR}/build.rs" || fail "link helper missing"
 grep -q "lat_hist" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map missing"
 grep -q "BPF_MAP_TYPE_ARRAY" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "wait map type missing"
 grep -q "FLOW_LAT_KINDS = 9" "${SRC_DIR}/src/bpf/intf.h" || fail "wait kinds missing"
@@ -553,13 +576,38 @@ fi
 # Ops stay at sixteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "16" ] || fail "ops count drifted"
 
-# Queues are four per LLC and fallback with kernel order and
+# Queues are two per CPU and fallback with kernel order and
 # insertion ties. Fair scales base by share while extra stays uniform
-# with a per LLC floor. Laxity sets the queue by slack bands with a
+# with a per LLC floor. Laxity sets the strand by slack bands with a
 # gap preempt on shared tasks. Wakes go preempt on a gap win else
-# idle with a skip otherwise.
+# idle with a skip otherwise. Strands stay balanced with an imbalance
+# cap so no strand starves.
 grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/intf.h" || fail "prio count missing"
-grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf/intf.h" || fail "prio queue helper missing"
+grep -q "FLOW_DHQ_PERCPU_CAP = 256ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "percpu cap missing"
+grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
+grep -q "FLOW_DHQ_MAX_IMBALANCE = 8ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "imbalance cap missing"
+grep -q "FLOW_DHQ_STRAND_A" "${SRC_DIR}/src/bpf/intf.h" || fail "strand const missing"
+grep -q "FLOW_DHQ_MODE_BALANCED" "${SRC_DIR}/src/bpf/intf.h" || fail "mode const missing"
+grep -q "flow_dhq_id" "${SRC_DIR}/src/bpf/intf.h" || fail "dhq helper missing"
+if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "priq helper reappeared"
+fi
+if grep -q "FLOW_LLC_BASE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "llc base reappeared"
+fi
+if grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
+    fail "prio queue reappeared"
+fi
+grep -q "flow_dhq_strand_for_prio" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "strand helper missing"
+grep -q "flow_dhq_pick_mode" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "mode helper missing"
+grep -q "flow_dhq_balanced_pick" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "balanced helper missing"
+grep -q "flow_dhq_over_imbalance" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "imbalance helper missing"
+grep -q "FLOW_DHQ_MODE_BALANCED" "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" || fail "balanced mode missing"
+grep -q "flow_dhq_balanced_pick" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "balanced drain missing"
+grep -q "flow_dhq_over_imbalance" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "imbalance guard missing"
+grep -q "flow_dhq_live" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "dhq handle missing"
+grep -q "flow_topo_online" "${SRC_DIR}/src/bpf/lib/topology.bpf.h" || fail "topo helper missing"
+grep -q "flow_topo_same_node" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "topo order missing"
 grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
 grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra missing"
 grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
@@ -579,15 +627,10 @@ if grep -q 'include "sjf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "sjf include reappeared"
 fi
 
-# Dead helpers stay removed. The plain queue helper and the cached
+# Dead helpers stay removed. The per LLC prio queue helper and the cached
 # weight reader have no caller and must not return.
-if grep -q "flow_llc_dsq(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    if ! grep -q "flow_llc_dsq_prio(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-        fail "queue helper check broken"
-    fi
-    if grep -q "static __always_inline u64 flow_llc_dsq(" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-        fail "dead queue helper reappeared"
-    fi
+if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead queue helper reappeared"
 fi
 if grep -q "flow_task_weight" "${SRC_DIR}/src/bpf/cgroup.bpf.h" 2>/dev/null; then
     fail "dead weight helper reappeared"

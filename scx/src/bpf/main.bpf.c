@@ -2,12 +2,12 @@
 /*
  * Flow scheduler entry.
  *
- * Thin glue that pulls in nine area headers in order and declares
- * the ops table. Each LLC has four queues and there is one fallback
- * queue. Ties leave in insertion order. Laxity sets the queue with
- * gap preempts for shared tasks. Tables are written once, so
- * a CPU that arrives late needs a restart to be seen. Settings live
- * in the shared header.
+ * Thin glue that pulls in eleven area headers in order and declares
+ * the ops table. Each CPU has two queues in balanced mode and there
+ * is one fallback queue. Ties leave in insertion order. Laxity sets
+ * the strand with gap preempts for shared tasks. Tables are written
+ * once, so a CPU that arrives late needs a restart to be seen.
+ * Settings live in the shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,6 +24,8 @@ UEI_DEFINE(uei);
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include "select.bpf.h"
+#include "lib/dhq.bpf.h"
+#include "lib/topology.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"
 SCX_OPS_DEFINE(flow_ops,
