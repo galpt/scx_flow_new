@@ -54,6 +54,13 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, flow_ops, open_opts)
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
+        {
+            let smt_on = crate::topology::detect_smt().unwrap_or(true);
+            match skel.maps.bss_data.as_mut() {
+                Some(bss) => bss.flow_smt_enabled = if smt_on { 1 } else { 0 },
+                None => warn!("smt seed missed, using kernel default"),
+            }
+        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         match crate::topology::seed_topology(&mut skel) {
             Ok(text) => info!("Topology: {text}"),
@@ -81,11 +88,27 @@ impl<'a> Scheduler<'a> {
         )
     }
 
+    /// One row per LLC for debug logs. Reuses the same fold guards.
+    fn log_per_llc(&self) {
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
+        for (llc, row) in crate::metrics::collect_per_llc(&self.skel) {
+            let mut buf: Vec<u8> = Vec::new();
+            if row.format_llc(&mut buf, llc).is_ok() {
+                log::debug!("{}", String::from_utf8_lossy(&buf).trim_end());
+            }
+        }
+    }
+
     pub fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_secs(1)) {
-                Ok(()) => res_ch.send(self.get_metrics())?,
+                Ok(()) => {
+                    res_ch.send(self.get_metrics())?;
+                    self.log_per_llc();
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,
             }

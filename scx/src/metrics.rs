@@ -125,6 +125,36 @@ pub fn collect(skel: &BpfSkel<'_>) -> Metrics {
     out
 }
 
+/// Collect each LLC row on its own.
+/// Short reads keep zeros for that LLC through the same fold guards.
+/// Order follows the LLC index.
+pub fn collect_per_llc(skel: &BpfSkel<'_>) -> Vec<(u32, Metrics)> {
+    use libbpf_rs::MapCore;
+    let mut out: Vec<(u32, Metrics)> = Vec::new();
+    for llc in 0..crate::bpf_intf::flow_consts_FLOW_MAX_LLCS {
+        let key = llc.to_ne_bytes();
+        let val = match skel
+            .maps
+            .llc_stats_stor
+            .lookup(&key, libbpf_rs::MapFlags::ANY)
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            Err(e) => {
+                warn!("stats read failed for llc {llc}: {e:#}");
+                continue;
+            }
+        };
+        let mut row = Metrics::default();
+        fold_llc_val(&mut row, &val);
+        out.push((llc, row));
+        if llc + 1 >= 64 {
+            break;
+        }
+    }
+    out
+}
+
 /// Fold one CPU wait hist into the aggregate.
 /// Cells use wrapping add. Short reads keep prior state.
 /// The discovered count from the map value bounds the fold

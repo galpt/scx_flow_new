@@ -5,10 +5,12 @@
  * The pick first tries the previous CPU when it is allowed and
  * online. Otherwise it scans the seed view once and prefers the
  * same LLC, then the same node, then a distant CPU. Ties keep the
- * first CPU in fixed order. When no hint is usable, CPUs on the
- * primary node are preferred and a miss falls back to the scan.
- * No sibling probe runs and each CPU stands single with fail closed
- * choice. Every check returns minus one on failure. Masks are tested again before
+ * first CPU in fixed order. Within the same LLC the scan favors
+ * the same cluster. A task that already ran favors its first CPU
+ * on ties. When no hint is usable, CPUs on the primary node are
+ * preferred and a miss falls back to the scan. No sibling probe
+ * runs and each CPU stands single with fail closed choice. Every
+ * check returns minus one on failure. Masks are tested again before
  * each wake, so a task is never kicked toward a CPU outside its
  * current mask. Frequency stays with the governor and never steers
  * placement. The pick stores a provisional wait kind from the
@@ -82,9 +84,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	s32 tgt;
 	u32 hint_llc = 0;
 	u32 hint_node = 0;
+	u32 hint_ccx = 0;
 	bool have_hint_topo = false;
 	s32 best = -1;
 	int best_score = 99;
+	bool best_same = false;
+	bool best_home = false;
+	s32 home = -1;
+	bool use_home = false;
+	bool use_ccx;
+	bool smt_on;
 	u32 c;
 	u64 nr = READ_ONCE(flow_nr_cpus);
 	struct flow_task_ctx *t;
@@ -96,7 +105,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		int pinned = flow_is_pinned(p) ? 1 : 0;
 		u32 pk = READ_ONCE(t->prio);
 		flow_lat_store(t, pk, pinned);
+		if (READ_ONCE(flow_home_stick)) {
+			s32 h = READ_ONCE(t->home_cpu);
+			if (h >= 0 && flow_cpu_allowed(h, p) && flow_cpu_live((u32)h))
+				home = h;
+			if (home >= 0)
+				use_home = true;
+		}
 	}
+	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
+	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
 	tgt = flow_constrained_target(hint, p);
 	if (tgt >= 0)
 		return tgt;
@@ -112,6 +130,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 				if (flow_llc_ok(l) && flow_node_ok(n)) {
 					hint_llc = l;
 					hint_node = n;
+					hint_ccx = READ_ONCE(cc->ccx_id);
 					have_hint_topo = true;
 				}
 			}
@@ -122,6 +141,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		u32 key = c;
 		u32 l;
 		u32 n;
+		u32 cx;
 		int score;
 		if (nr && (u64)c >= nr)
 			break;
@@ -134,6 +154,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			continue;
 		l = READ_ONCE(cc->llc_id);
 		n = READ_ONCE(cc->node_id);
+		cx = READ_ONCE(cc->ccx_id);
 		if (!flow_llc_ok(l))
 			continue;
 		score = 3;
@@ -144,14 +165,33 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 				score = 1;
 			else
 				score = 2;
+			if (!smt_on && use_ccx && l == hint_llc && cx == hint_ccx)
+				score = -1;
 		} else if (flow_is_primary(n)) {
 			score = 2;
 		}
 		if (score < best_score) {
 			best_score = score;
 			best = (s32)c;
-			if (score == 0)
+			best_same = have_hint_topo && use_ccx && cx == hint_ccx;
+			best_home = use_home && (s32)c == home;
+			if (score == -1)
 				break;
+			if (score == 0 && (!use_ccx || best_same))
+				break;
+		} else if (score == best_score) {
+			bool cur_same = have_hint_topo && use_ccx && cx == hint_ccx;
+			bool cur_home = use_home && (s32)c == home;
+			if (cur_same && !best_same) {
+				best = (s32)c;
+				best_same = true;
+				best_home = cur_home;
+				if (score == 0)
+					break;
+			} else if (cur_home && !best_home && cur_same == best_same) {
+				best = (s32)c;
+				best_home = true;
+			}
 		}
 	}
 	/* The mask can change while scanning, test the pick again. */

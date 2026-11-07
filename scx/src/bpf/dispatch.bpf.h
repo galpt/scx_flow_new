@@ -19,9 +19,10 @@
  * governor and never steers placement. Only a fixed hint that
  * never sends zero may reach the governor. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
- * when the owner is usable. Init creates four queues per LLC and
- * the fallback queue and records the node of each LLC. CPUs that
- * arrive late need a restart to be seen.
+ * when the owner is usable. Tasks that already ran favor their
+ * first CPU. Init creates four queues per LLC and the fallback
+ * queue and records the node of each LLC. CPUs that arrive late
+ * need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -48,6 +49,14 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 	pid = (u64)ph->pid;
 	hv = (s64)ph->scx.dsq_vtime;
 	owner = flow_first_allowed(ph);
+	if (READ_ONCE(flow_home_stick)) {
+		struct flow_task_ctx *ft = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+		if (ft) {
+			s32 hm = READ_ONCE(ft->home_cpu);
+			if (hm >= 0 && flow_cpu_allowed(hm, ph) && flow_cpu_live((u32)hm))
+				owner = hm;
+		}
+	}
 	{
 		u64 last_p = READ_ONCE(flow_fwd_pid[slot]);
 		s64 last_v = READ_ONCE(flow_fwd_vtime[slot]);
@@ -254,6 +263,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
+	if (READ_ONCE(flow_home_stick) && READ_ONCE(t->home_cpu) < 0)
+		t->home_cpu = (s32)cpu;
 	/* The stored time did not move, refresh the mirror beside it. */
 	scx_bpf_task_set_dsq_vtime(p, t->vtime);
 	flow_lat_observe(cpu, t, scx_bpf_now(), 1);
@@ -353,6 +364,7 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
+	t->home_cpu = -1;
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
@@ -416,6 +428,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
+	t->home_cpu = -1;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -439,6 +452,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->burst_ns = (u64)FLOW_SJF_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
+	t->home_cpu = -1;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }
@@ -458,6 +472,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		return -E2BIG;
 	}
 	flow_nr_cpus = n;
+	flow_ccx_prefer = 1;
+	flow_wait_allow = 1;
+	flow_home_stick = 1;
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u32 key;
 		struct flow_cpu_ctx *cc;

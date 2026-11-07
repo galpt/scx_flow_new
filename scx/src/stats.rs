@@ -119,6 +119,13 @@ impl Metrics {
         Ok(())
     }
 
+    /// Single LLC row with the same fields plus the LLC index.
+    /// Keeps struct order with no reorder.
+    pub fn format_llc<W: Write>(&self, w: &mut W, llc: u32) -> Result<()> {
+        write!(w, "[{}:llc{}] ", crate::cli::SCHEDULER_NAME, llc)?;
+        self.format(w)
+    }
+
     /// Interval delta. Queued passes through as a live gauge.
     pub fn delta(&self, rhs: &Self) -> Self {
         Self {

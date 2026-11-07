@@ -89,7 +89,8 @@ enum flow_consts {
  * Prio holds the selected queue. Burst holds the recent run time
  * estimate. Enq holds the last enqueue time. Cgrp holds the group
  * id and share hint. A zero id means no group was recorded. Lat
- * holds the wait kind for history. */
+ * holds the wait kind for history. Home holds the first CPU that
+ * ran the task with minus one when unset. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -102,6 +103,7 @@ struct flow_task_ctx {
 	u64 burst_ns;
 	u64 enq_ns;
 	u32 lat_kind;
+	s32 home_cpu;
 };
 /* Wait history for one CPU. Cells hold run waits then dispatch
  * waits by kind times bucket. The length covers two halves of
@@ -120,13 +122,13 @@ struct flow_running_state {
 	u32 reserved;
 	u32 pad;
 };
-/* Per CPU seed from userspace. Holds the CPU id and the LLC and
- * node indices assigned at startup. */
+/* Per CPU seed from userspace. Holds the CPU id plus the LLC plus
+ * node plus cluster indices assigned at startup. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
 	u32 llc_id;
 	u32 node_id;
-	u32 pad;
+	u32 ccx_id;
 };
 /* Per LLC counters. The order matches the userspace reader.
  * Queued counts tasks waiting in shared queues. Dispatched counts

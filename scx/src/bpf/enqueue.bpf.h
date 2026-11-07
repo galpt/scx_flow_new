@@ -23,7 +23,7 @@
  * birth id comes
  * from init args. Enqueue finalizes the wait kind with the full
  * path and stamps the wait start with the full clock with zero
- * stored as one.
+ * stored as one. Distant wakes hold when the target drains fast.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -57,6 +57,74 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 	}
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
+}
+static __always_inline bool flow_wait_hold(s32 tgt, struct task_struct *p)
+{
+	u32 cur;
+	u32 key;
+	struct flow_cpu_ctx *ac;
+	struct flow_cpu_ctx *bc;
+	struct flow_task_ctx *t;
+	struct flow_lat_hist *h;
+	u32 tgt_ccx;
+	u32 cur_ccx;
+	u32 kind;
+	u64 base;
+	u64 s0;
+	u64 s1;
+	u64 l6;
+	u64 l7;
+	if (!READ_ONCE(flow_wait_allow))
+		return false;
+	if (tgt < 0 || !p)
+		return false;
+	if (!flow_cpu_ok((u32)tgt))
+		return false;
+	cur = bpf_get_smp_processor_id();
+	if (cur == (u32)tgt)
+		return false;
+	if (!flow_cpu_ok(cur))
+		return false;
+	key = (u32)tgt;
+	ac = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!ac)
+		return false;
+	tgt_ccx = READ_ONCE(ac->ccx_id);
+	key = cur;
+	bc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!bc)
+		return false;
+	cur_ccx = READ_ONCE(bc->ccx_id);
+	if (tgt_ccx == cur_ccx)
+		return false;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return false;
+	kind = READ_ONCE(t->lat_kind);
+	if (kind >= (u32)FLOW_LAT_KINDS)
+		return false;
+	key = (u32)tgt;
+	h = bpf_map_lookup_elem(&lat_hist, &key);
+	if (!h)
+		return false;
+	base = (u64)72 + (u64)kind * (u64)8;
+	if (base + (u64)7 >= (u64)FLOW_HIST_LEN)
+		return false;
+	s0 = READ_ONCE(h->cells[base]);
+	s1 = READ_ONCE(h->cells[base + 1]);
+	l6 = READ_ONCE(h->cells[base + 6]);
+	l7 = READ_ONCE(h->cells[base + 7]);
+	if ((s0 || s1) && !l6 && !l7)
+		return true;
+	return false;
+}
+static __always_inline void flow_kick_checked(s32 tgt, struct task_struct *p, u32 llc)
+{
+	if (flow_wait_hold(tgt, p)) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	flow_kick_idle_only(tgt, p, llc);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
@@ -100,7 +168,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-				flow_kick_idle_only(tgt, p, llc);
+				flow_kick_checked(tgt, p, llc);
 				return;
 			}
 			{
@@ -114,7 +182,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				flow_stat_inc(llc, 0);
 				if (dsq == (u64)FLOW_FALLBACK_DSQ)
 					flow_stat_inc(llc, 2);
-				flow_kick_idle_only(tgt, p, llc);
+				flow_kick_checked(tgt, p, llc);
 				return;
 			}
 		}
@@ -129,7 +197,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 			flow_lat_finalize(t, (u32)FLOW_LAT_EXITING, scx_bpf_now());
 			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-			flow_kick_idle_only(tgt, p, llc);
+			flow_kick_checked(tgt, p, llc);
 			return;
 		}
 	}
@@ -152,7 +220,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)pcpu;
 				flow_lat_finalize(t, (u32)FLOW_LAT_PINNED, scx_bpf_now());
 				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-				flow_kick_idle_only(first, p, pllc);
+				flow_kick_checked(first, p, pllc);
 				return;
 			}
 		}
@@ -175,7 +243,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);
-		flow_kick_idle_only(tgt, p, llc);
+		flow_kick_checked(tgt, p, llc);
 		return;
 	}
 	if (pinned) {
@@ -272,7 +340,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (no_cpu) {
 			return;
 		}
-		flow_kick_idle_only(tgt, p, llc);
+		flow_kick_checked(tgt, p, llc);
 		return;
 	}
 insert_only:
@@ -293,7 +361,7 @@ insert_only:
 		flow_stat_inc(llc, 0);
 		if (dsq == (u64)FLOW_FALLBACK_DSQ)
 			flow_stat_inc(llc, 2);
-		flow_kick_idle_only(tgt, p, llc);
+		flow_kick_checked(tgt, p, llc);
 		return;
 	}
 }
