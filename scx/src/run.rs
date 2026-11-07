@@ -67,6 +67,12 @@ impl<'a> Scheduler<'a> {
                 Some(data) => data.flow_smt_enabled = if smt_on { 1 } else { 0 },
                 None => warn!("smt seed missed, using kernel default"),
             }
+            // Arena sizing needs the host CPU count before load so the bitmap
+            // init sees a valid value and the topology tree can build.
+            match skel.maps.rodata_data.as_mut() {
+                Some(rodata) => rodata.nr_cpu_ids = *NR_CPU_IDS as u32,
+                None => warn!("nr_cpu_ids seed missed, arena init will fail"),
+            }
         }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         // Build the arena and the topology tree before any queue exists.
