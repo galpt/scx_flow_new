@@ -22,9 +22,9 @@
  * burnt delta and burns
  * it from remain, then moves the remaining slice forward
  * with the same value mirrored beside it, so stopping charges
- * only the tail past the last tick. Frequency stays with the
- * governor and never steers placement. Only a fixed hint that
- * never sends zero may reach the governor. A mask change on a queued
+ * only the tail past the last tick. A busy core runs at max and
+ * an idle core runs at half. The set call never sends zero and
+ * never steers placement. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
  * when the owner is usable. Tasks that already ran favor their
  * first CPU. Init creates one queue per CPU and the fallback
@@ -48,6 +48,22 @@
 #include <lib/dhq.h>
 #include <lib/topology.h>
 #include <lib/sdt_alloc.h>
+/* A busy core runs at max and an idle core runs at half. The call
+ * stays on one live core and never sends zero. */
+static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
+{
+	u32 perf;
+	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	perf = (u32)SCX_CPUPERF_ONE;
+	if (idle)
+		perf = (u32)(SCX_CPUPERF_ONE / 2);
+	if (!perf)
+		return;
+	scx_bpf_cpuperf_set((s32)cpu, perf);
+}
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
@@ -142,6 +158,7 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 	}
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
 	bpf_task_release(p);
+	flow_cpuperf_mark(cpu, false);
 	flow_stat_inc(llc, 1);
 	flow_queued_dec(vllc);
 	if (steal) {
@@ -343,6 +360,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 					if (pt)
 						flow_lat_observe(c, pt, scx_bpf_now(), 0);
 					flow_stat_inc(llc, 1);
+					flow_cpuperf_mark(c, false);
 					if (have_owner) {
 						flow_queued_dec(vllc);
 					} else {
@@ -359,10 +377,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 							break;
 						}
 					}
+					return;
 				}
 			}
 		}
 	}
+	/* No task moved, so the core stays idle at half. */
+	flow_cpuperf_mark(c, true);
 }
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
@@ -417,8 +438,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	flow_lat_observe(cpu, t, now, 1);
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
-	 * ownership. */
+	 * ownership. The core is busy now, so it runs at max. */
 	__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+	flow_cpuperf_mark(cpu, false);
 }
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 {
@@ -435,6 +457,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
+	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
@@ -478,8 +501,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	}
 	rs->slice_rem = remain;
 	t->slice_rem = remain;
+	/* A sleeping task leaves the core idle at half. A runnable task
+	 * keeps its count with no frequency change. */
 	if (runnable)
 		flow_stat_inc(rs->llc_id, 11);
+	else
+		flow_cpuperf_mark(cpu, true);
 }
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {

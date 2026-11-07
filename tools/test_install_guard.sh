@@ -273,18 +273,21 @@ if grep -rqi "gpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "gpu hint reappeared"
 fi
 
-# Frequency stays governor only with no placement steer. Only a fixed
-# hint that never sends zero may reach the governor, and no other
+# Busy cores run at max with idle cores at half through one set call.
+# The call never sends zero and never steers placement, and no other
 # frequency call steers placement.
 grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
 grep -q "never steers" "${DISP_HDR}" || fail "freq dispatch prose missing"
 grep -q "never sends zero" "${DISP_HDR}" || fail "freq never zero prose missing"
+grep -q "scx_bpf_cpuperf_set" "${DISP_HDR}" || fail "cpuperf set missing"
+grep -q "SCX_CPUPERF_ONE" "${DISP_HDR}" || fail "cpuperf max missing"
+grep -q "SCX_CPUPERF_ONE / 2" "${DISP_HDR}" || fail "cpuperf half missing"
 if grep -q "cpuperf" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
     if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
         fail "freq call not set only"
     fi
 fi
-if grep -q "scx_bpf_cpufreq\|bpf_cpufreq\|freq_set\|perf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+if grep "scx_bpf_cpufreq\|bpf_cpufreq\|freq_set\|perf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null | grep -v "scx_bpf_cpuperf_set" | grep -q .; then
     fail "freq steer reappeared"
 fi
 

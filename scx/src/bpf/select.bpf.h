@@ -15,7 +15,7 @@
  * runs and each CPU stands single with fail closed choice. Every
  * check returns minus one on failure. Masks are tested again before
  * each wake, so a task is never kicked toward a CPU outside its
- * current mask. Frequency stays with the governor and never steers
+ * current mask. Frequency follows core busyness and never steers
  * placement. The pick stores a provisional wait kind from the
  * last queue choice with pinned tasks keeping the pinned kind.
  *
