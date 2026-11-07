@@ -348,7 +348,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		scx_cgroup_bw_consume(p, (u64)t, delta);
 	}
 	rs->slice_rem = cur;
-	if (flow_cgroup_throttled(p, t, false, 0) == -EAGAIN)
+	if (flow_cgroup_throttled(p, t, false, 0) != 0)
 		scx_bpf_task_set_slice(p, 0);
 }
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
@@ -460,8 +460,7 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	if (scx_cgroup_bw_is_task_throttled((u64)t))
-		scx_cgroup_bw_cancel((u64)t, SCX_CGROUP_BW_CANCEL_DROP);
+	scx_cgroup_bw_cancel((u64)t, SCX_CGROUP_BW_CANCEL_DROP);
 }
 int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 {
@@ -471,6 +470,12 @@ int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 	u32 prio;
 	s64 vtime;
 	s32 tgt;
+	u32 old;
+	u64 now;
+	u64 slice;
+	u32 kind;
+	bool exiting;
+	bool pinned;
 	if (!p || !t)
 		return 0;
 	llc = READ_ONCE(t->llc_id);
@@ -480,17 +485,46 @@ int flow_enqueue_cb(struct task_struct *p __arg_trusted, u64 ctx)
 	if (!flow_prio_ok(prio))
 		prio = (u32)FLOW_PRIO_NORM;
 	vtime = READ_ONCE(t->vtime);
+	old = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
+	if (old & (u32)FLOW_FLAG_QUEUED) {
+		flow_fb_inc(llc, 4);
+		return 0;
+	}
+	exiting = (p->flags & PF_EXITING) != 0;
+	pinned = flow_is_pinned(p);
 	tgt = flow_first_allowed(p);
 	if (tgt < 0 || !flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt))
+		dsq = (u64)FLOW_FALLBACK_DSQ;
+	else if (exiting)
+		dsq = flow_llc_dsq_prio(llc, (u32)FLOW_PRIO_NORM);
+	else if (pinned)
 		dsq = (u64)FLOW_FALLBACK_DSQ;
 	else
 		dsq = flow_llc_dsq_prio(llc, prio);
 	if (!flow_dsq_ok(dsq))
 		dsq = (u64)FLOW_FALLBACK_DSQ;
+	if (exiting) {
+		slice = (u64)FLOW_EXIT_SLICE_NS;
+		kind = (u32)FLOW_LAT_EXITING;
+	} else if (pinned) {
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		kind = (u32)FLOW_LAT_PINNED;
+	} else if (dsq == (u64)FLOW_FALLBACK_DSQ) {
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		kind = (u32)FLOW_LAT_FALLBACK;
+	} else if (!flow_prio_ok(prio)) {
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		kind = (u32)FLOW_LAT_OTHER;
+	} else {
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		kind = prio;
+	}
+	now = scx_bpf_now();
+	flow_lat_finalize(t, kind, now);
 	if (dsq == (u64)FLOW_FALLBACK_DSQ)
-		scx_bpf_dsq_insert(p, dsq, (u64)FLOW_SLICE_MIN_NS, 0);
+		scx_bpf_dsq_insert(p, dsq, slice, 0);
 	else
-		scx_bpf_dsq_insert_vtime(p, dsq, (u64)FLOW_SLICE_MIN_NS, (u64)vtime, 0);
+		scx_bpf_dsq_insert_vtime(p, dsq, slice, (u64)vtime, 0);
 	flow_stat_inc(llc, 0);
 	if (dsq == (u64)FLOW_FALLBACK_DSQ)
 		flow_stat_inc(llc, 2);
@@ -592,6 +626,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			.verbose = 0,
 		};
 		int ret = scx_cgroup_bw_lib_init(&cfg);
+		if (ret == -EOPNOTSUPP)
+			return 0;
 		if (ret)
 			return ret;
 	}

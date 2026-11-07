@@ -81,6 +81,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 		bpf_map_update_elem(&cgrp_weight_stor, &cgid, &w, BPF_ANY);
 	}
 	ret = scx_cgroup_bw_init(cgrp, args);
+	if (ret == -EOPNOTSUPP)
+		return 0;
 	if (ret)
 		return ret;
 	return 0;
@@ -114,6 +116,8 @@ void BPF_STRUCT_OPS(flow_cgroup_set_bandwidth, struct cgroup *cgrp, u64 period_u
 	if (!cgrp)
 		return;
 	ret = scx_cgroup_bw_set(cgrp, period_us, quota_us, burst_us);
+	if (ret == -EOPNOTSUPP)
+		return;
 	if (ret)
 		scx_bpf_error("bandwidth set failed %d", ret);
 }
@@ -137,6 +141,8 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p, struct cgroup *from
 	if (!from)
 		return;
 	ret = scx_cgroup_bw_move(p, (u64)t, from, to);
+	if (ret == -EOPNOTSUPP)
+		return;
 	if (ret)
 		scx_bpf_error("bandwidth move failed %d", ret);
 }

@@ -121,6 +121,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 		goto insert_only;
 	}
+	if (!t->pid)
+		t->pid = p->pid;
 	/* Local placements run before ownership is taken. A task on a
 	 * local queue is not counted in the shared gauge, so it leaves
 	 * without the queued bit. Shared and fallback inserts take the
@@ -134,6 +136,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 	}
+	/* Pinned tasks wait under the admin limit like shared tasks. The
+	 * check sits before any pinned insert so a pinned task cannot
+	 * enter through the local queue past the limit. Exiting tasks
+	 * keep the fast path above and the helper leaves them alone.
+	 * Requeues arrive here as well, so the check covers them. Any
+	 * error waits aside instead of joining a queue. */
+	if (pinned && flow_cgroup_throttled(p, t, true, (u64)raw_v) != 0)
+		return;
 	if (pinned) {
 		s32 first = flow_first_allowed(p);
 		if (first < 0)
@@ -246,7 +256,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->prio = prio;
 		/* Mirror the stored time so later reads see the same value. */
 		scx_bpf_task_set_dsq_vtime(p, raw_v);
-		if (flow_cgroup_throttled(p, t, true, (u64)raw_v) == -EAGAIN) {
+		if (flow_cgroup_throttled(p, t, true, (u64)raw_v) != 0) {
 			__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
 			return;
 		}

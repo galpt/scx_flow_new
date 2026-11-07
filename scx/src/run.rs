@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use log::info;
 use log::warn;
@@ -56,6 +57,18 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, flow_ops, open_opts)
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
+        {
+            let nr_llcs = scx_utils::Topology::new()
+                .map(|topo| topo.all_llcs.len())
+                .unwrap_or(1)
+                .max(1);
+            scx_utils::resize_cgroup_bw(skel.open_object_mut(), 2048, 32, nr_llcs)
+                .context("failed to size cpu.max maps")?;
+            let bw =
+                scx_utils::setup_cgroup_bw(skel.open_object_mut(), "flow_cgroup_set_bandwidth")
+                    .context("failed to setup cpu.max")?;
+            info!("cpu.max support: {bw:?}");
+        }
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         match crate::topology::seed_topology(&mut skel) {
             Ok(text) => info!("Topology: {text}"),
