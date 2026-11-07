@@ -5,11 +5,14 @@
  * Each task keeps a burst estimate. Samples below old mix one
  * quarter old with three quarters sample, else three quarters
  * old with one quarter sample through shifts from a fixed seed
- * clamped to a floor and a ceiling. Estimates under half a
- * millisecond select latency, up to a millisecond normal, up to
- * twenty milliseconds batch, else idle. Long waits halve, very
- * long waits halve again, count a rescue, and select normal.
- * Remaining is aged minus burnt at floor. All math uses integers.
+ * clamped to a floor and a ceiling. Small estimates take the
+ * first queue with larger ones placed further back in fixed
+ * bands. Waiting lifts a task forward when it reaches the
+ * estimate and again at three times the estimate, with the
+ * better of band and lift winning. A wait past the starve bound
+ * never sits below the second queue. Long waits halve the
+ * estimate once and count a rescue. Remaining is aged minus
+ * burnt at floor. All math uses integers.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -47,20 +50,45 @@ static __always_inline u64 flow_sjf_remain(u64 aged, u64 used)
 		return flow_sjf_clamp(v);
 	}
 }
+static __always_inline u64 flow_sjf_mul_sat(u64 a, u64 m)
+{
+	if (m <= 1)
+		return m ? a : 0;
+	if (a > 6148914691236517205ULL)
+		return ~0ULL;
+	return a * m;
+}
 static __always_inline u32 flow_sjf_prio(u64 est, u64 wait_ns, u64 now)
 {
-	u64 age = 0;
+	u64 e = flow_sjf_clamp(est);
+	u64 w = 0;
+	u32 base;
+	u64 lat_thr;
+	u64 norm_thr;
+	u32 promo;
+	u32 prio;
 	if (now && wait_ns && now > wait_ns)
-		age = now - wait_ns;
-	if (age >= (u64)FLOW_STARVE_NS)
-		return (u32)FLOW_PRIO_NORM;
-	if (est < (u64)FLOW_SJF_LAT_NS)
-		return (u32)FLOW_PRIO_LAT;
-	if (est <= (u64)FLOW_SJF_INIT_NS)
-		return (u32)FLOW_PRIO_NORM;
-	if (est <= (u64)FLOW_SJF_BATCH_NS)
-		return (u32)FLOW_PRIO_BATCH;
-	return (u32)FLOW_PRIO_IDLE;
+		w = now - wait_ns;
+	if (e < (u64)FLOW_SJF_LAT_NS)
+		base = (u32)FLOW_PRIO_LAT;
+	else if (e <= (u64)FLOW_SJF_INIT_NS)
+		base = (u32)FLOW_PRIO_NORM;
+	else if (e <= (u64)FLOW_SJF_BATCH_NS)
+		base = (u32)FLOW_PRIO_BATCH;
+	else
+		base = (u32)FLOW_PRIO_IDLE;
+	lat_thr = flow_sjf_mul_sat(e, (u64)FLOW_HRRN_LAT_MULT);
+	norm_thr = flow_sjf_mul_sat(e, (u64)FLOW_HRRN_NORM_MULT);
+	if (w >= lat_thr)
+		promo = (u32)FLOW_PRIO_LAT;
+	else if (w >= norm_thr)
+		promo = (u32)FLOW_PRIO_NORM;
+	else
+		promo = (u32)FLOW_PRIO_COUNT;
+	prio = base < promo ? base : promo;
+	if (w >= (u64)FLOW_STARVE_NS && prio > (u32)FLOW_PRIO_NORM)
+		prio = (u32)FLOW_PRIO_NORM;
+	return prio;
 }
 static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc)
 {
@@ -68,11 +96,6 @@ static __always_inline u64 flow_sjf_age(u64 est, u64 wait_ns, u64 now, u32 llc)
 	if (!now || !wait_ns || now <= wait_ns)
 		return est;
 	age = now - wait_ns;
-	if (age >= (u64)FLOW_STARVE_NS) {
-		u64 v = est - (est >> 1);
-		flow_stat_inc(llc, 18);
-		return flow_sjf_clamp(v);
-	}
 	if (age >= (u64)FLOW_AGING_NS) {
 		u64 v = est - (est >> 1);
 		flow_stat_inc(llc, 18);

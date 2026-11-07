@@ -11,8 +11,8 @@
  * so two tasks never share the same value. A burst estimate tracks
  * recent run time and selects the queue, with short estimates first
  * and long estimates last. Slices hold one fixed quantum. Tasks
- * that wait long have their estimate halved, and tasks that wait
- * very long halve again with a rescue counted. Wait history keeps per CPU queue waits by
+ * that wait long have their estimate halved once with a rescue
+ * counted. Wait history keeps per CPU queue waits by
  * kind and bucket with slice based edges. Kinds cover shared
  * queues plus pinned plus exiting plus fallback plus early plus
  * unknown. Buckets split waits by length with slice fractions
@@ -66,6 +66,8 @@ enum flow_consts {
 	FLOW_SJF_CAP_NS = 1000000000ULL,
 	FLOW_AGING_NS = 100000000ULL,
 	FLOW_STARVE_NS = 200000000ULL,
+	FLOW_HRRN_NORM_MULT = 1ULL,
+	FLOW_HRRN_LAT_MULT = 3ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_LLC_BASE = 0x6000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,

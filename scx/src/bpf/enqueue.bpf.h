@@ -10,7 +10,8 @@
  * that have no usable CPU join the fallback queue. The queue key
  * is the stored virtual time. Shared inserts move past the per LLC
  * floor. Queue choice uses remaining time from the aged estimate
- * minus the burnt part with saturation at the floor. The
+ * minus the burnt part with saturation at the floor, lifted by
+ * waiting time against scaled bounds. The
  * charge scales with the share and the extra amount is fixed. Each
  * enqueue sends at most one idle wake. A wake goes only to an idle
  * target, else it counts a skip with no wake. The kernel idle flag

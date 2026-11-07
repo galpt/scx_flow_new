@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.1.12" ] || fail "version not at 5.1.12"
+[ "${want}" = "5.1.13" ] || fail "version not at 5.1.13"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -284,9 +284,9 @@ fi
 
 # SJF stays non preemptive with fixed integers and no knob. The burst
 # moves toward the sample with one quarter weight when the sample is
-# below old and one quarter the other way otherwise, halves on long
-# waits and halves again with a rescue on very long waits while
-# selecting normal, picks one of four queues by remaining plus age,
+# below old and one quarter the other way otherwise, halves once on
+# long waits with a rescue counted, picks one of four queues by
+# remaining plus waiting against scaled bounds with a starve ceiling,
 # and wakes idle targets only with a skip otherwise. Remaining takes
 # the aged estimate minus the burnt part with saturation at the floor.
 # Stopping folds burnt time through the quarter blend with no wait
@@ -311,6 +311,39 @@ grep -q ">> 2" "${SJF_HDR}" || fail "sjf quarter blend missing"
 grep -q "< (u64)FLOW_SJF_LAT_NS" "${SJF_HDR}" || fail "sjf lat band missing"
 grep -q "<= (u64)FLOW_SJF_INIT_NS" "${SJF_HDR}" || fail "sjf norm band missing"
 grep -q "<= (u64)FLOW_SJF_BATCH_NS" "${SJF_HDR}" || fail "sjf batch band missing"
+grep -q "FLOW_HRRN_NORM_MULT = 1ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "hrrn norm mult missing"
+grep -q "FLOW_HRRN_LAT_MULT = 3ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "hrrn lat mult missing"
+grep -q "flow_sjf_mul_sat" "${SJF_HDR}" || fail "hrrn scale missing"
+grep -q "~0ULL" "${SJF_HDR}" || fail "saturating bound missing"
+grep -q "FLOW_HRRN_LAT_MULT" "${SJF_HDR}" || fail "hrrn lat use missing"
+grep -q "FLOW_HRRN_NORM_MULT" "${SJF_HDR}" || fail "hrrn norm use missing"
+grep -q "FLOW_STARVE_NS && prio" "${SJF_HDR}" || fail "starve ceiling missing"
+grep -q "prio > (u32)FLOW_PRIO_NORM" "${SJF_HDR}" || fail "starve ceiling clamp missing"
+[ "$(grep -c "flow_stat_inc(llc, 18)" "${SJF_HDR}" | tr -d ' ')" = "1" ] || fail "rescue count drifted"
+if grep -q "return (u32)FLOW_PRIO_NORM" "${SJF_HDR}" 2>/dev/null; then
+    fail "starve early return reappeared"
+fi
+if grep -q "FLOW_PRIO_BATCH;" "${SJF_HDR}" 2>/dev/null; then
+    case "$(grep "FLOW_PRIO_BATCH;" "${SJF_HDR}")" in
+        *"base = (u32)FLOW_PRIO_BATCH"*) ;;
+        *) fail "batch promo reappeared" ;;
+    esac
+    if grep -q "promo = (u32)FLOW_PRIO_BATCH" "${SJF_HDR}" 2>/dev/null; then
+        fail "batch promo reappeared"
+    fi
+fi
+if grep -q "float" "${SJF_HDR}" 2>/dev/null; then
+    fail "float reappeared"
+fi
+if grep -q "double" "${SJF_HDR}" 2>/dev/null; then
+    fail "double reappeared"
+fi
+if grep -q " / " "${SJF_HDR}" 2>/dev/null; then
+    fail "division reappeared"
+fi
+if grep -q "/=" "${SJF_HDR}" 2>/dev/null; then
+    fail "division reappeared"
+fi
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${SJF_ENQ}" || fail "fixed slice missing"
 grep -q "quanta = 1" "${SJF_ENQ}" || fail "fixed quanta missing"
 grep -q "extra = 0" "${SJF_ENQ}" || fail "fixed extra missing"
