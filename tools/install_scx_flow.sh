@@ -211,8 +211,10 @@ echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
-# Per CPU queue helpers live in src/bpf/lib with no vendored copy.
-# Only the license link is set up here.
+# Queue helpers live with the other area headers with no vendored copy.
+# The lib path stays as an upstream link for include parity.
+rm -rf "${DEST}/src/bpf/lib"
+ln -s ../../../../../lib "${DEST}/src/bpf/lib"
 rm -f "${DEST}/LICENSE"
 ln -s ../../../LICENSE "${DEST}/LICENSE"
 

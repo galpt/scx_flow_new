@@ -24,8 +24,8 @@ UEI_DEFINE(uei);
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include "select.bpf.h"
-#include "lib/dhq.bpf.h"
-#include "lib/topology.bpf.h"
+#include "dhq.bpf.h"
+#include "topology.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"
 SCX_OPS_DEFINE(flow_ops,

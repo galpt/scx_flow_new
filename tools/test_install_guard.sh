@@ -34,12 +34,13 @@ for need_file in \
     [ -s "${SRC_DIR}/${need_file}" ] || fail "scaffold missing ${need_file}"
 done
 
-# Per CPU helpers live in src/bpf/lib with no vendored copy.
-# A missing lib file fails closed here before any build.
-[ -s "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" ] || fail "dhq header missing"
-[ -s "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" ] || fail "dhq source missing"
-[ -s "${SRC_DIR}/src/bpf/lib/topology.bpf.h" ] || fail "topology header missing"
-[ -s "${SRC_DIR}/src/bpf/lib/topology.bpf.c" ] || fail "topology source missing"
+# Queue helpers live with the other area headers with no vendored copy.
+# A missing helper file fails closed here before any build.
+[ -s "${SRC_DIR}/src/bpf/dhq.bpf.h" ] || fail "dhq header missing"
+[ -s "${SRC_DIR}/src/bpf/dhq.bpf.c" ] || fail "dhq source missing"
+[ -s "${SRC_DIR}/src/bpf/topology.bpf.h" ] || fail "topology header missing"
+[ -s "${SRC_DIR}/src/bpf/topology.bpf.c" ] || fail "topology source missing"
+[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
 
 # Docs plus changelog plus todos stay untracked with no re-leak.
 # History remains public in prior commits; tips carry no docs blobs.
@@ -82,10 +83,10 @@ for need_flow in \
     "src/bpf/select.bpf.h" \
     "src/bpf/lst.bpf.h" \
     "src/bpf/stats.bpf.h" \
-    "src/bpf/lib/dhq.bpf.h" \
-    "src/bpf/lib/topology.bpf.h" \
-    "src/bpf/lib/dhq.bpf.c" \
-    "src/bpf/lib/topology.bpf.c"; do
+    "src/bpf/dhq.bpf.h" \
+    "src/bpf/topology.bpf.h" \
+    "src/bpf/dhq.bpf.c" \
+    "src/bpf/topology.bpf.c"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
@@ -151,15 +152,11 @@ grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 grep -q 'FORK="https://github.com/galpt/scx"' "${INST}" || fail "fork remote missing"
 grep -q 'pinned fork ref' "${INST}" || fail "fork pin comment missing"
 
-# Per CPU helpers stay in tree with only the license link.
-grep -q 'Per CPU queue helpers' "${INST}" || fail "lib prose missing"
+# Queue helpers stay with the area headers with only the license link plus lib link.
+grep -q 'Queue helpers live' "${INST}" || fail "lib prose missing"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
-if grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" 2>/dev/null; then
-    fail "vendored lib symlink reappeared"
-fi
-if grep -q 'rm -rf "${DEST}/src/bpf/lib"' "${INST}" 2>/dev/null; then
-    fail "lib remove reappeared"
-fi
+grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink missing"
+grep -q 'rm -rf "${DEST}/src/bpf/lib"' "${INST}" || fail "lib remove missing"
 
 # Kernels below 7.1 are refused with a parsable kernel check.
 grep -q '7\.1' "${INST}" || fail "kernel gate missing"
@@ -345,7 +342,7 @@ fi
 if grep -q "float" "${LST_HDR}" 2>/dev/null; then
     fail "float reappeared"
 fi
-if grep -qi "float" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" "${SRC_DIR}/src/bpf/lib/topology.bpf.h" "${SRC_DIR}/src/bpf/lib/topology.bpf.c" 2>/dev/null; then
+if grep -qi "float" "${SRC_DIR}/src/bpf/dhq.bpf.h" "${SRC_DIR}/src/bpf/dhq.bpf.c" "${SRC_DIR}/src/bpf/topology.bpf.h" "${SRC_DIR}/src/bpf/topology.bpf.c" 2>/dev/null; then
     fail "float reappeared in lib"
 fi
 if grep -q "ledger\|balancer\|warmth" "${SRC_DIR}/src/bpf" 2>/dev/null; then
@@ -526,14 +523,14 @@ if grep -q "hog_escape\|hog_hold\|lat_boost\|lat_preempt\|age_rescue" "${SRC_DIR
     fail "old stats name reappeared"
 fi
 
-# Wait hist stays scoped with five maps and nine headers.
+# Wait hist stays scoped with five maps and eleven headers.
 # The wait map is one array past the base tables with per CPU
 # run plus dispatch halves. Top keeps twenty one counters.
 [ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "maps count drifted"
 [ "$(grep -c 'include ".*\.bpf\.h"' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "11" ] || fail "headers count drifted"
 grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lat include missing"
-grep -q 'include "lib/dhq.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "dhq include missing"
-grep -q 'include "lib/topology.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "topology include missing"
+grep -q 'include "dhq.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "dhq include missing"
+grep -q 'include "topology.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "topology include missing"
 grep -q 'add_source.*dhq.bpf.c' "${SRC_DIR}/build.rs" || fail "dhq source missing"
 grep -q 'add_source.*topology.bpf.c' "${SRC_DIR}/build.rs" || fail "topology source missing"
 grep -q 'compile_link_gen' "${SRC_DIR}/build.rs" || fail "link helper missing"
@@ -598,15 +595,15 @@ fi
 if grep -q "FLOW_PRIO_COUNT" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
     fail "prio queue reappeared"
 fi
-grep -q "flow_dhq_strand_for_prio" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "strand helper missing"
-grep -q "flow_dhq_pick_mode" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "mode helper missing"
-grep -q "flow_dhq_balanced_pick" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "balanced helper missing"
-grep -q "flow_dhq_over_imbalance" "${SRC_DIR}/src/bpf/lib/dhq.bpf.h" || fail "imbalance helper missing"
-grep -q "FLOW_DHQ_MODE_BALANCED" "${SRC_DIR}/src/bpf/lib/dhq.bpf.c" || fail "balanced mode missing"
+grep -q "flow_dhq_strand_for_prio" "${SRC_DIR}/src/bpf/dhq.bpf.h" || fail "strand helper missing"
+grep -q "flow_dhq_pick_mode" "${SRC_DIR}/src/bpf/dhq.bpf.h" || fail "mode helper missing"
+grep -q "flow_dhq_balanced_pick" "${SRC_DIR}/src/bpf/dhq.bpf.h" || fail "balanced helper missing"
+grep -q "flow_dhq_over_imbalance" "${SRC_DIR}/src/bpf/dhq.bpf.h" || fail "imbalance helper missing"
+grep -q "FLOW_DHQ_MODE_BALANCED" "${SRC_DIR}/src/bpf/dhq.bpf.c" || fail "balanced mode missing"
 grep -q "flow_dhq_balanced_pick" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "balanced drain missing"
 grep -q "flow_dhq_over_imbalance" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "imbalance guard missing"
 grep -q "flow_dhq_live" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "dhq handle missing"
-grep -q "flow_topo_online" "${SRC_DIR}/src/bpf/lib/topology.bpf.h" || fail "topo helper missing"
+grep -q "flow_topo_online" "${SRC_DIR}/src/bpf/topology.bpf.h" || fail "topo helper missing"
 grep -q "flow_topo_same_node" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "topo order missing"
 grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
 grep -q "FLOW_FAIR_EXTRA_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair extra missing"

@@ -11,7 +11,7 @@
  */
 #ifndef __FLOW_DHQ_BPF_H
 #define __FLOW_DHQ_BPF_H
-#include "../intf.h"
+#include "intf.h"
 u64 flow_dhq_strand_for_prio(u32 prio);
 u64 flow_dhq_pick_mode(void);
 u64 flow_dhq_max_imbalance(void);

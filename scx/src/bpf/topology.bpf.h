@@ -10,7 +10,7 @@
  */
 #ifndef __FLOW_TOPOLOGY_BPF_H
 #define __FLOW_TOPOLOGY_BPF_H
-#include "../intf.h"
+#include "intf.h"
 bool flow_topo_online(u32 cpu, u64 nr_cpus);
 bool flow_topo_same_node(u32 got, u32 node);
 #endif

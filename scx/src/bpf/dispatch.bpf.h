@@ -44,8 +44,8 @@
 #include "lst.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
-#include "lib/dhq.bpf.h"
-#include "lib/topology.bpf.h"
+#include "dhq.bpf.h"
+#include "topology.bpf.h"
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;

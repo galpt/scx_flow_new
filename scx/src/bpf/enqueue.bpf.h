@@ -48,7 +48,7 @@
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include "lat.bpf.h"
-#include "lib/dhq.bpf.h"
+#include "dhq.bpf.h"
 static __always_inline u64 flow_enqueue_dhq_or_fallback(s32 tgt, u32 strand)
 {
 	u64 dsq_a;
