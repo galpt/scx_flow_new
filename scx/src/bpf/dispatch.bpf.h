@@ -35,9 +35,12 @@
  * on a queued task keeps the queue and wakes the new owner, counting
  * the wake when the owner is usable. A task with no usable CPU waits
  * in the fallback queue until the mask widens. Init creates one queue
- * per CPU and the fallback queue. Queues use the upstream library in
+ * per CPU with one handle and one total count and the fallback queue.
+ * Each handle holds both strands with per-CPU recency and no per strand
+ * count. Queues use the upstream library in
  * virtual time mode. Liveness comes from the upstream tree, so CPUs
- * that arrive late need a restart to be seen.
+ * that arrive late need a restart to be seen. The warm_only arg stays
+ * for shape with No warm caller and all callers pass no warm limit.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

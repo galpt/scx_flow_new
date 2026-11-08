@@ -3,9 +3,10 @@
  * Queueing for the flow scheduler.
  *
  * Shared tasks join the least queued per CPU queue in vd order.
- * One scan picks the live allowed queue with a handle that holds
- * the fewest waiting tasks. Ties keep the lowest id with no extra
- * mate favor here. Warmness stays in the strand only as per-CPU recency. Warm tasks
+ * One scan picks the live allowed queue with one handle that holds
+ * the fewest waiting tasks as one total per queue. Ties keep the lowest
+ * id with no extra mate favor here. Warmness stays in the strand only
+ * as per-CPU recency with no per strand count. Warm tasks
  * take the first strand and cold tasks take the second, with unclear
  * tasks treated as cold. Warm means the last CPU shares the same
  * LLC with the picked target. The same LLC means the same chip.

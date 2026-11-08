@@ -774,4 +774,14 @@ if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "bounded prose reappeared"
 fi
 
+# Single handle per CPU stays with no second index and no per strand counts.
+# One queue holds both strands, so a second dimension on the handle table
+# plus a second dimension on the count table must not return.
+if grep -rn "flow_dhqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "2-D queue handles reappeared"
+fi
+if grep -rn "flow_qcnt\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "per-strand counts reappeared"
+fi
+
 echo "guard tests passed"

@@ -2,14 +2,14 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU owns one queue with two strands ordered by vd. Warm tasks
+ * Each CPU owns one queue handle with two strands ordered by vd. Warm tasks
  * join the first strand and cold tasks join the second. Strands hold
- * per-CPU recency. Ties leave in
+ * per-CPU recency with no per strand count. Ties leave in
  * insertion order. Warm means the last CPU shares the same LLC with
  * the picked target, else the task stays cold. The same LLC means the
  * same chip. Placement picks the live allowed queue with the fewest
- * waiting tasks with ties to the lowest id. A strand that refuses an
- * insert tries the other strand once before the fallback queue
+ * waiting tasks as one total per queue with ties to the lowest id. A strand
+ * that refuses an insert tries the other strand once before the fallback queue
  * as a balance-only guard.
  * Draining peeks both heads and pops the earlier vd with ties to the
  * first strand. Remote queues drain last with both strands in vd order,
