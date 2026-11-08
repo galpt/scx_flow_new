@@ -12,5 +12,5 @@ stack plus bounded loops with divide only in fair charging,
 so inference stays in userspace. The hint never writes vd (virtual deadline)
 and never steers placement. It makes no faster claim over
 averaging and ships as a removable probe: delete this dir
-with no scheduler edit. Pointman raw frames feed burst
-replay only with no queue inference.
+with no scheduler edit. Pointman raw frames plus Lestat frametime feed burst
+replay only with no queue inference. Burst maps to zero for lat plus one for batch plus two for idle with shares 400 plus 100 plus 20 report only and calibration still required.

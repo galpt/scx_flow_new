@@ -3,9 +3,14 @@
 # Offline hint replay with integer math only and no scheduler use.
 # Reads raw frame rows or harness rows and prints a clamped hint.
 # Batch mode replays many files and reports proxy error plus
-# saturation plus shard stability with integer math only.
+# saturation plus shard stability plus taxonomy with integer math only.
 # Proxy maps hint minus offset to burst tenths as a placeholder
 # with no accuracy claim and calibration still required.
+# Burst sums cpu plus gpu tenths. Taxonomy maps burst to zero
+# for lat plus one for batch plus two for idle with shares four
+# hundred plus one hundred plus twenty report only.
+# Lestat frametime maps to duplicated tenths with header detect
+# for probe versus frametime with integer math only.
 # The model keeps two hidden units with rectified outputs and
 # saturates at the share bounds. It never writes vd and makes
 # no faster claim over averaging. Delete this dir to remove it.
@@ -67,6 +72,31 @@ def parse_tenths_ms(text):
     return whole // 100
 
 
+def tenths_from_ms_str(text):
+    # Tenths of ms from an ms decimal string with integers only.
+    # Whole part times ten plus first frac digit with no float math.
+    s = text.strip()
+    neg = False
+    if s.startswith("-"):
+        neg = True
+        s = s[1:]
+    if not s:
+        return 0
+    if "." in s:
+        whole_s, frac_s = s.split(".", 1)
+    else:
+        whole_s, frac_s = s, ""
+    whole = 0
+    for ch in whole_s:
+        if "0" <= ch <= "9":
+            whole = whole * 10 + (ord(ch) - 48)
+    tenth = 0
+    if frac_s and "0" <= frac_s[0] <= "9":
+        tenth = ord(frac_s[0]) - 48
+    out = whole * 10 + tenth
+    return -out if neg else out
+
+
 def relu(x):
     return x if x > 0 else 0
 
@@ -114,6 +144,29 @@ def proxy_for(hint):
     # Placeholder map from hint to burst tenths with integer add.
     # Removes the fixed offset. Uncalibrated with no accuracy claim.
     return hint - 100
+
+
+def taxonomy_for(burst):
+    # Burst class in tenths with integer compare only.
+    # At most 66 maps to lat zero. At most 91 maps to batch one
+    # which stays the default. Above maps to idle two.
+    # Report only with no scheduler use and no accuracy claim.
+    if burst <= 66:
+        return 0
+    if burst <= 91:
+        return 1
+    return 2
+
+
+def share_for(tax):
+    # Share step for a burst class with integer constants only.
+    # Lat maps to four hundred. Batch maps to one hundred which
+    # stays the default. Idle maps to twenty. Report only.
+    if tax == 0:
+        return 400
+    if tax == 2:
+        return 20
+    return 100
 
 
 def mean_int(vals):
@@ -182,9 +235,64 @@ def load_harness(path):
     return rows
 
 
+def load_lestat(path):
+    # Lestat frametime rows in ms mapped to duplicated tenths.
+    # Finds the fps header with frametime then parses each row
+    # with integer digits only and no float math. Preamble lines
+    # plus blank lines plus dash lines stay skipped report only.
+    rows = []
+    with open(path, newline="") as f:
+        text = f.read()
+    lines = text.splitlines()
+    header_idx = -1
+    header_fields = []
+    for idx in range(len(lines)):
+        line = lines[idx]
+        if "frametime" in line and "fps" in line:
+            header_idx = idx
+            header_fields = [h.strip() for h in line.split(",")]
+            break
+    if header_idx < 0:
+        return rows
+    ft_pos = -1
+    for pos in range(len(header_fields)):
+        if header_fields[pos] == "frametime":
+            ft_pos = pos
+    if ft_pos < 0:
+        return rows
+    for idx in range(header_idx + 1, len(lines)):
+        raw = lines[idx].strip()
+        if not raw:
+            continue
+        if raw.startswith("-"):
+            continue
+        parts = lines[idx].split(",")
+        if ft_pos >= len(parts):
+            continue
+        f10 = tenths_from_ms_str(parts[ft_pos])
+        if f10 < 0:
+            f10 = 0
+        rows.append((f10, f10))
+    return rows
+
+
 def load_any(path):
     if path.endswith(".json"):
         return load_frames(path)
+    # Auto detect csv kind by header text with string search only.
+    # Frametime without probe maps to lestat rows with duplicated
+    # tenths. Probe headers plus old headers map to harness rows
+    # for compat with no float use and no scheduler import.
+    with open(path, newline="") as f:
+        head = f.read(8192)
+    has_probe = False
+    has_frame = False
+    if "probe_p99_us" in head:
+        has_probe = True
+    if "frametime" in head:
+        has_frame = True
+    if has_frame and not has_probe:
+        return load_lestat(path)
     return load_harness(path)
 
 
@@ -263,6 +371,8 @@ def build_lines(rows, per_file, nshards):
     # First line keeps the old rows plus avg_hint form for compat.
     # Later lines add proxy error plus saturation plus stability
     # plus sweep against the averaging baseline report only.
+    # Taxonomy plus share lines stay report only with no threshold
+    # and no accuracy claim and calibration still required.
     hints = []
     bursts = []
     for c10, g10 in rows:
@@ -303,6 +413,20 @@ def build_lines(rows, per_file, nshards):
         if val < best_mean:
             best_mean = val
             best_name = name
+    tax_lat = 0
+    tax_batch = 0
+    tax_idle = 0
+    for b in bursts:
+        t = taxonomy_for(b)
+        if t == 0:
+            tax_lat = tax_lat + 1
+        elif t == 2:
+            tax_idle = tax_idle + 1
+        else:
+            tax_batch = tax_batch + 1
+    share_lat = share_for(0)
+    share_batch = share_for(1)
+    share_idle = share_for(2)
     lines = []
     lines.append(f"rows {len(rows)} avg_hint {avg}")
     lines.append(f"mean_err {mean_err} p50_err {p50_err} p99_err {p99_err}")
@@ -314,6 +438,8 @@ def build_lines(rows, per_file, nshards):
         sweep_bits.append(f"{name}={val}")
     lines.append("sweep " + " ".join(sweep_bits))
     lines.append(f"sweep_best {best_name} sweep_best_mean {best_mean}")
+    lines.append(f"taxonomy lat {tax_lat} batch {tax_batch} idle {tax_idle}")
+    lines.append(f"share lat {share_lat} batch {share_batch} idle {share_idle}")
     lines.append(f"files {len(per_file)}")
     for path, count, favg in per_file:
         lines.append(f"file {path} rows {count} avg_hint {favg}")

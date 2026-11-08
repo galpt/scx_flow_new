@@ -136,6 +136,25 @@ fi
 grep -q "never writes vd\|never writes" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint vd prose missing"
 grep -q "no faster claim\|no scheduler" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint claim prose missing"
 
+# Hint taxonomy plus lestat stay offline with integer math only.
+# Burst classes map to zero plus one plus two with shares report
+# only. Lestat frametime maps to duplicated tenths with header
+# detect for probe versus frametime and calibration still required.
+grep -q "taxonomy_for" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint taxonomy missing"
+grep -q "share_for" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint share missing"
+grep -q "load_lestat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lestat loader missing"
+grep -q "frametime" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint frametime detect missing"
+grep -q "probe_p99_us" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint probe detect missing"
+grep -q "taxonomy lat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint taxonomy report missing"
+grep -q "share lat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint share report missing"
+grep -q "burst <= 66" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lat bound missing"
+grep -q "burst <= 91" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint batch bound missing"
+grep -q "return 400" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lat share missing"
+grep -q "return 20" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint idle share missing"
+grep -q "calibration still required" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint calibration prose missing"
+grep -q "calibration still required" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint calibration readme missing"
+grep -q "frametime" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint lestat readme missing"
+
 # Changelog history remains public in prior commits; tip carries no changelog blob.
 
 # Deleted Rust mirrors stay deleted with no reappearance.
