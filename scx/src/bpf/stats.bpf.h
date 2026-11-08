@@ -50,19 +50,19 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 	else if (off == 11)
 		cell = &st->blocked;
 	else if (off == 12)
-		cell = &st->lst_escape;
+		cell = &st->edf_escape;
 	else if (off == 13)
 		cell = &st->orphan_kick;
 	else if (off == 14)
 		cell = &st->hol_forward;
 	else if (off == 15)
-		cell = &st->lst_urgent;
+		cell = &st->edf_urgent;
 	else if (off == 16)
-		cell = &st->lst_hold;
+		cell = &st->edf_hold;
 	else if (off == 17)
-		cell = &st->lst_preempt;
+		cell = &st->edf_preempt;
 	else if (off == 18)
-		cell = &st->lst_overdue;
+		cell = &st->edf_overdue;
 	else
 		return;
 	__sync_fetch_and_add(cell, 1ULL);

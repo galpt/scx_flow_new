@@ -45,7 +45,7 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "lst.bpf.h"
+#include "edf.bpf.h"
 #include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include "lat.bpf.h"
@@ -171,7 +171,7 @@ static __always_inline void flow_kick_checked(s32 tgt, struct task_struct *p, u3
 	}
 	flow_kick_idle_only(tgt, p, llc);
 }
-static __always_inline void flow_kick_lst(s32 tgt, struct task_struct *p, u32 llc, s64 new_slack)
+static __always_inline void flow_kick_edf(s32 tgt, struct task_struct *p, u32 llc, s64 new_slack)
 {
 	struct flow_running_state *rs;
 	u64 rgen;
@@ -207,10 +207,10 @@ static __always_inline void flow_kick_lst(s32 tgt, struct task_struct *p, u32 ll
 		return;
 	}
 	run_slack = READ_ONCE(rs->slack);
-	if (new_slack > vmax - (s64)FLOW_LST_PREEMPT_GAP_NS)
+	if (new_slack > vmax - (s64)FLOW_EDF_PREEMPT_GAP_NS)
 		need = vmax;
 	else
-		need = new_slack + (s64)FLOW_LST_PREEMPT_GAP_NS;
+		need = new_slack + (s64)FLOW_EDF_PREEMPT_GAP_NS;
 	if (need >= run_slack) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -365,26 +365,32 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u64 rem = READ_ONCE(t->remain_ns);
 		u64 dl = READ_ONCE(t->deadline_ns);
 		s64 slack;
-		bool over = false;
+		u32 est;
+		u8 hyst;
+		u8 hog;
+		u64 gen;
 		if (!rem)
-			rem = (u64)FLOW_LST_INIT_NS;
-		rem = flow_lst_clamp_rem(rem);
+			rem = (u64)FLOW_EDF_INIT_NS;
+		rem = flow_edf_clamp_rem(rem);
 		if (!dl) {
-			dl = now + (u64)FLOW_LST_REL_NS;
+			dl = now + (u64)FLOW_EDF_REL_NS;
 			if (dl < now)
 				dl = ~0ULL;
 		} else if (now && dl <= now) {
 			flow_stat_inc(llc, 18);
 			flow_stat_inc(llc, 12);
-			dl = now + (u64)FLOW_LST_REL_NS;
+			dl = now + (u64)FLOW_EDF_REL_NS;
 			if (dl < now)
 				dl = ~0ULL;
-			over = true;
 		}
-		slack = flow_lst_slack(dl, now, rem);
-		prio = flow_lst_prio(slack);
-		if (over)
-			prio = (u32)FLOW_PRIO_LAT;
+		est = READ_ONCE(t->est_ns);
+		if (!est)
+			est = (u32)FLOW_EDF_INIT_NS;
+		hyst = READ_ONCE(t->hyst);
+		hog = READ_ONCE(t->hog);
+		gen = READ_ONCE(t->gen);
+		slack = flow_edf_slack(dl, now, rem);
+		prio = flow_edf_prio_est(slack, est, hyst, hog, gen);
 		if (!flow_prio_ok(prio))
 			prio = (u32)FLOW_PRIO_NORM;
 		t->remain_ns = rem;
@@ -468,7 +474,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			flow_kick_idle_only((s32)bpf_get_smp_processor_id(), p, llc);
 			return;
 		}
-		flow_kick_lst(tgt, p, llc, new_slack);
+		flow_kick_edf(tgt, p, llc, new_slack);
 		return;
 	}
 insert_only:

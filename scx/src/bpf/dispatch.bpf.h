@@ -49,7 +49,7 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "lst.bpf.h"
+#include "edf.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include <lib/dhq.h>
@@ -232,7 +232,7 @@ static __always_inline bool flow_wait_long(u64 enq, u64 now)
 		return false;
 	if (now <= enq)
 		return false;
-	return now - enq > (u64)FLOW_LST_REL_NS;
+	return now - enq > (u64)FLOW_EDF_REL_NS;
 }
 static __always_inline bool flow_head_long_dhq(scx_dhq_t *dhq, u64 strand, u64 now)
 {
@@ -479,7 +479,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->llc_id = llc;
 	rs->prio = t->prio;
 	rs->reserved = 0;
-	rs->slack = flow_lst_slack(READ_ONCE(t->deadline_ns), now,
+	rs->slack = flow_edf_slack(READ_ONCE(t->deadline_ns), now,
 				   READ_ONCE(t->remain_ns));
 	t->gen = ng;
 	t->slice_rem = sl;
@@ -527,16 +527,53 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		used = len - remain;
 	rem = READ_ONCE(t->remain_ns);
 	if (!rem)
-		rem = (u64)FLOW_LST_INIT_NS;
-	rem = flow_lst_clamp_rem(rem);
+		rem = (u64)FLOW_EDF_INIT_NS;
+	rem = flow_edf_clamp_rem(rem);
 	if (used) {
 		if (used >= rem)
-			rem = (u64)FLOW_LST_FLOOR_NS;
+			rem = (u64)FLOW_EDF_FLOOR_NS;
 		else
 			rem -= used;
-		rem = flow_lst_clamp_rem(rem);
+		rem = flow_edf_clamp_rem(rem);
 	}
 	t->remain_ns = rem;
+	/* Tail burn feeds the burst filter with band update. Full tails
+	 * step the sustained count up while sleeps step it down by one.
+	 * A runnable yield with no burn keeps both counts. Sleep with no
+	 * burn halves the filter past a long gap and steps the count down
+	 * by one with no zero sample. */
+	if (used) {
+		u32 old_est = READ_ONCE(t->est_ns);
+		u32 sample;
+		u32 new_est;
+		u8 old_hyst = READ_ONCE(t->hyst);
+		u8 old_hog = READ_ONCE(t->hog);
+		bool is_full;
+		bool slept;
+		if (!old_est)
+			old_est = (u32)FLOW_EDF_INIT_NS;
+		if (used > (u64)FLOW_EDF_EST_CAP_NS)
+			sample = (u32)FLOW_EDF_EST_CAP_NS;
+		else
+			sample = (u32)used;
+		new_est = flow_est_update(old_est, sample);
+		t->est_ns = new_est;
+		t->hyst = flow_edf_hyst_next(old_hyst, new_est);
+		is_full = used >= (u64)FLOW_EDF_FULL_NS;
+		slept = !runnable;
+		t->hog = flow_edf_hog_next(old_hog, is_full, slept);
+	} else if (!runnable) {
+		u64 enq = READ_ONCE(t->enq_ns);
+		u64 now = scx_bpf_now();
+		u8 old_hog = READ_ONCE(t->hog);
+		if (enq && now && now > enq && now - enq > (u64)FLOW_EDF_REL_NS) {
+			u32 aged = flow_est_halve(READ_ONCE(t->est_ns));
+			t->est_ns = aged;
+			t->hyst = flow_edf_hyst_next(READ_ONCE(t->hyst), aged);
+		}
+		if (old_hog > 0)
+			t->hog = old_hog - 1;
+	}
 	/* Use pays here, scaled by the share with saturation. The tick
 	 * already moved the remaining slice forward, so this charges
 	 * only the tail past the last tick. A runnable yield with no
@@ -592,15 +629,29 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		s64 nv = flow_fair_charge(t->vtime, delta, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
 		if (!rem)
-			rem = (u64)FLOW_LST_INIT_NS;
-		rem = flow_lst_clamp_rem(rem);
+			rem = (u64)FLOW_EDF_INIT_NS;
+		rem = flow_edf_clamp_rem(rem);
 		if (delta >= rem)
-			rem = (u64)FLOW_LST_FLOOR_NS;
+			rem = (u64)FLOW_EDF_FLOOR_NS;
 		else
 			rem -= delta;
-		t->remain_ns = flow_lst_clamp_rem(rem);
+		t->remain_ns = flow_edf_clamp_rem(rem);
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
+		{
+			u32 old_est = READ_ONCE(t->est_ns);
+			u32 sample;
+			u32 new_est;
+			if (!old_est)
+				old_est = (u32)FLOW_EDF_INIT_NS;
+			if (delta > (u64)FLOW_EDF_EST_CAP_NS)
+				sample = (u32)FLOW_EDF_EST_CAP_NS;
+			else
+				sample = (u32)delta;
+			new_est = flow_est_update(old_est, sample);
+			t->est_ns = new_est;
+			t->hyst = flow_edf_hyst_next(READ_ONCE(t->hyst), new_est);
+		}
 	}
 	rs->slice_rem = cur;
 }
@@ -675,11 +726,15 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->llc_id = 0;
 	t->flags = 0;
 	t->prio = (u32)FLOW_PRIO_NORM;
-	t->remain_ns = (u64)FLOW_LST_INIT_NS;
+	t->remain_ns = (u64)FLOW_EDF_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	t->home_cpu = -1;
 	t->deadline_ns = 0;
+	t->est_ns = (u32)FLOW_EDF_INIT_NS;
+	t->hyst = 0;
+	t->hog = 0;
+	t->pad2 = 0;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -700,11 +755,15 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->prio = (u32)FLOW_PRIO_NORM;
 	t->cgrp_id = cgid;
 	t->cg_weight = flow_cgroup_lookup(cgid);
-	t->remain_ns = (u64)FLOW_LST_INIT_NS;
+	t->remain_ns = (u64)FLOW_EDF_INIT_NS;
 	t->enq_ns = 0;
 	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
 	t->home_cpu = -1;
 	t->deadline_ns = 0;
+	t->est_ns = (u32)FLOW_EDF_INIT_NS;
+	t->hyst = 0;
+	t->hog = 0;
+	t->pad2 = 0;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }

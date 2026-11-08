@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.2" ] || fail "version not at 5.2.2"
+[ "${want}" = "5.2.3" ] || fail "version not at 5.2.3"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -83,7 +83,7 @@ for need_flow in \
     "src/bpf/lat.bpf.h" \
     "src/bpf/maps.bpf.h" \
     "src/bpf/select.bpf.h" \
-    "src/bpf/lst.bpf.h" \
+    "src/bpf/edf.bpf.h" \
     "src/bpf/stats.bpf.h"; do
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
@@ -293,32 +293,32 @@ fi
 
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
-# LST picks by slack with gap preempts and fixed integers and no knob. Remain
+# EDF picks by slack with gap preempts and fixed integers and no knob. Remain
 # starts at one slice and burns down to a floor, deadline adds a fixed span
 # and is kept until it passes with overdue plus escape counted, slack is
 # deadline minus now minus remain with saturation, prio follows slack bands
 # with zero plus one slice plus ten slices, and shared enqueues kick for
 # preempt on a gap win else idle with a skip otherwise. Stopping plus tick
 # burn remain with no blend. No aging plus no starve plus no scale is kept.
-LST_HDR="${SRC_DIR}/src/bpf/lst.bpf.h"
-LST_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
-grep -q "flow_lst_clamp_rem" "${LST_HDR}" || fail "lst clamp missing"
-grep -q "flow_lst_slack" "${LST_HDR}" || fail "lst slack missing"
-grep -q "flow_lst_prio" "${LST_HDR}" || fail "lst prio missing"
+EDF_HDR="${SRC_DIR}/src/bpf/edf.bpf.h"
+EDF_ENQ="${SRC_DIR}/src/bpf/enqueue.bpf.h"
+grep -q "flow_edf_clamp_rem" "${EDF_HDR}" || fail "edf clamp missing"
+grep -q "flow_edf_slack" "${EDF_HDR}" || fail "edf slack missing"
+grep -q "flow_edf_prio" "${EDF_HDR}" || fail "edf prio missing"
 grep -q "FLOW_SLICE_MIN_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
-grep -q "FLOW_LST_REL_NS = 20000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst rel missing"
-grep -q "FLOW_LST_INIT_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst seed missing"
-grep -q "FLOW_LST_FLOOR_NS = 5000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst floor missing"
-grep -q "FLOW_LST_PREEMPT_GAP_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst gap missing"
-grep -q "FLOW_LST_NORM_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst norm missing"
-grep -q "FLOW_LST_BATCH_NS = 10000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lst batch missing"
-grep -q "slack <= 0" "${LST_HDR}" || fail "lst lat band missing"
-grep -q "FLOW_LST_NORM_NS" "${LST_HDR}" || fail "lst norm use missing"
-grep -q "FLOW_LST_BATCH_NS" "${LST_HDR}" || fail "lst batch use missing"
-grep -q "return (u32)FLOW_PRIO_LAT" "${LST_HDR}" || fail "lst lat return missing"
-grep -q "return (u32)FLOW_PRIO_NORM" "${LST_HDR}" || fail "lst norm return missing"
-grep -q "return (u32)FLOW_PRIO_BATCH" "${LST_HDR}" || fail "lst batch return missing"
-grep -q "0x7fffffffffffffff" "${LST_HDR}" || fail "saturating bound missing"
+grep -q "FLOW_EDF_REL_NS = 20000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf rel missing"
+grep -q "FLOW_EDF_INIT_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf seed missing"
+grep -q "FLOW_EDF_FLOOR_NS = 5000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf floor missing"
+grep -q "FLOW_EDF_PREEMPT_GAP_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf gap missing"
+grep -q "FLOW_EDF_NORM_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf norm missing"
+grep -q "FLOW_EDF_BATCH_NS = 10000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "edf batch missing"
+grep -q "slack <= 0" "${EDF_HDR}" || fail "edf lat band missing"
+grep -q "FLOW_EDF_NORM_NS" "${EDF_HDR}" || fail "edf norm use missing"
+grep -q "FLOW_EDF_BATCH_NS" "${EDF_HDR}" || fail "edf batch use missing"
+grep -q "return (u32)FLOW_PRIO_LAT" "${EDF_HDR}" || fail "edf lat return missing"
+grep -q "return (u32)FLOW_PRIO_NORM" "${EDF_HDR}" || fail "edf norm return missing"
+grep -q "return (u32)FLOW_PRIO_BATCH" "${EDF_HDR}" || fail "edf batch return missing"
+grep -q "0x7fffffffffffffff" "${EDF_HDR}" || fail "saturating bound missing"
 if grep -q "FLOW_SJF" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "sjf const reappeared"
 fi
@@ -340,7 +340,7 @@ fi
 if grep -q "FLOW_LAT_OFF_NS\|flow_lat_key\|500001\|1000001\|20000001" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "lat shift reappeared"
 fi
-if grep -q "float" "${LST_HDR}" 2>/dev/null; then
+if grep -q "float" "${EDF_HDR}" 2>/dev/null; then
     fail "float reappeared"
 fi
 if grep -qi "float" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
@@ -349,31 +349,31 @@ fi
 if grep -q "ledger\|balancer\|warmth" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "extra table reappeared"
 fi
-if grep -q "double" "${LST_HDR}" 2>/dev/null; then
+if grep -q "double" "${EDF_HDR}" 2>/dev/null; then
     fail "double reappeared"
 fi
-if grep -q " / " "${LST_HDR}" 2>/dev/null; then
+if grep -q " / " "${EDF_HDR}" 2>/dev/null; then
     fail "division reappeared"
 fi
-if grep -q "/=" "${LST_HDR}" 2>/dev/null; then
+if grep -q "/=" "${EDF_HDR}" 2>/dev/null; then
     fail "division reappeared"
 fi
-grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${LST_ENQ}" || fail "fixed slice missing"
-grep -q "quanta = 1" "${LST_ENQ}" || fail "fixed quanta missing"
-grep -q "extra = 0" "${LST_ENQ}" || fail "fixed extra missing"
-grep -q "flow_fair_charge" "${LST_ENQ}" || fail "charge pass through missing"
-grep -q "flow_fair_extra" "${LST_ENQ}" || fail "extra pass through missing"
-grep -q "flow_kick_idle_only" "${LST_ENQ}" || fail "idle kick missing"
-grep -q "flow_kick_lst" "${LST_ENQ}" || fail "gap kick missing"
-grep -q "flow_lst_clamp_rem" "${LST_ENQ}" || fail "remain clamp use missing"
-grep -q "flow_lst_slack" "${LST_ENQ}" || fail "slack use missing"
-grep -q "flow_lst_prio" "${LST_ENQ}" || fail "prio use missing"
-grep -q "deadline_ns" "${LST_ENQ}" || fail "deadline use missing"
-grep -q "remain_ns" "${LST_ENQ}" || fail "remain use missing"
-grep -q "FLOW_LST_PREEMPT_GAP_NS" "${LST_ENQ}" || fail "gap use missing"
-grep -q "flow_seq_floor" "${LST_ENQ}" || fail "floor key missing"
-grep -q "flow_lst_clamp_rem" "${DISP_HDR}" || fail "remain burn missing"
-grep -q "flow_lst_slack" "${DISP_HDR}" || fail "running slack missing"
+grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${EDF_ENQ}" || fail "fixed slice missing"
+grep -q "quanta = 1" "${EDF_ENQ}" || fail "fixed quanta missing"
+grep -q "extra = 0" "${EDF_ENQ}" || fail "fixed extra missing"
+grep -q "flow_fair_charge" "${EDF_ENQ}" || fail "charge pass through missing"
+grep -q "flow_fair_extra" "${EDF_ENQ}" || fail "extra pass through missing"
+grep -q "flow_kick_idle_only" "${EDF_ENQ}" || fail "idle kick missing"
+grep -q "flow_kick_edf" "${EDF_ENQ}" || fail "gap kick missing"
+grep -q "flow_edf_clamp_rem" "${EDF_ENQ}" || fail "remain clamp use missing"
+grep -q "flow_edf_slack" "${EDF_ENQ}" || fail "slack use missing"
+grep -q "flow_edf_prio" "${EDF_ENQ}" || fail "prio use missing"
+grep -q "deadline_ns" "${EDF_ENQ}" || fail "deadline use missing"
+grep -q "remain_ns" "${EDF_ENQ}" || fail "remain use missing"
+grep -q "FLOW_EDF_PREEMPT_GAP_NS" "${EDF_ENQ}" || fail "gap use missing"
+grep -q "flow_seq_floor" "${EDF_ENQ}" || fail "floor key missing"
+grep -q "flow_edf_clamp_rem" "${DISP_HDR}" || fail "remain burn missing"
+grep -q "flow_edf_slack" "${DISP_HDR}" || fail "running slack missing"
 grep -q "remain_ns" "${DISP_HDR}" || fail "remain field missing"
 grep -q "deadline_ns" "${DISP_HDR}" || fail "deadline field missing"
 grep -q "slack" "${DISP_HDR}" || fail "slack field missing"
@@ -381,29 +381,62 @@ grep -q "reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved field missing"
 grep -q "rs->reserved = 0" "${DISP_HDR}" || fail "reserved zero missing"
 grep -q "rs->slack" "${DISP_HDR}" || fail "running slack snapshot missing"
 grep -q "flow_tick" "${DISP_HDR}" || fail "tick missing"
-if grep -q "flow_pred_next" "${LST_HDR}" 2>/dev/null; then
+if grep -q "flow_pred_next" "${EDF_HDR}" 2>/dev/null; then
     fail "pred helper reappeared"
 fi
 if grep -q "flow_pred_next" "${DISP_HDR}" 2>/dev/null; then
     fail "pred call reappeared"
 fi
-if grep -q "flow_pred_next" "${LST_ENQ}" 2>/dev/null; then
+if grep -q "flow_pred_next" "${EDF_ENQ}" 2>/dev/null; then
     fail "pred call reappeared"
 fi
-if grep -q "pred" "${SRC_DIR}/src/bpf/lst.bpf.h" 2>/dev/null; then
+if grep -q "pred" "${SRC_DIR}/src/bpf/edf.bpf.h" 2>/dev/null; then
     fail "pred text reappeared"
 fi
-if grep -q "flow_hog_" "${LST_HDR}" 2>/dev/null; then
-    fail "hog helper reappeared"
+grep -q "flow_est_update" "${EDF_HDR}" || fail "edf est helper missing"
+grep -q "flow_est_clamp" "${EDF_HDR}" || fail "edf est clamp missing"
+grep -q "flow_est_halve" "${EDF_HDR}" || fail "edf est halve missing"
+grep -q "flow_edf_hyst_next" "${EDF_HDR}" || fail "edf hyst helper missing"
+grep -q "flow_edf_hyst_is_lat" "${EDF_HDR}" || fail "edf hyst read missing"
+grep -q "flow_edf_hog_next" "${EDF_HDR}" || fail "edf hog helper missing"
+grep -q "flow_edf_prio_est" "${EDF_HDR}" || fail "edf prio est missing"
+grep -q "flow_est_update" "${DISP_HDR}" || fail "edf est tick missing"
+grep -q "flow_est_update" "${EDF_ENQ}" 2>/dev/null && fail "edf est drifted to enqueue"
+grep -q "flow_edf_hog_next" "${DISP_HDR}" || fail "edf hog stopping missing"
+grep -q "flow_edf_prio_est" "${EDF_ENQ}" || fail "edf prio est use missing"
+grep -q "FLOW_EDF_EST_FLOOR_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf est floor missing"
+grep -q "FLOW_EDF_EST_CAP_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf est cap missing"
+grep -q "FLOW_EDF_LAT_ENTER_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf enter missing"
+grep -q "FLOW_EDF_LAT_EXIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf exit missing"
+grep -q "FLOW_EDF_FULL_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf full missing"
+grep -q "FLOW_EDF_HOG_ENTER" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hog enter missing"
+grep -q "FLOW_EDF_HOG_EXIT" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hog exit missing"
+grep -q "FLOW_EDF_HOG_MAX" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hog max missing"
+grep -q "FLOW_EDF_HYST_N" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hyst n missing"
+grep -q "FLOW_EDF_EST_FLOOR_NS" "${EDF_HDR}" || fail "edf est floor use missing"
+grep -q "FLOW_EDF_EST_CAP_NS" "${EDF_HDR}" || fail "edf est cap use missing"
+grep -q "FLOW_EDF_LAT_ENTER_NS" "${EDF_HDR}" || fail "edf enter use missing"
+grep -q "FLOW_EDF_LAT_EXIT_NS" "${EDF_HDR}" || fail "edf exit use missing"
+grep -q "FLOW_EDF_FULL_NS" "${EDF_HDR}" || fail "edf full use missing"
+grep -q "FLOW_EDF_HOG_ENTER" "${EDF_HDR}" || fail "edf hog enter use missing"
+grep -q "FLOW_EDF_HOG_EXIT" "${EDF_HDR}" || fail "edf hog exit use missing"
+grep -q "FLOW_EDF_HOG_MAX" "${EDF_HDR}" || fail "edf hog max use missing"
+grep -q "FLOW_EDF_HYST_N" "${EDF_HDR}" || fail "edf hyst n use missing"
+grep -q "est_ns" "${SRC_DIR}/src/bpf/intf.h" || fail "edf est field missing"
+grep -q "hyst" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hyst field missing"
+grep -q "hog" "${SRC_DIR}/src/bpf/intf.h" || fail "edf hog field missing"
+grep -q "est_ns" "${DISP_HDR}" || fail "edf est stopping missing"
+grep -q "est_ns" "${EDF_ENQ}" || fail "edf est enqueue missing"
+if grep -rn "flow_lst_\|FLOW_LST_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead edf prefix reappeared"
 fi
-if grep -q "flow_hog_" "${LST_ENQ}" 2>/dev/null; then
-    fail "hog call reappeared"
+if grep -rn "lst_escape\|lst_urgent\|lst_hold\|lst_preempt\|lst_overdue" "${SRC_DIR}" 2>/dev/null | grep -v target; then
+    fail "dead stats prefix reappeared"
 fi
-if grep -q "flow_hog_" "${DISP_HDR}" 2>/dev/null; then
-    fail "hog call reappeared"
-fi
-if grep -q "hog_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "hog text reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/edf.bpf.h" ] && fail "edf header missing"
+[ -e "${SRC_DIR}/src/bpf/lst.bpf.h" ] && fail "dead header reappeared"
+if grep -rni "laxity" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead laxity prose reappeared"
 fi
 if grep -q "FLOW_STREAK_MAX" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "streak bound reappeared"
@@ -425,48 +458,48 @@ fi
 if grep -q "streak" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "streak field reappeared"
 fi
-if grep -q "streak" "${LST_HDR}" 2>/dev/null; then
+if grep -q "streak" "${EDF_HDR}" 2>/dev/null; then
     fail "streak helper reappeared"
 fi
-if grep -q "streak" "${LST_ENQ}" 2>/dev/null; then
+if grep -q "streak" "${EDF_ENQ}" 2>/dev/null; then
     fail "streak use reappeared"
 fi
 if grep -q "streak" "${DISP_HDR}" 2>/dev/null; then
     fail "streak use reappeared"
 fi
-grep -q "flow_stat_inc(llc, 6)" "${LST_ENQ}" || fail "preempt count missing"
+grep -q "flow_stat_inc(llc, 6)" "${EDF_ENQ}" || fail "preempt count missing"
 if grep -q "flow_stat_inc(llc, 6)" "${DISP_HDR}" 2>/dev/null; then
     fail "preempt count drifted to dispatch"
 fi
-grep -q "flow_stat_inc(llc, 12)" "${LST_ENQ}" || fail "escape count missing"
+grep -q "flow_stat_inc(llc, 12)" "${EDF_ENQ}" || fail "escape count missing"
 if grep -q "flow_stat_inc(llc, 12)" "${DISP_HDR}" 2>/dev/null; then
     fail "escape count drifted to dispatch"
 fi
-grep -q "flow_stat_inc(llc, 17)" "${LST_ENQ}" || fail "lst preempt count missing"
+grep -q "flow_stat_inc(llc, 17)" "${EDF_ENQ}" || fail "edf preempt count missing"
 if grep -q "flow_stat_inc(llc, 17)" "${DISP_HDR}" 2>/dev/null; then
-    fail "lst preempt drifted to dispatch"
+    fail "edf preempt drifted to dispatch"
 fi
 if grep -q "flow_stat_inc(qllc, 17)" "${DISP_HDR}" 2>/dev/null; then
-    fail "lst preempt drifted to dispatch"
+    fail "edf preempt drifted to dispatch"
 fi
-grep -q "flow_stat_inc(llc, 18)" "${LST_ENQ}" || fail "overdue count missing"
+grep -q "flow_stat_inc(llc, 18)" "${EDF_ENQ}" || fail "overdue count missing"
 if grep -q "flow_stat_inc(llc, 18)" "${DISP_HDR}" 2>/dev/null; then
     fail "overdue drifted to dispatch"
 fi
-if grep -q "flow_sjf_" "${LST_HDR}" 2>/dev/null; then
+if grep -q "flow_sjf_" "${EDF_HDR}" 2>/dev/null; then
     fail "sjf helper reappeared"
 fi
-if grep -q "bpf_map_" "${LST_HDR}" 2>/dev/null; then
-    fail "lst map drift"
+if grep -q "bpf_map_" "${EDF_HDR}" 2>/dev/null; then
+    fail "edf map drift"
 fi
-if grep -q "BPF_STRUCT_OPS" "${LST_HDR}" 2>/dev/null; then
-    fail "lst prog drift"
+if grep -q "BPF_STRUCT_OPS" "${EDF_HDR}" 2>/dev/null; then
+    fail "edf prog drift"
 fi
-if grep -q "bpf_for" "${LST_HDR}" 2>/dev/null; then
-    fail "lst loop drift"
+if grep -q "bpf_for" "${EDF_HDR}" 2>/dev/null; then
+    fail "edf loop drift"
 fi
-if grep -q "for (" "${LST_HDR}" 2>/dev/null; then
-    fail "lst loop drift"
+if grep -q "for (" "${EDF_HDR}" 2>/dev/null; then
+    fail "edf loop drift"
 fi
 
 # Overdue stays urgent with holds gating gap wins and one kick per run.
@@ -479,41 +512,41 @@ grep -q "Holds gate gap wins" "${SRC_DIR}/src/bpf/intf.h" || fail "hold gate pro
 grep -q "Each running instance kicks at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "kick bound prose missing"
 grep -q "Long waiting batch" "${SRC_DIR}/src/bpf/intf.h" || fail "wait ceiling prose missing"
 grep -q "Pad holds the last kicked" "${SRC_DIR}/src/bpf/intf.h" || fail "kick cookie prose missing"
-grep -q "Holds gate gap" "${LST_ENQ}" || fail "enqueue hold gate prose missing"
-grep -q "Overdue tasks stay" "${LST_ENQ}" || fail "enqueue overdue prose missing"
-grep -q "Each running instance kicks at most once" "${LST_ENQ}" || fail "enqueue kick bound prose missing"
-grep -q "flow_wait_hold(tgt, p)" "${LST_ENQ}" || fail "hold gate call missing"
-grep -q "scx_bpf_test_and_clear_cpu_idle(tgt)" "${LST_ENQ}" || fail "idle consume missing"
-grep -q "rs->pad" "${LST_ENQ}" || fail "kick cookie missing"
-grep -q "over = true" "${LST_ENQ}" || fail "overdue flag missing"
-grep -q "prio = (u32)FLOW_PRIO_LAT" "${LST_ENQ}" || fail "overdue lat hold missing"
+grep -q "Holds gate gap" "${EDF_ENQ}" || fail "enqueue hold gate prose missing"
+grep -q "Overdue tasks stay" "${EDF_ENQ}" || fail "enqueue overdue prose missing"
+grep -q "Each running instance kicks at most once" "${EDF_ENQ}" || fail "enqueue kick bound prose missing"
+grep -q "flow_wait_hold(tgt, p)" "${EDF_ENQ}" || fail "hold gate call missing"
+grep -q "scx_bpf_test_and_clear_cpu_idle(tgt)" "${EDF_ENQ}" || fail "idle consume missing"
+grep -q "rs->pad" "${EDF_ENQ}" || fail "kick cookie missing"
+grep -q "flow_edf_prio_est" "${EDF_ENQ}" || fail "enqueue prio est missing"
+grep -q "slack <= 0" "${EDF_HDR}" || fail "overdue band missing"
 grep -q "flow_wait_long" "${DISP_HDR}" || fail "wait ceiling helper missing"
 grep -q "flow_head_long" "${DISP_HDR}" || fail "head wait helper missing"
 grep -q "Long waiting batch" "${DISP_HDR}" || fail "drain ceiling prose missing"
 grep -q "flow_lat_observe(cpu, t, now, 1)" "${DISP_HDR}" || fail "single clock observe missing"
 grep -q "flow_fair_cap_add(t->vtime, 1)" "${DISP_HDR}" || fail "yield advance missing"
 
-# Stats keep order with laxity names at the same offsets.
+# Stats keep order with deadline names at the same offsets.
 # Twenty one counters stay in struct order at 168 bytes with total
 # matching penalty and extra combined per award.
 grep -q "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "preempt field missing"
-grep -q "lst_escape" "${SRC_DIR}/src/bpf/intf.h" || fail "escape field missing"
-grep -q "lst_urgent" "${SRC_DIR}/src/bpf/intf.h" || fail "urgent field missing"
-grep -q "lst_hold" "${SRC_DIR}/src/bpf/intf.h" || fail "hold field missing"
-grep -q "lst_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "lst win field missing"
-grep -q "lst_overdue" "${SRC_DIR}/src/bpf/intf.h" || fail "overdue field missing"
+grep -q "edf_escape" "${SRC_DIR}/src/bpf/intf.h" || fail "escape field missing"
+grep -q "edf_urgent" "${SRC_DIR}/src/bpf/intf.h" || fail "urgent field missing"
+grep -q "edf_hold" "${SRC_DIR}/src/bpf/intf.h" || fail "hold field missing"
+grep -q "edf_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "edf win field missing"
+grep -q "edf_overdue" "${SRC_DIR}/src/bpf/intf.h" || fail "overdue field missing"
 grep -q "kick_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
-grep -q "lst_escape" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
-grep -q "lst_urgent" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
-grep -q "lst_hold" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
-grep -q "lst_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
-grep -q "lst_overdue" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "edf_escape" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "edf_urgent" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "edf_hold" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "edf_preempt" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
+grep -q "edf_overdue" "${SRC_DIR}/src/stats.rs" || fail "stats output drifted"
 grep -q "kick_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
-grep -q "lst_escape" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
-grep -q "lst_urgent" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
-grep -q "lst_hold" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
-grep -q "lst_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
-grep -q "lst_overdue" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "edf_escape" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "edf_urgent" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "edf_hold" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "edf_preempt" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
+grep -q "edf_overdue" "${SRC_DIR}/src/metrics.rs" || fail "metrics output drifted"
 if grep -q "hog_escape\|hog_hold\|lat_boost\|lat_preempt\|age_rescue" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "old stats name reappeared"
 fi
@@ -580,7 +613,7 @@ fi
 
 # Queues are one per CPU plus fallback with upstream order and
 # insertion ties. Fair scales base by share while extra stays uniform
-# with a per LLC floor. Laxity sets the strand by slack bands with a
+# with a per LLC floor. Deadline sets the strand by slack bands with a
 # gap preempt on shared tasks. Wakes go preempt on a gap win else
 # idle with a skip otherwise. Strands stay balanced with an imbalance
 # cap so no strand starves. Queues use the upstream library with per
@@ -652,14 +685,14 @@ grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper m
 if grep -q "flow_lat_key" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
     fail "lat shift helper reappeared"
 fi
-grep -q "flow_lst_clamp_rem" "${LST_HDR}" || fail "lst clamp missing"
-grep -q "FLOW_LST_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "lst init missing"
+grep -q "flow_edf_clamp_rem" "${EDF_HDR}" || fail "edf clamp missing"
+grep -q "FLOW_EDF_INIT_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "edf init missing"
 grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
-grep -q "insertion order" "${LST_ENQ}" || fail "insertion order missing"
-grep -q "fallback queue" "${LST_ENQ}" || fail "fallback path missing"
+grep -q "insertion order" "${EDF_ENQ}" || fail "insertion order missing"
+grep -q "fallback queue" "${EDF_ENQ}" || fail "fallback path missing"
 grep -q "kick_idle" "${SRC_DIR}/src/bpf/intf.h" || fail "idle count missing"
 grep -q "kick_skip" "${SRC_DIR}/src/bpf/intf.h" || fail "skip count missing"
-grep -q 'include "lst.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "lst include missing"
+grep -q 'include "edf.bpf.h"' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "edf include missing"
 if grep -q 'include "sjf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "sjf include reappeared"
 fi
@@ -676,7 +709,7 @@ fi
 # Local placements run before ownership so a local cancel never drops
 # a gauge that was never raised. The flag take must come after the
 # local returns.
-if ! grep -q "without the queued bit" "${LST_ENQ}" 2>/dev/null; then
+if ! grep -q "without the queued bit" "${EDF_ENQ}" 2>/dev/null; then
     fail "local ownership order missing"
 fi
 
@@ -765,14 +798,14 @@ if grep -q "if (!ca && !cb)" "${DISP_HDR}" 2>/dev/null; then
 fi
 grep -q "still peek" "${DISP_HDR}" || fail "peek liveness prose missing"
 grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
-grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${LST_ENQ}" || fail "enqueue slice floor missing"
-if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${LST_ENQ}" 2>/dev/null; then
+grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${EDF_ENQ}" || fail "enqueue slice floor missing"
+if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${EDF_ENQ}" 2>/dev/null; then
     fail "zero slice insert reappeared"
 fi
 if grep -q "dsq_insert(p, SCX_DSQ_LOCAL, 0" "${DISP_HDR}" 2>/dev/null; then
     fail "zero slice insert reappeared"
 fi
-grep -q "if (tgt < 0)" "${LST_ENQ}" || fail "kick minus one guard missing"
+grep -q "if (tgt < 0)" "${EDF_ENQ}" || fail "kick minus one guard missing"
 if grep -q "kick_cpu(-1" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "raw kick minus one reappeared"
 fi

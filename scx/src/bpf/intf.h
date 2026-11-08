@@ -79,12 +79,21 @@ enum flow_consts {
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
-	FLOW_LST_REL_NS = 20000000ULL,
-	FLOW_LST_INIT_NS = 1000000ULL,
-	FLOW_LST_FLOOR_NS = 5000ULL,
-	FLOW_LST_PREEMPT_GAP_NS = 1000000ULL,
-	FLOW_LST_NORM_NS = 1000000ULL,
-	FLOW_LST_BATCH_NS = 10000000ULL,
+	FLOW_EDF_REL_NS = 20000000ULL,
+	FLOW_EDF_INIT_NS = 1000000ULL,
+	FLOW_EDF_FLOOR_NS = 5000ULL,
+	FLOW_EDF_PREEMPT_GAP_NS = 1000000ULL,
+	FLOW_EDF_NORM_NS = 1000000ULL,
+	FLOW_EDF_BATCH_NS = 10000000ULL,
+	FLOW_EDF_EST_FLOOR_NS = 5000ULL,
+	FLOW_EDF_EST_CAP_NS = 2000000ULL,
+	FLOW_EDF_LAT_ENTER_NS = 500000ULL,
+	FLOW_EDF_LAT_EXIT_NS = 850000ULL,
+	FLOW_EDF_FULL_NS = 768000ULL,
+	FLOW_EDF_HOG_ENTER = 4ULL,
+	FLOW_EDF_HOG_EXIT = 2ULL,
+	FLOW_EDF_HOG_MAX = 8ULL,
+	FLOW_EDF_HYST_N = 2ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
 	FLOW_FLAG_QUEUED = 1ULL,
@@ -109,7 +118,9 @@ enum flow_consts {
  * the group id and share hint. A zero id means no group was recorded.
  * Lat holds the wait kind for history. Home holds the first CPU that
  * ran the task with minus one when unset. Deadline holds the time by
- * which remain should run with zero meaning unset. */
+ * which remain should run with zero meaning unset. Est holds the
+ * filtered burst in nanos. Hyst holds the burst band state. Hog
+ * counts sustained full burns. Pad keeps the tail aligned. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -124,6 +135,10 @@ struct flow_task_ctx {
 	u32 lat_kind;
 	s32 home_cpu;
 	u64 deadline_ns;
+	u32 est_ns;
+	u8 hyst;
+	u8 hog;
+	u16 pad2;
 };
 /* Wait history for one CPU. Cells hold run waits then dispatch
  * waits by kind times bucket. The length covers two halves of
@@ -182,13 +197,13 @@ struct flow_llc_stats {
 	u64 overrun;
 	u64 domino_penalty;
 	u64 blocked;
-	u64 lst_escape;
+	u64 edf_escape;
 	u64 orphan_kick;
 	u64 hol_forward;
-	u64 lst_urgent;
-	u64 lst_hold;
-	u64 lst_preempt;
-	u64 lst_overdue;
+	u64 edf_urgent;
+	u64 edf_hold;
+	u64 edf_preempt;
+	u64 edf_overdue;
 	u64 extra_award;
 	u64 total_quanta;
 };

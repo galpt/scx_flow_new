@@ -61,7 +61,7 @@ pub struct Metrics {
     pub blocked: u64,
     #[stat(desc = "Fresh spans after an overdue deadline")]
     #[serde(default)]
-    pub lst_escape: u64,
+    pub edf_escape: u64,
     #[stat(desc = "Mask change kicks for queued tasks")]
     #[serde(default)]
     pub orphan_kick: u64,
@@ -70,16 +70,16 @@ pub struct Metrics {
     pub hol_forward: u64,
     #[stat(desc = "Enqueues with urgent slack")]
     #[serde(default)]
-    pub lst_urgent: u64,
+    pub edf_urgent: u64,
     #[stat(desc = "Enqueues with roomy slack")]
     #[serde(default)]
-    pub lst_hold: u64,
+    pub edf_hold: u64,
     #[stat(desc = "Gap preempts won on enqueue")]
     #[serde(default)]
-    pub lst_preempt: u64,
+    pub edf_preempt: u64,
     #[stat(desc = "Deadlines seen past now")]
     #[serde(default)]
-    pub lst_overdue: u64,
+    pub edf_overdue: u64,
     #[stat(desc = "Extra quanta beyond the first")]
     #[serde(default)]
     pub extra_award: u64,
@@ -92,7 +92,7 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] queued={} dispatched={} fallback={} steal={} fb_duplicate={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} lst_escape={} orphan_kick={} hol_forward={} lst_urgent={} lst_hold={} lst_preempt={} lst_overdue={} extra_award={} total_quanta={}",
+            "[{}] queued={} dispatched={} fallback={} steal={} fb_duplicate={} steal_llc={} kick_preempt={} kick_idle={} kick_skip={} overrun={} domino_penalty={} blocked={} edf_escape={} orphan_kick={} hol_forward={} edf_urgent={} edf_hold={} edf_preempt={} edf_overdue={} extra_award={} total_quanta={}",
             crate::cli::SCHEDULER_NAME,
             self.queued,
             self.dispatched,
@@ -106,13 +106,13 @@ impl Metrics {
             self.overrun,
             self.domino_penalty,
             self.blocked,
-            self.lst_escape,
+            self.edf_escape,
             self.orphan_kick,
             self.hol_forward,
-            self.lst_urgent,
-            self.lst_hold,
-            self.lst_preempt,
-            self.lst_overdue,
+            self.edf_urgent,
+            self.edf_hold,
+            self.edf_preempt,
+            self.edf_overdue,
             self.extra_award,
             self.total_quanta,
         )?;
@@ -141,13 +141,13 @@ impl Metrics {
             overrun: self.overrun.wrapping_sub(rhs.overrun),
             domino_penalty: self.domino_penalty.wrapping_sub(rhs.domino_penalty),
             blocked: self.blocked.wrapping_sub(rhs.blocked),
-            lst_escape: self.lst_escape.wrapping_sub(rhs.lst_escape),
+            edf_escape: self.edf_escape.wrapping_sub(rhs.edf_escape),
             orphan_kick: self.orphan_kick.wrapping_sub(rhs.orphan_kick),
             hol_forward: self.hol_forward.wrapping_sub(rhs.hol_forward),
-            lst_urgent: self.lst_urgent.wrapping_sub(rhs.lst_urgent),
-            lst_hold: self.lst_hold.wrapping_sub(rhs.lst_hold),
-            lst_preempt: self.lst_preempt.wrapping_sub(rhs.lst_preempt),
-            lst_overdue: self.lst_overdue.wrapping_sub(rhs.lst_overdue),
+            edf_urgent: self.edf_urgent.wrapping_sub(rhs.edf_urgent),
+            edf_hold: self.edf_hold.wrapping_sub(rhs.edf_hold),
+            edf_preempt: self.edf_preempt.wrapping_sub(rhs.edf_preempt),
+            edf_overdue: self.edf_overdue.wrapping_sub(rhs.edf_overdue),
             extra_award: self.extra_award.wrapping_sub(rhs.extra_award),
             total_quanta: self.total_quanta.wrapping_sub(rhs.total_quanta),
         }
@@ -310,7 +310,7 @@ mod tests {
         fold_llc_val(&mut short, &buf152);
         assert_eq!(short.extra_award, 0);
         assert_eq!(short.total_quanta, 0);
-        assert_eq!(short.lst_overdue, 1);
+        assert_eq!(short.edf_overdue, 1);
 
         let mut extra_only = Metrics::default();
         let mut buf160 = [0u8; 160];

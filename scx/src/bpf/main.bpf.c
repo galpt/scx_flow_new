@@ -5,7 +5,7 @@
  * Thin glue that pulls in nine area headers in order and declares
  * the ops table. Each CPU owns one upstream queue in balanced mode
  * with two strands and there is one fallback queue. Ties leave in
- * insertion order. Laxity sets the strand with gap preempts for
+ * insertion order. Deadline sets the strand with gap preempts for
  * shared tasks. Queues come from the upstream double helix library
  * and placement follows the upstream topology library. Tables are
  * written once, so a CPU that arrives late needs a restart to be
@@ -25,7 +25,7 @@ UEI_DEFINE(uei);
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "lst.bpf.h"
+#include "edf.bpf.h"
 #include "cgroup.bpf.h"
 #include "lat.bpf.h"
 #include "select.bpf.h"
