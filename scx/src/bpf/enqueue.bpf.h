@@ -2,15 +2,18 @@
 /*
  * Queueing for the flow scheduler.
  *
- * Shared tasks join the per CPU queue picked by warm retarget
- * in vd order. The retarget keeps the last CPU when it is allowed
- * and live in the same LLC, else it keeps the constrained target
- * from the current CPU. Warm tasks take the first strand and cold
- * tasks take the second, with unclear tasks treated as cold. The
- * upstream queue keeps insertion order for equal vd, so the code
+ * Shared tasks join the least queued per CPU queue in vd order.
+ * One scan picks the live allowed queue with a handle that holds
+ * the fewest waiting tasks. Ties keep the lowest id with no extra
+ * mate favor here. Warmness stays in the strand only. Warm tasks
+ * take the first strand and cold tasks take the second, with unclear
+ * tasks treated as cold. Warm means the last CPU shares the same
+ * LLC with the picked target. The same LLC means the same chip.
+ * The upstream queue keeps insertion order for equal vd, so the code
  * adds no extra tie handling. A strand that refuses an insert tries
- * the other strand once before the fallback queue. Pinned tasks join
- * the local queue in order with
+ * the other strand once before the fallback queue. Queues hold
+ * without a bound, so inserts refuse only on strand balance.
+ * Pinned tasks join the local queue in order with
  * a single slice. Exiting tasks use the local queue when allowed and
  * the owner queue otherwise with a short slice. Tasks that have no
  * usable CPU join the fallback queue in FIFO order. The queue key is
@@ -24,12 +27,13 @@
  * with no wake. The kernel idle flag decides the idle wake. Preempts
  * stay in the same LLC with an allowed live target. Local inserts
  * are not counted in the shared gauge. Shared and fallback inserts
- * count the gauge, and fallback inserts also count fallback. Dequeue
- * drops the gauge on cancel. Masks are checked again before each
- * wake, so a task is never kicked toward a CPU outside its current
- * mask. Enqueue reads the cgroup map on shared and fallback inserts.
- * The birth id comes from init args. Full and overfull inserts fall
- * back to the FIFO queue with no extra probe.
+ * count the gauge, and fallback inserts also count fallback. Waiting
+ * counts rise only on a queue insert and drop on dispatch moves.
+ * Dequeue drops the gauge on cancel with no waiting drop. Masks are
+ * checked again before each wake, so a task is never kicked toward
+ * a CPU outside its current mask. Enqueue reads the cgroup map on
+ * shared and fallback inserts. The birth id comes from init args.
+ * Balance rejects fall back to the FIFO queue with no extra probe.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -66,26 +70,52 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
 	*out = (u32)v;
 	return 0;
 }
-/* Keep the last CPU when it is allowed and live in the same LLC.
- * Else keep the constrained target from the current CPU. */
-static __always_inline s32 flow_warm_target(s32 last, s32 cur, struct task_struct *p)
+/* Pick the live allowed queue with the fewest waiting tasks.
+ * Ties keep the lowest id with no extra mate favor here.
+ * Warmness stays in the strand only. */
+static __always_inline s32 flow_pick_least(struct task_struct *p)
 {
-	int cllc;
-	int lllc;
-	if (last < 0 || cur < 0)
-		return cur;
-	if (!flow_cpu_ok((u32)last) || !flow_cpu_ok((u32)cur))
-		return cur;
-	if (!flow_cpu_allowed(last, p) || !flow_cpu_live((u32)last))
-		return cur;
-	cllc = topo_cpu_to_llc_id((u32)cur);
-	lllc = topo_cpu_to_llc_id((u32)last);
-	if (cllc < 0 || lllc < 0 || cllc != lllc)
-		return cur;
-	return last;
+	s32 best = -1;
+	u32 best_cnt = 0xffffffffU;
+	u32 cpu;
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
+		u64 h;
+		u32 cnt;
+		if (!flow_cpu_live(cpu))
+			continue;
+		if (!flow_cpu_allowed((s32)cpu, p))
+			continue;
+		h = READ_ONCE(flow_dhqs[cpu]);
+		if (!h)
+			continue;
+		cnt = READ_ONCE(flow_qcnt[cpu]);
+		if (best < 0 || cnt < best_cnt) {
+			best = (s32)cpu;
+			best_cnt = cnt;
+		}
+	}
+	return best;
+}
+/* Warm means the last CPU shares the same LLC with the picked
+ * target. The same LLC means the same chip. Warm takes the first
+ * strand and all else takes the second. */
+static __always_inline u64 flow_warm_strand(s32 last, s32 tgt)
+{
+	int a;
+	int b;
+	if (last < 0 || tgt < 0)
+		return (u64)SCX_DHQ_STRAND_B;
+	if (!flow_cpu_ok((u32)last) || !flow_cpu_ok((u32)tgt))
+		return (u64)SCX_DHQ_STRAND_B;
+	a = topo_cpu_to_llc_id((u32)last);
+	b = topo_cpu_to_llc_id((u32)tgt);
+	if (a < 0 || b < 0 || a != b)
+		return (u64)SCX_DHQ_STRAND_B;
+	return (u64)SCX_DHQ_STRAND_A;
 }
 /* Try the picked strand once, then the other strand once. A reject
- * from both means the queue is full. */
+ * from both means strand balance refused. Queues hold without
+ * a bound. */
 static __always_inline int flow_try_insert_dhq(scx_dhq_t *dhq, u64 pid, u64 key, u64 first)
 {
 	u64 second;
@@ -166,13 +196,11 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 last_cpu;
-	s32 cur_tgt;
 	s32 tgt;
 	u32 llc = 0;
 	u32 cpu_ok = 0;
 	s64 raw_v;
 	bool pinned = false;
-	bool warm = false;
 	u64 strand = (u64)SCX_DHQ_STRAND_B;
 	struct flow_task_ctx *t;
 	u32 old_flags;
@@ -180,12 +208,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	scx_arena_subprog_init();
 	last_cpu = scx_bpf_task_cpu(p);
-	cur_tgt = flow_constrained_target((s32)bpf_get_smp_processor_id(), p);
-	tgt = flow_warm_target(last_cpu, cur_tgt, p);
-	if (last_cpu >= 0 && tgt >= 0 && tgt == last_cpu)
-		warm = true;
-	if (warm)
-		strand = (u64)SCX_DHQ_STRAND_A;
+	tgt = flow_pick_least(p);
+	strand = flow_warm_strand(last_cpu, tgt);
 	if (tgt >= 0 && flow_cpu_live((u32)tgt)) {
 		u32 tmp = 0;
 		if (!flow_llc_for_cpu(tgt, &tmp))
@@ -213,8 +237,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				if (dhq) {
 					int ret = flow_try_insert_dhq(dhq, (u64)p->pid,
 								      (u64)raw_v, strand);
-					if (!ret)
+					if (!ret) {
 						fell = false;
+						if (tgt >= 0)
+							flow_qcnt_inc((u32)tgt);
+					}
 				}
 				if (fell)
 					scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ,
@@ -268,8 +295,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->llc_id = llc;
 		if (dhq) {
 			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)raw_v, strand);
-			if (!ret)
+			if (!ret) {
 				fell = false;
+				if (tgt >= 0)
+					flow_qcnt_inc((u32)tgt);
+			}
 		}
 		if (fell)
 			scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ,
@@ -293,7 +323,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Each owner queue holds at most ten tasks. */
+		 * Queues hold without a bound. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_combine(flow_cgroup_lookup(READ_ONCE(t->cgrp_id)),
 				     flow_nice_weight(p));
@@ -308,11 +338,14 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->llc_id = llc;
 		/* Mirror the due time so later reads see the same value. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
-		/* Overfull inserts fall back to FIFO with no extra probe. */
+		/* Balance rejects fall back to FIFO with no extra probe. */
 		if (dhq) {
 			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)vd, strand);
-			if (!ret)
+			if (!ret) {
 				fell = false;
+				if (tgt >= 0)
+					flow_qcnt_inc((u32)tgt);
+			}
 		}
 		if (fell)
 			scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice_len, enq_flags);
@@ -336,8 +369,11 @@ insert_only:
 		bool fell = true;
 		if (dhq) {
 			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)k, strand);
-			if (!ret)
+			if (!ret) {
 				fell = false;
+				if (tgt >= 0)
+					flow_qcnt_inc((u32)tgt);
+			}
 		}
 		if (fell)
 			scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, sl, enq_flags);

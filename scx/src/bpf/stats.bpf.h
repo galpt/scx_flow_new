@@ -6,7 +6,10 @@
  * never drops below zero. It uses a short compare and swap loop.
  * If the loop does not win, the last observed value is written
  * back directly so a decrement is not lost under contention.
- * An unknown offset does nothing.
+ * An unknown offset does nothing. Waiting counts track queued tasks
+ * per CPU for placement with the same loop shape. The count caps at
+ * the top on rise and floors at zero on drop. Waiting counts stay
+ * internal with no export through the counter view.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -79,6 +82,54 @@ static __always_inline void flow_queued_dec(u32 llc)
 		if (last == 0)
 			return;
 		st->queued = last - 1;
+	}
+}
+static __always_inline u32 flow_qcnt_get(u32 cpu)
+{
+	if (!flow_cpu_ok(cpu))
+		return 0;
+	return READ_ONCE(flow_qcnt[cpu]);
+}
+static __always_inline void flow_qcnt_inc(u32 cpu)
+{
+	int i;
+	if (!flow_cpu_ok(cpu))
+		return;
+	for (i = 0; i < 4; i++) {
+		u32 old = READ_ONCE(flow_qcnt[cpu]);
+		u32 next;
+		if (old == 0xffffffffU)
+			return;
+		next = old + 1;
+		if (__sync_val_compare_and_swap(&flow_qcnt[cpu], old, next) == old)
+			return;
+	}
+	{
+		u32 last = READ_ONCE(flow_qcnt[cpu]);
+		if (last == 0xffffffffU)
+			return;
+		flow_qcnt[cpu] = last + 1;
+	}
+}
+static __always_inline void flow_qcnt_dec(u32 cpu)
+{
+	int i;
+	if (!flow_cpu_ok(cpu))
+		return;
+	for (i = 0; i < 4; i++) {
+		u32 old = READ_ONCE(flow_qcnt[cpu]);
+		u32 next;
+		if (old == 0)
+			return;
+		next = old - 1;
+		if (__sync_val_compare_and_swap(&flow_qcnt[cpu], old, next) == old)
+			return;
+	}
+	{
+		u32 last = READ_ONCE(flow_qcnt[cpu]);
+		if (last == 0)
+			return;
+		flow_qcnt[cpu] = last - 1;
 	}
 }
 #endif

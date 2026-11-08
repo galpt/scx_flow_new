@@ -4,18 +4,20 @@
  *
  * Each CPU owns one queue with two strands ordered by vd. Warm tasks
  * join the first strand and cold tasks join the second. Ties leave in
- * insertion order. Warm keeps the last CPU when it is allowed and live
- * in the same LLC, else the task stays cold. A strand that refuses an
+ * insertion order. Warm means the last CPU shares the same LLC with
+ * the picked target, else the task stays cold. The same LLC means the
+ * same chip. Placement picks the live allowed queue with the fewest
+ * waiting tasks with ties to the lowest id. A strand that refuses an
  * insert tries the other strand once before the fallback queue.
  * Draining peeks both heads and pops the earlier vd with ties to the
- * first strand. Each per CPU queue holds at most ten tasks, so a full
- * queue drains in at most ten millis with one millis slices minus steal
- * parallelism. One millis alone stays aspirational since a cap of one
- * throttles throughput. Depth signal reuses the guard and the queued
- * plus fallback plus steal counts with no extra probe. One fallback
- * queue holds tasks that have no usable CPU in FIFO order as a best
- * effort overflow without a bound promise. Pinned tasks run on their
- * local queue.
+ * first strand on the same node. A far node drains the first strand
+ * only. Each per CPU queue holds without a bound with one millis
+ * slices. Depth signal reuses the guard and the queued plus fallback
+ * plus steal counts with no extra probe. Waiting counts track queued
+ * tasks per CPU for placement and stay internal. One fallback queue
+ * holds tasks that have no usable CPU in FIFO order as a best effort
+ * overflow without a bound promise. Pinned tasks run on their local
+ * queue.
  * Shares are read from the cgroup map on each enqueue and folded
  * with the task nice weight. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
@@ -24,10 +26,11 @@
  * an earlier vd. Slices hold one fixed quantum. A shared
  * enqueue with a vd ahead of the running vd kicks for preempt
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
- * stored time forward by one. Each per CPU queue holds at most ten
- * tasks with the fallback holding at most one thousand twenty four.
- * Steal moves in topology order with local first then mates then the
- * rest of the same LLC then same node then remote. Queues come from the upstream
+ * stored time forward by one. Each per CPU queue holds without a bound
+ * with the fallback holding at most one thousand twenty four.
+ * Steal moves with local first then the most loaded queue then mates
+ * then the rest of the same LLC then same node then remote with idle
+ * starts at once. Queues come from the upstream
  * double helix library in virtual time mode, and placement follows
  * the upstream topology library with liveness from the same tree.
  *

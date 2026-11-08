@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.5" ] || fail "version not at 5.2.5"
+[ "${want}" = "5.2.6" ] || fail "version not at 5.2.6"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "2dc54eea96e276fd2278cb6d06cb4d74a5c6b8e7c921d19d60046fb1c3024d0d" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "8809f5e98b2432b6c6f2e6feae0d12a7fb2538b4d81aa819b899cbe215a75d39" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -350,7 +350,8 @@ grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "SCX_DHQ_STRAND_B" "${ENQ_HDR}" || fail "second strand missing"
 grep -q "SCX_DHQ_STRAND_B" "${DISP_HDR}" || fail "merge strand missing"
-grep -q "flow_warm_target" "${ENQ_HDR}" || fail "warm retarget missing"
+grep -q "flow_pick_least" "${ENQ_HDR}" || fail "least pick missing"
+grep -q "flow_warm_strand" "${ENQ_HDR}" || fail "warm strand missing"
 grep -q "same LLC" "${ENQ_HDR}" || fail "warm llc prose missing"
 grep -q "flow_try_insert_dhq" "${ENQ_HDR}" || fail "strand retry missing"
 grep -q "vb < va" "${DISP_HDR}" || fail "merge compare missing"
@@ -500,12 +501,15 @@ fi
 # Fair scales base by share with a per LLC floor. Vd sets the order with
 # a strict preempt on an earlier vd. Wakes go preempt on a vd win else
 # idle with a skip otherwise. Queues use the upstream library with per
-# CPU placement and FIFO fallback. Depth caps at ten for ten millis max.
+# CPU placement and FIFO fallback. Queues hold without a bound.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "SCX_DHQ_MODE_BALANCED" "${DISP_HDR}" || fail "mode use missing"
 grep -q "scx_dhq_create_balanced" "${DISP_HDR}" || fail "queue create missing"
-grep -q "10ULL" "${DISP_HDR}" || fail "percpu cap missing"
+grep -q "SCX_DHQ_INF_CAPACITY" "${DISP_HDR}" || fail "unbounded cap missing"
+if grep -q "10ULL" "${DISP_HDR}" 2>/dev/null; then
+    fail "bounded cap reappeared"
+fi
 if grep -q "256ULL" "${DISP_HDR}" 2>/dev/null; then
     fail "old percpu cap reappeared"
 fi
@@ -629,10 +633,11 @@ if grep -q "tcc->llc_id\|t2->llc_id" "${DISP_HDR}" 2>/dev/null; then
     fail "dead cpu scan reappeared"
 fi
 grep -q "topo_contains" "${DISP_HDR}" || fail "tree order missing"
-# Drain peeks every queue with no gauge skip.
+# Drain skips empty queues through waiting counts with no gauge peek.
 if grep -q "flow_stats_for(victim)" "${DISP_HDR}" 2>/dev/null; then
     fail "gauge bail reappeared"
 fi
+grep -q "flow_qcnt_get(victim)" "${DISP_HDR}" || fail "empty skip missing"
 
 # Select rechecks the winning pick against the current mask.
 grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
@@ -690,7 +695,7 @@ grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose m
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
 # plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus ten plus overflow plus tail target.
+# plus unbounded plus overflow plus tail target.
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
 grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"
@@ -700,11 +705,21 @@ grep -q "idle" "${SRC_DIR}/README.md" || fail "readme idle missing"
 grep -q "preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
 grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
 grep -q "strand" "${SRC_DIR}/README.md" || fail "readme strand missing"
-grep -q "10 tasks" "${SRC_DIR}/README.md" || fail "readme cap missing"
-grep -q "10ms" "${SRC_DIR}/README.md" || fail "readme bound missing"
-grep -q "aspirational" "${SRC_DIR}/README.md" || fail "readme ideal missing"
+grep -q "without bound" "${SRC_DIR}/README.md" || fail "readme unbounded missing"
+grep -q "least queued" "${SRC_DIR}/README.md" || fail "readme least missing"
+grep -q "most loaded" "${SRC_DIR}/README.md" || fail "readme most missing"
+grep -q "warm only" "${SRC_DIR}/README.md" || fail "readme warm missing"
 grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
 grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
+if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme bounded cap reappeared"
+fi
+if grep -q "10ms" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme bounded bound reappeared"
+fi
+if grep -q "aspirational" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme ideal reappeared"
+fi
 
 # No classifier plus no average estimator returns with no float divide.
 if grep -qi "ewma" "${SRC_DIR}/src/bpf" 2>/dev/null; then
@@ -717,6 +732,25 @@ if grep -q "classifier" "${SRC_DIR}/src/bpf" 2>/dev/null; then
 fi
 if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
     fail "float outside fair reappeared"
+fi
+
+# Unbounded queues with waiting counts plus least load plus most load steal.
+# Placement scans once for the fewest waiting tasks and dispatch steals
+# the most loaded queue first with far nodes kept warm only.
+grep -q "flow_qcnt" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "waiting counts missing"
+grep -q "flow_qcnt_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting rise missing"
+grep -q "flow_qcnt_dec" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting drop missing"
+grep -q "flow_qcnt_inc" "${ENQ_HDR}" || fail "enqueue waiting rise missing"
+grep -q "flow_qcnt_dec" "${DISP_HDR}" || fail "dispatch waiting drop missing"
+grep -q "flow_pick_busiest" "${DISP_HDR}" || fail "busiest pick missing"
+grep -q "flow_is_same_node" "${DISP_HDR}" || fail "node test missing"
+grep -q "warm_only" "${DISP_HDR}" || fail "warm only steal missing"
+grep -q "first strand only" "${DISP_HDR}" || fail "far node prose missing"
+grep -q "without a bound" "${SRC_DIR}/src/bpf/intf.h" || fail "unbounded prose missing"
+grep -q "without a bound" "${ENQ_HDR}" || fail "enqueue unbounded prose missing"
+grep -q "without a bound" "${DISP_HDR}" || fail "dispatch unbounded prose missing"
+if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "bounded prose reappeared"
 fi
 
 echo "guard tests passed"
