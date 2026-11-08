@@ -295,7 +295,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
 		 * Each owner queue holds at most ten tasks. */
 		s64 base = READ_ONCE(t->vtime);
-		u32 w = flow_cgroup_lookup(READ_ONCE(t->cgrp_id));
+		u32 w = flow_combine(flow_cgroup_lookup(READ_ONCE(t->cgrp_id)),
+				     flow_nice_weight(p));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
 		s64 vd = flow_vd_for(floored, w);
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;

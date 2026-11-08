@@ -16,7 +16,8 @@
  * queue holds tasks that have no usable CPU in FIFO order as a best
  * effort overflow without a bound promise. Pinned tasks run on their
  * local queue.
- * Shares are read from the cgroup map on each enqueue. A task pays
+ * Shares are read from the cgroup map on each enqueue and folded
+ * with the task nice weight. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
  * a per LLC floor so two tasks never share the same value. Vd adds
  * a share based step to the floored time, so a larger share gives

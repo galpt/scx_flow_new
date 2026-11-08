@@ -3,7 +3,13 @@
  * Fair charging for the flow scheduler.
  *
  * The base charge scales with the cgroup share. Values saturate at
- * the top. Fresh times move past the per LLC floor through a short
+ * the top. The task nice weight comes from a small table over minus
+ * twenty to nineteen with zero as one hundred, read from the task
+ * static priority minus one hundred twenty. Out of range tasks keep
+ * the default. The combined share multiplies the cgroup share by the
+ * nice weight over one hundred and clamps to the share range, so a
+ * zero nice keeps the cgroup share unchanged.
+ * Fresh times move past the per LLC floor through a short
  * compare and swap loop, so each stored time is unique. If the loop
  * does not win, the last observed value is written back directly.
  * The floor rises over time and never moves backward for a given
@@ -16,6 +22,40 @@
 #define __FLOW_FAIR_BPF_H
 #include "intf.h"
 #include "maps.bpf.h"
+/* Nice weight on the cgroup scale from minus twenty to nineteen.
+ * Strictly falls from ten thousand to one with one hundred at zero.
+ * Fits in read only data with direct indexing and no loop. */
+static const u32 flow_nice_table[40] = {
+	10000, 7943, 6310, 5012, 3981, 3162, 2512, 1995,
+	1585, 1259, 1000, 794, 631, 501, 398, 316,
+	251, 200, 158, 126, 100, 78, 62, 48,
+	38, 30, 23, 18, 14, 11, 10, 9,
+	8, 7, 6, 5, 4, 3, 2, 1,
+};
+static __always_inline u32 flow_nice_weight(const struct task_struct *p)
+{
+	s32 prio;
+	u32 idx;
+	if (!p)
+		return (u32)FLOW_CGROUP_WEIGHT_DFLT;
+	prio = p->static_prio - 120;
+	if (prio < -20 || prio > 19)
+		return (u32)FLOW_CGROUP_WEIGHT_DFLT;
+	idx = (u32)(prio + 20);
+	if (idx >= 40U)
+		return (u32)FLOW_CGROUP_WEIGHT_DFLT;
+	return flow_nice_table[idx];
+}
+static __always_inline u32 flow_combine(u32 cw, u32 nw)
+{
+	u64 prod = (u64)cw * (u64)nw;
+	u64 q = prod / (u64)100;
+	if (!q || q < (u64)FLOW_CGROUP_WEIGHT_MIN)
+		return (u32)FLOW_CGROUP_WEIGHT_MIN;
+	if (q > (u64)FLOW_CGROUP_WEIGHT_MAX)
+		return (u32)FLOW_CGROUP_WEIGHT_MAX;
+	return (u32)q;
+}
 static __always_inline u64 flow_fair_step(u32 w)
 {
 	u32 cw = w;

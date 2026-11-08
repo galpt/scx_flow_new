@@ -460,7 +460,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	 * queue head. */
 	if (used) {
 		u64 cgid = READ_ONCE(t->cgrp_id);
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used, flow_cgroup_lookup(cgid));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
+					  flow_combine(flow_cgroup_lookup(cgid),
+						       flow_nice_weight(p)));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 		if (!cur)
@@ -505,7 +507,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (cur && cur < have) {
 		u64 delta = have - cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, flow_cgroup_lookup(cgid));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta,
+					  flow_combine(flow_cgroup_lookup(cgid),
+						       flow_nice_weight(p)));
 		t->vtime = nv;
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
