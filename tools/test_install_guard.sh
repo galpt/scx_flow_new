@@ -107,7 +107,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c156d2f121d741870a14489083f1e63f5621420054eb028cbd8a9e522f199629" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "e55c1cec6982f5a72ef161557a8c7785475b01e3380f3bb02ff6223c0bb043fd" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Harness stays present with no logic change.
@@ -625,7 +625,7 @@ grep -q "SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "strand us
 grep -q "SCX_DHQ_MODE_BALANCED" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "mode use missing"
 grep -q "scx_dhq_create_balanced" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "queue create missing"
 grep -q "256ULL" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "percpu cap missing"
-grep -q "8ULL" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "imbalance cap missing"
+grep -q "SCX_DHQ_MODE_BALANCED, 1ULL" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "imbalance cap missing"
 grep -q "scx_dhq_insert_vtime" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "queue insert missing"
 grep -q "scx_dhq_pop_strand" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "queue pop missing"
 grep -q "scx_dhq_peek_strand" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "queue peek missing"

@@ -104,8 +104,8 @@ static __always_inline u32 flow_est_halve(u32 old)
 		next = (u32)FLOW_EDF_EST_FLOOR_NS;
 	return next;
 }
-/* Band state holds short stable plus short pending plus long stable
- * plus long pending in that order. Short needs two short samples to
+/* Band state holds long stable plus short pending plus short stable
+ * plus pending clear in that order. Short needs two short samples to
  * set while long needs two long samples to clear. Mid values hold. */
 static __always_inline u8 flow_edf_hyst_next(u8 h, u32 est)
 {
@@ -139,7 +139,7 @@ static __always_inline u8 flow_edf_hyst_next(u8 h, u32 est)
 		return 2;
 	return 3;
 }
-/* Long covers stable long plus pending clear. */
+/* Short lat covers stable short plus pending clear. */
 static __always_inline bool flow_edf_hyst_is_lat(u8 h)
 {
 	return h == 2 || h == 3;
@@ -165,8 +165,8 @@ static __always_inline u8 flow_edf_hog_next(u8 hog, bool is_full, bool slept)
 }
 /* Join slack with burst state. Fresh tasks cap at the second band.
  * Past due stays on the first band. Sustained full burns take the
- * third band without ever jumping straight to the last band. Long
- * burst lifts the last two bands to the second band only. The last
+ * third band without ever jumping straight to the last band. Short
+ * filter lifts the last two bands to the second band only. The last
  * band needs a long filter or a sustained count. */
 static __always_inline u32 flow_edf_prio_est(s64 slack, u32 est, u8 hyst, u8 hog, u64 gen)
 {

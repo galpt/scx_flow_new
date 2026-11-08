@@ -18,7 +18,9 @@
  * remain with saturation. Small
  * slack takes the first strand with larger slack placed further back
  * in fixed bands. Bands keep four labels for urgent plus normal
- * plus batch plus idle. Slices hold one fixed quantum. A shared
+ * plus batch plus idle. Burst joins slack through a filtered used
+ * time with band state plus sustained count. Slices hold one fixed
+ * quantum. A shared
  * enqueue with slack ahead of the running slack by a gap kicks for
  * preempt with idle wakes otherwise. Holds gate gap wins. Idle targets
  * take idle wakes. Each running instance kicks at most once. A runnable
@@ -31,7 +33,7 @@
  * observe step. The wait table is sized for every CPU with run
  * plus dispatch halves. Each per CPU queue holds at most two
  * hundred fifty six tasks with the fallback holding at most one
- * thousand twenty four. Strands stay balanced with at most eight
+ * thousand twenty four. Strands stay balanced with at most one
  * more tasks on one side than the other. Steal moves in topology
  * order with local first then same node then remote. Balanced mode
  * drains the larger strand first with a long batch head promoted

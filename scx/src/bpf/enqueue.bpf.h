@@ -11,8 +11,9 @@
  * with a short slice. Tasks that have no usable CPU join the
  * fallback queue. The queue key is the stored virtual time. Shared
  * inserts move past the per LLC floor. Queue choice uses slack from deadline minus now minus
- * remain with saturation in fixed bands. The
- * charge scales with the share and the extra amount is fixed. Each
+ * remain with saturation in fixed bands. Burst state joins slack
+ * from the filtered used time with band state plus sustained count.
+ * The charge scales with the share and the extra amount is fixed. Each
  * shared enqueue first checks the hold, then the idle flag, then
  * the running slack on the target for a gap win. Holds gate gap
  * wins and count a skip. Idle targets take an idle wake and never

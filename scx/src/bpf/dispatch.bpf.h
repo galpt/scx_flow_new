@@ -28,7 +28,8 @@
  * burnt delta and burns
  * it from remain, then moves the remaining slice forward
  * with the same value mirrored beside it, so stopping charges
- * only the tail past the last tick. A busy core runs at max and
+ * only the tail past the last tick. Burns feed the filtered used
+ * time with band state plus sustained count. A busy core runs at max and
  * an idle core runs at half. The set call never sends zero and
  * never steers placement. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
@@ -805,9 +806,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (!flow_cpu_live((u32)cpu))
 			continue;
 		/* One upstream queue per CPU in virtual time mode with
-		 * balanced drains and a small imbalance cap. */
+		 * balanced drains and at most one extra task on one side. */
 		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, 256ULL,
-							   (u64)SCX_DHQ_MODE_BALANCED, 8ULL);
+							   (u64)SCX_DHQ_MODE_BALANCED, 1ULL);
 		if (!dhq) {
 			scx_bpf_error("queue create failed");
 			return -ENOMEM;
