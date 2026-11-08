@@ -9,7 +9,13 @@
  * Long waiting batch and idle heads drain before normal.
  * Overdue tasks stay on the first strand, so the first strand still
  * drains first on ties. A head that cannot run here
- * sends one wake to its owner and stays queued. Remote moves count
+ * sends one wake to its owner and stays queued. Each victim keeps
+ * its own forward slot with the fallback on the last slot, so one
+ * victim does not hide another. A dead head is dropped with its
+ * count and the next strand is tried. The fallback drops its count
+ * from the task and wakes the owner when the move fails. A dispatch
+ * that moved nothing but saw such a head wakes the fallback head
+ * again without the dedup check. Remote moves count
  * on the thief and drop the gauge on the source. Running records
  * the task snapshot with the slack at running time and counts the
  * enqueue to run wait. Dispatch
@@ -26,7 +32,8 @@
  * an idle core runs at half. The set call never sends zero and
  * never steers placement. A mask change on a queued
  * task keeps the queue and wakes the new owner, counting the wake
- * when the owner is usable. Tasks that already ran favor their
+ * when the owner is usable. A task with no usable CPU waits in
+ * the fallback queue until the mask widens. Tasks that already ran favor their
  * first CPU. Init creates one queue per CPU and the fallback
  * queue. Queues use the upstream library in virtual time mode with
  * balanced drains. Liveness comes from the upstream tree, so CPUs
@@ -101,8 +108,28 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 	flow_stat_inc(llc, 14);
 	flow_kick_idle_only(owner, ph, llc);
 }
+/* A dispatch that moved nothing but saw an unrunnable head wakes the
+ * fallback head again without the dedup check, so an owner that
+ * turned idle is not missed. The kick stays idle only with no hold
+ * gate and no pad check. */
+static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 llc)
+{
+	s32 owner;
+	if (!ph)
+		return;
+	owner = flow_first_allowed(ph);
+	if (READ_ONCE(flow_home_stick)) {
+		struct flow_task_ctx *ft = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+		if (ft) {
+			s32 hm = READ_ONCE(ft->home_cpu);
+			if (hm >= 0 && flow_cpu_allowed(hm, ph) && flow_cpu_live((u32)hm))
+				owner = hm;
+		}
+	}
+	flow_kick_idle_only(owner, ph, llc);
+}
 static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq_t *dhq,
-					     u64 strand, u32 slot, int steal)
+					     u64 strand, u32 slot, int steal, bool *saw)
 {
 	u64 peeked;
 	struct task_struct *ph;
@@ -118,9 +145,37 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 	if (!peeked)
 		return 0;
 	ph = bpf_task_from_pid((s32)peeked);
-	if (!ph)
+	if (!ph) {
+		u64 dead = scx_dhq_pop_strand(dhq, strand);
+		struct task_struct *dq;
+		if (!dead)
+			return 0;
+		dq = bpf_task_from_pid((s32)dead);
+		if (!dq) {
+			flow_queued_dec(vllc);
+			return 0;
+		}
+		/* Another CPU removed the dead head and this pop took the
+		 * next task. Keep it alive through fallback with no count
+		 * drop, so no task is lost on the race. */
+		if (saw)
+			*saw = true;
+		flow_forward_from_peeked(dq, llc, slot);
+		lt = bpf_task_storage_get(&task_ctx_stor, dq, 0, 0);
+		slice = (u64)FLOW_SLICE_MIN_NS;
+		if (lt) {
+			u64 s = READ_ONCE(lt->slice_rem);
+			if (s)
+				slice = s;
+		}
+		scx_bpf_dsq_insert(dq, (u64)FLOW_FALLBACK_DSQ, slice, 0);
+		flow_stat_inc(llc, 2);
+		bpf_task_release(dq);
 		return 0;
+	}
 	if (!flow_cpu_allowed((s32)cpu, ph)) {
+		if (saw)
+			*saw = true;
 		flow_forward_from_peeked(ph, llc, slot);
 		bpf_task_release(ph);
 		return 0;
@@ -130,9 +185,13 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 	if (!popped)
 		return 0;
 	p = bpf_task_from_pid((s32)popped);
-	if (!p)
+	if (!p) {
+		flow_queued_dec(vllc);
 		return 0;
+	}
 	if (!flow_cpu_allowed((s32)cpu, p)) {
+		if (saw)
+			*saw = true;
 		flow_forward_from_peeked(p, llc, slot);
 		/* Keep the task alive through the fallback queue. */
 		lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -200,7 +259,7 @@ static __always_inline bool flow_head_long_dhq(scx_dhq_t *dhq, u64 strand, u64 n
 	bpf_task_release(ph);
 	return out;
 }
-static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal)
+static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
 	scx_dhq_t *dhq;
 	u64 h;
@@ -224,13 +283,15 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	if (vllc < 0 || !flow_llc_ok((u32)vllc))
 		return 0;
 	vuse = (u32)vllc;
-	slot = (u32)FLOW_MAX_LLCS;
+	/* The bound is a power of two, so a mask keeps the slot in
+	 * range with no division. The fallback keeps the last slot. */
+	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
 	na = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_A);
 	nb = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_B);
 	ca = na < 0 ? 0ULL : (u64)na;
 	cb = nb < 0 ? 0ULL : (u64)nb;
-	if (!ca && !cb)
-		return 0;
+	/* The counts only order the strands. Empty strands still peek
+	 * below, so a stale count never hides a queued task. */
 	/* Balanced drains take the larger strand first. Ties keep the
 	 * first strand unless the second head waited long, so long
 	 * batch and idle heads drain before normal on ties. */
@@ -261,9 +322,9 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 			second = (u64)SCX_DHQ_STRAND_B;
 		}
 	}
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, first, slot, steal))
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, first, slot, steal, saw))
 		return 1;
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, second, slot, steal))
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, second, slot, steal, saw))
 		return 1;
 	return 0;
 }
@@ -272,8 +333,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	u32 c;
 	u32 llc = 0;
 	u32 victim;
-	u32 li;
 	int v;
+	bool saw_unrunnable = false;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
@@ -296,7 +357,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			}
 		}
 	}
-	if (flow_drain_cpu(c, llc, c, 0))
+	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
@@ -307,7 +368,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || (u32)vl != llc)
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1))
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
@@ -322,7 +383,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		/* Node identity comes from the tree with no per-CPU walk here. */
 		if (!hint_node || !topo_contains(hint_node, victim))
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1))
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
@@ -336,7 +397,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (hint_node && topo_contains(hint_node, victim))
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1))
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
 	{
@@ -344,43 +405,35 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (ph) {
 			if (!flow_cpu_allowed((s32)c, ph)) {
 				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
+				saw_unrunnable = true;
 			} else {
 				struct flow_task_ctx *pt;
 				u32 vllc = llc;
-				int have_owner = 0;
 				pt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
 				if (pt) {
 					u32 q = READ_ONCE(pt->llc_id);
-					if (flow_llc_ok(q)) {
+					if (flow_llc_ok(q))
 						vllc = q;
-						have_owner = 1;
-					}
 				}
 				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
 					if (pt)
 						flow_lat_observe(c, pt, scx_bpf_now(), 0);
 					flow_stat_inc(llc, 1);
 					flow_cpuperf_mark(c, false);
-					if (have_owner) {
-						flow_queued_dec(vllc);
-					} else {
-						bpf_for(li, 0, FLOW_MAX_LLCS) {
-							struct flow_llc_stats *st;
-							if (!flow_llc_ok(li))
-								continue;
-							st = flow_stats_for(li);
-							if (!st)
-								continue;
-							if (READ_ONCE(st->queued) == 0)
-								continue;
-							flow_queued_dec(li);
-							break;
-						}
-					}
+					flow_queued_dec(vllc);
 					return;
 				}
+				/* The head can run here but the move failed.
+				 * Wake the owner so the task is not left idle. */
+				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
+				saw_unrunnable = true;
 			}
 		}
+	}
+	if (saw_unrunnable) {
+		struct task_struct *rh = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
+		if (rh)
+			flow_rekick_unrunnable(rh, llc);
 	}
 	/* No task moved, so the core stays idle at half. */
 	flow_cpuperf_mark(c, true);
@@ -567,8 +620,14 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 		u32 qllc = READ_ONCE(t->llc_id);
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
-		if (owner < 0 || !flow_cpu_allowed(owner, p) || !flow_cpu_live((u32)owner)) {
-			flow_kick_idle_only(owner, p, qllc);
+		if (owner < 0) {
+			/* No usable CPU. The task waits in fallback
+			 * until the mask widens, so count the skip. */
+			flow_stat_inc(qllc, 8);
+			return;
+		}
+		if (!flow_cpu_allowed(owner, p) || !flow_cpu_live((u32)owner)) {
+			flow_stat_inc(qllc, 8);
 			return;
 		}
 		flow_kick_idle_only(owner, p, qllc);

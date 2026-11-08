@@ -354,6 +354,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 		flow_stat_inc(llc, 0);
 		flow_stat_inc(llc, 2);
+		/* No owner queue took the task. Kick self when idle so the
+		 * fallback head is peeked again soon. */
+		flow_kick_idle_only((s32)bpf_get_smp_processor_id(), p, llc);
 		return;
 	}
 	now = scx_bpf_now();
@@ -460,6 +463,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (fell)
 			flow_stat_inc(llc, 2);
 		if (no_cpu) {
+			/* No usable CPU. Kick self when idle so the
+			 * fallback head is peeked again soon. */
+			flow_kick_idle_only((s32)bpf_get_smp_processor_id(), p, llc);
 			return;
 		}
 		flow_kick_lst(tgt, p, llc, new_slack);

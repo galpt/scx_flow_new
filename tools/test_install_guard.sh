@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.1" ] || fail "version not at 5.2.1"
+[ "${want}" = "5.2.2" ] || fail "version not at 5.2.2"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -681,9 +681,13 @@ if ! grep -q "without the queued bit" "${LST_ENQ}" 2>/dev/null; then
 fi
 
 # Fallback dispatch drops the gauge on the enqueue LLC read from the
-# task, with a scan only when no task state exists.
-if ! grep -q "have_owner" "${DISP_HDR}" 2>/dev/null; then
-    fail "fallback owner tracking missing"
+# task, with no scan. The count always comes from the task.
+if grep -q "have_owner" "${DISP_HDR}" 2>/dev/null; then
+    fail "fallback scan state reappeared"
+fi
+grep -q "flow_queued_dec(vllc)" "${DISP_HDR}" || fail "fallback owner dec missing"
+if grep -q 'bpf_for(li, 0, FLOW_MAX_LLCS)' "${DISP_HDR}" 2>/dev/null; then
+    fail "fallback scan reappeared"
 fi
 
 # Queued gauge writes back the last value when the compare loop loses.
@@ -750,5 +754,36 @@ grep -q "suppress one hold then decay" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fai
 # and only the fast pick is gated on single threads.
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
 grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
+
+# Dispatch liveness keeps every queued task reachable. Counts only order
+# strands with no early return, slices stay at the floor with no zero
+# insert, kicks never take minus one without a skip, forward slots stay
+# per victim with the fallback reserved, and a tail re-kick covers heads
+# that could not run here.
+if grep -q "if (!ca && !cb)" "${DISP_HDR}" 2>/dev/null; then
+    fail "nr_queued bail reappeared"
+fi
+grep -q "still peek" "${DISP_HDR}" || fail "peek liveness prose missing"
+grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
+grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${LST_ENQ}" || fail "enqueue slice floor missing"
+if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${LST_ENQ}" 2>/dev/null; then
+    fail "zero slice insert reappeared"
+fi
+if grep -q "dsq_insert(p, SCX_DSQ_LOCAL, 0" "${DISP_HDR}" 2>/dev/null; then
+    fail "zero slice insert reappeared"
+fi
+grep -q "if (tgt < 0)" "${LST_ENQ}" || fail "kick minus one guard missing"
+if grep -q "kick_cpu(-1" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "raw kick minus one reappeared"
+fi
+grep -q "owner < 0" "${DISP_HDR}" || fail "orphan owner check missing"
+grep -q "victim &" "${DISP_HDR}" || fail "forward slot missing"
+grep -q "(u32)FLOW_MAX_LLCS" "${DISP_HDR}" || fail "fallback slot missing"
+grep -q "flow_rekick_unrunnable" "${DISP_HDR}" || fail "re-kick helper missing"
+grep -q "saw_unrunnable" "${DISP_HDR}" || fail "unrunnable flag missing"
+grep -q "its own forward slot" "${DISP_HDR}" || fail "forward slot prose missing"
+grep -q "dead head is dropped" "${DISP_HDR}" || fail "dead pop prose missing"
+grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
+grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
 
 echo "guard tests passed"
