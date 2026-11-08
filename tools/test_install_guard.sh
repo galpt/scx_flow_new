@@ -108,8 +108,16 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "5ec1f20ba993564b213ce72d945423e449e2cf75add660cd24b92037a51594e4" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "688bea327e6cd8728a3fdd56e2e6d7cb7d46d81b287f35cffab48d8cecb5c048" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
+
+# Scheduler plus hint prose keeps periods with no semicolon.
+if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "scx README semicolon reappeared"
+fi
+if grep -q ";" "${REPO_DIR}/tools/nn_hint/README.md" 2>/dev/null; then
+    fail "hint README semicolon reappeared"
+fi
 
 # Harness stays present with report fields and no workload change.
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"

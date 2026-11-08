@@ -2,6 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0
 # Offline hint replay with integer math only and no scheduler use.
 # Reads raw frame rows or harness rows and prints a clamped hint.
+# Batch mode replays many files and reports proxy error plus
+# saturation plus shard stability with integer math only.
+# Proxy maps hint minus offset to burst tenths as a placeholder
+# with no accuracy claim and calibration still required.
 # The model keeps two hidden units with rectified outputs and
 # saturates at the share bounds. It never writes vd and makes
 # no faster claim over averaging. Delete this dir to remove it.
@@ -80,6 +84,79 @@ def hint_for(cpu_ms_x10, gpu_ms_x10):
     return out
 
 
+def hint_for_w(cpu_ms_x10, gpu_ms_x10, w1, b1, w2, b2):
+    # Parameter sweep helper with explicit weights and integer math.
+    # Global placeholder weights stay unchanged. Caller passes
+    # bounded deltas only. Shifts plus clamps match hint_for.
+    h0 = relu(w1[0][0] * cpu_ms_x10 + w1[0][1] * gpu_ms_x10 + b1[0])
+    h1 = relu(w1[1][0] * cpu_ms_x10 + w1[1][1] * gpu_ms_x10 + b1[1])
+    out = w2[0] * h0 + w2[1] * h1 + b2
+    out = (out >> 4) + 100
+    if out < LO:
+        return LO
+    if out > HI:
+        return HI
+    return out
+
+
+def abs_int(x):
+    return -x if x < 0 else x
+
+
+def burst_for(cpu_ms_x10, gpu_ms_x10):
+    # Burst proxy in tenths of ms with integer add only.
+    # Sums both inputs. Negative sums clamp to zero.
+    s = cpu_ms_x10 + gpu_ms_x10
+    return s if s > 0 else 0
+
+
+def proxy_for(hint):
+    # Placeholder map from hint to burst tenths with integer add.
+    # Removes the fixed offset. Uncalibrated with no accuracy claim.
+    return hint - 100
+
+
+def mean_int(vals):
+    # Integer mean with floor divide and no float math.
+    if not vals:
+        return 0
+    total = 0
+    for v in vals:
+        total = total + v
+    return total // len(vals)
+
+
+def pctl_int(sorted_vals, pct):
+    # Integer percentile from a sorted list with floor index.
+    # pct holds 0 to 100. Index uses floor divide only.
+    n = len(sorted_vals)
+    if n == 0:
+        return 0
+    if pct < 0:
+        pct = 0
+    if pct > 100:
+        pct = 100
+    idx = (n * pct) // 100
+    if idx >= n:
+        idx = n - 1
+    return sorted_vals[idx]
+
+
+def is_tmp_path(path):
+    # Refuse any report path outside the temp dir with string checks.
+    # Dotsplit refuses parent escapes with no filesystem call.
+    if not path:
+        return False
+    if path == "/tmp":
+        return False
+    if not path.startswith("/tmp/"):
+        return False
+    for part in path.split("/"):
+        if part == "..":
+            return False
+    return True
+
+
 def load_frames(path):
     with open(path) as f:
         data = json.load(f)
@@ -105,23 +182,210 @@ def load_harness(path):
     return rows
 
 
-def main():
-    if len(sys.argv) != 2:
-        print("use nn_hint.py PATH.json|PATH.csv", file=sys.stderr)
-        return 2
-    path = sys.argv[1]
+def load_any(path):
     if path.endswith(".json"):
-        rows = load_frames(path)
-    else:
-        rows = load_harness(path)
+        return load_frames(path)
+    return load_harness(path)
+
+
+def shard_avgs(hints, nshards):
+    # Contiguous shard means with floor divide and no float math.
+    # Shards split in input order. Short tails join the last shard.
+    n = len(hints)
+    if n == 0 or nshards <= 0:
+        return []
+    if nshards > n:
+        nshards = n
+    if nshards > 16:
+        nshards = 16
+    base = n // nshards
+    rest = n - base * nshards
+    out = []
+    pos = 0
+    for i in range(nshards):
+        size = base + (1 if i < rest else 0)
+        total = 0
+        for k in range(size):
+            total = total + hints[pos + k]
+        pos = pos + size
+        if size > 0:
+            out.append(total // size)
+    return out
+
+
+def baseline_errors(bursts):
+    # Averaging baseline errors with running integer mean only.
+    # First row has no prior so it starts from the second row.
+    # Report only with no threshold and no accuracy claim.
+    errs = []
+    total = 0
+    count = 0
+    for b in bursts:
+        if count > 0:
+            pred = total // count
+            errs.append(abs_int(pred - b))
+        total = total + b
+        count = count + 1
+    return errs
+
+
+def sweep_means(rows):
+    # Bounded sweep over placeholder weights with integer math.
+    # Each variant moves one entry by one with no larger step.
+    # Returns name plus mean proxy error pairs report only.
+    bursts = []
+    for c10, g10 in rows:
+        bursts.append(burst_for(c10, g10))
+    variants = [
+        ("base", [[3, -2], [2, 4]], [1, -1], [2, 3], 0),
+        ("w00_up", [[4, -2], [2, 4]], [1, -1], [2, 3], 0),
+        ("w00_dn", [[2, -2], [2, 4]], [1, -1], [2, 3], 0),
+        ("w01_up", [[3, -1], [2, 4]], [1, -1], [2, 3], 0),
+        ("w01_dn", [[3, -3], [2, 4]], [1, -1], [2, 3], 0),
+        ("w10_up", [[3, -2], [3, 4]], [1, -1], [2, 3], 0),
+        ("w11_up", [[3, -2], [2, 5]], [1, -1], [2, 3], 0),
+        ("o0_up", [[3, -2], [2, 4]], [1, -1], [3, 3], 0),
+        ("o1_up", [[3, -2], [2, 4]], [1, -1], [2, 4], 0),
+    ]
+    out = []
+    for name, w1, b1, w2, b2 in variants:
+        errs = []
+        for idx in range(len(rows)):
+            c10, g10 = rows[idx]
+            h = hint_for_w(c10, g10, w1, b1, w2, b2)
+            errs.append(abs_int(proxy_for(h) - bursts[idx]))
+        out.append((name, mean_int(errs)))
+    return out
+
+
+def build_lines(rows, per_file, nshards):
+    # Batch report lines with integer math only and no float use.
+    # First line keeps the old rows plus avg_hint form for compat.
+    # Later lines add proxy error plus saturation plus stability
+    # plus sweep against the averaging baseline report only.
+    hints = []
+    bursts = []
+    for c10, g10 in rows:
+        hints.append(hint_for(c10, g10))
+        bursts.append(burst_for(c10, g10))
+    avg = mean_int(hints)
+    errs = []
+    for i in range(len(rows)):
+        errs.append(abs_int(proxy_for(hints[i]) - bursts[i]))
+    serr = sorted(errs)
+    mean_err = mean_int(errs)
+    p50_err = pctl_int(serr, 50)
+    p99_err = pctl_int(serr, 99)
+    berrs = baseline_errors(bursts)
+    sberr = sorted(berrs)
+    bmean = mean_int(berrs)
+    bp50 = pctl_int(sberr, 50)
+    bp99 = pctl_int(sberr, 99)
+    sat = 0
+    for h in hints:
+        if h == LO or h == HI:
+            sat = sat + 1
+    sat_pm = (sat * 1000) // len(rows) if rows else 0
+    avgs = shard_avgs(hints, nshards)
+    smin = avgs[0] if avgs else 0
+    smax = avgs[0] if avgs else 0
+    for v in avgs:
+        if v < smin:
+            smin = v
+        if v > smax:
+            smax = v
+    spread = smax - smin
+    spread_pm = (spread * 1000) // avg if avg > 0 else 0
+    sweeps = sweep_means(rows)
+    best_name = sweeps[0][0] if sweeps else "base"
+    best_mean = sweeps[0][1] if sweeps else 0
+    for name, val in sweeps:
+        if val < best_mean:
+            best_mean = val
+            best_name = name
+    lines = []
+    lines.append(f"rows {len(rows)} avg_hint {avg}")
+    lines.append(f"mean_err {mean_err} p50_err {p50_err} p99_err {p99_err}")
+    lines.append(f"baseline_mean_err {bmean} baseline_p50 {bp50} baseline_p99 {bp99}")
+    lines.append(f"sat_count {sat} sat_permille {sat_pm}")
+    lines.append(f"shards {len(avgs)} shard_min {smin} shard_max {smax} shard_spread {spread} shard_spread_permille {spread_pm}")
+    sweep_bits = []
+    for name, val in sweeps:
+        sweep_bits.append(f"{name}={val}")
+    lines.append("sweep " + " ".join(sweep_bits))
+    lines.append(f"sweep_best {best_name} sweep_best_mean {best_mean}")
+    lines.append(f"files {len(per_file)}")
+    for path, count, favg in per_file:
+        lines.append(f"file {path} rows {count} avg_hint {favg}")
+    return lines
+
+
+def main():
+    args = sys.argv[1:]
+    report = ""
+    nshards = 2
+    inputs = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--report":
+            i = i + 1
+            if i >= len(args):
+                print("missing report path", file=sys.stderr)
+                return 2
+            report = args[i]
+        elif a == "--shards":
+            i = i + 1
+            if i >= len(args):
+                print("missing shards count", file=sys.stderr)
+                return 2
+            digits = args[i]
+            val = 0
+            for ch in digits:
+                if "0" <= ch <= "9":
+                    val = val * 10 + (ord(ch) - 48)
+            nshards = val
+            if nshards < 1:
+                nshards = 1
+            if nshards > 16:
+                nshards = 16
+        elif a == "--sweep":
+            # Accepted for explicit calibration runs. Sweep already
+            # ships in every report so the flag changes nothing.
+            pass
+        elif a.startswith("--"):
+            print(f"unknown flag {a}", file=sys.stderr)
+            return 2
+        else:
+            inputs.append(a)
+        i = i + 1
+    if not inputs:
+        print("use nn_hint.py PATH.json|PATH.csv [more ...] [--report /tmp/file] [--shards N] [--sweep]", file=sys.stderr)
+        return 2
+    if report and not is_tmp_path(report):
+        print("report path must stay under /tmp", file=sys.stderr)
+        return 2
+    rows = []
+    per_file = []
+    for path in inputs:
+        part = load_any(path)
+        total = 0
+        for c10, g10 in part:
+            rows.append((c10, g10))
+        for c10, g10 in part:
+            total = total + hint_for(c10, g10)
+        favg = total // len(part) if part else 0
+        per_file.append((path, len(part), favg))
     if not rows:
         print("no rows", file=sys.stderr)
         return 1
-    total = 0
-    for c10, g10 in rows:
-        total += hint_for(c10, g10)
-    avg = total // len(rows)
-    print(f"rows {len(rows)} avg_hint {avg}")
+    lines = build_lines(rows, per_file, nshards)
+    for line in lines:
+        print(line)
+    if report:
+        with open(report, "w") as f:
+            for line in lines:
+                f.write(line + "\n")
     return 0
 
 
