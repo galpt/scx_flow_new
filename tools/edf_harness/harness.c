@@ -429,7 +429,7 @@ int main(int argc, char **argv)
         probe_max_us = (double)st.probe.max_delay_ns /
             1000.0;
     }
-    /* Frame p99 reads the sorted probe delays with no extra wakeup.
+    /* Probe p99 reads the sorted probe delays with no extra wakeup.
      * Occupancy reports threads and spill reports misses, both from
      * existing counts with no new measurement. */
     if (st.probe.len > 0 && st.probe.delays) {

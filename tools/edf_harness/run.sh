@@ -8,9 +8,9 @@
 # a light baseline. Set CONTROL to 1 to mark runs as
 # control for A and B comparison. The binary is built
 # on each run with no checked in binary. Report adds
-# occupancy plus spill plus frame p99 with no workload
+# occupancy plus spill plus probe p99 with no workload
 # change: occupancy reads threads, spill reads misses,
-# and frame p99 reads the sorted probe delays.
+# and probe p99 reads the sorted probe delays.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail

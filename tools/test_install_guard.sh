@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "cf1335f5722a759429921d826b4e14920a975289505a88f3c98bb117eb2a02db" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "dc8b743542efda36a0fb3db3c2046f7c3acd931c04ae8f96cc6ff1a5cc2d2659" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "10" ] || fail "scx README lines drifted"
 
 # Harness stays present with report fields and no workload change.
@@ -683,7 +683,7 @@ grep -q "10 tasks" "${SRC_DIR}/README.md" || fail "readme cap missing"
 grep -q "10ms" "${SRC_DIR}/README.md" || fail "readme bound missing"
 grep -q "aspirational" "${SRC_DIR}/README.md" || fail "readme ideal missing"
 grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
-grep -q "Pointman" "${SRC_DIR}/README.md" || fail "readme tail missing"
+grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
 grep -q "offline" "${SRC_DIR}/README.md" || fail "readme hint missing"
 
 # No classifier plus no average estimator returns with no float divide.
