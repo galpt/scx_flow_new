@@ -4,16 +4,15 @@
  *
  * Each CPU drains its own queue first, then the most loaded queue,
  * then mates in the same LLC, then the rest of the same LLC, then
- * the same node, then distant queues, then fallback. The most loaded
+ * the same node, then distant queues last, then fallback. The most loaded
  * pick scans waiting counts with mates first on ties and lowest id
- * after that. Idle work starts at once with no wait for warm tasks,
- * save for the far node rule below. Queues hold without a bound and
- * empty queues are skipped with no peek through waiting counts.
- * Mates compare the cluster hint with no extra walk. Each queue
- * drains the earlier vd across both strands with ties to the first
- * strand on the same node. A far node drains the first strand only,
- * so cold tasks stay near their node. The same LLC means the same
- * chip and the same node comes from the tree walk. Trying one strand
+ * after that. Idle work starts at once with no wait for warm tasks.
+ * Queues hold without a bound and empty queues are skipped with no
+ * peek through waiting counts. Mates compare the cluster hint with
+ * no extra walk. Each queue drains the earlier vd across both strands
+ * with ties to the first strand. Remote queues drain last with both
+ * strands in vd order, so locality comes from order alone. The same
+ * LLC means the same chip and the same node comes from the tree walk. Trying one strand
  * first or the fuller side or alternating sides would favor warm or
  * cold tasks and break fairness, so the drain keeps vd order by vd
  * only. A head that cannot run here sends one wake to its owner and
@@ -253,8 +252,8 @@ static __always_inline s32 flow_pick_busiest(u32 self, u32 self_llc, u32 self_cc
 	}
 	return best;
 }
-/* Same node holds the same LLC plus the tree node. Far nodes take
- * the first strand only, so cold tasks stay near their node. */
+/* Same node holds the same LLC plus the tree node. Remote queues drain
+ * last with both strands in vd order, so locality comes from order. */
 static __always_inline int flow_is_same_node(u32 cpu, u32 llc, topo_ptr hint_node, u32 victim)
 {
 	int vl;
@@ -289,7 +288,7 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* Far nodes take the first strand only. */
+	/* No warm caller. Remote drains last with both strands in vd order. */
 	if (warm_only)
 		return flow_try_move_dhq(cpu, llc, vuse, victim, dhq,
 					 (u64)SCX_DHQ_STRAND_A, slot, steal, saw);
@@ -365,8 +364,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		u32 my_ccx = flow_cpu_ccx(c);
 		s32 busy = flow_pick_busiest(c, llc, my_ccx);
 		if (busy >= 0) {
-			int warm_only = !flow_is_same_node(c, llc, hint_node, (u32)busy);
-			if (flow_drain_cpu(c, llc, (u32)busy, 1, &saw_unrunnable, warm_only))
+			/* Busiest victim drains both strands with locality from order. */
+			if (flow_drain_cpu(c, llc, (u32)busy, 1, &saw_unrunnable, 0))
 				return;
 		}
 		bpf_for(victim, 0, FLOW_MAX_CPUS) {
@@ -428,8 +427,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (hint_node && topo_contains(hint_node, victim))
 			continue;
-		/* Far nodes take the first strand only. */
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable, 1))
+		/* Remote drains last with both strands in vd order. */
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable, 0))
 			return;
 	}
 	{

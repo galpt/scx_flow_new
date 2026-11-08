@@ -5,14 +5,14 @@
  * Shared tasks join the least queued per CPU queue in vd order.
  * One scan picks the live allowed queue with a handle that holds
  * the fewest waiting tasks. Ties keep the lowest id with no extra
- * mate favor here. Warmness stays in the strand only. Warm tasks
+ * mate favor here. Warmness stays in the strand only as per-CPU recency. Warm tasks
  * take the first strand and cold tasks take the second, with unclear
  * tasks treated as cold. Warm means the last CPU shares the same
  * LLC with the picked target. The same LLC means the same chip.
  * The upstream queue keeps insertion order for equal vd, so the code
  * adds no extra tie handling. A strand that refuses an insert tries
  * the other strand once before the fallback queue. Queues hold
- * without a bound, so inserts refuse only on strand balance.
+ * without a bound, so inserts refuse only on strand balance as a balance-only guard.
  * Pinned tasks join the local queue in order with
  * a single slice. Exiting tasks use the local queue when allowed and
  * the owner queue otherwise with a short slice. Tasks that have no
@@ -72,7 +72,7 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
 }
 /* Pick the live allowed queue with the fewest waiting tasks.
  * Ties keep the lowest id with no extra mate favor here.
- * Warmness stays in the strand only. */
+ * Warmness stays in the strand only as per-CPU recency. */
 static __always_inline s32 flow_pick_least(struct task_struct *p)
 {
 	s32 best = -1;
@@ -98,7 +98,7 @@ static __always_inline s32 flow_pick_least(struct task_struct *p)
 }
 /* Warm means the last CPU shares the same LLC with the picked
  * target. The same LLC means the same chip. Warm takes the first
- * strand and all else takes the second. */
+ * strand and all else takes the second as per-CPU recency. */
 static __always_inline u64 flow_warm_strand(s32 last, s32 tgt)
 {
 	int a;
@@ -114,7 +114,7 @@ static __always_inline u64 flow_warm_strand(s32 last, s32 tgt)
 	return (u64)SCX_DHQ_STRAND_A;
 }
 /* Try the picked strand once, then the other strand once. A reject
- * from both means strand balance refused. Queues hold without
+ * from both means strand balance refused as a balance-only guard. Queues hold without
  * a bound. */
 static __always_inline int flow_try_insert_dhq(scx_dhq_t *dhq, u64 pid, u64 key, u64 first)
 {

@@ -9,8 +9,9 @@
  * entry reads as the default share. Globals hold the running view,
  * the per LLC floor, the per CPU queue handles as upstream queue
  * pointers in arena memory, the per CPU waiting counts, the forward
- * coalescing state, and two
- * switches for cluster choice plus thread shape. A zero handle means
+ * coalescing state, and two switches for cluster choice plus thread shape. Queue
+ * handles hold per-CPU recency strands with a balance-only guard and no bound.
+ * A zero handle means
  * the CPU is offline or its queue was never built. Counts hold waiting
  * tasks per CPU with saturation at the top and a floor at zero. Counts
  * stay internal with no export through the counter view. Thread shape

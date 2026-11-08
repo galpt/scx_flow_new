@@ -3,15 +3,17 @@
  * Shared constants for the flow scheduler.
  *
  * Each CPU owns one queue with two strands ordered by vd. Warm tasks
- * join the first strand and cold tasks join the second. Ties leave in
+ * join the first strand and cold tasks join the second. Strands hold
+ * per-CPU recency. Ties leave in
  * insertion order. Warm means the last CPU shares the same LLC with
  * the picked target, else the task stays cold. The same LLC means the
  * same chip. Placement picks the live allowed queue with the fewest
  * waiting tasks with ties to the lowest id. A strand that refuses an
- * insert tries the other strand once before the fallback queue.
+ * insert tries the other strand once before the fallback queue
+ * as a balance-only guard.
  * Draining peeks both heads and pops the earlier vd with ties to the
- * first strand on the same node. A far node drains the first strand
- * only. Each per CPU queue holds without a bound with one millis
+ * first strand. Remote queues drain last with both strands in vd order,
+ * so locality comes from order alone. Each per CPU queue holds without a bound with one millis
  * slices. Depth signal reuses the guard and the queued plus fallback
  * plus steal counts with no extra probe. Waiting counts track queued
  * tasks per CPU for placement and stay internal. One fallback queue
@@ -29,8 +31,8 @@
  * stored time forward by one. Each per CPU queue holds without a bound
  * with the fallback holding at most one thousand twenty four.
  * Steal moves with local first then the most loaded queue then mates
- * then the rest of the same LLC then same node then remote with idle
- * starts at once. Queues come from the upstream
+ * then the rest of the same LLC then same node then remote last with both strands
+ * in vd order with idle starts at once. Queues come from the upstream
  * double helix library in virtual time mode, and placement follows
  * the upstream topology library with liveness from the same tree.
  *

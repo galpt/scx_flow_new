@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "8809f5e98b2432b6c6f2e6feae0d12a7fb2538b4d81aa819b899cbe215a75d39" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "237b6eca7fb19077b5673b81b0e03fc3e9e81e3c4e9e643306c4e90782121907" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -708,7 +708,14 @@ grep -q "strand" "${SRC_DIR}/README.md" || fail "readme strand missing"
 grep -q "without bound" "${SRC_DIR}/README.md" || fail "readme unbounded missing"
 grep -q "least queued" "${SRC_DIR}/README.md" || fail "readme least missing"
 grep -q "most loaded" "${SRC_DIR}/README.md" || fail "readme most missing"
-grep -q "warm only" "${SRC_DIR}/README.md" || fail "readme warm missing"
+grep -q "remote last" "${SRC_DIR}/README.md" || fail "readme remote missing"
+grep -q "both strands" "${SRC_DIR}/README.md" || fail "readme both missing"
+if grep -q "warm only" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme warm only reappeared"
+fi
+if grep -q "first strand only" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme far warm reappeared"
+fi
 grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
 grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
 if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -736,7 +743,7 @@ fi
 
 # Unbounded queues with waiting counts plus least load plus most load steal.
 # Placement scans once for the fewest waiting tasks and dispatch steals
-# the most loaded queue first with far nodes kept warm only.
+# the most loaded queue first with remote kept last with both strands.
 grep -q "flow_qcnt" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "waiting counts missing"
 grep -q "flow_qcnt_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting rise missing"
 grep -q "flow_qcnt_dec" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting drop missing"
@@ -744,8 +751,22 @@ grep -q "flow_qcnt_inc" "${ENQ_HDR}" || fail "enqueue waiting rise missing"
 grep -q "flow_qcnt_dec" "${DISP_HDR}" || fail "dispatch waiting drop missing"
 grep -q "flow_pick_busiest" "${DISP_HDR}" || fail "busiest pick missing"
 grep -q "flow_is_same_node" "${DISP_HDR}" || fail "node test missing"
-grep -q "warm_only" "${DISP_HDR}" || fail "warm only steal missing"
-grep -q "first strand only" "${DISP_HDR}" || fail "far node prose missing"
+grep -q "warm_only" "${DISP_HDR}" || fail "warm arg missing"
+grep -q "if (warm_only)" "${DISP_HDR}" || fail "warm branch missing"
+grep -q "both strands in vd order" "${DISP_HDR}" || fail "remote last prose missing"
+grep -q "Remote drains last" "${DISP_HDR}" || fail "far node prose missing"
+grep -q "saw_unrunnable, 0)" "${DISP_HDR}" || fail "free drain missing"
+if grep -q "first strand only" "${DISP_HDR}" 2>/dev/null; then
+    fail "warm only path reappeared"
+fi
+if grep -q "saw_unrunnable, 1)" "${DISP_HDR}" 2>/dev/null; then
+    fail "warm only dispatch reappeared"
+fi
+grep -q "per-CPU recency" "${ENQ_HDR}" || fail "enqueue recency missing"
+grep -q "balance-only guard" "${ENQ_HDR}" || fail "enqueue guard missing"
+grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/intf.h" || fail "intf recency missing"
+grep -q "balance-only guard" "${SRC_DIR}/src/bpf/intf.h" || fail "intf guard missing"
+grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps recency missing"
 grep -q "without a bound" "${SRC_DIR}/src/bpf/intf.h" || fail "unbounded prose missing"
 grep -q "without a bound" "${ENQ_HDR}" || fail "enqueue unbounded prose missing"
 grep -q "without a bound" "${DISP_HDR}" || fail "dispatch unbounded prose missing"
