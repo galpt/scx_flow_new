@@ -108,15 +108,12 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "688bea327e6cd8728a3fdd56e2e6d7cb7d46d81b287f35cffab48d8cecb5c048" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "2dc54eea96e276fd2278cb6d06cb4d74a5c6b8e7c921d19d60046fb1c3024d0d" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
-# Scheduler plus hint prose keeps periods with no semicolon.
+# Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "scx README semicolon reappeared"
-fi
-if grep -q ";" "${REPO_DIR}/tools/nn_hint/README.md" 2>/dev/null; then
-    fail "hint README semicolon reappeared"
 fi
 
 # Harness stays present with report fields and no workload change.
@@ -127,33 +124,26 @@ grep -q "spill" "${REPO_DIR}/tools/edf_harness/harness.c" || fail "harness spill
 grep -q "occupancy" "${REPO_DIR}/tools/edf_harness/harness.c" || fail "harness occupancy missing"
 grep -q "probe_p99_us" "${REPO_DIR}/tools/edf_harness/run.sh" || fail "harness report missing p99"
 
-# Hint probe stays userspace only with no BPF hook and no vd write.
-[ -s "${REPO_DIR}/tools/nn_hint/nn_hint.py" ] || fail "hint scaffold missing nn_hint.py"
-[ -s "${REPO_DIR}/tools/nn_hint/README.md" ] || fail "hint scaffold missing README"
-if grep -q "scx_bpf_\|bpf_task_storage\|dsq_vtime" "${REPO_DIR}/tools/nn_hint/nn_hint.py" 2>/dev/null; then
-    fail "hint BPF hook reappeared"
+# Hint tooling stays removed with no reappearance.
+# The offline probe left the tree, so its dir plus its tracked
+# files plus its scoped names must not return. Scoped names stay
+# narrow so topology hint locals plus share prose keep passing.
+[ ! -e "${REPO_DIR}/tools/nn_hint" ] || fail "hint dir reappeared"
+if git -C "${REPO_DIR}" ls-files -- tools/nn_hint | grep -q .; then
+    fail "hint files reappeared"
 fi
-grep -q "never writes vd\|never writes" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint vd prose missing"
-grep -q "no faster claim\|no scheduler" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint claim prose missing"
-
-# Hint taxonomy plus lestat stay offline with integer math only.
-# Burst classes map to zero plus one plus two with shares report
-# only. Lestat frametime maps to duplicated tenths with header
-# detect for probe versus frametime and calibration still required.
-grep -q "taxonomy_for" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint taxonomy missing"
-grep -q "share_for" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint share missing"
-grep -q "load_lestat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lestat loader missing"
-grep -q "frametime" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint frametime detect missing"
-grep -q "probe_p99_us" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint probe detect missing"
-grep -q "taxonomy lat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint taxonomy report missing"
-grep -q "share lat" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint share report missing"
-grep -q "burst <= 66" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lat bound missing"
-grep -q "burst <= 91" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint batch bound missing"
-grep -q "return 400" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint lat share missing"
-grep -q "return 20" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint idle share missing"
-grep -q "calibration still required" "${REPO_DIR}/tools/nn_hint/nn_hint.py" || fail "hint calibration prose missing"
-grep -q "calibration still required" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint calibration readme missing"
-grep -q "frametime" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint lestat readme missing"
+for hint_name in \
+    "nn_hint" \
+    "hint_for" \
+    "taxonomy_for" \
+    "share_for" \
+    "load_lestat" \
+    "burst <= 66" \
+    "calibration still required"; do
+    if grep -rn --exclude="test_install_guard.sh" --exclude-dir=target --exclude-dir=.git "${hint_name}" "${REPO_DIR}" 2>/dev/null | grep -q .; then
+        fail "hint name reappeared ${hint_name}"
+    fi
+done
 
 # Changelog history remains public in prior commits; tip carries no changelog blob.
 
@@ -696,7 +686,7 @@ grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose m
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
 # plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus ten plus overflow plus tail target plus offline hint.
+# plus ten plus overflow plus tail target.
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
 grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"
@@ -711,7 +701,6 @@ grep -q "10ms" "${SRC_DIR}/README.md" || fail "readme bound missing"
 grep -q "aspirational" "${SRC_DIR}/README.md" || fail "readme ideal missing"
 grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
 grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
-grep -q "offline" "${SRC_DIR}/README.md" || fail "readme hint missing"
 
 # No classifier plus no average estimator returns with no float divide.
 if grep -qi "ewma" "${SRC_DIR}/src/bpf" 2>/dev/null; then
