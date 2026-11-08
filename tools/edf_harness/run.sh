@@ -7,7 +7,10 @@
 # realtime use. One probe thread wakes each 10ms for
 # a light baseline. Set CONTROL to 1 to mark runs as
 # control for A and B comparison. The binary is built
-# on each run with no checked in binary.
+# on each run with no checked in binary. Report adds
+# occupancy plus spill plus frame p99 with no workload
+# change: occupancy reads threads, spill reads misses,
+# and frame p99 reads the sorted probe delays.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
@@ -59,7 +62,7 @@ else
 fi
 SUMMARY="${OUTDIR}/summary.csv"
 STATS="${OUTDIR}/summary_stats.csv"
-echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,control,sched,repeat,seed" > "${SUMMARY}"
+echo "target_u,nthreads,ncpu,wall_secs,released,completed,completion,offered_util,exact_util,effective_util,nvcsw,nivcsw,probe_count,probe_avg_us,probe_max_us,probe_p99_us,spill,occupancy,control,sched,repeat,seed" > "${SUMMARY}"
 for target in ${LEVELS}; do
     N="$(calc_n "${target}")"
     echo "level target ${target} threads ${N} duration" \
@@ -94,7 +97,7 @@ with open(src, newline='') as f:
         groups.setdefault(t, []).append(row)
 cols = ['completion', 'offered_util', 'exact_util']
 cols += ['effective_util', 'nvcsw', 'probe_avg_us']
-cols += ['probe_max_us']
+cols += ['probe_max_us', 'probe_p99_us', 'spill']
 with open(dst, 'w', newline='') as f:
     w = csv.writer(f)
     head = ['target_u', 'n']

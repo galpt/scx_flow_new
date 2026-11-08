@@ -79,7 +79,11 @@ CPU count plus completion equal to completed over
 released plus effective use equal to completed execution
 over wall over CPU count plus switches from voluntary
 switches summed over threads plus probe average and max
-delay in microseconds from the 10ms probe. Exact use is
+and p99 delay in microseconds from the 10ms probe.
+Report also holds occupancy equal to threads plus spill
+equal to released minus completed plus frame p99 equal
+to probe p99, all from existing counts with no workload
+change and no scheduler use. Exact use is
 mean per job ratio times thread count over CPU count with
 no wall sampling. Offered use matches exact use on average
 with no extra sampling.
@@ -89,7 +93,7 @@ use only with no guarantee. There is no threshold on 98.5.
 Report topology plus variance with each run. Use
 `stress-ng` only as background load plus `cyclictest`
 plus `schbench` as cross checks with no threshold. The
-10ms probe reports average plus max delay only with no
+10ms probe reports average plus max plus p99 delay with no
 per-op latency histogram, so tail claims need raw runs.
 
 ## Results (4.2.4 vs 4.2.5)

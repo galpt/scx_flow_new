@@ -2,9 +2,13 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own queue first, then queues on the same LLC,
- * then the same node, then distant queues, then fallback. Each queue
- * drains in vd order on the first strand. A head that cannot run here
+ * Each CPU drains its own queue first, then mates in the same LLC,
+ * then the rest of the same LLC, then the same node, then distant
+ * queues, then fallback. Mates compare the cluster hint with no extra
+ * walk. Each queue drains the earlier vd across both strands with ties
+ * to the first strand. Trying one strand first or the fuller side or
+ * alternating sides would favor warm or cold tasks and break fairness,
+ * so the drain keeps vd order by vd only. A head that cannot run here
  * sends one wake to its owner and stays queued. Each victim keeps
  * its own forward slot with the fallback on the last slot, so one victim
  * does not hide another. A dead head is dropped with its count and
@@ -212,10 +216,42 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* Single strand drain on the first strand in vd order. */
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, (u64)SCX_DHQ_STRAND_A, slot, steal, saw))
-		return 1;
-	return 0;
+	/* Dual strand drain orders by vd only. */
+	{
+		u64 pa = scx_dhq_peek_strand(dhq, (u64)SCX_DHQ_STRAND_A);
+		u64 pb = scx_dhq_peek_strand(dhq, (u64)SCX_DHQ_STRAND_B);
+		if (!pa && !pb)
+			return 0;
+		if (pa && pb) {
+			struct task_struct *ta = bpf_task_from_pid((s32)pa);
+			struct task_struct *tb = bpf_task_from_pid((s32)pb);
+			u64 first = (u64)SCX_DHQ_STRAND_A;
+			u64 second = (u64)SCX_DHQ_STRAND_B;
+			if (ta && tb) {
+				s64 va = (s64)ta->scx.dsq_vtime;
+				s64 vb = (s64)tb->scx.dsq_vtime;
+				if (vb < va) {
+					first = (u64)SCX_DHQ_STRAND_B;
+					second = (u64)SCX_DHQ_STRAND_A;
+				}
+			} else if (!ta && tb) {
+				first = (u64)SCX_DHQ_STRAND_B;
+				second = (u64)SCX_DHQ_STRAND_A;
+			}
+			if (ta)
+				bpf_task_release(ta);
+			if (tb)
+				bpf_task_release(tb);
+			if (flow_try_move_dhq(cpu, llc, vuse, dhq, first, slot, steal, saw))
+				return 1;
+			return flow_try_move_dhq(cpu, llc, vuse, dhq, second, slot, steal, saw);
+		}
+		if (pa)
+			return flow_try_move_dhq(cpu, llc, vuse, dhq,
+						 (u64)SCX_DHQ_STRAND_A, slot, steal, saw);
+		return flow_try_move_dhq(cpu, llc, vuse, dhq,
+					 (u64)SCX_DHQ_STRAND_B, slot, steal, saw);
+	}
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
@@ -248,32 +284,46 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		if (victim == c)
-			continue;
-		if (!flow_cpu_live(victim))
-			continue;
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || (u32)vl != llc)
-			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-			return;
-	}
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		if (victim == c)
-			continue;
-		if (!flow_cpu_live(victim))
-			continue;
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
-			continue;
-		/* Node identity comes from the tree with no per-CPU walk here. */
-		if (!hint_node || !topo_contains(hint_node, victim))
-			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-			return;
+	{
+		u32 my_ccx = flow_cpu_ccx(c);
+		bpf_for(victim, 0, FLOW_MAX_CPUS) {
+			int vl;
+			if (victim == c)
+				continue;
+			if (!flow_cpu_live(victim))
+				continue;
+			vl = topo_cpu_to_llc_id(victim);
+			if (vl < 0 || (u32)vl != llc)
+				continue;
+			/* Mates first in the same LLC with no extra walk. */
+			if (flow_cpu_ccx(victim) != my_ccx)
+				continue;
+			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+				return;
+		}
+		bpf_for(victim, 0, FLOW_MAX_CPUS) {
+			int vl;
+			bool same_llc;
+			if (victim == c)
+				continue;
+			if (!flow_cpu_live(victim))
+				continue;
+			vl = topo_cpu_to_llc_id(victim);
+			same_llc = (vl >= 0 && flow_llc_ok((u32)vl) && (u32)vl == llc);
+			if (same_llc) {
+				/* Mates already ran, so only the rest remains. */
+				if (flow_cpu_ccx(victim) == my_ccx)
+					continue;
+			} else {
+				if (vl < 0 || !flow_llc_ok((u32)vl))
+					continue;
+				/* Node identity comes from the tree with no per-CPU walk here. */
+				if (!hint_node || !topo_contains(hint_node, victim))
+					continue;
+			}
+			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+				return;
+		}
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
@@ -589,8 +639,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (!flow_cpu_live((u32)cpu))
 			continue;
 		/* One upstream queue per CPU in virtual time mode with
-		 * at most one extra task on one side. */
-		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, 256ULL,
+		 * at most ten tasks and at most one extra task on one side. */
+		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, 10ULL,
 							   (u64)SCX_DHQ_MODE_BALANCED, 1ULL);
 		if (!dhq) {
 			scx_bpf_error("queue create failed");

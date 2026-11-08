@@ -2,10 +2,15 @@
 /*
  * Queueing for the flow scheduler.
  *
- * Shared tasks join the per CPU queue of the constrained target
- * in vd order. The upstream queue keeps insertion order for equal
- * vd, so the code adds no extra tie handling. All shared tasks take
- * the first strand. Pinned tasks join the local queue in order with
+ * Shared tasks join the per CPU queue picked by warm retarget
+ * in vd order. The retarget keeps the last CPU when it is allowed
+ * and live in the same LLC, else it keeps the constrained target
+ * from the current CPU. Warm tasks take the first strand and cold
+ * tasks take the second, with unclear tasks treated as cold. The
+ * upstream queue keeps insertion order for equal vd, so the code
+ * adds no extra tie handling. A strand that refuses an insert tries
+ * the other strand once before the fallback queue. Pinned tasks join
+ * the local queue in order with
  * a single slice. Exiting tasks use the local queue when allowed and
  * the owner queue otherwise with a short slice. Tasks that have no
  * usable CPU join the fallback queue in FIFO order. The queue key is
@@ -60,6 +65,41 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
 		return -1;
 	*out = (u32)v;
 	return 0;
+}
+/* Keep the last CPU when it is allowed and live in the same LLC.
+ * Else keep the constrained target from the current CPU. */
+static __always_inline s32 flow_warm_target(s32 last, s32 cur, struct task_struct *p)
+{
+	int cllc;
+	int lllc;
+	if (last < 0 || cur < 0)
+		return cur;
+	if (!flow_cpu_ok((u32)last) || !flow_cpu_ok((u32)cur))
+		return cur;
+	if (!flow_cpu_allowed(last, p) || !flow_cpu_live((u32)last))
+		return cur;
+	cllc = topo_cpu_to_llc_id((u32)cur);
+	lllc = topo_cpu_to_llc_id((u32)last);
+	if (cllc < 0 || lllc < 0 || cllc != lllc)
+		return cur;
+	return last;
+}
+/* Try the picked strand once, then the other strand once. A reject
+ * from both means the queue is full. */
+static __always_inline int flow_try_insert_dhq(scx_dhq_t *dhq, u64 pid, u64 key, u64 first)
+{
+	u64 second;
+	int ret;
+	if (!dhq)
+		return -1;
+	if (first == (u64)SCX_DHQ_STRAND_A)
+		second = (u64)SCX_DHQ_STRAND_B;
+	else
+		second = (u64)SCX_DHQ_STRAND_A;
+	ret = scx_dhq_insert_vtime(dhq, pid, key, first);
+	if (!ret)
+		return 0;
+	return scx_dhq_insert_vtime(dhq, pid, key, second);
 }
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
@@ -125,27 +165,36 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 task_cpu;
+	s32 last_cpu;
+	s32 cur_tgt;
 	s32 tgt;
 	u32 llc = 0;
 	u32 cpu_ok = 0;
 	s64 raw_v;
 	bool pinned = false;
+	bool warm = false;
+	u64 strand = (u64)SCX_DHQ_STRAND_B;
 	struct flow_task_ctx *t;
 	u32 old_flags;
 	if (!p)
 		return;
 	scx_arena_subprog_init();
-	task_cpu = scx_bpf_task_cpu(p);
-	if (task_cpu < 0)
-		task_cpu = bpf_get_smp_processor_id();
-	tgt = flow_constrained_target(task_cpu, p);
+	last_cpu = scx_bpf_task_cpu(p);
+	cur_tgt = flow_constrained_target((s32)bpf_get_smp_processor_id(), p);
+	tgt = flow_warm_target(last_cpu, cur_tgt, p);
+	if (last_cpu >= 0 && tgt >= 0 && tgt == last_cpu)
+		warm = true;
+	if (warm)
+		strand = (u64)SCX_DHQ_STRAND_A;
 	if (tgt >= 0 && flow_cpu_live((u32)tgt)) {
 		u32 tmp = 0;
 		if (!flow_llc_for_cpu(tgt, &tmp))
 			llc = tmp;
 		cpu_ok = 1;
 	}
+	/* The bound is a power of two, so a mask keeps the index in
+	 * range with no division. */
+	llc &= ((u32)FLOW_MAX_LLCS - 1U);
 	bool no_cpu = !cpu_ok || tgt < 0;
 	raw_v = (s64)p->scx.dsq_vtime;
 	pinned = flow_is_pinned(p);
@@ -162,9 +211,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				scx_dhq_t *dhq = no_cpu ? 0 : flow_queue_for_cpu(tgt);
 				bool fell = true;
 				if (dhq) {
-					int ret = scx_dhq_insert_vtime(dhq, (u64)p->pid,
-								       (u64)raw_v,
-								       (u64)SCX_DHQ_STRAND_A);
+					int ret = flow_try_insert_dhq(dhq, (u64)p->pid,
+								      (u64)raw_v, strand);
 					if (!ret)
 						fell = false;
 				}
@@ -219,8 +267,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		bool fell = true;
 		t->llc_id = llc;
 		if (dhq) {
-			int ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)raw_v,
-						       (u64)SCX_DHQ_STRAND_A);
+			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)raw_v, strand);
 			if (!ret)
 				fell = false;
 		}
@@ -246,7 +293,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Each owner queue holds at most two hundred fifty six tasks. */
+		 * Each owner queue holds at most ten tasks. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_cgroup_lookup(READ_ONCE(t->cgrp_id));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
@@ -262,8 +309,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		/* Overfull inserts fall back to FIFO with no extra probe. */
 		if (dhq) {
-			int ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)vd,
-						       (u64)SCX_DHQ_STRAND_A);
+			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)vd, strand);
 			if (!ret)
 				fell = false;
 		}
@@ -288,8 +334,7 @@ insert_only:
 		scx_dhq_t *dhq = no_cpu ? 0 : flow_queue_for_cpu(tgt);
 		bool fell = true;
 		if (dhq) {
-			int ret = scx_dhq_insert_vtime(dhq, (u64)p->pid, (u64)k,
-						       (u64)SCX_DHQ_STRAND_A);
+			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)k, strand);
 			if (!ret)
 				fell = false;
 		}

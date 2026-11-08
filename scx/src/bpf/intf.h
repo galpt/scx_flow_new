@@ -2,9 +2,20 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU owns one queue ordered by vd. Ties leave in
- * insertion order. One fallback queue holds tasks that have no
- * usable CPU in FIFO order. Pinned tasks run on their local queue.
+ * Each CPU owns one queue with two strands ordered by vd. Warm tasks
+ * join the first strand and cold tasks join the second. Ties leave in
+ * insertion order. Warm keeps the last CPU when it is allowed and live
+ * in the same LLC, else the task stays cold. A strand that refuses an
+ * insert tries the other strand once before the fallback queue.
+ * Draining peeks both heads and pops the earlier vd with ties to the
+ * first strand. Each per CPU queue holds at most ten tasks, so a full
+ * queue drains in at most ten millis with one millis slices minus steal
+ * parallelism. One millis alone stays aspirational since a cap of one
+ * throttles throughput. Depth signal reuses the guard and the queued
+ * plus fallback plus steal counts with no extra probe. One fallback
+ * queue holds tasks that have no usable CPU in FIFO order as a best
+ * effort overflow without a bound promise. Pinned tasks run on their
+ * local queue.
  * Shares are read from the cgroup map on each enqueue. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
  * a per LLC floor so two tasks never share the same value. Vd adds
@@ -12,10 +23,10 @@
  * an earlier vd. Slices hold one fixed quantum. A shared
  * enqueue with a vd ahead of the running vd kicks for preempt
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
- * stored time forward by one. Each per CPU queue holds at most two
- * hundred fifty six tasks with the fallback holding at most one
- * thousand twenty four. Steal moves in topology order with local
- * first then same node then remote. Queues come from the upstream
+ * stored time forward by one. Each per CPU queue holds at most ten
+ * tasks with the fallback holding at most one thousand twenty four.
+ * Steal moves in topology order with local first then mates then the
+ * rest of the same LLC then same node then remote. Queues come from the upstream
  * double helix library in virtual time mode, and placement follows
  * the upstream topology library with liveness from the same tree.
  *

@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.4" ] || fail "version not at 5.2.4"
+[ "${want}" = "5.2.5" ] || fail "version not at 5.2.5"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -108,12 +108,25 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "af94f1a23dde49e7ca1effd4429be4c4ef5eea0a755eb214edc16a3adb3bee52" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "cf1335f5722a759429921d826b4e14920a975289505a88f3c98bb117eb2a02db" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "10" ] || fail "scx README lines drifted"
 
-# Harness stays present with no logic change.
+# Harness stays present with report fields and no workload change.
 [ -s "${REPO_DIR}/tools/edf_harness/harness.c" ] || fail "harness scaffold missing harness.c"
 [ -s "${REPO_DIR}/tools/edf_harness/run.sh" ] || fail "harness scaffold missing run.sh"
+grep -q "probe_p99_us" "${REPO_DIR}/tools/edf_harness/harness.c" || fail "harness p99 missing"
+grep -q "spill" "${REPO_DIR}/tools/edf_harness/harness.c" || fail "harness spill missing"
+grep -q "occupancy" "${REPO_DIR}/tools/edf_harness/harness.c" || fail "harness occupancy missing"
+grep -q "probe_p99_us" "${REPO_DIR}/tools/edf_harness/run.sh" || fail "harness report missing p99"
+
+# Hint probe stays userspace only with no BPF hook and no vd write.
+[ -s "${REPO_DIR}/tools/nn_hint/nn_hint.py" ] || fail "hint scaffold missing nn_hint.py"
+[ -s "${REPO_DIR}/tools/nn_hint/README.md" ] || fail "hint scaffold missing README"
+if grep -q "scx_bpf_\|bpf_task_storage\|dsq_vtime" "${REPO_DIR}/tools/nn_hint/nn_hint.py" 2>/dev/null; then
+    fail "hint BPF hook reappeared"
+fi
+grep -q "never writes vd\|never writes" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint vd prose missing"
+grep -q "no faster claim\|no scheduler" "${REPO_DIR}/tools/nn_hint/README.md" || fail "hint claim prose missing"
 
 # Changelog history remains public in prior commits; tip carries no changelog blob.
 
@@ -236,12 +249,15 @@ grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
 grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
 
-# Topology keeps local first drain with single strand. The drain keeps
-# own CPU first then same LLC then same node then remote then fallback,
-# single strand in vd order, the pick keeps the hint when allowed else
-# the first near target, and ties keep the first CPU in fixed order.
+# Topology keeps local first drain with dual strands. The drain keeps
+# own CPU first then mates then rest of same LLC then same node then
+# remote then fallback, dual strands in vd order with earliest head
+# first, the pick keeps the hint when allowed else the first near
+# target, and ties keep the first CPU in fixed order.
 grep -q "drains its own queue" "${DISP_HDR}" || fail "cache drain prose missing"
-grep -q "first strand" "${DISP_HDR}" || fail "single strand prose missing"
+grep -q "both strands" "${DISP_HDR}" || fail "dual strand prose missing"
+grep -q "earlier vd" "${DISP_HDR}" || fail "merge order prose missing"
+grep -q "mates in the same LLC" "${DISP_HDR}" || fail "mate prose missing"
 grep -q "vd order" "${DISP_HDR}" || fail "vd order prose missing"
 grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
 grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
@@ -293,8 +309,8 @@ fi
 
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
-# Pure vd ordering with single pass and fixed integers and no knob. Vd adds
-# the share step to the floored time, queue key is vd on the first strand
+# Pure vd ordering with dual strands and fixed integers and no knob. Vd adds
+# the share step to the floored time, queue key is vd across both strands
 # with FIFO fallback, and shared enqueues kick for preempt on an earlier
 # vd else idle with a skip otherwise. Stopping plus tick charge burnt time
 # with no extra state. No float plus no new divide is kept.
@@ -311,9 +327,13 @@ grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
 grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
-if grep -q "SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${DISP_HDR}" 2>/dev/null; then
-    fail "second strand reappeared"
-fi
+grep -q "SCX_DHQ_STRAND_B" "${ENQ_HDR}" || fail "second strand missing"
+grep -q "SCX_DHQ_STRAND_B" "${DISP_HDR}" || fail "merge strand missing"
+grep -q "flow_warm_target" "${ENQ_HDR}" || fail "warm retarget missing"
+grep -q "same LLC" "${ENQ_HDR}" || fail "warm llc prose missing"
+grep -q "flow_try_insert_dhq" "${ENQ_HDR}" || fail "strand retry missing"
+grep -q "vb < va" "${DISP_HDR}" || fail "merge compare missing"
+grep -q "flow_cpu_ccx" "${DISP_HDR}" || fail "mate compare missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice missing"
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
@@ -384,7 +404,7 @@ grep -q "vd" "${SRC_DIR}/src/bpf/intf.h" || fail "vd field missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
 
-# Single strand stays with one kick per run and idle fast path.
+# Dual strands stay with one kick per run and idle fast path.
 # Each run kicks at most once, idle targets take idle wakes, each
 # vd win kicks for preempt, and a runnable yield with no burn still
 # moves time.
@@ -459,12 +479,15 @@ fi
 # Fair scales base by share with a per LLC floor. Vd sets the order with
 # a strict preempt on an earlier vd. Wakes go preempt on a vd win else
 # idle with a skip otherwise. Queues use the upstream library with per
-# CPU placement and FIFO fallback.
+# CPU placement and FIFO fallback. Depth caps at ten for ten millis max.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "SCX_DHQ_MODE_BALANCED" "${DISP_HDR}" || fail "mode use missing"
 grep -q "scx_dhq_create_balanced" "${DISP_HDR}" || fail "queue create missing"
-grep -q "256ULL" "${DISP_HDR}" || fail "percpu cap missing"
+grep -q "10ULL" "${DISP_HDR}" || fail "percpu cap missing"
+if grep -q "256ULL" "${DISP_HDR}" 2>/dev/null; then
+    fail "old percpu cap reappeared"
+fi
 grep -q "SCX_DHQ_MODE_BALANCED, 1ULL" "${DISP_HDR}" || fail "imbalance cap missing"
 grep -q "scx_dhq_insert_vtime" "${ENQ_HDR}" || fail "queue insert missing"
 grep -q "scx_dhq_pop_strand" "${DISP_HDR}" || fail "queue pop missing"
@@ -612,15 +635,16 @@ fi
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
 grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
 
-# Dispatch liveness keeps every queued task reachable. Single strand
-# drains with no count bail, slices stay at the floor with no zero
+# Dispatch liveness keeps every queued task reachable. Dual strands
+# drain with no count bail, slices stay at the floor with no zero
 # insert, kicks never take minus one without a skip, forward slots stay
 # per victim with the fallback reserved, and a tail re-kick covers heads
 # that could not run here.
 if grep -q "if (!ca && !cb)" "${DISP_HDR}" 2>/dev/null; then
     fail "nr_queued bail reappeared"
 fi
-grep -q "Single strand drain" "${DISP_HDR}" || fail "single strand prose missing"
+grep -q "Dual strand drain" "${DISP_HDR}" || fail "dual strand prose missing"
+grep -q "break fairness" "${DISP_HDR}" || fail "fairness prose missing"
 grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "enqueue slice floor missing"
 if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${ENQ_HDR}" 2>/dev/null; then
@@ -644,7 +668,8 @@ grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
 grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
-# plus fixed slice plus idle plus preempt plus restart.
+# plus fixed slice plus idle plus preempt plus restart plus dual strand
+# plus ten plus overflow plus tail target plus offline hint.
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
 grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"
@@ -653,5 +678,25 @@ grep -q "1ms" "${SRC_DIR}/README.md" || fail "readme slice missing"
 grep -q "idle" "${SRC_DIR}/README.md" || fail "readme idle missing"
 grep -q "preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
 grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
+grep -q "strand" "${SRC_DIR}/README.md" || fail "readme strand missing"
+grep -q "10 tasks" "${SRC_DIR}/README.md" || fail "readme cap missing"
+grep -q "10ms" "${SRC_DIR}/README.md" || fail "readme bound missing"
+grep -q "aspirational" "${SRC_DIR}/README.md" || fail "readme ideal missing"
+grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
+grep -q "Pointman" "${SRC_DIR}/README.md" || fail "readme tail missing"
+grep -q "offline" "${SRC_DIR}/README.md" || fail "readme hint missing"
+
+# No classifier plus no average estimator returns with no float divide.
+if grep -qi "ewma" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "average estimator reappeared"
+fi
+if grep -q "classifier" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    if ! grep -q "cluster hint" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+        fail "classifier reappeared"
+    fi
+fi
+if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "float outside fair reappeared"
+fi
 
 echo "guard tests passed"
