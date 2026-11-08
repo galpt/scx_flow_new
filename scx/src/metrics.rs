@@ -8,14 +8,11 @@
 use log::warn;
 
 use crate::BpfSkel;
-use crate::stats::LatMetrics;
 use crate::stats::Metrics;
 
 /// Fold one LLC value into the aggregate.
 /// Counters use wrapping add. Short reads keep prior state.
-/// Overrun counts full slice burns. Penalty counts the charge for
-/// those burns. Extra counts quanta beyond the first, and total
-/// counts all quanta, so total matches penalty and extra combined.
+/// Thirteen counters cover queueing plus kicks plus forward.
 pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     if val.len() < 32 {
         return;
@@ -54,47 +51,15 @@ pub fn fold_llc_val(out: &mut Metrics, val: &[u8]) {
     }
     if val.len() >= 88 {
         let v = u64::from_ne_bytes(val[80..88].try_into().unwrap_or([0u8; 8]));
-        out.domino_penalty = out.domino_penalty.wrapping_add(v);
+        out.blocked = out.blocked.wrapping_add(v);
     }
     if val.len() >= 96 {
         let v = u64::from_ne_bytes(val[88..96].try_into().unwrap_or([0u8; 8]));
-        out.blocked = out.blocked.wrapping_add(v);
+        out.orphan_kick = out.orphan_kick.wrapping_add(v);
     }
     if val.len() >= 104 {
         let v = u64::from_ne_bytes(val[96..104].try_into().unwrap_or([0u8; 8]));
-        out.edf_escape = out.edf_escape.wrapping_add(v);
-    }
-    if val.len() >= 112 {
-        let v = u64::from_ne_bytes(val[104..112].try_into().unwrap_or([0u8; 8]));
-        out.orphan_kick = out.orphan_kick.wrapping_add(v);
-    }
-    if val.len() >= 120 {
-        let v = u64::from_ne_bytes(val[112..120].try_into().unwrap_or([0u8; 8]));
         out.hol_forward = out.hol_forward.wrapping_add(v);
-    }
-    if val.len() >= 128 {
-        let v = u64::from_ne_bytes(val[120..128].try_into().unwrap_or([0u8; 8]));
-        out.edf_urgent = out.edf_urgent.wrapping_add(v);
-    }
-    if val.len() >= 136 {
-        let v = u64::from_ne_bytes(val[128..136].try_into().unwrap_or([0u8; 8]));
-        out.edf_hold = out.edf_hold.wrapping_add(v);
-    }
-    if val.len() >= 144 {
-        let v = u64::from_ne_bytes(val[136..144].try_into().unwrap_or([0u8; 8]));
-        out.edf_preempt = out.edf_preempt.wrapping_add(v);
-    }
-    if val.len() >= 152 {
-        let v = u64::from_ne_bytes(val[144..152].try_into().unwrap_or([0u8; 8]));
-        out.edf_overdue = out.edf_overdue.wrapping_add(v);
-    }
-    if val.len() >= 160 {
-        let v = u64::from_ne_bytes(val[152..160].try_into().unwrap_or([0u8; 8]));
-        out.extra_award = out.extra_award.wrapping_add(v);
-    }
-    if val.len() >= 168 {
-        let v = u64::from_ne_bytes(val[160..168].try_into().unwrap_or([0u8; 8]));
-        out.total_quanta = out.total_quanta.wrapping_add(v);
     }
 }
 
@@ -149,45 +114,6 @@ pub fn collect_per_llc(skel: &BpfSkel<'_>) -> Vec<(u32, Metrics)> {
         fold_llc_val(&mut row, &val);
         out.push((llc, row));
         if llc + 1 >= 64 {
-            break;
-        }
-    }
-    out
-}
-
-/// Fold one CPU wait hist into the aggregate.
-/// Cells use wrapping add. Short reads keep prior state.
-/// The discovered count from the map value bounds the fold
-/// with the shared hist length as the top.
-pub fn fold_lat_val(out: &mut LatMetrics, val: &[u8]) {
-    let want = crate::bpf_intf::flow_consts_FLOW_HIST_LEN as usize;
-    if out.lat_hist.len() < want {
-        out.lat_hist.resize(want, 0);
-    }
-    let (chunks, _) = val.as_chunks::<8>();
-    for (slot, chunk) in out.lat_hist.iter_mut().zip(chunks) {
-        let v = u64::from_ne_bytes(*chunk);
-        *slot = slot.wrapping_add(v);
-    }
-}
-
-/// Sum per CPU wait hists into one view.
-/// A failed map read warns and keeps zeros for that CPU.
-pub fn collect_lat(skel: &BpfSkel<'_>) -> LatMetrics {
-    use libbpf_rs::MapCore;
-    let mut out = LatMetrics::default();
-    for cpu in 0..crate::bpf_intf::flow_consts_FLOW_MAX_CPUS {
-        let key = cpu.to_ne_bytes();
-        let val = match skel.maps.lat_hist.lookup(&key, libbpf_rs::MapFlags::ANY) {
-            Ok(Some(v)) => v,
-            Ok(None) => continue,
-            Err(e) => {
-                warn!("lat read failed for cpu {cpu}: {e:#}");
-                continue;
-            }
-        };
-        fold_lat_val(&mut out, &val);
-        if cpu + 1 >= 1024 {
             break;
         }
     }

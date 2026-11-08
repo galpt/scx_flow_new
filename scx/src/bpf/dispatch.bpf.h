@@ -2,43 +2,29 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own per CPU queues first, then queues on the
- * same LLC, then the same node, then distant queues, then fallback.
- * Each queue drains in queue order and strands drain balanced with
- * the larger side first and a long head promoted on ties.
- * Long waiting batch and idle heads drain before normal.
- * Overdue tasks stay on the first strand, so the first strand still
- * drains first on ties. A head that cannot run here
+ * Each CPU drains its own queue first, then queues on the same LLC,
+ * then the same node, then distant queues, then fallback. Each queue
+ * drains in vd order on the first strand. A head that cannot run here
  * sends one wake to its owner and stays queued. Each victim keeps
- * its own forward slot with the fallback on the last slot, so one
- * victim does not hide another. A dead head is dropped with its
- * count and the next strand is tried. The fallback drops its count
- * from the task and wakes the owner when the move fails. A dispatch
- * that moved nothing but saw such a head wakes the fallback head
- * again without the dedup check. Remote moves count
- * on the thief and drop the gauge on the source. Running records
- * the task snapshot with the slack at running time and counts the
- * enqueue to run wait. Dispatch
- * counts the enqueue to dispatch wait on the moving CPU with one
- * clock read in running. Stopping
- * burns the used time from remain down to a floor
- * and charges use into the stored time with the same value
- * mirrored beside it. A runnable yield with no burnt time still
- * moves the stored time forward by one. The tick charges the
- * burnt delta and burns
- * it from remain, then moves the remaining slice forward
- * with the same value mirrored beside it, so stopping charges
- * only the tail past the last tick. Burns feed the filtered used
- * time with band state plus sustained count. A busy core runs at max and
+ * its own forward slot with the fallback on the last slot, so one victim
+ * does not hide another. A dead head is dropped with its count and
+ * the next queue is tried. The fallback drops its count from the task
+ * and wakes the owner when the move fails. A dispatch that moved
+ * nothing but saw such a head wakes the fallback head again without
+ * the dedup check. Remote moves count on the thief and drop the gauge
+ * on the source. Running records the task snapshot with the vd. Stopping
+ * charges burnt time into the stored time with the same value mirrored
+ * beside it. A runnable yield with no burnt time still moves the stored
+ * time forward by one. The tick charges the burnt delta and moves the
+ * left slice forward with the same value mirrored beside it, so stopping
+ * charges only the tail past the last tick. A busy core runs at max and
  * an idle core runs at half. The set call never sends zero and
- * never steers placement. A mask change on a queued
- * task keeps the queue and wakes the new owner, counting the wake
- * when the owner is usable. A task with no usable CPU waits in
- * the fallback queue until the mask widens. Tasks that already ran favor their
- * first CPU. Init creates one queue per CPU and the fallback
- * queue. Queues use the upstream library in virtual time mode with
- * balanced drains. Liveness comes from the upstream tree, so CPUs
- * that arrive late need a restart to be seen.
+ * never steers placement. A mask change on a queued task keeps the queue and
+ * wakes the new owner, counting the wake when the owner is usable. A
+ * task with no usable CPU waits in the fallback queue until the mask
+ * widens. Init creates one queue per CPU and the fallback queue. Queues
+ * use the upstream library in virtual time mode. Liveness comes from
+ * the upstream tree, so CPUs that arrive late need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -50,9 +36,7 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "edf.bpf.h"
 #include "cgroup.bpf.h"
-#include "lat.bpf.h"
 #include <lib/dhq.h>
 #include <lib/topology.h>
 #include <lib/sdt_alloc.h>
@@ -84,14 +68,6 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 	pid = (u64)ph->pid;
 	hv = (s64)ph->scx.dsq_vtime;
 	owner = flow_first_allowed(ph);
-	if (READ_ONCE(flow_home_stick)) {
-		struct flow_task_ctx *ft = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-		if (ft) {
-			s32 hm = READ_ONCE(ft->home_cpu);
-			if (hm >= 0 && flow_cpu_allowed(hm, ph) && flow_cpu_live((u32)hm))
-				owner = hm;
-		}
-	}
 	{
 		u64 last_p = READ_ONCE(flow_fwd_pid[slot]);
 		s64 last_v = READ_ONCE(flow_fwd_vtime[slot]);
@@ -106,27 +82,18 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 		flow_kick_idle_only(owner, ph, llc);
 		return;
 	}
-	flow_stat_inc(llc, 14);
+	flow_stat_inc(llc, 12);
 	flow_kick_idle_only(owner, ph, llc);
 }
 /* A dispatch that moved nothing but saw an unrunnable head wakes the
  * fallback head again without the dedup check, so an owner that
- * turned idle is not missed. The kick stays idle only with no hold
- * gate and no pad check. */
+ * turned idle is not missed. The kick stays idle only with no pad check. */
 static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 llc)
 {
 	s32 owner;
 	if (!ph)
 		return;
 	owner = flow_first_allowed(ph);
-	if (READ_ONCE(flow_home_stick)) {
-		struct flow_task_ctx *ft = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-		if (ft) {
-			s32 hm = READ_ONCE(ft->home_cpu);
-			if (hm >= 0 && flow_cpu_allowed(hm, ph) && flow_cpu_live((u32)hm))
-				owner = hm;
-		}
-	}
 	flow_kick_idle_only(owner, ph, llc);
 }
 static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq_t *dhq,
@@ -208,8 +175,6 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 		return 0;
 	}
 	lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (lt)
-		flow_lat_observe(cpu, lt, scx_bpf_now(), 0);
 	slice = (u64)FLOW_SLICE_MIN_NS;
 	if (lt) {
 		u64 s = READ_ONCE(lt->slice_rem);
@@ -227,53 +192,13 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 	}
 	return 1;
 }
-static __always_inline bool flow_wait_long(u64 enq, u64 now)
-{
-	if (!enq || !now)
-		return false;
-	if (now <= enq)
-		return false;
-	return now - enq > (u64)FLOW_EDF_REL_NS;
-}
-static __always_inline bool flow_head_long_dhq(scx_dhq_t *dhq, u64 strand, u64 now)
-{
-	u64 peeked;
-	struct task_struct *ph;
-	struct flow_task_ctx *lt;
-	u64 enq;
-	bool out = false;
-	if (!dhq || !now)
-		return false;
-	peeked = scx_dhq_peek_strand(dhq, strand);
-	if (!peeked)
-		return false;
-	ph = bpf_task_from_pid((s32)peeked);
-	if (!ph)
-		return false;
-	lt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-	if (!lt) {
-		bpf_task_release(ph);
-		return false;
-	}
-	enq = READ_ONCE(lt->enq_ns);
-	out = flow_wait_long(enq, now);
-	bpf_task_release(ph);
-	return out;
-}
 static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
 	scx_dhq_t *dhq;
 	u64 h;
-	int na;
-	int nb;
-	u64 ca;
-	u64 cb;
-	u64 first;
-	u64 second;
 	int vllc;
 	u32 vuse;
 	u32 slot;
-	u64 now;
 	if (!flow_cpu_ok(victim) || !flow_cpu_live(victim))
 		return 0;
 	h = READ_ONCE(flow_dhqs[victim]);
@@ -287,45 +212,8 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	na = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_A);
-	nb = scx_dhq_nr_queued_strand(dhq, (u64)SCX_DHQ_STRAND_B);
-	ca = na < 0 ? 0ULL : (u64)na;
-	cb = nb < 0 ? 0ULL : (u64)nb;
-	/* The counts only order the strands. Empty strands still peek
-	 * below, so a stale count never hides a queued task. */
-	/* Balanced drains take the larger strand first. Ties keep the
-	 * first strand unless the second head waited long, so long
-	 * batch and idle heads drain before normal on ties. */
-	if (cb > ca) {
-		first = (u64)SCX_DHQ_STRAND_B;
-		second = (u64)SCX_DHQ_STRAND_A;
-	} else if (ca > cb) {
-		if (ca == cb + 1ULL) {
-			now = scx_bpf_now();
-			if (flow_head_long_dhq(dhq, (u64)SCX_DHQ_STRAND_B, now)) {
-				first = (u64)SCX_DHQ_STRAND_B;
-				second = (u64)SCX_DHQ_STRAND_A;
-			} else {
-				first = (u64)SCX_DHQ_STRAND_A;
-				second = (u64)SCX_DHQ_STRAND_B;
-			}
-		} else {
-			first = (u64)SCX_DHQ_STRAND_A;
-			second = (u64)SCX_DHQ_STRAND_B;
-		}
-	} else {
-		now = scx_bpf_now();
-		if (flow_head_long_dhq(dhq, (u64)SCX_DHQ_STRAND_B, now)) {
-			first = (u64)SCX_DHQ_STRAND_B;
-			second = (u64)SCX_DHQ_STRAND_A;
-		} else {
-			first = (u64)SCX_DHQ_STRAND_A;
-			second = (u64)SCX_DHQ_STRAND_B;
-		}
-	}
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, first, slot, steal, saw))
-		return 1;
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, second, slot, steal, saw))
+	/* Single strand drain on the first strand in vd order. */
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, (u64)SCX_DHQ_STRAND_A, slot, steal, saw))
 		return 1;
 	return 0;
 }
@@ -417,8 +305,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 						vllc = q;
 				}
 				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
-					if (pt)
-						flow_lat_observe(c, pt, scx_bpf_now(), 0);
 					flow_stat_inc(llc, 1);
 					flow_cpuperf_mark(c, false);
 					flow_queued_dec(vllc);
@@ -448,7 +334,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_running_state *rs;
 	u64 sl;
 	u64 ng;
-	u64 now;
 	int v;
 	if (task_cpu < 0)
 		return;
@@ -467,29 +352,22 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	sl = p->scx.slice;
 	if (!sl)
 		sl = (u64)FLOW_SLICE_MIN_NS;
-	else if (sl > (u64)FLOW_SLICE_MIN_NS * 3)
-		sl = (u64)FLOW_SLICE_MIN_NS * 3;
+	else if (sl > (u64)FLOW_SLICE_MIN_NS)
+		sl = (u64)FLOW_SLICE_MIN_NS;
 	rs = &flow_running_state[cpu];
 	ng = rs->gen + 1;
 	if (ng == 0)
 		ng = 1;
-	now = scx_bpf_now();
-	rs->vtime = t->vtime;
+	rs->vtime = READ_ONCE(t->vtime);
 	rs->slice_rem = sl;
 	rs->gen = ng;
 	rs->llc_id = llc;
-	rs->prio = t->prio;
-	rs->reserved = 0;
-	rs->slack = flow_edf_slack(READ_ONCE(t->deadline_ns), now,
-				   READ_ONCE(t->remain_ns));
+	rs->vd = READ_ONCE(t->vd);
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
-	if (READ_ONCE(flow_home_stick) && READ_ONCE(t->home_cpu) < 0)
-		t->home_cpu = (s32)cpu;
 	/* The stored time did not move, refresh the mirror beside it. */
-	scx_bpf_task_set_dsq_vtime(p, t->vtime);
-	flow_lat_observe(cpu, t, now, 1);
+	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(t->vd));
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
 	 * ownership. The core is busy now, so it runs at max. */
@@ -502,10 +380,9 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u32 cpu;
 	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
-	u64 remain;
-	u64 len;
+	u64 cur;
+	u64 have;
 	u64 used;
-	u64 rem;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -516,86 +393,39 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (!t)
 		return;
 	rs = &flow_running_state[cpu];
-	remain = p->scx.slice;
-	len = t->slice_rem;
-	if (!len)
-		len = (u64)FLOW_SLICE_MIN_NS;
-	if (remain > len)
-		remain = len;
-	if (remain >= len)
+	cur = p->scx.slice;
+	have = READ_ONCE(t->slice_rem);
+	if (!have)
+		have = (u64)FLOW_SLICE_MIN_NS;
+	if (cur > have)
+		cur = have;
+	if (cur >= have)
 		used = 0;
 	else
-		used = len - remain;
-	rem = READ_ONCE(t->remain_ns);
-	if (!rem)
-		rem = (u64)FLOW_EDF_INIT_NS;
-	rem = flow_edf_clamp_rem(rem);
-	if (used) {
-		if (used >= rem)
-			rem = (u64)FLOW_EDF_FLOOR_NS;
-		else
-			rem -= used;
-		rem = flow_edf_clamp_rem(rem);
-	}
-	t->remain_ns = rem;
-	/* Tail burn feeds the burst filter with band update. Full tails
-	 * step the sustained count up while sleeps step it down by one.
-	 * A runnable yield with no burn keeps both counts. Sleep with no
-	 * burn halves the filter past a long gap and steps the count down
-	 * by one with no zero sample. */
-	if (used) {
-		u32 old_est = READ_ONCE(t->est_ns);
-		u32 sample;
-		u32 new_est;
-		u8 old_hyst = READ_ONCE(t->hyst);
-		u8 old_hog = READ_ONCE(t->hog);
-		bool is_full;
-		bool slept;
-		if (!old_est)
-			old_est = (u32)FLOW_EDF_INIT_NS;
-		if (used > (u64)FLOW_EDF_EST_CAP_NS)
-			sample = (u32)FLOW_EDF_EST_CAP_NS;
-		else
-			sample = (u32)used;
-		new_est = flow_est_update(old_est, sample);
-		t->est_ns = new_est;
-		t->hyst = flow_edf_hyst_next(old_hyst, new_est);
-		is_full = used >= (u64)FLOW_EDF_FULL_NS;
-		slept = !runnable;
-		t->hog = flow_edf_hog_next(old_hog, is_full, slept);
-	} else if (!runnable) {
-		u64 enq = READ_ONCE(t->enq_ns);
-		u64 now = scx_bpf_now();
-		u8 old_hog = READ_ONCE(t->hog);
-		if (enq && now && now > enq && now - enq > (u64)FLOW_EDF_REL_NS) {
-			u32 aged = flow_est_halve(READ_ONCE(t->est_ns));
-			t->est_ns = aged;
-			t->hyst = flow_edf_hyst_next(READ_ONCE(t->hyst), aged);
-		}
-		if (old_hog > 0)
-			t->hog = old_hog - 1;
-	}
-	/* Use pays here, scaled by the share with saturation. The tick
-	 * already moved the remaining slice forward, so this charges
-	 * only the tail past the last tick. A runnable yield with no
-	 * burnt time still moves the stored time forward by one, so
-	 * repeated yields cannot hold the queue head. */
+		used = have - cur;
+	/* Burnt time pays here, scaled by the share with saturation. The tick
+	 * already moved the left slice forward, so this charges only the tail
+	 * past the last tick. A runnable yield with no burnt time still moves
+	 * the stored time forward by one, so repeated yields cannot hold the
+	 * queue head. */
 	if (used) {
 		u64 cgid = READ_ONCE(t->cgrp_id);
-		s64 nv = flow_fair_charge(t->vtime, used, flow_cgroup_lookup(cgid));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
+		if (!cur)
+			flow_stat_inc(rs->llc_id, 9);
 	} else if (runnable) {
-		s64 nv = flow_fair_cap_add(t->vtime, 1);
+		s64 nv = flow_fair_cap_add(READ_ONCE(t->vtime), 1);
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 	}
-	rs->slice_rem = remain;
-	t->slice_rem = remain;
+	rs->slice_rem = cur;
+	t->slice_rem = cur;
 	/* A sleeping task leaves the core idle at half. A runnable task
 	 * keeps its count with no frequency change. */
 	if (runnable)
-		flow_stat_inc(rs->llc_id, 11);
+		flow_stat_inc(rs->llc_id, 10);
 	else
 		flow_cpuperf_mark(cpu, true);
 }
@@ -606,7 +436,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
 	u64 cur;
-	u64 last;
+	u64 have;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -619,40 +449,16 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->slice_rem = cur;
 		return;
 	}
-	/* Charge the burnt delta and burn it from remain, then move
-	 * the remaining slice forward, so stopping later charges only
-	 * the tail past this tick. */
-	last = READ_ONCE(t->slice_rem);
-	if (cur && cur < last) {
-		u64 delta = last - cur;
+	/* Charge the burnt delta, then move the left slice forward, so
+	 * stopping later charges only the tail past this tick. */
+	have = READ_ONCE(t->slice_rem);
+	if (cur && cur < have) {
+		u64 delta = have - cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
-		u64 rem = READ_ONCE(t->remain_ns);
-		s64 nv = flow_fair_charge(t->vtime, delta, flow_cgroup_lookup(cgid));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, flow_cgroup_lookup(cgid));
 		t->vtime = nv;
-		if (!rem)
-			rem = (u64)FLOW_EDF_INIT_NS;
-		rem = flow_edf_clamp_rem(rem);
-		if (delta >= rem)
-			rem = (u64)FLOW_EDF_FLOOR_NS;
-		else
-			rem -= delta;
-		t->remain_ns = flow_edf_clamp_rem(rem);
 		t->slice_rem = cur;
 		scx_bpf_task_set_dsq_vtime(p, nv);
-		{
-			u32 old_est = READ_ONCE(t->est_ns);
-			u32 sample;
-			u32 new_est;
-			if (!old_est)
-				old_est = (u32)FLOW_EDF_INIT_NS;
-			if (delta > (u64)FLOW_EDF_EST_CAP_NS)
-				sample = (u32)FLOW_EDF_EST_CAP_NS;
-			else
-				sample = (u32)delta;
-			new_est = flow_est_update(old_est, sample);
-			t->est_ns = new_est;
-			t->hyst = flow_edf_hyst_next(READ_ONCE(t->hyst), new_est);
-		}
 	}
 	rs->slice_rem = cur;
 }
@@ -666,7 +472,6 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	t->home_cpu = -1;
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
@@ -683,7 +488,7 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 			return;
 		}
 		flow_kick_idle_only(owner, p, qllc);
-		flow_stat_inc(qllc, 13);
+		flow_stat_inc(qllc, 11);
 		return;
 	}
 	if (p->flags & PF_EXITING)
@@ -712,6 +517,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 		return;
 	v = (s64)p->scx.dsq_vtime;
 	t->vtime = v;
+	t->vd = v;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
 	if (!t->cgrp_id) {
 		struct cgroup *cg = scx_bpf_task_cgroup(p);
@@ -719,23 +525,12 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 		/* The kfunc hands back a reference, drop it after the read. */
 		if (cg) {
 			t->cgrp_id = flow_cgroup_cgid(cg);
-			t->cg_weight = flow_cgroup_lookup(t->cgrp_id);
 			bpf_cgroup_release(cg);
 		}
 	}
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
-	t->prio = (u32)FLOW_PRIO_NORM;
-	t->remain_ns = (u64)FLOW_EDF_INIT_NS;
-	t->enq_ns = 0;
-	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
-	t->home_cpu = -1;
-	t->deadline_ns = 0;
-	t->est_ns = (u32)FLOW_EDF_INIT_NS;
-	t->hyst = 0;
-	t->hog = 0;
-	t->pad2 = 0;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -749,22 +544,12 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	if (args && args->cgroup)
 		cgid = flow_cgroup_cgid(args->cgroup);
 	t->vtime = 0;
-	t->slice_rem = 0;
+	t->vd = 0;
+	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
-	t->prio = (u32)FLOW_PRIO_NORM;
 	t->cgrp_id = cgid;
-	t->cg_weight = flow_cgroup_lookup(cgid);
-	t->remain_ns = (u64)FLOW_EDF_INIT_NS;
-	t->enq_ns = 0;
-	t->lat_kind = (u32)FLOW_LAT_UNKNOWN;
-	t->home_cpu = -1;
-	t->deadline_ns = 0;
-	t->est_ns = (u32)FLOW_EDF_INIT_NS;
-	t->hyst = 0;
-	t->hog = 0;
-	t->pad2 = 0;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }
@@ -791,8 +576,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	/* Thread shape keeps the userspace seed with the source default on miss. */
 	flow_ccx_prefer = 1;
-	flow_wait_allow = 1;
-	flow_home_stick = 1;
 	if (n > 512ULL) {
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
@@ -806,7 +589,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		if (!flow_cpu_live((u32)cpu))
 			continue;
 		/* One upstream queue per CPU in virtual time mode with
-		 * balanced drains and at most one extra task on one side. */
+		 * at most one extra task on one side. */
 		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, 256ULL,
 							   (u64)SCX_DHQ_MODE_BALANCED, 1ULL);
 		if (!dhq) {

@@ -6,17 +6,15 @@
  * view written at startup with the cluster index only; cache and node
  * placement come from the upstream topology tree. LLC storage holds
  * per LLC counters. Weight storage holds shares by group id. A missing
- * entry reads as the default share. Wait history holds per CPU queue
- * waits by kind and bucket for run plus dispatch halves. Globals hold
- * the running view, the per LLC floor, the per CPU queue handles as
- * upstream queue pointers in arena memory, the forward coalescing
- * state, and four switches for cluster choice plus distant wake hold
- * plus thread shape plus home stick. A zero handle means the CPU is
- * offline or its queue was never built. Thread shape defaults on so
- * a missed seed stays conservative. The CPU plus LLC plus wait
- * tables are written once, so a CPU that arrives late needs
- * a restart to be seen. Liveness comes from the topology tree, so no
- * separate live table is kept.
+ * entry reads as the default share. Globals hold the running view,
+ * the per LLC floor, the per CPU queue handles as upstream queue
+ * pointers in arena memory, the forward coalescing state, and two
+ * switches for cluster choice plus thread shape. A zero handle means
+ * the CPU is offline or its queue was never built. Thread shape
+ * defaults on so a missed seed stays conservative. The CPU plus LLC
+ * tables are written once, so a CPU that arrives late needs a restart
+ * to be seen. Liveness comes from the topology tree, so no separate
+ * live table is kept.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -47,16 +45,8 @@ struct {
 	__type(key, u64);
 	__type(value, u64);
 } cgrp_weight_stor SEC(".maps");
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, FLOW_MAX_CPUS);
-	__type(key, u32);
-	__type(value, struct flow_lat_hist);
-} lat_hist SEC(".maps");
 volatile u64 flow_ccx_prefer;
-volatile u64 flow_wait_allow;
 volatile u64 flow_smt_enabled = 1;
-volatile u64 flow_home_stick;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];
 u64 flow_dhqs[FLOW_MAX_CPUS];

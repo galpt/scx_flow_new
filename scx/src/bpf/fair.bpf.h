@@ -2,12 +2,13 @@
 /*
  * Fair charging for the flow scheduler.
  *
- * The base charge scales with the cgroup share and the extra charge
- * is the same for every task. Values saturate at the top. Fresh
- * times move past the per LLC floor through a short compare and
- * swap loop, so each stored time is unique. If the loop does not
- * win, the last observed value is written back directly. The floor
- * rises over time and never moves backward for a given LLC.
+ * The base charge scales with the cgroup share. Values saturate at
+ * the top. Fresh times move past the per LLC floor through a short
+ * compare and swap loop, so each stored time is unique. If the loop
+ * does not win, the last observed value is written back directly.
+ * The floor rises over time and never moves backward for a given
+ * LLC. Vd adds the share step to the floored time, so a larger
+ * share gives an earlier vd with no extra divide.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -56,16 +57,9 @@ static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 		return vmax;
 	return flow_fair_cap_add(base, scaled);
 }
-static __always_inline s64 flow_fair_extra(s64 v, u64 n_extra)
+static __always_inline s64 flow_vd_for(s64 floored, u32 w)
 {
-	u64 i;
-	s64 cur = v;
-	for (i = 0; i < 2; i++) {
-		if (i >= n_extra)
-			break;
-		cur = flow_fair_cap_add(cur, (u64)FLOW_FAIR_EXTRA_NS);
-	}
-	return cur;
+	return flow_fair_cap_add(floored, flow_fair_step(w));
 }
 static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 {

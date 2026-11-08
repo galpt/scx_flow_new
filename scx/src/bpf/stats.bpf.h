@@ -6,8 +6,7 @@
  * never drops below zero. It uses a short compare and swap loop.
  * If the loop does not win, the last observed value is written
  * back directly so a decrement is not lost under contention.
- * Award counters use plain adds. Extra and total move together
- * so the sums stay consistent. An unknown offset does nothing.
+ * An unknown offset does nothing.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -46,40 +45,14 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 	else if (off == 9)
 		cell = &st->overrun;
 	else if (off == 10)
-		cell = &st->domino_penalty;
-	else if (off == 11)
 		cell = &st->blocked;
-	else if (off == 12)
-		cell = &st->edf_escape;
-	else if (off == 13)
+	else if (off == 11)
 		cell = &st->orphan_kick;
-	else if (off == 14)
+	else if (off == 12)
 		cell = &st->hol_forward;
-	else if (off == 15)
-		cell = &st->edf_urgent;
-	else if (off == 16)
-		cell = &st->edf_hold;
-	else if (off == 17)
-		cell = &st->edf_preempt;
-	else if (off == 18)
-		cell = &st->edf_overdue;
 	else
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
-}
-static __always_inline void flow_stat_add(u32 llc, u64 off, u64 val)
-{
-	struct flow_llc_stats *st = flow_stats_for(llc);
-	u64 *cell;
-	if (!st || !val)
-		return;
-	if (off == 19)
-		cell = &st->extra_award;
-	else if (off == 20)
-		cell = &st->total_quanta;
-	else
-		return;
-	__sync_fetch_and_add(cell, val);
 }
 static __always_inline void flow_fb_inc(u32 llc, u64 tail_off)
 {

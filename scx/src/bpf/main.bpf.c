@@ -2,14 +2,15 @@
 /*
  * Flow scheduler entry.
  *
- * Thin glue that pulls in nine area headers in order and declares
- * the ops table. Each CPU owns one upstream queue in balanced mode
- * with two strands and there is one fallback queue. Ties leave in
- * insertion order. Deadline sets the strand with gap preempts for
- * shared tasks. Queues come from the upstream double helix library
- * and placement follows the upstream topology library. Tables are
- * written once, so a CPU that arrives late needs a restart to be
- * seen. Settings live in the shared header.
+ * Thin glue that pulls in area headers in order and declares
+ * the ops table. Each CPU owns one upstream queue in vd order
+ * with one strand and there is one fallback queue in FIFO order.
+ * Ties leave in insertion order. Vd order sets the queue with
+ * preempts for shared tasks with an earlier vd. Queues come from
+ * the upstream double helix library and placement follows the
+ * upstream topology library. Tables are written once, so a CPU that
+ * arrives late needs a restart to be seen. Settings live in the
+ * shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,9 +26,7 @@ UEI_DEFINE(uei);
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "edf.bpf.h"
 #include "cgroup.bpf.h"
-#include "lat.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"

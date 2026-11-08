@@ -32,7 +32,6 @@ use crate::BpfSkel;
 use crate::BpfSkelBuilder;
 use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
-use crate::stats::LatMetrics;
 use crate::stats::Metrics;
 
 /*
@@ -44,7 +43,7 @@ use crate::stats::Metrics;
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    stats_server: StatsServer<(), (Metrics, LatMetrics)>,
+    stats_server: StatsServer<(), Metrics>,
     _arenalib: ArenaLib,
 }
 
@@ -99,13 +98,10 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    /// Sum per LLC counters plus per CPU wait hists into one view.
+    /// Sum per LLC counters into one view.
     /// A failed map read warns and keeps zeros for that entry.
-    fn get_metrics(&self) -> (Metrics, LatMetrics) {
-        (
-            crate::metrics::collect(&self.skel),
-            crate::metrics::collect_lat(&self.skel),
-        )
+    fn get_metrics(&self) -> Metrics {
+        crate::metrics::collect(&self.skel)
     }
 
     /// One row per LLC for debug logs. Reuses the same fold guards.

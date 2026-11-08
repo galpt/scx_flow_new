@@ -31,8 +31,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if opts.help_stats {
-        stats::server_data()
-            .describe_meta(&mut std::io::stdout(), Some(&["Metrics", "LatMetrics"]))?;
+        stats::server_data().describe_meta(&mut std::io::stdout(), Some(&["Metrics"]))?;
         return Ok(());
     }
     cli::init_logging(opts.verbose)?;

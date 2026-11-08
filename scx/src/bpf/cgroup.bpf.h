@@ -6,7 +6,7 @@
  * default. The group id comes from the cgroup node. Enqueue reads
  * the map on every insert, so a share change applies to the next
  * enqueue. A missing entry reads as the default. Move and init
- * record the id and a hint for later reads.
+ * record the id for later reads.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -89,7 +89,6 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p, struct cgroup *from
 {
 	struct flow_task_ctx *t;
 	u64 cgid;
-	u32 w;
 	(void)from;
 	if (!p || !to)
 		return;
@@ -100,7 +99,5 @@ void BPF_STRUCT_OPS(flow_cgroup_move, struct task_struct *p, struct cgroup *from
 	if (!cgid)
 		return;
 	t->cgrp_id = cgid;
-	w = flow_cgroup_lookup(cgid);
-	t->cg_weight = w;
 }
 #endif

@@ -9,15 +9,11 @@
  * view. Ties keep the first CPU in fixed order. Within the same LLC
  * the scan favors the same cluster, with the tie favor kept even
  * when threads share cores and only the fast pick gated on single
- * threads. A task that already ran favors its first CPU
- * on ties. When no hint is usable, CPUs on the primary node are
- * preferred and a miss falls back to the scan. No sibling probe
- * runs and each CPU stands single with fail closed choice. Every
- * check returns minus one on failure. Masks are tested again before
- * each wake, so a task is never kicked toward a CPU outside its
- * current mask. Frequency follows core busyness and never steers
- * placement. The pick stores a provisional wait kind from the
- * last queue choice with pinned tasks keeping the pinned kind.
+ * threads. No sibling probe runs and each CPU stands single with
+ * fail closed choice. Every check returns minus one on failure.
+ * Masks are tested again before each wake, so a task is never kicked
+ * toward a CPU outside its current mask. Frequency follows core
+ * busyness and never steers placement.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,7 +22,6 @@
 #include "intf.h"
 #include "maps.bpf.h"
 #include "stats.bpf.h"
-#include "lat.bpf.h"
 #include <lib/sdt_alloc.h>
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
@@ -113,33 +108,16 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	s32 best = -1;
 	int best_score = 99;
 	bool best_same = false;
-	bool best_home = false;
-	s32 home = -1;
-	bool use_home = false;
 	bool use_ccx;
 	bool smt_on;
 	u32 c;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
-	struct flow_task_ctx *t;
 	(void)wake_flags;
 	if (!p)
 		return hint;
 	scx_arena_subprog_init();
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (t) {
-		int pinned = flow_is_pinned(p) ? 1 : 0;
-		u32 pk = READ_ONCE(t->prio);
-		flow_lat_store(t, pk, pinned);
-		if (READ_ONCE(flow_home_stick)) {
-			s32 h = READ_ONCE(t->home_cpu);
-			if (h >= 0 && flow_cpu_allowed(h, p) && flow_cpu_live((u32)h))
-				home = h;
-			if (home >= 0)
-				use_home = true;
-		}
-	}
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
 	tgt = flow_constrained_target(hint, p);
@@ -193,7 +171,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			best_score = score;
 			best = (s32)c;
 			best_same = have_hint_topo && use_ccx && cx == hint_ccx;
-			best_home = use_home && (s32)c == home;
 			if (score == -1)
 				break;
 			if (score == 0 && (!use_ccx || best_same))
@@ -201,20 +178,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		} else if (score == best_score) {
 			/* Tie favor stays even with threads on; only the fast pick is gated. */
 			bool cur_same = have_hint_topo && use_ccx && cx == hint_ccx;
-			bool cur_home = use_home && (s32)c == home;
 			if (cur_same && !best_same) {
 				best = (s32)c;
 				best_same = true;
-				best_home = cur_home;
 				if (score == 0)
 					break;
-			} else if (cur_home && !best_home && cur_same == best_same) {
-				best = (s32)c;
-				best_home = true;
 			}
 		}
 	}
-	/* The mask can change while scanning, test the pick again. */
+	/* The mask can change while scanning, check the pick again. */
 	if (best >= 0 && flow_cpu_allowed(best, p))
 		return best;
 	return flow_first_allowed(p);
