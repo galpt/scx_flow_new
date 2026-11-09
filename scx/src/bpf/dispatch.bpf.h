@@ -24,13 +24,18 @@
  * the task and wakes the owner when the move fails. A dispatch that
  * moved nothing but saw such a head wakes the fallback head again
  * without the dedup check. Remote moves count on the thief and drop
- * the gauge on the source. Running records the task snapshot with
- * the vd. Stopping charges burnt time into the stored time with the
- * same value mirrored beside it. A runnable yield with no burnt time
- * still moves the stored time forward by one. The tick charges the
- * burnt delta and moves the left slice forward with the same value
- * mirrored beside it, so stopping charges only the tail past the last
- * tick. A busy core runs at max and an idle core runs at half. The
+ * the gauge on the source. Running records the task snapshot and
+ * mirrors the Virtual deadline beside it for gap checks with no
+ * move of the stored time. Stopping charges burnt time into the
+ * stored time and mirrors the stored time beside it. A runnable
+ * yield with no burnt time still moves the stored time forward by
+ * one. The tick charges the burnt delta and moves the due time
+ * with the left slice and mirrors the due time beside it, so
+ * stopping charges only the tail past the last tick. When the
+ * slice is exhausted at the tick, the stored slice stays while
+ * the running horizon moves out, so the two views diverge until
+ * stopping charges the tail. A busy core runs at max and an idle
+ * core runs at half. The
  * set call never sends zero and never steers placement. A mask change
  * on a queued task keeps the queue and wakes the new owner, counting
  * the wake when the owner is usable. A task with no usable CPU waits
@@ -511,7 +516,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;
-	/* The stored time did not move, refresh the mirror beside it. */
+	/* Running keeps the stored time and mirrors the due time beside it for gap checks. */
 	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(t->vd));
 	/* The gauge was already dropped when the task moved to the local
 	 * queue. Local inserts were never counted. Running only clears
@@ -556,11 +561,12 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	else
 		total_used = 0;
 	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
-	/* Burnt time pays here, scaled by the share with saturation. The tick
-	 * already moved the left slice forward, so this charges only the tail
-	 * past the last tick. A runnable yield with no burnt time still moves
-	 * the stored time forward by one, so repeated yields cannot hold the
-	 * queue head. */
+	/* Burnt time pays here into the stored time, scaled by the share
+	 * with saturation and mirrored as the stored time beside it. The
+	 * tick already moved the left slice forward, so this charges only
+	 * the tail past the last tick. A runnable yield with no burnt time
+	 * still moves the stored time forward by one, so repeated yields
+	 * cannot hold the queue head. */
 	if (used) {
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
@@ -605,8 +611,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		return;
 	}
 	/* Charge the burnt delta, then move the due time with the left
-	 * slice, so the running horizon prices what is left. Stopping
-	 * later charges only the tail past this tick. */
+	 * slice in both the stored and running views, so the running
+	 * horizon prices what is left. Stopping later charges only the
+	 * tail past this tick. */
 	have = READ_ONCE(t->slice_rem);
 	if (cur && cur < have) {
 		u64 delta = have - cur;
@@ -623,8 +630,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		scx_bpf_task_set_dsq_vtime(p, nvd);
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
-		 * stopping still charges the tail, but move the running
-		 * horizon out so a wake can preempt at once. */
+		 * stopping still charges the tail, but move the running horizon
+		 * out so a wake can preempt at once with the two views diverged
+		 * until stopping. Seed the burst to one slice for the next run. */
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		u32 w = flow_combine(flow_cgroup_lookup(cgid),
 				     flow_nice_weight(p));

@@ -18,8 +18,10 @@
  * a single slice. Exiting tasks use the local queue when allowed and
  * the owner queue otherwise with a short slice. Tasks that have no
  * usable CPU join the fallback queue in FIFO order. The queue key is
- * the vd. Shared inserts move past the per LLC floor. Vd adds the
- * share step to the floored time. The charge scales with the share.
+ * the Virtual deadline. Shared inserts move past the per LLC floor
+ * and add the burst scaled share step to the floored time through
+ * the shared charge path. Tasks with no usable CPU skip the floor
+ * and stay FIFO. The charge scales with the share.
  * Each shared enqueue checks the idle flag first, then the running
  * vd on the target for an earlier vd win. Idle targets take an idle
  * wake and never preempt. Each running instance kicks at most once.
@@ -337,7 +339,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->vd = vd;
 		t->slice_rem = slice_len;
 		t->llc_id = llc;
-		/* Mirror the due time so later reads see the same value. */
+		/* Mirror the due time beside the stored time so later reads see the same due time for order checks. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		/* Balance rejects fall back to FIFO with no extra probe. */
 		if (dhq) {

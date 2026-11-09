@@ -23,11 +23,14 @@
  * Shares are read from the cgroup map on each enqueue and folded
  * with the task nice weight. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
- * a per LLC floor so two tasks never share the same value. Vd adds
- * a share based step scaled by the burst to the floored time, so a
- * larger share gives an earlier vd. Slices hold one fixed quantum
- * with a small floor. Burst holds the last run length. A shared
- * enqueue with a vd ahead of the running vd kicks for preempt
+ * a per LLC floor so two tasks never share the same value, with a
+ * direct store of the last observed value plus one when the loop
+ * loses too often. Virtual deadline adds a share based step scaled
+ * by the burst to the floored time through the shared charge path,
+ * so a larger share or a shorter run gives an earlier due time.
+ * Slices hold one fixed quantum with a small floor. Burst holds the
+ * last run length. A shared enqueue with a due time ahead of the
+ * running due time kicks for preempt
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
  * stored time forward by one. Each per CPU queue holds without a bound
  * with the fallback holding at most one thousand twenty four.
