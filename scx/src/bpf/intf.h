@@ -9,14 +9,13 @@
  * constrained target with no load scan. Draining walks local first
  * then same LLC then same node then distant remote last in vd order
  * with idle starts at once. Each per CPU queue holds bounded at 64
- * total with one millis slices. Shares are read from the cgroup map
- * on each enqueue and folded with the task nice weight. A task pays
- * for the time it burns, scaled by its share. Fresh times move past
+ * total with one millis slices. Each enqueue prices the task by its
+ * nice weight. A task pays for the time it burns, scaled by that weight. Fresh times move past
  * a per LLC floor so two tasks never share the same value, with a
  * direct store of the last observed value plus one when the loop
- * loses too often. Virtual deadline adds a share based step scaled
+ * loses too often. Virtual deadline adds a nice based step scaled
  * by the burst to the floored time through the shared charge path,
- * so a larger share or a shorter run gives an earlier due time.
+ * so a larger weight or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
  * last run length. A shared enqueue with a due time ahead of the
  * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
@@ -70,7 +69,6 @@ enum flow_consts {
 /* Per task state. Vtime is charged service. Slice holds the time
  * left in the current quantum. Gen identifies the running instance.
  * Llc records the last enqueue target. Flags holds the queued bit.
- * Cgrp holds the group id. A zero id means no group was recorded.
  * Vd holds the due time for queue order. Burst holds the run length
  * used for the due time. */
 struct flow_task_ctx {
@@ -79,7 +77,6 @@ struct flow_task_ctx {
 	u64 gen;
 	u32 llc_id;
 	u32 flags;
-	u64 cgrp_id;
 	s64 vd;
 	u64 burst_ns;
 };

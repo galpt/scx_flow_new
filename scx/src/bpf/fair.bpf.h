@@ -2,13 +2,11 @@
 /*
  * Fair charging for the flow scheduler.
  *
- * The base charge scales with the cgroup share. Values saturate at
+ * The base charge scales with the nice weight. Values saturate at
  * the top. The task nice weight comes from a small table over minus
  * twenty to nineteen with zero as one hundred, read from the task
  * static priority minus one hundred twenty. Out of range tasks keep
- * the default. The combined share multiplies the cgroup share by the
- * nice weight over one hundred and clamps to the share range, so a
- * zero nice keeps the cgroup share unchanged.
+ * the default.
  * Fresh times move past the per LLC floor through a short
  * compare and swap loop, so each stored time stays unique with
  * the winner publishing its value at once. When the loop loses
@@ -17,9 +15,9 @@
  * the input time directly. The floor rises over time and never
  * moves backward for a given LLC. When the time runs ahead of the
  * floor, the floor moves up by at most one base step per enqueue,
- * so one far time cannot pull the floor with it. Virtual deadline adds the burst scaled share step
+ * so one far time cannot pull the floor with it. Virtual deadline adds the burst scaled nice step
  * to the floored time through the shared charge path, so a larger
- * share or a shorter run gives an earlier due time with no extra
+ * weight or a shorter run gives an earlier due time with no extra
  * divide. Burst holds the last run length between the floor and
  * one slice with shift only moves.
  *
@@ -29,7 +27,7 @@
 #define __FLOW_FAIR_BPF_H
 #include "intf.h"
 #include "maps.bpf.h"
-/* Nice weight on the cgroup scale from minus twenty to nineteen.
+/* Nice weight on the weight scale from minus twenty to nineteen.
  * Strictly falls from ten thousand to one with one hundred at zero.
  * Fits in read only data with direct indexing and no loop. */
 static const u32 flow_nice_table[40] = {
@@ -52,16 +50,6 @@ static __always_inline u32 flow_nice_weight(const struct task_struct *p)
 	if (idx >= 40U)
 		return (u32)FLOW_CGROUP_WEIGHT_DFLT;
 	return flow_nice_table[idx];
-}
-static __always_inline u32 flow_combine(u32 cw, u32 nw)
-{
-	u64 prod = (u64)cw * (u64)nw;
-	u64 q = prod / (u64)100;
-	if (!q || q < (u64)FLOW_CGROUP_WEIGHT_MIN)
-		return (u32)FLOW_CGROUP_WEIGHT_MIN;
-	if (q > (u64)FLOW_CGROUP_WEIGHT_MAX)
-		return (u32)FLOW_CGROUP_WEIGHT_MAX;
-	return (u32)q;
 }
 static __always_inline u64 flow_fair_step(u32 w)
 {

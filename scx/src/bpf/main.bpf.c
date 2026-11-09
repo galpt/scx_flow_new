@@ -27,7 +27,6 @@ UEI_DEFINE(uei);
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"
@@ -42,10 +41,6 @@ SCX_OPS_DEFINE(flow_ops,
 	       .set_cpumask		= (void *)flow_set_cpumask,
 	       .enable			= (void *)flow_enable,
 	       .init_task		= (void *)flow_init_task,
-	       .cgroup_init		= (void *)flow_cgroup_init,
-	       .cgroup_exit		= (void *)flow_cgroup_exit,
-	       .cgroup_move		= (void *)flow_cgroup_move,
-	       .cgroup_set_weight	= (void *)flow_cgroup_set_weight,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |

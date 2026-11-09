@@ -42,7 +42,6 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include "cgroup.bpf.h"
 #include <lib/dhq.h>
 #include <lib/topology.h>
 #include <lib/sdt_alloc.h>
@@ -417,17 +416,15 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	else
 		total_used = 0;
 	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
-	/* Burnt time pays here into the stored time, scaled by the share
-	 * with saturation and mirrored as the stored time beside it. The
+	/* Burnt time pays here into the stored time, scaled by the nice
+	 * weight with saturation and mirrored as the stored time beside it. The
 	 * tick already moved the left slice forward, so this charges only
 	 * the tail past the last tick. A runnable yield with no burnt time
 	 * still moves the stored time forward by one, so repeated yields
 	 * cannot hold the queue head. */
 	if (used) {
-		u64 cgid = READ_ONCE(t->cgrp_id);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
-					  flow_combine(flow_cgroup_lookup(cgid),
-						       flow_nice_weight(p)));
+					  flow_nice_weight(p));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 		if (!cur)
@@ -477,9 +474,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 			    ((u64)FLOW_SLICE_MIN_NS - cur) : (u64)FLOW_SLICE_MIN_NS;
 		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
 		u64 rem = (burnt < b) ? (b - burnt) : cur;
-		u64 cgid = READ_ONCE(t->cgrp_id);
-		u32 w = flow_combine(flow_cgroup_lookup(cgid),
-				     flow_nice_weight(p));
+		u32 w = flow_nice_weight(p);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
 		s64 nvd = flow_vd_for(nv, rem, w);
 		t->vtime = nv;
@@ -494,9 +489,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		 * out by one slice so a wake can preempt at once with the two
 		 * views diverged until stopping. Seed the burst to one slice
 		 * for the next run. */
-		u64 cgid = READ_ONCE(t->cgrp_id);
-		u32 w = flow_combine(flow_cgroup_lookup(cgid),
-				     flow_nice_weight(p));
+		u32 w = flow_nice_weight(p);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
 		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
 		rs->vtime = nv;
@@ -563,15 +556,6 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->vd = v;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
 	t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
-	if (!t->cgrp_id) {
-		struct cgroup *cg = scx_bpf_task_cgroup(p);
-
-		/* The kfunc hands back a reference, drop it after the read. */
-		if (cg) {
-			t->cgrp_id = flow_cgroup_cgid(cg);
-			bpf_cgroup_release(cg);
-		}
-	}
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
@@ -579,14 +563,12 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
 	struct flow_task_ctx *t;
-	u64 cgid = 0;
+	(void)args;
 	if (!p)
 		return 0;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return 0;
-	if (args && args->cgroup)
-		cgid = flow_cgroup_cgid(args->cgroup);
 	t->vtime = 0;
 	t->vd = 0;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
@@ -594,7 +576,6 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
-	t->cgrp_id = cgid;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }

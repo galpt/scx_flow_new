@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.9" ] || fail "version not at 5.2.9"
+[ "${want}" = "5.2.11" ] || fail "version not at 5.2.11"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -76,7 +76,6 @@ grep -qF "scx/README.md" "${REPO_DIR}/README.md" || fail "readme scheduler ref m
 # in src/bpf and build.rs. Version lives only in Cargo and installer
 # and guard and changelog and manifest.
 for need_flow in \
-    "src/bpf/cgroup.bpf.h" \
     "src/bpf/dispatch.bpf.h" \
     "src/bpf/enqueue.bpf.h" \
     "src/bpf/fair.bpf.h" \
@@ -86,6 +85,7 @@ for need_flow in \
     [ -s "${SRC_DIR}/${need_flow}" ] || fail "flow scaffold missing ${need_flow}"
     grep -q "Galih Tama" "${SRC_DIR}/${need_flow}" || fail "flow rationale missing ${need_flow}"
 done
+[ ! -e "${SRC_DIR}/src/bpf/cgroup.bpf.h" ] || fail "cgroup header reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/flow" ] || fail "flow dir reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/steal.bpf.h" ] || fail "steal helper reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/srtf.bpf.h" ] || fail "srtf header reappeared"
@@ -325,7 +325,7 @@ fi
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
 # Pure vd ordering on a single strand with fixed integers and no knob. Vd adds
-# the burst scaled share step to the floored time, queue key is vd on the
+# the burst scaled nice step to the floored time, queue key is vd on the
 # first strand with FIFO fallback, and shared enqueues kick for preempt on
 # an earlier vd else idle with a skip otherwise. Stopping plus tick charge
 # burnt time with burst as the only extra state. No float plus no new divide
@@ -339,8 +339,10 @@ grep -q "flow_fair_cap_add" "${FAIR_HDR}" || fail "cap add missing"
 grep -q "flow_fair_charge" "${FAIR_HDR}" || fail "fair charge missing"
 grep -q "flow_nice_table" "${FAIR_HDR}" || fail "nice table missing"
 grep -q "flow_nice_weight" "${FAIR_HDR}" || fail "nice weight missing"
-grep -q "flow_combine" "${FAIR_HDR}" || fail "combine helper missing"
-[ "$(grep -rh "flow_combine" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "combine use drifted"
+if grep -rq "flow_combine" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "combine reappeared"
+fi
+[ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "nice use drifted"
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
@@ -362,7 +364,28 @@ grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "
 grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"
 grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
 [ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
-grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
+# Nice only weight with no group share. The weight comes from the nice
+# table alone with no combine and no group map.
+if grep -rq "cgrp_weight_stor" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "group map reappeared"
+fi
+if grep -rn "cgrp_id" "${SRC_DIR}/src/bpf" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/stats.rs" "${SRC_DIR}/src/metrics.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null | grep -q .; then
+    fail "group id reappeared"
+fi
+if grep -rq "flow_cgroup_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "group helper reappeared"
+fi
+if grep -rq 'cgroup\.bpf\.h' "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "group include reappeared"
+fi
+if grep -rq "scx_bpf_task_cgroup\|bpf_cgroup_release" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "group kfunc reappeared"
+fi
+if grep -rq "cgroup_init\|cgroup_exit\|cgroup_move\|cgroup_set_weight" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "group op reappeared"
+fi
+grep -q "flow_nice_weight(p)" "${ENQ_HDR}" || fail "nice use missing"
+grep -q "flow_nice_weight(p)" "${DISP_HDR}" || fail "nice dispatch use missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "first strand" "${ENQ_HDR}" || fail "single strand prose missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice missing"
@@ -482,12 +505,12 @@ if grep -q '"lat"' "${SRC_DIR}/src/stats.rs" 2>/dev/null; then
     fail "lat endpoint reappeared"
 fi
 
-# Tables stay scoped with four maps and eight headers.
-# The base tables hold task plus cpu plus llc plus weight with per CPU
+# Tables stay scoped with three maps and seven headers.
+# The base tables hold task plus cpu plus llc with per CPU
 # queue handles. Top keeps thirteen counters. Queues come from upstream,
-# so quoted headers stay at eight with ops at sixteen.
-[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "4" ] || fail "maps count drifted"
-[ "$(grep -c 'include "' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "8" ] || fail "headers count drifted"
+# so quoted headers stay at seven with ops at twelve.
+[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "3" ] || fail "maps count drifted"
+[ "$(grep -c 'include "' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "7" ] || fail "headers count drifted"
 grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled dhq missing"
 grep -q '<lib/topology.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled topo missing"
 grep -q 'add_source.*lib/arena.bpf.c' "${SRC_DIR}/build.rs" || fail "arena source missing"
@@ -503,11 +526,11 @@ if grep -q "flow_wait_allow\|flow_home_stick" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>
     fail "old global reappeared"
 fi
 
-# Ops stay at sixteen with no probe added.
-[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "16" ] || fail "ops count drifted"
+# Ops stay at twelve with no probe added.
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "12" ] || fail "ops count drifted"
 
 # Queues are one per CPU plus fallback with vd order and insertion ties.
-# Fair scales base by share with a per LLC floor. Vd sets the order with
+# Fair scales base by nice weight with a per LLC floor. Vd sets the order with
 # a strict preempt on an earlier vd. Wakes go preempt on a vd win else
 # idle with a skip otherwise. Queues use the upstream library with per
 # CPU placement and FIFO fallback. Queues hold bounded at 64 total.
@@ -578,7 +601,7 @@ fi
 grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
 grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
 grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
-grep -q "flow_cgroup_lookup" "${SRC_DIR}/src/bpf/cgroup.bpf.h" || fail "cgroup live lookup missing"
+grep -q "FLOW_CGROUP_WEIGHT_DFLT = 100ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "weight default missing"
 grep -q "insertion order" "${ENQ_HDR}" || fail "insertion order missing"
 grep -q "fallback queue" "${ENQ_HDR}" || fail "fallback path missing"
 grep -q "kick_idle" "${SRC_DIR}/src/bpf/intf.h" || fail "idle count missing"
@@ -593,12 +616,12 @@ if grep -q 'include "sjf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "sjf include reappeared"
 fi
 
-# Dead helpers stay removed. The per LLC prio queue helper and the cached
-# weight reader have no caller and must not return.
+# Dead helpers stay removed. The per LLC prio queue helper has no caller
+# and must not return.
 if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "dead queue helper reappeared"
 fi
-if grep -q "flow_task_weight" "${SRC_DIR}/src/bpf/cgroup.bpf.h" 2>/dev/null; then
+if grep -rq "flow_task_weight\|flow_combine\|flow_cgroup_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "dead weight helper reappeared"
 fi
 
@@ -652,8 +675,10 @@ grep -q "topo_contains" "${DISP_HDR}" || fail "tree order missing"
 # Select rechecks the winning pick against the current mask.
 grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
 
-# Task init resolves the cgroup through compat and clears vtime through compat.
-grep -q "scx_bpf_task_cgroup(p)" "${DISP_HDR}" || fail "task cgroup compat missing"
+# Task init clears vtime through compat with no group resolve.
+if grep -q "scx_bpf_task_cgroup" "${DISP_HDR}" 2>/dev/null; then
+    fail "task cgroup reappeared"
+fi
 grep -q "scx_bpf_task_set_dsq_vtime" "${DISP_HDR}" || fail "dsq vtime setter missing"
 
 # Thread shape defaults on so a missed seed stays conservative.

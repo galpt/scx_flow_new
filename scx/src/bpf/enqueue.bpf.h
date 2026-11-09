@@ -9,10 +9,10 @@
  * Exiting tasks use the local queue when allowed and the owner queue
  * otherwise with a short slice. Tasks that have no usable CPU join
  * the fallback queue in FIFO order. The queue key is the vd. Shared
- * inserts move past the per LLC floor and add the burst scaled share
+ * inserts move past the per LLC floor and add the burst scaled nice
  * step to the floored time through the shared charge path. Tasks with
  * no usable CPU skip the floor and stay FIFO. The charge scales with
- * the share. Each shared enqueue checks the idle flag first, then the
+ * the nice weight. Each shared enqueue checks the idle flag first, then the
  * running vd on the target for an earlier vd win. Idle targets take
  * an idle wake and never preempt. Each running instance kicks at most once.
  * A vd win kicks for preempt on a win, else it counts a skip with no wake. A wake goes only to an idle target, else it counts a
@@ -22,8 +22,7 @@
  * inserts count the gauge, and fallback inserts also count fallback.
  * Dequeue drops the gauge on cancel. Masks
  * are checked again before each wake, so a task is never kicked toward
- * a CPU outside its current mask. Enqueue reads the cgroup map on
- * shared and fallback inserts. The birth id comes from init args.
+ * a CPU outside its current mask. The birth id comes from init args.
  * Rejects fall back to the FIFO queue with no extra probe. Queues hold
  * bounded at 64 total.
  *
@@ -35,7 +34,6 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "cgroup.bpf.h"
 #include "select.bpf.h"
 #include <lib/dhq.h>
 #include <lib/sdt_alloc.h>
@@ -253,8 +251,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
 		 * Queues hold bounded at 64 total. */
 		s64 base = READ_ONCE(t->vtime);
-		u32 w = flow_combine(flow_cgroup_lookup(READ_ONCE(t->cgrp_id)),
-				     flow_nice_weight(p));
+		u32 w = flow_nice_weight(p);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
 		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
