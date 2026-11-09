@@ -3,12 +3,12 @@
  * Flow scheduler entry.
  *
  * Thin glue that pulls in area headers in order and declares
- * the ops table. Each CPU owns one upstream queue in vd order
- * on the first strand and there is one fallback
+ * the ops table. Each CPU owns one upstream queue in deadline order
+ * and there is one fallback
  * queue in FIFO order. Queues hold bounded at 64 total.
- * Ties leave in insertion order. Vd order sets the queue with
- * preempts for shared tasks with an earlier vd. Queues come from
- * the upstream double helix library and placement follows the
+ * Ties leave in insertion order. Deadline order sets the queue with
+ * preempts for shared tasks with an earlier deadline. Queues come from
+ * the upstream deadline library and placement follows the
  * upstream topology library. Tables are written once, so a CPU that
  * arrives late needs a restart to be seen. Settings live in the
  * shared header.
@@ -19,7 +19,7 @@
 #include <scx/compat.bpf.h>
 #include <scx/user_exit_info.bpf.h>
 #include <bpf_arena_common.bpf.h>
-#include <lib/dhq.h>
+#include <lib/edq.h>
 #include <lib/topology.h>
 #include "intf.h"
 char _license[] SEC("license") = "GPL";
@@ -41,6 +41,7 @@ SCX_OPS_DEFINE(flow_ops,
 	       .set_cpumask		= (void *)flow_set_cpumask,
 	       .enable			= (void *)flow_enable,
 	       .init_task		= (void *)flow_init_task,
+	       .exit_task		= (void *)flow_exit_task,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |

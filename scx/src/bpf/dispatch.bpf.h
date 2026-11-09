@@ -4,7 +4,7 @@
  *
  * Each CPU drains its own queue first, then queues on the same LLC,
  * then the same node, then distant queues, then fallback. Each queue
- * drains in vd order on the first strand. A head that cannot run here
+ * drains in deadline order. A head that cannot run here
  * sends one wake to its owner and stays queued. Each victim keeps
  * its own forward slot with the fallback on the last slot, so one
  * victim does not hide another. A dead head is dropped with its count
@@ -13,7 +13,7 @@
  * nothing but saw such a head wakes the fallback head again without
  * the dedup check. Remote moves count on the thief and drop the gauge
  * on the source. Running records the task snapshot and mirrors the
- * vd beside it for gap checks. Stopping charges burnt time into the
+ * due time beside it for gap checks. Stopping charges burnt time into the
  * stored time and mirrors the stored time beside it, and tracks the
  * run length for the next due time. A runnable yield with no burnt
  * time still moves the stored time forward by one. The tick charges
@@ -27,10 +27,11 @@
  * placement. A mask change on a queued task keeps the queue and wakes
  * the new owner, counting the wake when the owner is usable. A task
  * with no usable CPU waits in the fallback queue until the mask widens.
- * Init creates one queue per CPU bounded at 64 total with one handle
- * and the fallback queue. The handle holds the first strand. Queues
- * use the upstream library in virtual time mode. Liveness comes from
+ * Init creates one embedded queue per CPU bounded at 64 total
+ * and the fallback queue. Queues
+ * use the upstream deadline library with always eligible tasks. Liveness comes from
  * the upstream tree, so CPUs that arrive late need a restart to be seen.
+ * Each task carries one arena queue node with its pid for lookup.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -42,9 +43,10 @@
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
-#include <lib/dhq.h>
+#include <lib/edq.h>
 #include <lib/topology.h>
 #include <lib/sdt_alloc.h>
+#include <lib/sdt_task.h>
 /* A busy core runs at max and an idle core runs at half. The call
  * stays on one live core and never sends zero. */
 static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
@@ -101,49 +103,41 @@ static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 l
 	owner = flow_first_allowed(ph);
 	flow_kick_idle_only(owner, ph, llc);
 }
-static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq_t *dhq,
-					     u64 strand, u32 slot, int steal, bool *saw)
+static __always_inline int flow_try_move_edq(u32 cpu, u32 llc, u32 vllc,
+					     struct scx_edq __arena *edq,
+					     u32 slot, int steal, bool *saw)
 {
-	u64 peeked;
+	u64 peeked_raw;
+	struct flow_arena_task __arena *peeked_at;
+	s32 peek_pid;
 	struct task_struct *ph;
 	struct task_struct *p;
 	struct flow_task_ctx *lt;
 	u64 slice;
-	u64 popped;
-	if (!dhq)
+	u64 popped_raw;
+	struct flow_arena_task __arena *popped_at;
+	s32 popped_pid;
+	if (!edq)
 		return 0;
 	if (slot > (u32)FLOW_MAX_LLCS)
 		return 0;
-	peeked = scx_dhq_peek_strand(dhq, strand);
-	if (!peeked)
+	/* Peek with a hold so the node stays alive across the owner check. */
+	peeked_raw = scx_edq_peek_hold(edq);
+	if (!peeked_raw)
 		return 0;
-	ph = bpf_task_from_pid((s32)peeked);
+	/* The pop address is also the wrapper address with the node at
+	 * offset zero. This cast follows the queue API and does not
+	 * launder task storage. */
+	peeked_at = (struct flow_arena_task __arena *)peeked_raw;
+	peek_pid = READ_ONCE(peeked_at->pid);
+	ph = bpf_task_from_pid(peek_pid);
 	if (!ph) {
-		u64 dead = scx_dhq_pop_strand(dhq, strand);
-		struct task_struct *dq;
-		if (!dead)
-			return 0;
-		dq = bpf_task_from_pid((s32)dead);
-		if (!dq) {
+		/* Dead head. Remove the exact node with no extra pop so a
+		 * raced pop elsewhere does not lose its count. */
+		int r = scx_edq_try_remove(edq, (scx_edq_task_t *)peeked_at);
+		scx_edq_task_drop((scx_edq_task_t *)peeked_at);
+		if (!r)
 			flow_queued_dec(vllc);
-			return 0;
-		}
-		/* Another CPU removed the dead head and this pop took the
-		 * next task. Keep it alive through fallback with no count
-		 * drop, so no task is lost on the race. */
-		if (saw)
-			*saw = true;
-		flow_forward_from_peeked(dq, llc, slot);
-		lt = bpf_task_storage_get(&task_ctx_stor, dq, 0, 0);
-		slice = (u64)FLOW_SLICE_MIN_NS;
-		if (lt) {
-			u64 s = READ_ONCE(lt->slice_rem);
-			if (s)
-				slice = s;
-		}
-		scx_bpf_dsq_insert(dq, (u64)FLOW_FALLBACK_DSQ, slice, 0);
-		flow_stat_inc(llc, 2);
-		bpf_task_release(dq);
 		return 0;
 	}
 	if (!flow_cpu_allowed((s32)cpu, ph)) {
@@ -151,14 +145,21 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 			*saw = true;
 		flow_forward_from_peeked(ph, llc, slot);
 		bpf_task_release(ph);
+		scx_edq_task_drop((scx_edq_task_t *)peeked_at);
 		return 0;
 	}
 	bpf_task_release(ph);
-	popped = scx_dhq_pop_strand(dhq, strand);
-	if (!popped)
+	scx_edq_task_drop((scx_edq_task_t *)peeked_at);
+	/* Claim the head with a hold. A raced pop may hand the next task,
+	 * which is checked again below. */
+	popped_raw = scx_edq_pop(edq, true);
+	if (!popped_raw)
 		return 0;
-	p = bpf_task_from_pid((s32)popped);
+	popped_at = (struct flow_arena_task __arena *)popped_raw;
+	popped_pid = READ_ONCE(popped_at->pid);
+	p = bpf_task_from_pid(popped_pid);
 	if (!p) {
+		scx_edq_task_drop((scx_edq_task_t *)popped_at);
 		flow_queued_dec(vllc);
 		return 0;
 	}
@@ -177,6 +178,7 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, 0);
 		flow_stat_inc(llc, 2);
 		bpf_task_release(p);
+		scx_edq_task_drop((scx_edq_task_t *)popped_at);
 		return 0;
 	}
 	lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -191,6 +193,7 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 	flow_stat_inc(llc, 1);
 	flow_queued_dec(vllc);
 	bpf_task_release(p);
+	scx_edq_task_drop((scx_edq_task_t *)popped_at);
 	if (steal) {
 		flow_stat_inc(llc, 3);
 		flow_stat_inc(llc, 5);
@@ -199,17 +202,15 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq
 }
 static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
-	scx_dhq_t *dhq;
-	u64 h;
+	struct scx_edq __arena *edq;
 	int vllc;
 	u32 vuse;
 	u32 slot;
 	if (!flow_cpu_ok(victim) || !flow_cpu_live(victim))
 		return 0;
-	h = READ_ONCE(flow_dhqs[victim]);
-	if (!h)
+	if (!flow_edqs)
 		return 0;
-	dhq = (scx_dhq_t *)h;
+	edq = &flow_edqs[victim];
 	vllc = topo_cpu_to_llc_id(victim);
 	if (vllc < 0 || !flow_llc_ok((u32)vllc))
 		return 0;
@@ -217,8 +218,8 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* Single strand drain on the first strand in vd order. */
-	if (flow_try_move_dhq(cpu, llc, vuse, dhq, (u64)SCX_DHQ_STRAND_A, slot, steal, saw))
+	/* Deadline order drain with insertion ties from the queue. */
+	if (flow_try_move_edq(cpu, llc, vuse, edq, slot, steal, saw))
 		return 1;
 	return 0;
 }
@@ -560,29 +561,93 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->llc_id = 0;
 	t->flags = 0;
 }
-s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
+s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
 	struct flow_task_ctx *t;
+	void __arena *mem;
+	struct flow_arena_task __arena *at;
 	(void)args;
 	if (!p)
 		return 0;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!t)
+	if (t) {
+		t->vtime = 0;
+		t->vd = 0;
+		t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
+		t->gen = 0;
+		t->llc_id = 0;
+		t->flags = 0;
+		scx_bpf_task_set_dsq_vtime(p, 0);
+	}
+	/* One arena node per task for the queue. The node sits at offset
+	 * zero of the wrapper, so the queue address is also the wrapper
+	 * address with no storage laundering. */
+	mem = __scx_task_data(p);
+	if (mem) {
+		at = mem;
+		scx_edq_task_init((scx_edq_task_t *)at);
+		WRITE_ONCE(at->pid, p->pid);
+		WRITE_ONCE(at->pad, 0);
 		return 0;
-	t->vtime = 0;
-	t->vd = 0;
-	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
-	t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
-	t->gen = 0;
-	t->llc_id = 0;
-	t->flags = 0;
-	scx_bpf_task_set_dsq_vtime(p, 0);
+	}
+	mem = scx_task_alloc(p);
+	if (!mem)
+		return 0;
+	at = mem;
+	scx_edq_task_init((scx_edq_task_t *)at);
+	WRITE_ONCE(at->pid, p->pid);
+	WRITE_ONCE(at->pad, 0);
 	return 0;
+}
+void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
+{
+	struct flow_task_ctx *t;
+	void __arena *mem;
+	(void)args;
+	if (!p)
+		return;
+	scx_arena_subprog_init();
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	mem = __scx_task_data(p);
+	if (!mem) {
+		if (t) {
+			u32 old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+			if (old & (u32)FLOW_FLAG_QUEUED) {
+				u32 dllc = READ_ONCE(t->llc_id);
+				if (!flow_llc_ok(dllc))
+					dllc = 0;
+				flow_queued_dec(dllc);
+			}
+		}
+		return;
+	}
+	{
+		struct flow_arena_task __arena *at = mem;
+		u32 was_queued = 0;
+		u32 dllc = 0;
+		if (t) {
+			dllc = READ_ONCE(t->llc_id);
+			if (!flow_llc_ok(dllc))
+				dllc = 0;
+			was_queued = __sync_fetch_and_and(&t->flags,
+							  (u32)~(u32)FLOW_FLAG_QUEUED) &
+				     (u32)FLOW_FLAG_QUEUED;
+		}
+		/* Drop the queue link when still present. Dequeue already
+		 * dropped the gauge when it ran, so drop here only when
+		 * the flag shows dequeue had not run yet. Detach then
+		 * waits for holds before the free below. */
+		scx_edq_task_fini((scx_edq_task_t *)at);
+		if (was_queued)
+			flow_queued_dec(dllc);
+		scx_edq_task_detach((scx_edq_task_t *)at);
+		scx_task_free(p);
+	}
 }
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	u64 n;
-	s32 cpu;
 	n = scx_bpf_nr_cpu_ids();
 	scx_arena_subprog_init();
 	if (n == 0) {
@@ -606,23 +671,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		scx_dhq_t *dhq;
-		if ((u64)cpu >= n)
-			break;
-		if (cpu < 0)
-			continue;
-		if (!flow_cpu_live((u32)cpu))
-			continue;
-		/* One upstream queue per CPU in virtual time mode bounded at 64 total
-		 * with at most one extra task on one side. */
-		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, (u64)FLOW_QUEUE_CAP,
-							   (u64)SCX_DHQ_MODE_BALANCED, 1ULL);
-		if (!dhq) {
-			scx_bpf_error("queue create failed");
-			return -ENOMEM;
-		}
-		flow_dhqs[(u32)cpu] = (u64)dhq;
+	/* One embedded queue per CPU in deadline order bounded at 64 total.
+	 * The array lives in arena memory for the queue address space.
+	 * Fresh pages start zeroed, which is the empty queue state. */
+	flow_edqs = scx_static_alloc(sizeof(struct scx_edq) * (size_t)FLOW_MAX_CPUS,
+				     __alignof__(struct scx_edq));
+	if (!flow_edqs) {
+		scx_bpf_error("queue alloc failed");
+		return -ENOMEM;
 	}
 	{
 		s32 ret = scx_bpf_create_dsq((u64)FLOW_FALLBACK_DSQ, -1);
@@ -635,15 +691,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 }
 void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
 {
-	s32 cpu;
 	UEI_RECORD(uei, info);
-	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		if (cpu < 0)
-			continue;
-		if (!READ_ONCE(flow_dhqs[(u32)cpu]))
-			continue;
-		flow_dhqs[(u32)cpu] = 0ULL;
-	}
+	flow_edqs = 0;
 	scx_bpf_destroy_dsq((u64)FLOW_FALLBACK_DSQ);
 }
 #endif

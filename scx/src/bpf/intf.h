@@ -2,12 +2,12 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU owns one queue ordered by vd on the first strand. Ties
+ * Each CPU owns one queue ordered by virtual deadline. Ties
  * leave in insertion order. One fallback queue holds tasks that have
  * no usable CPU in FIFO order as a best effort overflow with no extra
  * promise. Pinned tasks run on their local queue. Placement keeps the
  * constrained target with no load scan. Draining walks local first
- * then same LLC then same node then distant remote last in vd order
+ * then same LLC then same node then distant remote last in deadline order
  * with idle starts at once. Each per CPU queue holds bounded at 64
  * total with one millis slices. Each enqueue prices the task by its
  * nice weight. A task pays for the time it burns, scaled by that weight. Fresh times move past
@@ -21,9 +21,10 @@
  * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
  * holds bounded at 64 total with the fallback holding at most one
- * thousand twenty four. Queues come from the upstream double helix
- * library in virtual time mode, and placement follows the upstream
- * topology library with liveness from the same tree.
+ * thousand twenty four. Queues come from the upstream deadline
+ * library with always eligible tasks, and placement follows the upstream
+ * topology library with liveness from the same tree. Arena holds one
+ * queue node per task beside the task state.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -79,6 +80,15 @@ struct flow_task_ctx {
 	u32 flags;
 	s64 vd;
 	u64 burst_ns;
+};
+/* Arena per task queue node. Storage holds the upstream queue node
+ * with the pid beside it for owner lookup. The node sits at offset
+ * zero so a queue pop address is also this address. Sized for the
+ * task allocator with spare words for growth. */
+struct flow_arena_task {
+	u64 storage[16];
+	s32 pid;
+	u32 pad;
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
  * generation, so each run kicks at most once. Vd mirrors the running

@@ -77,7 +77,7 @@ impl<'a> Scheduler<'a> {
         // Build the arena and the topology tree before any queue exists.
         // The BPF init fails closed when the tree is missing, so a setup
         // failure here never reaches attach.
-        let task_size = std::mem::size_of::<crate::bpf_intf::flow_task_ctx>();
+        let task_size = std::mem::size_of::<crate::bpf_intf::flow_arena_task>();
         let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)
             .context("arena setup failed")?;
         match crate::topology::seed_topology(&mut skel) {

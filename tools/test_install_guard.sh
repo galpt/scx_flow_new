@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.11" ] || fail "version not at 5.2.11"
+[ "${want}" = "5.2.12" ] || fail "version not at 5.2.12"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -38,10 +38,15 @@ done
 # A missing angled include fails closed here before any build.
 [ ! -e "${SRC_DIR}/src/bpf/dhq.bpf.h" ] || fail "own dhq header reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/dhq.bpf.c" ] || fail "own dhq source reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/edq.bpf.h" ] || fail "own edq header reappeared"
+[ ! -e "${SRC_DIR}/src/bpf/edq.bpf.c" ] || fail "own edq source reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/topology.bpf.h" ] || fail "own topology header reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/topology.bpf.c" ] || fail "own topology source reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
-grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled dhq missing"
+grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled edq missing"
+if grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" 2>/dev/null; then
+    fail "angled dhq reappeared"
+fi
 grep -q '<lib/topology.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled topo missing"
 
 # Docs plus changelog plus todos stay untracked with no re-leak.
@@ -266,14 +271,16 @@ grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
 grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
 
-# Topology keeps local first drain on a single strand. The drain keeps
+# Topology keeps local first drain in deadline order. The drain keeps
 # own CPU first then same LLC then same node then remote then fallback,
-# each queue in vd order on the first strand, the pick keeps the hint
+# each queue in deadline order, the pick keeps the hint
 # when allowed else the first near target, and ties keep the first CPU
 # in fixed order.
 grep -q "drains its own queue" "${DISP_HDR}" || fail "cache drain prose missing"
-grep -q "first strand" "${DISP_HDR}" || fail "single strand prose missing"
-grep -q "vd order" "${DISP_HDR}" || fail "vd order prose missing"
+grep -q "deadline order" "${DISP_HDR}" || fail "deadline order prose missing"
+if grep -q "first strand" "${DISP_HDR}" 2>/dev/null; then
+    fail "strand prose reappeared"
+fi
 grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
 grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
 if ! grep -q "score < best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
@@ -324,10 +331,10 @@ fi
 
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
-# Pure vd ordering on a single strand with fixed integers and no knob. Vd adds
-# the burst scaled nice step to the floored time, queue key is vd on the
-# first strand with FIFO fallback, and shared enqueues kick for preempt on
-# an earlier vd else idle with a skip otherwise. Stopping plus tick charge
+# Pure deadline ordering with fixed integers and no knob. Deadline adds
+# the burst scaled nice step to the floored time, queue key is deadline
+# with FIFO fallback, and shared enqueues kick for preempt on
+# an earlier deadline else idle with a skip otherwise. Stopping plus tick charge
 # burnt time with burst as the only extra state. No float plus no new divide
 # is kept.
 FAIR_HDR="${SRC_DIR}/src/bpf/fair.bpf.h"
@@ -386,8 +393,13 @@ if grep -rq "cgroup_init\|cgroup_exit\|cgroup_move\|cgroup_set_weight" "${SRC_DI
 fi
 grep -q "flow_nice_weight(p)" "${ENQ_HDR}" || fail "nice use missing"
 grep -q "flow_nice_weight(p)" "${DISP_HDR}" || fail "nice dispatch use missing"
-grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
-grep -q "first strand" "${ENQ_HDR}" || fail "single strand prose missing"
+if grep -q "SCX_DHQ_STRAND_A\|SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "strand reappeared"
+fi
+if grep -q "first strand" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "strand prose reappeared"
+fi
+grep -q "deadline order" "${ENQ_HDR}" || fail "deadline order prose missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice missing"
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
@@ -458,9 +470,9 @@ grep -q "vd" "${SRC_DIR}/src/bpf/intf.h" || fail "vd field missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
 
-# A single strand stays with one kick per run and idle fast path.
+# Deadline order stays with one kick per run and idle fast path.
 # Each run kicks at most once, idle targets take idle wakes, each
-# vd win kicks for preempt, and a runnable yield with no burn still
+# deadline win kicks for preempt, and a runnable yield with no burn still
 # moves time.
 grep -q "Each running instance kicks at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "kick bound prose missing"
 grep -q "Each running instance kicks at most once" "${ENQ_HDR}" || fail "enqueue kick bound prose missing"
@@ -506,15 +518,22 @@ if grep -q '"lat"' "${SRC_DIR}/src/stats.rs" 2>/dev/null; then
 fi
 
 # Tables stay scoped with three maps and seven headers.
-# The base tables hold task plus cpu plus llc with per CPU
-# queue handles. Top keeps thirteen counters. Queues come from upstream,
-# so quoted headers stay at seven with ops at twelve.
+# The base tables hold task plus cpu plus llc with one embedded
+# queue per CPU in arena memory. Top keeps thirteen counters. Queues
+# come from upstream, so quoted headers stay at seven with ops at thirteen.
+# The arena task map is infra and not counted here.
 [ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "3" ] || fail "maps count drifted"
 [ "$(grep -c 'include "' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "7" ] || fail "headers count drifted"
-grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled dhq missing"
+grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled edq missing"
+if grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" 2>/dev/null; then
+    fail "angled dhq reappeared"
+fi
 grep -q '<lib/topology.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled topo missing"
 grep -q 'add_source.*lib/arena.bpf.c' "${SRC_DIR}/build.rs" || fail "arena source missing"
-grep -q 'add_source.*lib/dhq.bpf.c' "${SRC_DIR}/build.rs" || fail "dhq lib missing"
+grep -q 'add_source.*lib/edq.bpf.c' "${SRC_DIR}/build.rs" || fail "edq lib missing"
+if grep -q 'add_source.*lib/dhq.bpf.c' "${SRC_DIR}/build.rs" 2>/dev/null; then
+    fail "dhq lib reappeared"
+fi
 grep -q 'add_source.*lib/topology.bpf.c' "${SRC_DIR}/build.rs" || fail "topo lib missing"
 grep -q 'add_source.*lib/minheap.bpf.c' "${SRC_DIR}/build.rs" || fail "minheap lib missing"
 grep -q 'add_source.*lib/sdt_task.bpf.c' "${SRC_DIR}/build.rs" || fail "task lib missing"
@@ -526,21 +545,23 @@ if grep -q "flow_wait_allow\|flow_home_stick" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>
     fail "old global reappeared"
 fi
 
-# Ops stay at twelve with no probe added.
-[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "12" ] || fail "ops count drifted"
+# Ops stay at thirteen with no probe added.
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "ops count drifted"
 
-# Queues are one per CPU plus fallback with vd order and insertion ties.
-# Fair scales base by nice weight with a per LLC floor. Vd sets the order with
-# a strict preempt on an earlier vd. Wakes go preempt on a vd win else
+# Queues are one per CPU plus fallback with deadline order and insertion ties.
+# Fair scales base by nice weight with a per LLC floor. Deadline sets the order with
+# a strict preempt on an earlier deadline. Wakes go preempt on a deadline win else
 # idle with a skip otherwise. Queues use the upstream library with per
 # CPU placement and FIFO fallback. Queues hold bounded at 64 total.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
 grep -q "FLOW_QUEUE_CAP = 64ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap missing"
-grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
-grep -q "SCX_DHQ_MODE_BALANCED" "${DISP_HDR}" || fail "mode use missing"
-grep -q "scx_dhq_create_balanced" "${DISP_HDR}" || fail "queue create missing"
-grep -q "(u64)FLOW_QUEUE_CAP" "${DISP_HDR}" || fail "bounded create missing"
-if grep -q "SCX_DHQ_INF_CAPACITY" "${DISP_HDR}" 2>/dev/null; then
+if grep -q "SCX_DHQ_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dhq const reappeared"
+fi
+if grep -q "scx_dhq_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dhq helper reappeared"
+fi
+if grep -q "SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "unbounded cap reappeared"
 fi
 if grep -q "10ULL" "${DISP_HDR}" 2>/dev/null; then
@@ -549,11 +570,28 @@ fi
 if grep -q "256ULL" "${DISP_HDR}" 2>/dev/null; then
     fail "old percpu cap reappeared"
 fi
-grep -q "SCX_DHQ_MODE_BALANCED, 1ULL" "${DISP_HDR}" || fail "imbalance cap missing"
-grep -q "scx_dhq_insert_vtime" "${ENQ_HDR}" || fail "queue insert missing"
-grep -q "scx_dhq_pop_strand" "${DISP_HDR}" || fail "queue pop missing"
-grep -q "scx_dhq_peek_strand" "${DISP_HDR}" || fail "queue peek missing"
-grep -q "flow_dhqs" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "queue handle missing"
+grep -q "scx_static_alloc" "${DISP_HDR}" || fail "queue alloc missing"
+grep -q "flow_edqs" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "queue handle missing"
+if grep -q "flow_dhqs" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "old queue handle reappeared"
+fi
+grep -q "scx_edq_insert" "${ENQ_HDR}" || fail "queue insert missing"
+grep -q "scx_edq_pop" "${DISP_HDR}" || fail "queue pop missing"
+grep -q "scx_edq_peek_hold" "${DISP_HDR}" || fail "queue peek missing"
+grep -q "scx_edq_nr_queued" "${ENQ_HDR}" || fail "queue cap check missing"
+grep -q "scx_edq_try_remove" "${DISP_HDR}" || fail "queue remove missing"
+grep -q "scx_edq_task_init" "${DISP_HDR}" || fail "task init missing"
+grep -q "scx_edq_task_detach" "${DISP_HDR}" || fail "task detach missing"
+grep -q "scx_edq_task_drop" "${DISP_HDR}" || fail "task drop missing"
+grep -q "scx_edq_task_fini" "${DISP_HDR}" || fail "task fini missing"
+grep -q "scx_task_alloc" "${DISP_HDR}" || fail "arena alloc missing"
+grep -q "scx_task_free" "${DISP_HDR}" || fail "arena free missing"
+grep -rq "__scx_task_data" "${SRC_DIR}/src/bpf" || fail "arena lookup missing"
+grep -q "flow_edq_for_cpu" "${ENQ_HDR}" || fail "queue helper missing"
+grep -q "flow_edq_deadline" "${ENQ_HDR}" || fail "deadline helper missing"
+grep -q "flow_try_move_edq" "${DISP_HDR}" || fail "move helper missing"
+grep -q "flow_arena_task" "${SRC_DIR}/src/bpf/intf.h" || fail "arena task missing"
+grep -q "flow_arena_task" "${SRC_DIR}/src/run.rs" || fail "arena size missing"
 grep -q "topo_all" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo tree missing"
 grep -q "TOPO_FOR_EACH_NODE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo walk missing"
 grep -q "topo_contains" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo test missing"
@@ -696,12 +734,12 @@ fi
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
 grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
 
-# Dispatch liveness keeps every queued task reachable. A single strand
-# drains in vd order, slices stay at the floor with no zero
+# Dispatch liveness keeps every queued task reachable. Deadline order
+# drains in deadline order, slices stay at the floor with no zero
 # insert, kicks never take minus one without a skip, forward slots stay
 # per victim with the fallback reserved, and a tail re-kick covers heads
 # that could not run here.
-grep -q "Single strand drain" "${DISP_HDR}" || fail "single strand prose missing"
+grep -q "deadline order" "${DISP_HDR}" || fail "deadline order prose missing"
 grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "enqueue slice floor missing"
 if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${ENQ_HDR}" 2>/dev/null; then
@@ -776,19 +814,19 @@ fi
 # No load balancing remains with constrained placement plus topology drain.
 # Enqueue joins the queue of the constrained target with no least pick
 # and no waiting counts. Dispatch drains in topology order with no
-# busiest pick and no warm strand. Every queue insert uses the first
-# strand with FIFO fallback for rejects.
+# busiest pick and no warm queue. Every queue insert uses deadline order
+# with FIFO fallback for rejects.
 if grep -q "flow_pick_least\|flow_pick_busiest" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "load pick reappeared"
 fi
-if grep -q "flow_qcnt\|flow_warm_strand\|flow_try_insert_dhq\|flow_is_same_node\|warm_only" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+if grep -q "flow_qcnt\|flow_warm_strand\|flow_try_insert_dhq\|flow_try_insert_edq\|flow_is_same_node\|warm_only" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "load state reappeared"
 fi
 if grep -q "qcpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "stored queue reappeared"
 fi
-if grep -q "SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "second strand reappeared"
+if grep -q "SCX_DHQ_STRAND_B\|SCX_DHQ_STRAND_A" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "strand reappeared"
 fi
 if grep -q "best_mate\|vb < va\|both strands\|Dual strand" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "merge state reappeared"
@@ -797,7 +835,7 @@ if grep -q "mate" "${ENQ_HDR}" "${DISP_HDR}" "${SRC_DIR}/src/bpf/intf.h" "${SRC_
     fail "mate bias reappeared"
 fi
 grep -q "flow_constrained_target(task_cpu, p)" "${ENQ_HDR}" || fail "constrained place missing"
-grep -q "(u64)SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "first strand insert missing"
+grep -q "flow_edq_for_cpu(tgt)" "${ENQ_HDR}" || fail "queue helper use missing"
 grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "drain signature missing"
 grep -q "FLOW_QUEUE_CAP" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap prose missing"
 grep -q "bounded at 64" "${SRC_DIR}/src/bpf/intf.h" || fail "bounded prose missing"
@@ -821,11 +859,20 @@ if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "stale bounded prose reappeared"
 fi
 
-# Single handle per CPU stays with no second index.
-# One queue holds the first strand, so a second dimension on the handle
-# table must not return.
-if grep -rn "flow_dhqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+# Single queue per CPU stays with no second index.
+# One embedded queue per CPU in arena memory, so a second dimension
+# on the handle table must not return.
+if grep -rn "flow_edqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "2-D queue handles reappeared"
 fi
+if grep -rn "flow_dhqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "old 2-D handles reappeared"
+fi
+
+# Ordered drain stays fail closed with forward wakes. Each CPU drains
+# its own queue first, then same LLC, then same node, then
+# remote, then fallback, with one forward wake per unrunnable head.
+grep -q "flow_drain_cpu" "${DISP_HDR}" || fail "drain helper missing"
+grep -q "flow_try_move_edq" "${DISP_HDR}" || fail "move helper missing"
 
 echo "guard tests passed"
