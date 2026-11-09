@@ -44,8 +44,11 @@ done
 [ ! -e "${SRC_DIR}/src/bpf/topology.bpf.c" ] || fail "own topology source reappeared"
 [ -L "${SRC_DIR}/src/bpf/lib" ] || fail "lib link missing"
 [ "$(readlink "${SRC_DIR}/src/bpf/lib")" = "../../../../../lib" ] || fail "lib link drifted"
-[ -L "${SRC_DIR}/lib" ] || fail "top lib link missing"
-[ "$(readlink "${SRC_DIR}/lib")" = "../../../../../lib" ] || fail "top lib link drifted"
+[ ! -e "${SRC_DIR}/lib" ] || fail "top lib reappeared"
+[ ! -L "${SRC_DIR}/lib" ] || fail "top lib link reappeared"
+if git -C "${REPO_DIR}" ls-files -- scx/lib | grep -q .; then
+    fail "top lib tracked"
+fi
 grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled edq missing"
 if grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" 2>/dev/null; then
     fail "angled dhq reappeared"
@@ -189,15 +192,31 @@ grep -q "/tmp/opencode" "${INST}" || fail "opencode guard missing"
 grep -q 'FORK="https://github.com/galpt/scx"' "${INST}" || fail "fork remote missing"
 grep -q 'pinned fork ref' "${INST}" || fail "fork pin comment missing"
 
-# Queues come from upstream with only the license link plus lib links.
+# Queues come from upstream with only the license link plus nested lib link and no top link.
 grep -q 'upstream library' "${INST}" || fail "lib prose missing"
 grep -q '\.\./\.\./\.\./LICENSE' "${INST}" || fail "license symlink missing"
 grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink missing"
 grep -q 'rm -rf "${DEST}/src/bpf/lib"' "${INST}" || fail "lib remove missing"
-grep -q 'rm -rf "${DEST}/lib"' "${INST}" || fail "top lib remove missing"
-grep -q 'readlink "${DEST}/lib"' "${INST}" || fail "top lib guard missing"
-grep -q 'ln -s ../../../../../lib "${DEST}/lib"' "${INST}" || fail "top lib symlink missing"
 grep -q 'ln -s ../../../../../lib "${DEST}/src/bpf/lib"' "${INST}" || fail "lib symlink missing"
+if grep -q 'readlink "${DEST}/lib"' "${INST}" 2>/dev/null; then
+    fail "top lib guard reappeared"
+fi
+if grep -q 'ln -s ../../../../../lib "${DEST}/lib"' "${INST}" 2>/dev/null; then
+    fail "top lib symlink reappeared"
+fi
+if grep -q 'rm -rf "${DEST}/lib"' "${INST}" 2>/dev/null; then
+    fail "top lib remove reappeared"
+fi
+grep -q 'rsync -a' "${INST}" || fail "rsync archive missing"
+if grep -q -- '--copy-links' "${INST}" 2>/dev/null; then
+    fail "copy links reappeared"
+fi
+if grep -q -- '--dereference' "${INST}" 2>/dev/null; then
+    fail "dereference reappeared"
+fi
+if grep -q '"${DEST}/src/bpf/lib/"' "${INST}" 2>/dev/null; then
+    fail "trailing slash reappeared"
+fi
 
 # Kernels below 7.1 are refused with a parsable kernel check.
 grep -q '7\.1' "${INST}" || fail "kernel gate missing"
