@@ -11,6 +11,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
 - `scx/src/bpf/` nine area headers in one directory
+- `scx/lib` links to upstream headers for include parity
 - `scx/src/bpf/lib` links to upstream headers for include parity
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
@@ -19,6 +20,8 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/test_install_guard.sh` installer checks
 - `tools/edf_harness/` load probe with its own README
+
+Both links dangle in a standalone clone by design. After overlay the nested link resolves to workspace headers for the build while the top link stays broken for upstream parity.
 
 ## Build
 
