@@ -528,6 +528,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 cur;
 	u64 have;
 	u64 used;
+	u64 total_used;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -548,6 +549,13 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		used = 0;
 	else
 		used = have - cur;
+	/* Track the run length before the tail charge, so the next due
+	 * time prices what this run actually burnt. */
+	if (cur < (u64)FLOW_SLICE_MIN_NS)
+		total_used = (u64)FLOW_SLICE_MIN_NS - cur;
+	else
+		total_used = 0;
+	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
 	/* Burnt time pays here, scaled by the share with saturation. The tick
 	 * already moved the left slice forward, so this charges only the tail
 	 * past the last tick. A runnable yield with no burnt time still moves
@@ -596,18 +604,35 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->slice_rem = cur;
 		return;
 	}
-	/* Charge the burnt delta, then move the left slice forward, so
-	 * stopping later charges only the tail past this tick. */
+	/* Charge the burnt delta, then move the due time with the left
+	 * slice, so the running horizon prices what is left. Stopping
+	 * later charges only the tail past this tick. */
 	have = READ_ONCE(t->slice_rem);
 	if (cur && cur < have) {
 		u64 delta = have - cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta,
-					  flow_combine(flow_cgroup_lookup(cgid),
-						       flow_nice_weight(p)));
+		u32 w = flow_combine(flow_cgroup_lookup(cgid),
+				     flow_nice_weight(p));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
+		s64 nvd = flow_vd_for(nv, cur, w);
 		t->vtime = nv;
+		t->vd = nvd;
 		t->slice_rem = cur;
-		scx_bpf_task_set_dsq_vtime(p, nv);
+		rs->vtime = nv;
+		rs->vd = nvd;
+		scx_bpf_task_set_dsq_vtime(p, nvd);
+	} else if (!cur && have) {
+		/* The slice ran out at the tick. Keep the stored slice so
+		 * stopping still charges the tail, but move the running
+		 * horizon out so a wake can preempt at once. */
+		u64 cgid = READ_ONCE(t->cgrp_id);
+		u32 w = flow_combine(flow_cgroup_lookup(cgid),
+				     flow_nice_weight(p));
+		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
+		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_FLOOR_NS, w);
+		rs->vtime = nv;
+		rs->vd = nvd;
+		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
 	}
 	rs->slice_rem = cur;
 }
@@ -668,6 +693,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->vtime = v;
 	t->vd = v;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+	t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
 	if (!t->cgrp_id) {
 		struct cgroup *cg = scx_bpf_task_cgroup(p);
 
@@ -695,6 +721,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->vtime = 0;
 	t->vd = 0;
 	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
+	t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;

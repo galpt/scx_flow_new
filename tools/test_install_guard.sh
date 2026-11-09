@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.6" ] || fail "version not at 5.2.6"
+[ "${want}" = "5.2.7" ] || fail "version not at 5.2.7"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "237b6eca7fb19077b5673b81b0e03fc3e9e81e3c4e9e643306c4e90782121907" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "99870fb0902bfa370b77c387a2d5fb6b5919a007079e93e099ed483c11c3ab4c" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -327,10 +327,11 @@ fi
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
 # Pure vd ordering with dual strands and fixed integers and no knob. Vd adds
-# the share step to the floored time, queue key is vd across both strands
-# with FIFO fallback, and shared enqueues kick for preempt on an earlier
-# vd else idle with a skip otherwise. Stopping plus tick charge burnt time
-# with no extra state. No float plus no new divide is kept.
+# the burst scaled share step to the floored time, queue key is vd across
+# both strands with FIFO fallback, and shared enqueues kick for preempt on
+# an earlier vd else idle with a skip otherwise. Stopping plus tick charge
+# burnt time with burst as the only extra state. No float plus no new divide
+# is kept.
 FAIR_HDR="${SRC_DIR}/src/bpf/fair.bpf.h"
 ENQ_HDR="${SRC_DIR}/src/bpf/enqueue.bpf.h"
 grep -q "FLOW_SLICE_MIN_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
@@ -341,11 +342,28 @@ grep -q "flow_fair_charge" "${FAIR_HDR}" || fail "fair charge missing"
 grep -q "flow_nice_table" "${FAIR_HDR}" || fail "nice table missing"
 grep -q "flow_nice_weight" "${FAIR_HDR}" || fail "nice weight missing"
 grep -q "flow_combine" "${FAIR_HDR}" || fail "combine helper missing"
-[ "$(grep -rh "flow_combine" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "3" ] || fail "combine use drifted"
+[ "$(grep -rh "flow_combine" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "combine use drifted"
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
+# Burst run length scales the vd step with shift only moves and a
+# bounded floor. The vd takes three args with the burst in the middle
+# and the floor cap stays at one base step.
+grep -q "FLOW_SLICE_FLOOR_NS = 62500ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "burst floor missing"
+grep -q "burst_ns" "${SRC_DIR}/src/bpf/intf.h" || fail "burst field missing"
+grep -q "flow_burst_clamp" "${FAIR_HDR}" || fail "burst clamp missing"
+grep -q "flow_burst_update" "${FAIR_HDR}" || fail "burst update missing"
+grep -q "flow_vd_for(s64 floored, u64 burst_ns, u32 w)" "${FAIR_HDR}" || fail "vd arg drifted"
+grep -q "b >> 1" "${FAIR_HDR}" || fail "burst half shift missing"
+grep -q "b >> 2" "${FAIR_HDR}" || fail "burst quarter shift missing"
+grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "burst vd use missing"
+grep -q "flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS)" "${FAIR_HDR}" || fail "floor cap missing"
+grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
+grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
+grep -q "flow_vd_for(nv, cur, w)" "${DISP_HDR}" || fail "tick vd missing"
+grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_FLOOR_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
+[ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
 grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "SCX_DHQ_STRAND_B" "${ENQ_HDR}" || fail "second strand missing"
@@ -695,7 +713,8 @@ grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose m
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
 # plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus unbounded plus overflow plus tail target.
+# plus unbounded plus overflow plus tail plus burst vd target.
+grep -q "burst" "${SRC_DIR}/README.md" || fail "readme burst missing"
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
 grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"

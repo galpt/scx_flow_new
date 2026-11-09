@@ -24,8 +24,9 @@
  * with the task nice weight. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
  * a per LLC floor so two tasks never share the same value. Vd adds
- * a share based step to the floored time, so a larger share gives
- * an earlier vd. Slices hold one fixed quantum. A shared
+ * a share based step scaled by the burst to the floored time, so a
+ * larger share gives an earlier vd. Slices hold one fixed quantum
+ * with a small floor. Burst holds the last run length. A shared
  * enqueue with a vd ahead of the running vd kicks for preempt
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
  * stored time forward by one. Each per CPU queue holds without a bound
@@ -64,6 +65,7 @@ enum flow_consts {
 	FLOW_MAX_NODES = 8ULL,
 	FLOW_FALLBACK_CAP = 1024ULL,
 	FLOW_SLICE_MIN_NS = 1000000ULL,
+	FLOW_SLICE_FLOOR_NS = 62500ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,
 	FLOW_FAIR_BASE_NS = 20000ULL,
 	FLOW_FAIR_EXTRA_NS = 1000ULL,
@@ -79,7 +81,8 @@ enum flow_consts {
  * left in the current quantum. Gen identifies the running instance.
  * Llc records the last enqueue target. Flags holds the queued bit.
  * Cgrp holds the group id. A zero id means no group was recorded.
- * Vd holds the due time for queue order. */
+ * Vd holds the due time for queue order. Burst holds the run length
+ * used for the due time. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -88,6 +91,7 @@ struct flow_task_ctx {
 	u32 flags;
 	u64 cgrp_id;
 	s64 vd;
+	u64 burst_ns;
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
  * generation, so each run kicks at most once. Vd mirrors the running

@@ -329,7 +329,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u32 w = flow_combine(flow_cgroup_lookup(READ_ONCE(t->cgrp_id)),
 				     flow_nice_weight(p));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-		s64 vd = flow_vd_for(floored, w);
+		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
 		scx_dhq_t *dhq = no_cpu ? 0 : flow_queue_for_cpu(tgt);
 		bool fell = true;

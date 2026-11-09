@@ -13,8 +13,12 @@
  * compare and swap loop, so each stored time is unique. If the loop
  * does not win, the last observed value is written back directly.
  * The floor rises over time and never moves backward for a given
- * LLC. Vd adds the share step to the floored time, so a larger
- * share gives an earlier vd with no extra divide.
+ * LLC. When the time runs ahead of the floor, the floor moves up by
+ * at most one base step per enqueue, so one far time cannot pull the
+ * floor with it. Vd adds the share step for the burst to the floored
+ * time, so a larger share or a shorter run gives an earlier vd with
+ * no extra divide. Burst holds the last run length between the floor
+ * and one slice with shift only moves.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -97,9 +101,44 @@ static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 		return vmax;
 	return flow_fair_cap_add(base, scaled);
 }
-static __always_inline s64 flow_vd_for(s64 floored, u32 w)
+/* Burst stays between the floor and one slice. A zero or long value
+ * snaps to one slice. Shift moves keep the update without divide. */
+static __always_inline u64 flow_burst_clamp(u64 burst_ns)
 {
-	return flow_fair_cap_add(floored, flow_fair_step(w));
+	if (!burst_ns || burst_ns > (u64)FLOW_SLICE_MIN_NS)
+		return (u64)FLOW_SLICE_MIN_NS;
+	if (burst_ns < (u64)FLOW_SLICE_FLOOR_NS)
+		return (u64)FLOW_SLICE_FLOOR_NS;
+	return burst_ns;
+}
+static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
+{
+	u64 b = flow_burst_clamp(burst_ns);
+	s64 vd = flow_fair_charge(floored, b, w);
+	if (vd <= floored)
+		return flow_fair_cap_add(floored, 1);
+	return vd;
+}
+/* Track the last run length. An overrun snaps to one slice. A run
+ * that ends early while still runnable only moves up past the old
+ * value by half the gap and holds otherwise, since the stop cut the
+ * run short. A sleep moves by a quarter toward the run length. */
+static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
+					     u64 cur, bool runnable)
+{
+	u64 b = flow_burst_clamp(old_burst);
+	u64 u = total_used;
+	if (u > (u64)FLOW_SLICE_MIN_NS)
+		u = (u64)FLOW_SLICE_MIN_NS;
+	if (!cur)
+		return (u64)FLOW_SLICE_MIN_NS;
+	if (runnable) {
+		if (u > b)
+			b = b - (b >> 1) + (u >> 1);
+		return flow_burst_clamp(b);
+	}
+	b = b - (b >> 2) + (u >> 2);
+	return flow_burst_clamp(b);
 }
 static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 {
@@ -110,13 +149,21 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 	for (i = 0; i < 4; i++) {
 		s64 last = READ_ONCE(flow_llc_seq[llc]);
 		s64 want = v;
+		s64 next;
 		if (want <= last) {
 			if (last == vmax)
 				want = last;
 			else
 				want = last + 1;
+			next = want;
+		} else {
+			s64 cap = flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS);
+			if (want < cap)
+				next = want;
+			else
+				next = cap;
 		}
-		if (__sync_val_compare_and_swap(&flow_llc_seq[llc], last, want) == last)
+		if (__sync_val_compare_and_swap(&flow_llc_seq[llc], last, next) == last)
 			return want;
 	}
 	{
@@ -127,8 +174,8 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 				want = last;
 			else
 				want = last + 1;
+			flow_llc_seq[llc] = want;
 		}
-		flow_llc_seq[llc] = want;
 		return want;
 	}
 }
