@@ -212,7 +212,11 @@ mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
 # Queues come from the upstream library with no vendored copy.
-# The lib path stays as an upstream link for include parity.
+# Both lib paths stay as upstream links for include parity.
+if [ "$(readlink "${DEST}/lib" 2>/dev/null)" != "../../../../../lib" ]; then
+    rm -rf "${DEST}/lib"
+    ln -s ../../../../../lib "${DEST}/lib"
+fi
 if [ "$(readlink "${DEST}/src/bpf/lib" 2>/dev/null)" != "../../../../../lib" ]; then
     rm -rf "${DEST}/src/bpf/lib"
     ln -s ../../../../../lib "${DEST}/src/bpf/lib"

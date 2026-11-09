@@ -11,6 +11,7 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 - `scx/src/bpf/intf.h` shared constants and helpers
 - `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
 - `scx/src/bpf/` nine area headers in one directory
+- `scx/lib` links to upstream headers for include parity
 - `scx/src/bpf/lib` links to upstream headers for include parity
 - `scx/src/main.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
