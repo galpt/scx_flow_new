@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "d65b933b2fbc984f5e91cc5696f76fff137c49669eface00bbc8e6661ad4c19a" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "21eceebbb04a9e40739dcb514882888c3649e924cbd45cc433ad148ca7a91055" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -266,15 +266,13 @@ grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
 grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
 
-# Topology keeps local first drain with dual strands. The drain keeps
-# own CPU first then mates then rest of same LLC then same node then
-# remote then fallback, dual strands in vd order with earliest head
-# first, the pick keeps the hint when allowed else the first near
-# target, and ties keep the first CPU in fixed order.
+# Topology keeps local first drain on a single strand. The drain keeps
+# own CPU first then same LLC then same node then remote then fallback,
+# each queue in vd order on the first strand, the pick keeps the hint
+# when allowed else the first near target, and ties keep the first CPU
+# in fixed order.
 grep -q "drains its own queue" "${DISP_HDR}" || fail "cache drain prose missing"
-grep -q "both strands" "${DISP_HDR}" || fail "dual strand prose missing"
-grep -q "earlier vd" "${DISP_HDR}" || fail "merge order prose missing"
-grep -q "mates in the same LLC" "${DISP_HDR}" || fail "mate prose missing"
+grep -q "first strand" "${DISP_HDR}" || fail "single strand prose missing"
 grep -q "vd order" "${DISP_HDR}" || fail "vd order prose missing"
 grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
 grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
@@ -326,9 +324,9 @@ fi
 
 # Changelog plus design histories remain public in prior commits; tip carries no docs blobs.
 
-# Pure vd ordering with dual strands and fixed integers and no knob. Vd adds
-# the burst scaled share step to the floored time, queue key is vd across
-# both strands with FIFO fallback, and shared enqueues kick for preempt on
+# Pure vd ordering on a single strand with fixed integers and no knob. Vd adds
+# the burst scaled share step to the floored time, queue key is vd on the
+# first strand with FIFO fallback, and shared enqueues kick for preempt on
 # an earlier vd else idle with a skip otherwise. Stopping plus tick charge
 # burnt time with burst as the only extra state. No float plus no new divide
 # is kept.
@@ -366,14 +364,7 @@ grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick
 [ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
 grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
-grep -q "SCX_DHQ_STRAND_B" "${ENQ_HDR}" || fail "second strand missing"
-grep -q "SCX_DHQ_STRAND_B" "${DISP_HDR}" || fail "merge strand missing"
-grep -q "flow_pick_least" "${ENQ_HDR}" || fail "least pick missing"
-grep -q "flow_warm_strand" "${ENQ_HDR}" || fail "warm strand missing"
-grep -q "same LLC" "${ENQ_HDR}" || fail "warm llc prose missing"
-grep -q "flow_try_insert_dhq" "${ENQ_HDR}" || fail "strand retry missing"
-grep -q "vb < va" "${DISP_HDR}" || fail "merge compare missing"
-grep -q "flow_cpu_ccx" "${DISP_HDR}" || fail "mate compare missing"
+grep -q "first strand" "${ENQ_HDR}" || fail "single strand prose missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice missing"
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
@@ -444,7 +435,7 @@ grep -q "vd" "${SRC_DIR}/src/bpf/intf.h" || fail "vd field missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
 
-# Dual strands stay with one kick per run and idle fast path.
+# A single strand stays with one kick per run and idle fast path.
 # Each run kicks at most once, idle targets take idle wakes, each
 # vd win kicks for preempt, and a runnable yield with no burn still
 # moves time.
@@ -633,11 +624,7 @@ fi
 if grep -q "st->queued = last - 1" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
     fail "queued direct store reappeared"
 fi
-if grep -q "flow_qcnt\[cpu\] = last" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
-    fail "waiting direct store reappeared"
-fi
 grep -q "__sync_fetch_and_sub(&st->queued" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "queued saturating step missing"
-grep -q "__sync_fetch_and_add(&flow_qcnt" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting saturating step missing"
 
 # Installer provenance states the mirror and upstream share one commit.
 if ! grep -q "matches the upstream" "${INST}" 2>/dev/null; then
@@ -661,11 +648,6 @@ if grep -q "tcc->llc_id\|t2->llc_id" "${DISP_HDR}" 2>/dev/null; then
     fail "dead cpu scan reappeared"
 fi
 grep -q "topo_contains" "${DISP_HDR}" || fail "tree order missing"
-# Drain skips empty queues through waiting counts with no gauge peek.
-if grep -q "flow_stats_for(victim)" "${DISP_HDR}" 2>/dev/null; then
-    fail "gauge bail reappeared"
-fi
-grep -q "flow_qcnt_get(victim)" "${DISP_HDR}" || fail "empty skip missing"
 
 # Select rechecks the winning pick against the current mask.
 grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
@@ -689,16 +671,12 @@ fi
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
 grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
 
-# Dispatch liveness keeps every queued task reachable. Dual strands
-# drain with no count bail, slices stay at the floor with no zero
+# Dispatch liveness keeps every queued task reachable. A single strand
+# drains in vd order, slices stay at the floor with no zero
 # insert, kicks never take minus one without a skip, forward slots stay
 # per victim with the fallback reserved, and a tail re-kick covers heads
 # that could not run here.
-if grep -q "if (!ca && !cb)" "${DISP_HDR}" 2>/dev/null; then
-    fail "nr_queued bail reappeared"
-fi
-grep -q "Dual strand drain" "${DISP_HDR}" || fail "dual strand prose missing"
-grep -q "break fairness" "${DISP_HDR}" || fail "fairness prose missing"
+grep -q "Single strand drain" "${DISP_HDR}" || fail "single strand prose missing"
 grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "enqueue slice floor missing"
 if grep -q "dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 0" "${DISP_HDR}" "${ENQ_HDR}" 2>/dev/null; then
@@ -722,9 +700,7 @@ grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
 grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
-# plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus bounded at 64 plus overflow plus tail plus burst vd target
-# plus mate tie plus locality order.
+# plus fixed slice plus idle plus preempt plus restart plus burst vd.
 grep -q "burst" "${SRC_DIR}/README.md" || fail "readme burst missing"
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
@@ -734,21 +710,12 @@ grep -q "1ms" "${SRC_DIR}/README.md" || fail "readme slice missing"
 grep -q "idle" "${SRC_DIR}/README.md" || fail "readme idle missing"
 grep -q "preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
 grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
-grep -q "strand" "${SRC_DIR}/README.md" || fail "readme strand missing"
-grep -q "bounded at 64" "${SRC_DIR}/README.md" || fail "readme bounded missing"
-grep -q "least queued" "${SRC_DIR}/README.md" || fail "readme least missing"
-grep -q "most loaded" "${SRC_DIR}/README.md" || fail "readme most missing"
-grep -q "remote last" "${SRC_DIR}/README.md" || fail "readme remote missing"
-grep -q "both strands" "${SRC_DIR}/README.md" || fail "readme both missing"
-grep -q "mate tie" "${SRC_DIR}/README.md" || fail "readme mate missing"
-if grep -q "warm only" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme warm only reappeared"
+if grep -q "least queued\|most loaded" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme load reappeared"
 fi
-if grep -q "first strand only" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme far warm reappeared"
+if grep -qi "mate\|strand\|warm" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme strand reappeared"
 fi
-grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
-grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
 if grep -q "without bound" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme unbounded reappeared"
 fi
@@ -781,51 +748,32 @@ if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/b
     fail "float outside fair reappeared"
 fi
 
-# Bounded queues with waiting counts plus least load plus most load steal.
-# Placement scans once for the fewest waiting tasks with mate tie and
-# dispatch keeps locality first with remote kept last with both strands.
-grep -q "flow_qcnt" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "waiting counts missing"
-grep -q "flow_qcnt_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting rise missing"
-grep -q "flow_qcnt_dec" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting drop missing"
-grep -q "flow_qcnt_inc" "${ENQ_HDR}" || fail "enqueue waiting rise missing"
-grep -q "flow_qcnt_dec" "${DISP_HDR}" || fail "dispatch waiting drop missing"
-grep -q "flow_pick_busiest" "${DISP_HDR}" || fail "busiest pick missing"
-grep -q "flow_is_same_node" "${DISP_HDR}" || fail "node test missing"
-if grep -q "warm_only" "${DISP_HDR}" 2>/dev/null; then
-    fail "warm arg reappeared"
+# No load balancing remains with constrained placement plus topology drain.
+# Enqueue joins the queue of the constrained target with no least pick
+# and no waiting counts. Dispatch drains in topology order with no
+# busiest pick and no warm strand. Every queue insert uses the first
+# strand with FIFO fallback for rejects.
+if grep -q "flow_pick_least\|flow_pick_busiest" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "load pick reappeared"
 fi
-if grep -q "if (warm_only)" "${DISP_HDR}" 2>/dev/null; then
-    fail "warm branch reappeared"
+if grep -q "flow_qcnt\|flow_warm_strand\|flow_try_insert_dhq\|flow_is_same_node\|warm_only" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "load state reappeared"
 fi
-grep -q "both strands in vd order" "${DISP_HDR}" || fail "remote last prose missing"
-grep -q "Remote drains last" "${DISP_HDR}" || fail "far node prose missing"
-grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "free drain missing"
-if grep -q "first strand only" "${DISP_HDR}" 2>/dev/null; then
-    fail "warm only path reappeared"
+if grep -q "qcpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stored queue reappeared"
 fi
-if grep -q "saw_unrunnable, 1)" "${DISP_HDR}" 2>/dev/null; then
-    fail "warm only dispatch reappeared"
+if grep -q "SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "second strand reappeared"
 fi
-# Mate-aware least tie keeps locality on equal waits with no extra bias.
-grep -q "flow_pick_least(p, last" "${ENQ_HDR}" || fail "mate pick missing"
-grep -q "cnt == best_cnt" "${ENQ_HDR}" || fail "mate tie missing"
-grep -q "best_mate" "${ENQ_HDR}" || fail "mate state missing"
-# Locality-first order keeps mates plus rest before busiest outside
-# with same-node remote before distant remote last.
-grep -q "outside the scanned set" "${DISP_HDR}" || fail "busiest outside missing"
-grep -q "Mates first in the same LLC" "${DISP_HDR}" || fail "mate order missing"
-grep -q "rest of the same LLC" "${DISP_HDR}" || fail "rest order missing"
-grep -q "Same node remote" "${DISP_HDR}" || fail "node remote missing"
-# Stored queue keeps waiting counts exact with no per strand split.
-grep -q "qcpu" "${SRC_DIR}/src/bpf/intf.h" || fail "stored queue missing"
-grep -q "qcpu = -1" "${ENQ_HDR}" || fail "stored queue clear missing"
-grep -q "qcpu = tgt" "${ENQ_HDR}" || fail "stored queue set missing"
-grep -q "qcpu = -1" "${DISP_HDR}" || fail "dispatch queue clear missing"
-grep -q "per-CPU recency" "${ENQ_HDR}" || fail "enqueue recency missing"
-grep -q "balance-only guard" "${ENQ_HDR}" || fail "enqueue guard missing"
-grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/intf.h" || fail "intf recency missing"
-grep -q "balance-only guard" "${SRC_DIR}/src/bpf/intf.h" || fail "intf guard missing"
-grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps recency missing"
+if grep -q "best_mate\|vb < va\|both strands\|Dual strand" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "merge state reappeared"
+fi
+if grep -q "mate" "${ENQ_HDR}" "${DISP_HDR}" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>/dev/null; then
+    fail "mate bias reappeared"
+fi
+grep -q "flow_constrained_target(task_cpu, p)" "${ENQ_HDR}" || fail "constrained place missing"
+grep -q "(u64)SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "first strand insert missing"
+grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "drain signature missing"
 grep -q "FLOW_QUEUE_CAP" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap prose missing"
 grep -q "bounded at 64" "${SRC_DIR}/src/bpf/intf.h" || fail "bounded prose missing"
 grep -q "bounded at 64" "${ENQ_HDR}" || fail "enqueue bounded prose missing"
@@ -848,14 +796,11 @@ if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "stale bounded prose reappeared"
 fi
 
-# Single handle per CPU stays with no second index and no per strand counts.
-# One queue holds both strands, so a second dimension on the handle table
-# plus a second dimension on the count table must not return.
+# Single handle per CPU stays with no second index.
+# One queue holds the first strand, so a second dimension on the handle
+# table must not return.
 if grep -rn "flow_dhqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "2-D queue handles reappeared"
-fi
-if grep -rn "flow_qcnt\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "per-strand counts reappeared"
 fi
 
 echo "guard tests passed"

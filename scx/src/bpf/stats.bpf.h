@@ -6,11 +6,7 @@
  * never drops below zero. It uses a short compare and swap loop.
  * When the loop loses, a saturating atomic step keeps the floor
  * with no plain store, so a decrement is not lost under contention.
- * An unknown offset does nothing. Waiting counts track queued tasks
- * per CPU for placement with the same loop shape. The count caps at
- * the top on rise and floors at zero on drop through saturating
- * atomic steps with no plain store. Waiting counts stay
- * internal with no export through the counter view.
+ * An unknown offset does nothing.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -82,52 +78,6 @@ static __always_inline void flow_queued_dec(u32 llc)
 		u64 old = __sync_fetch_and_sub(&st->queued, 1ULL);
 		if (!old)
 			__sync_fetch_and_add(&st->queued, 1ULL);
-	}
-}
-static __always_inline u32 flow_qcnt_get(u32 cpu)
-{
-	if (!flow_cpu_ok(cpu))
-		return 0;
-	return READ_ONCE(flow_qcnt[cpu]);
-}
-static __always_inline void flow_qcnt_inc(u32 cpu)
-{
-	int i;
-	if (!flow_cpu_ok(cpu))
-		return;
-	for (i = 0; i < 4; i++) {
-		u32 old = READ_ONCE(flow_qcnt[cpu]);
-		u32 next;
-		if (old == 0xffffffffU)
-			return;
-		next = old + 1;
-		if (__sync_val_compare_and_swap(&flow_qcnt[cpu], old, next) == old)
-			return;
-	}
-	{
-		u32 old = __sync_fetch_and_add(&flow_qcnt[cpu], 1U);
-		if (old == 0xffffffffU)
-			__sync_fetch_and_sub(&flow_qcnt[cpu], 1U);
-	}
-}
-static __always_inline void flow_qcnt_dec(u32 cpu)
-{
-	int i;
-	if (!flow_cpu_ok(cpu))
-		return;
-	for (i = 0; i < 4; i++) {
-		u32 old = READ_ONCE(flow_qcnt[cpu]);
-		u32 next;
-		if (old == 0)
-			return;
-		next = old - 1;
-		if (__sync_val_compare_and_swap(&flow_qcnt[cpu], old, next) == old)
-			return;
-	}
-	{
-		u32 old = __sync_fetch_and_sub(&flow_qcnt[cpu], 1U);
-		if (!old)
-			__sync_fetch_and_add(&flow_qcnt[cpu], 1U);
 	}
 }
 #endif

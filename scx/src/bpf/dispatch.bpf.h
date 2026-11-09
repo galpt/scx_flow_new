@@ -2,51 +2,35 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own queue first, then mates in the same LLC,
- * then the rest of the same LLC and node, then the most loaded queue
- * outside the scanned set, then same node remote, then distant queues
- * last, then fallback. The most loaded pick scans waiting counts
- * with mates first on ties and lowest id after that. Idle work starts
- * at once with no wait for warm tasks.
- * Queues hold bounded at 64 total and empty queues are skipped with no
- * peek through waiting counts. Mates compare the cluster hint with
- * no extra walk. Each queue drains the earlier vd across both strands
- * with ties to the first strand. Remote queues drain last with both
- * strands in vd order, so locality comes from order alone. The same
- * LLC means the same chip and the same node comes from the tree walk. Trying one strand
- * first or the fuller side or alternating sides would favor warm or
- * cold tasks and break fairness, so the drain keeps vd order by vd
- * only. A head that cannot run here sends one wake to its owner and
- * stays queued. Each victim keeps its own forward slot with the
- * fallback on the last slot, so one victim does not hide another.
- * A dead head is dropped with its count and the next queue is tried.
- * Waiting counts drop on moves to local plus dead drops plus moves
- * to fallback with the race kept. The fallback drops its count from
- * the task and wakes the owner when the move fails. A dispatch that
- * moved nothing but saw such a head wakes the fallback head again
- * without the dedup check. Remote moves count on the thief and drop
- * the gauge on the source. Running records the task snapshot and
- * mirrors the Virtual deadline beside it for gap checks with no
- * move of the stored time. Stopping charges burnt time into the
- * stored time and mirrors the stored time beside it. A runnable
- * yield with no burnt time still moves the stored time forward by
- * one. The tick charges the burnt delta and moves the due time
- * with the burst left while inside it and the left slice past it
- * and mirrors the due time beside it, so stopping charges only
- * the tail past the last tick. When the slice is exhausted at
- * the tick, the stored slice stays while the running horizon
- * moves out by one slice, so the two views diverge until
- * stopping charges the tail. A busy core runs at max and an idle
- * core runs at half. The
- * set call never sends zero and never steers placement. A mask change
- * on a queued task keeps the queue and wakes the new owner, counting
- * the wake when the owner is usable. A task with no usable CPU waits
- * in the fallback queue until the mask widens. Init creates one queue
- * per CPU bounded at 64 total with one handle and one total count and the fallback queue.
- * Each handle holds both strands with per-CPU recency and no per strand
- * count. Queues use the upstream library in
- * virtual time mode. Liveness comes from the upstream tree, so CPUs
- * that arrive late need a restart to be seen.
+ * Each CPU drains its own queue first, then queues on the same LLC,
+ * then the same node, then distant queues, then fallback. Each queue
+ * drains in vd order on the first strand. A head that cannot run here
+ * sends one wake to its owner and stays queued. Each victim keeps
+ * its own forward slot with the fallback on the last slot, so one
+ * victim does not hide another. A dead head is dropped with its count
+ * and the next queue is tried. The fallback drops its count from the
+ * task and wakes the owner when the move fails. A dispatch that moved
+ * nothing but saw such a head wakes the fallback head again without
+ * the dedup check. Remote moves count on the thief and drop the gauge
+ * on the source. Running records the task snapshot and mirrors the
+ * vd beside it for gap checks. Stopping charges burnt time into the
+ * stored time and mirrors the stored time beside it, and tracks the
+ * run length for the next due time. A runnable yield with no burnt
+ * time still moves the stored time forward by one. The tick charges
+ * the burnt delta and moves the due time with the burst left while
+ * inside it and the left slice past it and mirrors the due time beside
+ * it, so stopping charges only the tail past the last tick. When the
+ * slice is exhausted at the tick, the stored slice stays while the
+ * running horizon moves out by one slice, so the two views diverge
+ * until stopping charges the tail. A busy core runs at max and an idle
+ * core runs at half. The set call never sends zero and never steers
+ * placement. A mask change on a queued task keeps the queue and wakes
+ * the new owner, counting the wake when the owner is usable. A task
+ * with no usable CPU waits in the fallback queue until the mask widens.
+ * Init creates one queue per CPU bounded at 64 total with one handle
+ * and the fallback queue. The handle holds the first strand. Queues
+ * use the upstream library in virtual time mode. Liveness comes from
+ * the upstream tree, so CPUs that arrive late need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -118,7 +102,7 @@ static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 l
 	owner = flow_first_allowed(ph);
 	flow_kick_idle_only(owner, ph, llc);
 }
-static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 victim, scx_dhq_t *dhq,
+static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, scx_dhq_t *dhq,
 					     u64 strand, u32 slot, int steal, bool *saw)
 {
 	u64 peeked;
@@ -143,7 +127,6 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 		dq = bpf_task_from_pid((s32)dead);
 		if (!dq) {
 			flow_queued_dec(vllc);
-			flow_qcnt_dec(victim);
 			return 0;
 		}
 		/* Another CPU removed the dead head and this pop took the
@@ -161,9 +144,6 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 		}
 		scx_bpf_dsq_insert(dq, (u64)FLOW_FALLBACK_DSQ, slice, 0);
 		flow_stat_inc(llc, 2);
-		flow_qcnt_dec(victim);
-		if (lt)
-			lt->qcpu = -1;
 		bpf_task_release(dq);
 		return 0;
 	}
@@ -181,7 +161,6 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 	p = bpf_task_from_pid((s32)popped);
 	if (!p) {
 		flow_queued_dec(vllc);
-		flow_qcnt_dec(victim);
 		return 0;
 	}
 	if (!flow_cpu_allowed((s32)cpu, p)) {
@@ -198,9 +177,6 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 		}
 		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, 0);
 		flow_stat_inc(llc, 2);
-		flow_qcnt_dec(victim);
-		if (lt)
-			lt->qcpu = -1;
 		bpf_task_release(p);
 		return 0;
 	}
@@ -215,72 +191,12 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 	flow_cpuperf_mark(cpu, false);
 	flow_stat_inc(llc, 1);
 	flow_queued_dec(vllc);
-	flow_qcnt_dec(victim);
-	if (lt)
-		lt->qcpu = -1;
 	bpf_task_release(p);
 	if (steal) {
 		flow_stat_inc(llc, 3);
 		flow_stat_inc(llc, 5);
 	}
 	return 1;
-}
-/* Pick the loaded queue with the most waiting tasks. Ties prefer
- * mates first with the lowest id after that. Empty queues never win. */
-static __always_inline s32 flow_pick_busiest(u32 self, u32 self_llc, u32 self_ccx)
-{
-	s32 best = -1;
-	u32 best_cnt = 0;
-	bool best_mate = false;
-	u32 cpu;
-	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
-		u64 h;
-		u32 cnt;
-		int vl;
-		bool mate;
-		if (cpu == self)
-			continue;
-		if (!flow_cpu_live(cpu))
-			continue;
-		h = READ_ONCE(flow_dhqs[cpu]);
-		if (!h)
-			continue;
-		cnt = READ_ONCE(flow_qcnt[cpu]);
-		if (!cnt)
-			continue;
-		if (best < 0 || cnt > best_cnt) {
-			vl = topo_cpu_to_llc_id(cpu);
-			mate = (vl >= 0 && (u32)vl == self_llc &&
-				flow_cpu_ccx(cpu) == self_ccx);
-			best = (s32)cpu;
-			best_cnt = cnt;
-			best_mate = mate;
-		} else if (cnt == best_cnt) {
-			vl = topo_cpu_to_llc_id(cpu);
-			mate = (vl >= 0 && (u32)vl == self_llc &&
-				flow_cpu_ccx(cpu) == self_ccx);
-			if (mate && !best_mate) {
-				best = (s32)cpu;
-				best_mate = true;
-			}
-		}
-	}
-	return best;
-}
-/* Same node holds the same LLC plus the tree node. Remote queues drain
- * last with both strands in vd order, so locality comes from order. */
-static __always_inline int flow_is_same_node(u32 cpu, u32 llc, topo_ptr hint_node, u32 victim)
-{
-	int vl;
-	if (!flow_cpu_ok(victim))
-		return 0;
-	vl = topo_cpu_to_llc_id(victim);
-	if (vl >= 0 && flow_llc_ok((u32)vl) && (u32)vl == llc)
-		return 1;
-	(void)cpu;
-	if (hint_node && topo_contains(hint_node, victim))
-		return 1;
-	return 0;
 }
 static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
@@ -302,43 +218,10 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* Remote drains last with both strands in vd order. */
-	/* Dual strand drain orders by vd only. */
-	{
-		u64 pa = scx_dhq_peek_strand(dhq, (u64)SCX_DHQ_STRAND_A);
-		u64 pb = scx_dhq_peek_strand(dhq, (u64)SCX_DHQ_STRAND_B);
-		if (!pa && !pb)
-			return 0;
-		if (pa && pb) {
-			struct task_struct *ta = bpf_task_from_pid((s32)pa);
-			struct task_struct *tb = bpf_task_from_pid((s32)pb);
-			u64 first = (u64)SCX_DHQ_STRAND_A;
-			u64 second = (u64)SCX_DHQ_STRAND_B;
-			if (ta && tb) {
-				s64 va = (s64)ta->scx.dsq_vtime;
-				s64 vb = (s64)tb->scx.dsq_vtime;
-				if (vb < va) {
-					first = (u64)SCX_DHQ_STRAND_B;
-					second = (u64)SCX_DHQ_STRAND_A;
-				}
-			} else if (!ta && tb) {
-				first = (u64)SCX_DHQ_STRAND_B;
-				second = (u64)SCX_DHQ_STRAND_A;
-			}
-			if (ta)
-				bpf_task_release(ta);
-			if (tb)
-				bpf_task_release(tb);
-			if (flow_try_move_dhq(cpu, llc, vuse, victim, dhq, first, slot, steal, saw))
-				return 1;
-			return flow_try_move_dhq(cpu, llc, vuse, victim, dhq, second, slot, steal, saw);
-		}
-		if (pa)
-			return flow_try_move_dhq(cpu, llc, vuse, victim, dhq,
-						 (u64)SCX_DHQ_STRAND_A, slot, steal, saw);
-		return flow_try_move_dhq(cpu, llc, vuse, victim, dhq,
-					 (u64)SCX_DHQ_STRAND_B, slot, steal, saw);
-	}
+	/* Single strand drain on the first strand in vd order. */
+	if (flow_try_move_dhq(cpu, llc, vuse, dhq, (u64)SCX_DHQ_STRAND_A, slot, steal, saw))
+		return 1;
+	return 0;
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
@@ -371,77 +254,17 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
-	{
-		u32 my_ccx = flow_cpu_ccx(c);
-		bpf_for(victim, 0, FLOW_MAX_CPUS) {
-			int vl;
-			if (victim == c)
-				continue;
-			if (!flow_cpu_live(victim))
-				continue;
-			/* Empty queues are skipped with no peek. */
-			if (!flow_qcnt_get(victim))
-				continue;
-			vl = topo_cpu_to_llc_id(victim);
-			if (vl < 0 || (u32)vl != llc)
-				continue;
-			/* Mates first in the same LLC with no extra walk. */
-			if (flow_cpu_ccx(victim) != my_ccx)
-				continue;
-			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-				return;
-		}
-		bpf_for(victim, 0, FLOW_MAX_CPUS) {
-			int vl;
-			if (victim == c)
-				continue;
-			if (!flow_cpu_live(victim))
-				continue;
-			/* Empty queues are skipped with no peek. */
-			if (!flow_qcnt_get(victim))
-				continue;
-			vl = topo_cpu_to_llc_id(victim);
-			if (vl < 0 || (u32)vl != llc)
-				continue;
-			/* Mates already ran, so only the rest of the same LLC remains. */
-			if (flow_cpu_ccx(victim) == my_ccx)
-				continue;
-			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-				return;
-		}
-		{
-			s32 busy = flow_pick_busiest(c, llc, my_ccx);
-			if (busy >= 0) {
-				int bllc = topo_cpu_to_llc_id((u32)busy);
-				bool scanned = (bllc >= 0 && (u32)bllc == llc);
-				/* Busiest victim drains both strands with locality from order.
-				 * Only queues outside the scanned set run here. */
-				if (!scanned) {
-					if (flow_drain_cpu(c, llc, (u32)busy, 1,
-							   &saw_unrunnable))
-						return;
-				}
-			}
-		}
-		bpf_for(victim, 0, FLOW_MAX_CPUS) {
-			int vl;
-			if (victim == c)
-				continue;
-			if (!flow_cpu_live(victim))
-				continue;
-			/* Empty queues are skipped with no peek. */
-			if (!flow_qcnt_get(victim))
-				continue;
-			vl = topo_cpu_to_llc_id(victim);
-			if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
-				continue;
-			/* Node identity comes from the tree with no per-CPU walk here.
-			 * Same node remote runs before distant remote. */
-			if (!hint_node || !topo_contains(hint_node, victim))
-				continue;
-			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-				return;
-		}
+	bpf_for(victim, 0, FLOW_MAX_CPUS) {
+		int vl;
+		if (victim == c)
+			continue;
+		if (!flow_cpu_live(victim))
+			continue;
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || (u32)vl != llc)
+			continue;
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+			return;
 	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
@@ -449,15 +272,26 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (!flow_cpu_live(victim))
 			continue;
-		/* Empty queues are skipped with no peek. */
-		if (!flow_qcnt_get(victim))
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
+			continue;
+		/* Node identity comes from the tree with no per-CPU walk here. */
+		if (!hint_node || !topo_contains(hint_node, victim))
+			continue;
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+			return;
+	}
+	bpf_for(victim, 0, FLOW_MAX_CPUS) {
+		int vl;
+		if (victim == c)
+			continue;
+		if (!flow_cpu_live(victim))
 			continue;
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
 			continue;
 		if (hint_node && topo_contains(hint_node, victim))
 			continue;
-		/* Remote drains last with both strands in vd order. */
 		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
@@ -741,7 +575,6 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
-	t->qcpu = -1;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -762,7 +595,6 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->llc_id = 0;
 	t->flags = 0;
 	t->cgrp_id = cgid;
-	t->qcpu = -1;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }

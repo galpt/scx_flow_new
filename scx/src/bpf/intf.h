@@ -2,28 +2,15 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU owns one queue handle with two strands ordered by vd. Warm tasks
- * join the first strand and cold tasks join the second. Strands hold
- * per-CPU recency with no per strand count. Ties leave in
- * insertion order. Warm means the last CPU shares the same LLC with
- * the picked target, else the task stays cold. The same LLC means the
- * same chip. Placement picks the live allowed queue with the fewest
- * waiting tasks as one total per queue with ties to the mate of the
- * last CPU else the lowest id. A strand
- * that refuses an insert tries the other strand once before the fallback queue
- * as a balance-only guard.
- * Draining peeks both heads and pops the earlier vd with ties to the
- * first strand. Remote queues drain last with both strands in vd order,
- * so locality comes from order alone. Each per CPU queue holds bounded at 64 total
- * as a 32+32 split with at most one extra on one side with one millis
- * slices. Depth signal reuses the guard and the queued plus fallback
- * plus steal counts with no extra probe. Waiting counts track queued
- * tasks per CPU for placement and stay internal. One fallback queue
- * holds tasks that have no usable CPU in FIFO order as a best effort
- * overflow with no extra promise. Pinned tasks run on their local
- * queue.
- * Shares are read from the cgroup map on each enqueue and folded
- * with the task nice weight. A task pays
+ * Each CPU owns one queue ordered by vd on the first strand. Ties
+ * leave in insertion order. One fallback queue holds tasks that have
+ * no usable CPU in FIFO order as a best effort overflow with no extra
+ * promise. Pinned tasks run on their local queue. Placement keeps the
+ * constrained target with no load scan. Draining walks local first
+ * then same LLC then same node then distant remote last in vd order
+ * with idle starts at once. Each per CPU queue holds bounded at 64
+ * total with one millis slices. Shares are read from the cgroup map
+ * on each enqueue and folded with the task nice weight. A task pays
  * for the time it burns, scaled by its share. Fresh times move past
  * a per LLC floor so two tasks never share the same value, with a
  * direct store of the last observed value plus one when the loop
@@ -32,16 +19,12 @@
  * so a larger share or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
  * last run length. A shared enqueue with a due time ahead of the
- * running due time kicks for preempt
- * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
- * stored time forward by one. Each per CPU queue holds bounded at 64 total
- * with the fallback holding at most one thousand twenty four.
- * Steal moves with local first then mates then the rest of the same LLC
- * and node then the most loaded queue outside the scanned set then same
- * node remote then distant remote last with both strands in vd order
- * with idle starts at once. Queues come from the upstream
- * double helix library in virtual time mode, and placement follows
- * the upstream topology library with liveness from the same tree.
+ * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
+ * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
+ * holds bounded at 64 total with the fallback holding at most one
+ * thousand twenty four. Queues come from the upstream double helix
+ * library in virtual time mode, and placement follows the upstream
+ * topology library with liveness from the same tree.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -89,8 +72,7 @@ enum flow_consts {
  * Llc records the last enqueue target. Flags holds the queued bit.
  * Cgrp holds the group id. A zero id means no group was recorded.
  * Vd holds the due time for queue order. Burst holds the run length
- * used for the due time. Qcpu holds the queue with the counted wait
- * with minus one for none. */
+ * used for the due time. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -100,7 +82,6 @@ struct flow_task_ctx {
 	u64 cgrp_id;
 	s64 vd;
 	u64 burst_ns;
-	s32 qcpu;
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
  * generation, so each run kicks at most once. Vd mirrors the running

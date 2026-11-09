@@ -4,7 +4,7 @@
  *
  * Thin glue that pulls in area headers in order and declares
  * the ops table. Each CPU owns one upstream queue in vd order
- * with two strands for warm and cold tasks and there is one fallback
+ * on the first strand and there is one fallback
  * queue in FIFO order. Queues hold bounded at 64 total.
  * Ties leave in insertion order. Vd order sets the queue with
  * preempts for shared tasks with an earlier vd. Queues come from

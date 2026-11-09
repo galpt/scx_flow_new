@@ -2,11 +2,11 @@
 
 ## What
 
-scx_flow orders tasks by deadline.
-Each per-CPU queue holds warm on strand A and cold on strand B in deadline order with insertion order for ties, draining earlier head first with ties to A, balanced cap 1.
-Each queue holds bounded at 64 total with fixed 1ms slices, plus one FIFO fallback as best-effort overflow.
-Warm means last CPU shares same LLC. Placement picks least queued live queue with mate tie. Dispatch drains local, mates, same LLC, same node, most loaded outside, same-node remote, then distant remote last with both strands in vd order. Virtual deadline (vd) adds burst scaled share step to floored time.
-Wakeups wake idle only with preempt on earlier deadline in same LLC with single kick. The tail stays informational.
+scx_flow orders tasks by deadline. Each per-CPU queue holds tasks in
+deadline order with equal deadlines in insertion order, plus one fallback
+queue in FIFO order. Running tasks pay for burnt time. Virtual deadline adds
+a burst scaled share step to the floored time. Dispatch drains local first,
+then same LLC, then same node, then remote. Wakeups wake idle only with preempt on an earlier deadline. Slice is fixed at 1ms, and hotplug needs restart.
 
 ## Typical Use Cases
 
