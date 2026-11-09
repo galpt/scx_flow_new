@@ -19,9 +19,7 @@
  * to the floored time through the shared charge path, so a larger
  * weight or a shorter run gives an earlier due time with no extra
  * divide. Burst holds the last run length between the floor and
- * one slice with shift only moves. A wakeup enqueue moves the due time
- * earlier by at most one eighth of the nice step with shift only moves,
- * staying past the floor and within one step above it.
+ * one slice with shift only moves.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -112,24 +110,6 @@ static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
 	if (vd <= floored)
 		return flow_fair_cap_add(floored, 1);
 	return vd;
-}
-/* Wakeup assist moves the due time earlier by at most one eighth of
- * the nice step with shift only moves. The final due time stays past
- * the floor and within one step above it with saturation, so a wakeup
- * gains at most a small nudge with no extra divide. */
-static __always_inline s64 flow_vd_wakeup_assist(s64 vd, s64 floored, u32 w)
-{
-	u64 step = flow_fair_step(w);
-	u64 assist = step >> 3;
-	s64 floor_one;
-	if (!assist)
-		return vd;
-	floor_one = flow_fair_cap_add(floored, 1);
-	if (vd <= floor_one)
-		return vd;
-	if ((u64)(vd - floored) > assist + 1U)
-		return vd - (s64)assist;
-	return floor_one;
 }
 /* Track the last run length. An overrun snaps to one slice. A run
  * that ends early while still runnable only moves up past the old

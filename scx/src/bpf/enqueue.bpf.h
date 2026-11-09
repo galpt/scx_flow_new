@@ -282,15 +282,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Queues hold bounded at 64 total. A wakeup enqueue nudges the
-		 * due time earlier by at most one eighth of the nice step with
-		 * shift only moves. Pinned plus exiting plus no CPU plus
-		 * fallback stay without the nudge with a single kick. */
+		 * Queues hold bounded at 64 total with pure deadline order
+		 * and a single kick. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_nice_weight(p);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-		s64 base_vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
-		s64 vd = base_vd;
+		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
 		struct scx_edq __arena *edq = no_cpu ? 0 : flow_edq_for_cpu(tgt);
 		bool fell = true;
@@ -301,8 +298,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			if (mem && scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP)
 				can_queue = true;
 		}
-		if (can_queue && (enq_flags & SCX_ENQ_WAKEUP))
-			vd = flow_vd_wakeup_assist(base_vd, floored, w);
 		t->vtime = floored;
 		t->vd = vd;
 		t->slice_rem = slice_len;
@@ -320,12 +315,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 							 dl, 0, slice_len);
 				if (!ret)
 					fell = false;
-				else {
-					/* Fallback stays without the nudge. */
-					t->vd = base_vd;
-					scx_bpf_task_set_dsq_vtime(p, base_vd);
-					vd = base_vd;
-				}
 			}
 		}
 		if (fell)

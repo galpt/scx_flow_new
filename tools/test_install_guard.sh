@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.12" ] || fail "version not at 5.2.12"
+[ "${want}" = "5.2.14" ] || fail "version not at 5.2.14"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -356,10 +356,8 @@ grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
 # Burst run length scales the vd step with shift only moves and a
 # bounded floor. The vd takes three args with the burst in the middle
-# and the floor cap stays at one base step. Wakeup assist nudges the
-# due time earlier by at most one eighth of the nice step with shift
-# only moves for wakeup enqueues with the final due time past the floor
-# and within one step above it.
+# and the floor cap stays at one base step. Pure deadline order keeps
+# the floored time plus the burst scaled nice step with no wakeup nudge.
 grep -q "FLOW_SLICE_FLOOR_NS = 62500ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "burst floor missing"
 grep -q "burst_ns" "${SRC_DIR}/src/bpf/intf.h" || fail "burst field missing"
 grep -q "flow_burst_clamp" "${FAIR_HDR}" || fail "burst clamp missing"
@@ -369,13 +367,18 @@ grep -q "b >> 1" "${FAIR_HDR}" || fail "burst half shift missing"
 grep -q "b >> 2" "${FAIR_HDR}" || fail "burst quarter shift missing"
 grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "burst vd use missing"
 grep -q "flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS)" "${FAIR_HDR}" || fail "floor cap missing"
-grep -q "flow_vd_wakeup_assist" "${FAIR_HDR}" || fail "wakeup assist missing"
-grep -q "step >> 3" "${FAIR_HDR}" || fail "assist eighth shift missing"
-grep -q "flow_fair_step(w)" "${FAIR_HDR}" || fail "assist step missing"
-grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "assist floor missing"
-grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" || fail "wakeup flag missing"
-grep -q "flow_vd_wakeup_assist(base_vd" "${ENQ_HDR}" || fail "assist use missing"
-[ "$(grep -c "flow_vd_wakeup_assist" "${SRC_DIR}/src/bpf/fair.bpf.h" "${SRC_DIR}/src/bpf/enqueue.bpf.h" | cut -d : -f 2 | paste -sd + - | bc | tr -d ' ')" = "2" ] || fail "assist use drifted"
+grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "vd floor missing"
+# Pure proxy keeps deadline order with no wakeup nudge. Any assist helper
+# plus wakeup branch plus eighth shift must not return.
+if grep -q "flow_vd_wakeup_assist" "${FAIR_HDR}" "${ENQ_HDR}" 2>/dev/null; then
+    fail "wakeup assist reappeared"
+fi
+if grep -q "step >> 3" "${FAIR_HDR}" 2>/dev/null; then
+    fail "assist shift reappeared"
+fi
+if grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" 2>/dev/null; then
+    fail "wakeup branch reappeared"
+fi
 grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
 grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
 grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"
