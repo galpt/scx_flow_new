@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.8" ] || fail "version not at 5.2.8"
+[ "${want}" = "5.2.9" ] || fail "version not at 5.2.9"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c24f2ddc32516a43b2293c19b3730a22d0b517508431abd6f969cccf228a9ac6" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "d65b933b2fbc984f5e91cc5696f76fff137c49669eface00bbc8e6661ad4c19a" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -628,10 +628,16 @@ if grep -q 'bpf_for(li, 0, FLOW_MAX_LLCS)' "${DISP_HDR}" 2>/dev/null; then
     fail "fallback scan reappeared"
 fi
 
-# Queued gauge writes back the last value when the compare loop loses.
-if ! grep -q "st->queued = last - 1" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
-    fail "queued fallback store missing"
+# Queued gauge keeps the floor through a saturating atomic step with
+# no plain store when the compare loop loses.
+if grep -q "st->queued = last - 1" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "queued direct store reappeared"
 fi
+if grep -q "flow_qcnt\[cpu\] = last" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "waiting direct store reappeared"
+fi
+grep -q "__sync_fetch_and_sub(&st->queued" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "queued saturating step missing"
+grep -q "__sync_fetch_and_add(&flow_qcnt" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting saturating step missing"
 
 # Installer provenance states the mirror and upstream share one commit.
 if ! grep -q "matches the upstream" "${INST}" 2>/dev/null; then
@@ -717,7 +723,8 @@ grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose m
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
 # plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus bounded at 64 plus overflow plus tail plus burst vd target.
+# plus bounded at 64 plus overflow plus tail plus burst vd target
+# plus mate tie plus locality order.
 grep -q "burst" "${SRC_DIR}/README.md" || fail "readme burst missing"
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
@@ -733,6 +740,7 @@ grep -q "least queued" "${SRC_DIR}/README.md" || fail "readme least missing"
 grep -q "most loaded" "${SRC_DIR}/README.md" || fail "readme most missing"
 grep -q "remote last" "${SRC_DIR}/README.md" || fail "readme remote missing"
 grep -q "both strands" "${SRC_DIR}/README.md" || fail "readme both missing"
+grep -q "mate tie" "${SRC_DIR}/README.md" || fail "readme mate missing"
 if grep -q "warm only" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme warm only reappeared"
 fi
@@ -774,8 +782,8 @@ if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/b
 fi
 
 # Bounded queues with waiting counts plus least load plus most load steal.
-# Placement scans once for the fewest waiting tasks and dispatch steals
-# the most loaded queue first with remote kept last with both strands.
+# Placement scans once for the fewest waiting tasks with mate tie and
+# dispatch keeps locality first with remote kept last with both strands.
 grep -q "flow_qcnt" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "waiting counts missing"
 grep -q "flow_qcnt_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting rise missing"
 grep -q "flow_qcnt_dec" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "waiting drop missing"
@@ -783,17 +791,36 @@ grep -q "flow_qcnt_inc" "${ENQ_HDR}" || fail "enqueue waiting rise missing"
 grep -q "flow_qcnt_dec" "${DISP_HDR}" || fail "dispatch waiting drop missing"
 grep -q "flow_pick_busiest" "${DISP_HDR}" || fail "busiest pick missing"
 grep -q "flow_is_same_node" "${DISP_HDR}" || fail "node test missing"
-grep -q "warm_only" "${DISP_HDR}" || fail "warm arg missing"
-grep -q "if (warm_only)" "${DISP_HDR}" || fail "warm branch missing"
+if grep -q "warm_only" "${DISP_HDR}" 2>/dev/null; then
+    fail "warm arg reappeared"
+fi
+if grep -q "if (warm_only)" "${DISP_HDR}" 2>/dev/null; then
+    fail "warm branch reappeared"
+fi
 grep -q "both strands in vd order" "${DISP_HDR}" || fail "remote last prose missing"
 grep -q "Remote drains last" "${DISP_HDR}" || fail "far node prose missing"
-grep -q "saw_unrunnable, 0)" "${DISP_HDR}" || fail "free drain missing"
+grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "free drain missing"
 if grep -q "first strand only" "${DISP_HDR}" 2>/dev/null; then
     fail "warm only path reappeared"
 fi
 if grep -q "saw_unrunnable, 1)" "${DISP_HDR}" 2>/dev/null; then
     fail "warm only dispatch reappeared"
 fi
+# Mate-aware least tie keeps locality on equal waits with no extra bias.
+grep -q "flow_pick_least(p, last" "${ENQ_HDR}" || fail "mate pick missing"
+grep -q "cnt == best_cnt" "${ENQ_HDR}" || fail "mate tie missing"
+grep -q "best_mate" "${ENQ_HDR}" || fail "mate state missing"
+# Locality-first order keeps mates plus rest before busiest outside
+# with same-node remote before distant remote last.
+grep -q "outside the scanned set" "${DISP_HDR}" || fail "busiest outside missing"
+grep -q "Mates first in the same LLC" "${DISP_HDR}" || fail "mate order missing"
+grep -q "rest of the same LLC" "${DISP_HDR}" || fail "rest order missing"
+grep -q "Same node remote" "${DISP_HDR}" || fail "node remote missing"
+# Stored queue keeps waiting counts exact with no per strand split.
+grep -q "qcpu" "${SRC_DIR}/src/bpf/intf.h" || fail "stored queue missing"
+grep -q "qcpu = -1" "${ENQ_HDR}" || fail "stored queue clear missing"
+grep -q "qcpu = tgt" "${ENQ_HDR}" || fail "stored queue set missing"
+grep -q "qcpu = -1" "${DISP_HDR}" || fail "dispatch queue clear missing"
 grep -q "per-CPU recency" "${ENQ_HDR}" || fail "enqueue recency missing"
 grep -q "balance-only guard" "${ENQ_HDR}" || fail "enqueue guard missing"
 grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/intf.h" || fail "intf recency missing"

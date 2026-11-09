@@ -8,7 +8,8 @@
  * insertion order. Warm means the last CPU shares the same LLC with
  * the picked target, else the task stays cold. The same LLC means the
  * same chip. Placement picks the live allowed queue with the fewest
- * waiting tasks as one total per queue with ties to the lowest id. A strand
+ * waiting tasks as one total per queue with ties to the mate of the
+ * last CPU else the lowest id. A strand
  * that refuses an insert tries the other strand once before the fallback queue
  * as a balance-only guard.
  * Draining peeks both heads and pops the earlier vd with ties to the
@@ -35,9 +36,10 @@
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
  * stored time forward by one. Each per CPU queue holds bounded at 64 total
  * with the fallback holding at most one thousand twenty four.
- * Steal moves with local first then the most loaded queue then mates
- * then the rest of the same LLC then same node then remote last with both strands
- * in vd order with idle starts at once. Queues come from the upstream
+ * Steal moves with local first then mates then the rest of the same LLC
+ * and node then the most loaded queue outside the scanned set then same
+ * node remote then distant remote last with both strands in vd order
+ * with idle starts at once. Queues come from the upstream
  * double helix library in virtual time mode, and placement follows
  * the upstream topology library with liveness from the same tree.
  *
@@ -87,7 +89,8 @@ enum flow_consts {
  * Llc records the last enqueue target. Flags holds the queued bit.
  * Cgrp holds the group id. A zero id means no group was recorded.
  * Vd holds the due time for queue order. Burst holds the run length
- * used for the due time. */
+ * used for the due time. Qcpu holds the queue with the counted wait
+ * with minus one for none. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -97,6 +100,7 @@ struct flow_task_ctx {
 	u64 cgrp_id;
 	s64 vd;
 	u64 burst_ns;
+	s32 qcpu;
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
  * generation, so each run kicks at most once. Vd mirrors the running

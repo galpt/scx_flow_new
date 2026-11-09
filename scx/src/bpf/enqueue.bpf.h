@@ -4,8 +4,8 @@
  *
  * Shared tasks join the least queued per CPU queue in vd order.
  * One scan picks the live allowed queue with one handle that holds
- * the fewest waiting tasks as one total per queue. Ties keep the lowest
- * id with no extra mate favor here. Warmness stays in the strand only
+ * the fewest waiting tasks as one total per queue. Ties keep the mate
+ * of the last CPU else the lowest id. Warmness stays in the strand only
  * as per-CPU recency with no per strand count. Warm tasks
  * take the first strand and cold tasks take the second, with unclear
  * tasks treated as cold. Warm means the last CPU shares the same
@@ -31,8 +31,9 @@
  * stay in the same LLC with an allowed live target. Local inserts
  * are not counted in the shared gauge. Shared and fallback inserts
  * count the gauge, and fallback inserts also count fallback. Waiting
- * counts rise only on a queue insert and drop on dispatch moves.
- * Dequeue drops the gauge on cancel with no waiting drop. Masks are
+ * counts rise only on a queue insert and drop on dispatch moves
+ * plus dequeue cancel through the stored queue. Dequeue drops the
+ * gauge on cancel with the stored queue drop when present. Masks are
  * checked again before each wake, so a task is never kicked toward
  * a CPU outside its current mask. Enqueue reads the cgroup map on
  * shared and fallback inserts. The birth id comes from init args.
@@ -74,13 +75,25 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
 	return 0;
 }
 /* Pick the live allowed queue with the fewest waiting tasks.
- * Ties keep the lowest id with no extra mate favor here.
+ * Ties keep the mate of the last CPU else the lowest id.
  * Warmness stays in the strand only as per-CPU recency. */
-static __always_inline s32 flow_pick_least(struct task_struct *p)
+static __always_inline s32 flow_pick_least(struct task_struct *p, s32 last)
 {
 	s32 best = -1;
 	u32 best_cnt = 0xffffffffU;
+	bool best_mate = false;
+	bool have_last = false;
+	int last_llc = -1;
+	u32 last_ccx = 0;
 	u32 cpu;
+	if (last >= 0 && flow_cpu_ok((u32)last)) {
+		int v = topo_cpu_to_llc_id((u32)last);
+		if (v >= 0 && flow_llc_ok((u32)v)) {
+			last_llc = v;
+			last_ccx = flow_cpu_ccx((u32)last);
+			have_last = true;
+		}
+	}
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 h;
 		u32 cnt;
@@ -95,6 +108,23 @@ static __always_inline s32 flow_pick_least(struct task_struct *p)
 		if (best < 0 || cnt < best_cnt) {
 			best = (s32)cpu;
 			best_cnt = cnt;
+			if (have_last) {
+				int vl = topo_cpu_to_llc_id(cpu);
+				best_mate = (vl == last_llc &&
+					     flow_cpu_ccx(cpu) == last_ccx);
+			} else {
+				best_mate = false;
+			}
+		} else if (cnt == best_cnt) {
+			if (have_last) {
+				int vl = topo_cpu_to_llc_id(cpu);
+				bool mate = (vl == last_llc &&
+					     flow_cpu_ccx(cpu) == last_ccx);
+				if (mate && !best_mate) {
+					best = (s32)cpu;
+					best_mate = true;
+				}
+			}
 		}
 	}
 	return best;
@@ -211,7 +241,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	scx_arena_subprog_init();
 	last_cpu = scx_bpf_task_cpu(p);
-	tgt = flow_pick_least(p);
+	tgt = flow_pick_least(p, last_cpu);
 	strand = flow_warm_strand(last_cpu, tgt);
 	if (tgt >= 0 && flow_cpu_live((u32)tgt)) {
 		u32 tmp = 0;
@@ -296,12 +326,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_dhq_t *dhq = no_cpu ? 0 : flow_queue_for_cpu(tgt);
 		bool fell = true;
 		t->llc_id = llc;
+		t->qcpu = -1;
 		if (dhq) {
 			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)raw_v, strand);
 			if (!ret) {
 				fell = false;
-				if (tgt >= 0)
+				if (tgt >= 0) {
 					flow_qcnt_inc((u32)tgt);
+					t->qcpu = tgt;
+				}
 			}
 		}
 		if (fell)
@@ -315,6 +348,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	if (pinned) {
 		t->llc_id = llc;
+		t->qcpu = -1;
 		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
 		flow_stat_inc(llc, 0);
 		flow_stat_inc(llc, 2);
@@ -339,6 +373,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->vd = vd;
 		t->slice_rem = slice_len;
 		t->llc_id = llc;
+		t->qcpu = -1;
 		/* Mirror the due time beside the stored time so later reads see the same due time for order checks. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		/* Balance rejects fall back to FIFO with no extra probe. */
@@ -346,8 +381,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			int ret = flow_try_insert_dhq(dhq, (u64)p->pid, (u64)vd, strand);
 			if (!ret) {
 				fell = false;
-				if (tgt >= 0)
+				if (tgt >= 0) {
 					flow_qcnt_inc((u32)tgt);
+					t->qcpu = tgt;
+				}
 			}
 		}
 		if (fell)
@@ -400,9 +437,13 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 	old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
 	if (old & (u32)FLOW_FLAG_QUEUED) {
 		u32 dllc = READ_ONCE(t->llc_id);
+		s32 qc = READ_ONCE(t->qcpu);
 		if (!flow_llc_ok(dllc))
 			dllc = 0;
 		flow_queued_dec(dllc);
+		if (qc >= 0 && flow_cpu_ok((u32)qc))
+			flow_qcnt_dec((u32)qc);
+		t->qcpu = -1;
 	}
 }
 #endif

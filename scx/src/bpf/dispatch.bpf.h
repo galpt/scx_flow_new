@@ -2,11 +2,12 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own queue first, then the most loaded queue,
- * then mates in the same LLC, then the rest of the same LLC, then
- * the same node, then distant queues last, then fallback. The most loaded
- * pick scans waiting counts with mates first on ties and lowest id
- * after that. Idle work starts at once with no wait for warm tasks.
+ * Each CPU drains its own queue first, then mates in the same LLC,
+ * then the rest of the same LLC and node, then the most loaded queue
+ * outside the scanned set, then same node remote, then distant queues
+ * last, then fallback. The most loaded pick scans waiting counts
+ * with mates first on ties and lowest id after that. Idle work starts
+ * at once with no wait for warm tasks.
  * Queues hold bounded at 64 total and empty queues are skipped with no
  * peek through waiting counts. Mates compare the cluster hint with
  * no extra walk. Each queue drains the earlier vd across both strands
@@ -45,8 +46,7 @@
  * Each handle holds both strands with per-CPU recency and no per strand
  * count. Queues use the upstream library in
  * virtual time mode. Liveness comes from the upstream tree, so CPUs
- * that arrive late need a restart to be seen. The warm_only arg stays
- * for shape with No warm caller and all callers pass no warm limit.
+ * that arrive late need a restart to be seen.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -162,6 +162,8 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 		scx_bpf_dsq_insert(dq, (u64)FLOW_FALLBACK_DSQ, slice, 0);
 		flow_stat_inc(llc, 2);
 		flow_qcnt_dec(victim);
+		if (lt)
+			lt->qcpu = -1;
 		bpf_task_release(dq);
 		return 0;
 	}
@@ -197,6 +199,8 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, 0);
 		flow_stat_inc(llc, 2);
 		flow_qcnt_dec(victim);
+		if (lt)
+			lt->qcpu = -1;
 		bpf_task_release(p);
 		return 0;
 	}
@@ -208,11 +212,13 @@ static __always_inline int flow_try_move_dhq(u32 cpu, u32 llc, u32 vllc, u32 vic
 			slice = s;
 	}
 	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
-	bpf_task_release(p);
 	flow_cpuperf_mark(cpu, false);
 	flow_stat_inc(llc, 1);
 	flow_queued_dec(vllc);
 	flow_qcnt_dec(victim);
+	if (lt)
+		lt->qcpu = -1;
+	bpf_task_release(p);
 	if (steal) {
 		flow_stat_inc(llc, 3);
 		flow_stat_inc(llc, 5);
@@ -276,8 +282,7 @@ static __always_inline int flow_is_same_node(u32 cpu, u32 llc, topo_ptr hint_nod
 		return 1;
 	return 0;
 }
-static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw,
-					  int warm_only)
+static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
 	scx_dhq_t *dhq;
 	u64 h;
@@ -297,10 +302,7 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	/* The bound is a power of two, so a mask keeps the slot in
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* No warm caller. Remote drains last with both strands in vd order. */
-	if (warm_only)
-		return flow_try_move_dhq(cpu, llc, vuse, victim, dhq,
-					 (u64)SCX_DHQ_STRAND_A, slot, steal, saw);
+	/* Remote drains last with both strands in vd order. */
 	/* Dual strand drain orders by vd only. */
 	{
 		u64 pa = scx_dhq_peek_strand(dhq, (u64)SCX_DHQ_STRAND_A);
@@ -367,16 +369,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			}
 		}
 	}
-	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable, 0))
+	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
 	{
 		u32 my_ccx = flow_cpu_ccx(c);
-		s32 busy = flow_pick_busiest(c, llc, my_ccx);
-		if (busy >= 0) {
-			/* Busiest victim drains both strands with locality from order. */
-			if (flow_drain_cpu(c, llc, (u32)busy, 1, &saw_unrunnable, 0))
-				return;
-		}
 		bpf_for(victim, 0, FLOW_MAX_CPUS) {
 			int vl;
 			if (victim == c)
@@ -392,12 +388,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			/* Mates first in the same LLC with no extra walk. */
 			if (flow_cpu_ccx(victim) != my_ccx)
 				continue;
-			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable, 0))
+			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 				return;
 		}
 		bpf_for(victim, 0, FLOW_MAX_CPUS) {
 			int vl;
-			bool same_llc;
 			if (victim == c)
 				continue;
 			if (!flow_cpu_live(victim))
@@ -406,19 +401,45 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			if (!flow_qcnt_get(victim))
 				continue;
 			vl = topo_cpu_to_llc_id(victim);
-			same_llc = (vl >= 0 && flow_llc_ok((u32)vl) && (u32)vl == llc);
-			if (same_llc) {
-				/* Mates already ran, so only the rest remains. */
-				if (flow_cpu_ccx(victim) == my_ccx)
-					continue;
-			} else {
-				if (vl < 0 || !flow_llc_ok((u32)vl))
-					continue;
-				/* Node identity comes from the tree with no per-CPU walk here. */
-				if (!hint_node || !topo_contains(hint_node, victim))
-					continue;
+			if (vl < 0 || (u32)vl != llc)
+				continue;
+			/* Mates already ran, so only the rest of the same LLC remains. */
+			if (flow_cpu_ccx(victim) == my_ccx)
+				continue;
+			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+				return;
+		}
+		{
+			s32 busy = flow_pick_busiest(c, llc, my_ccx);
+			if (busy >= 0) {
+				int bllc = topo_cpu_to_llc_id((u32)busy);
+				bool scanned = (bllc >= 0 && (u32)bllc == llc);
+				/* Busiest victim drains both strands with locality from order.
+				 * Only queues outside the scanned set run here. */
+				if (!scanned) {
+					if (flow_drain_cpu(c, llc, (u32)busy, 1,
+							   &saw_unrunnable))
+						return;
+				}
 			}
-			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable, 0))
+		}
+		bpf_for(victim, 0, FLOW_MAX_CPUS) {
+			int vl;
+			if (victim == c)
+				continue;
+			if (!flow_cpu_live(victim))
+				continue;
+			/* Empty queues are skipped with no peek. */
+			if (!flow_qcnt_get(victim))
+				continue;
+			vl = topo_cpu_to_llc_id(victim);
+			if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
+				continue;
+			/* Node identity comes from the tree with no per-CPU walk here.
+			 * Same node remote runs before distant remote. */
+			if (!hint_node || !topo_contains(hint_node, victim))
+				continue;
+			if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 				return;
 		}
 	}
@@ -437,7 +458,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (hint_node && topo_contains(hint_node, victim))
 			continue;
 		/* Remote drains last with both strands in vd order. */
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable, 0))
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
 	{
@@ -720,6 +741,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
+	t->qcpu = -1;
 }
 s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -740,6 +762,7 @@ s32 BPF_STRUCT_OPS(flow_init_task, struct task_struct *p, struct scx_init_task_a
 	t->llc_id = 0;
 	t->flags = 0;
 	t->cgrp_id = cgid;
+	t->qcpu = -1;
 	scx_bpf_task_set_dsq_vtime(p, 0);
 	return 0;
 }
