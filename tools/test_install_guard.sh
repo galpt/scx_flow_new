@@ -108,7 +108,7 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "99870fb0902bfa370b77c387a2d5fb6b5919a007079e93e099ed483c11c3ab4c" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c24f2ddc32516a43b2293c19b3730a22d0b517508431abd6f969cccf228a9ac6" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -519,14 +519,18 @@ fi
 # Fair scales base by share with a per LLC floor. Vd sets the order with
 # a strict preempt on an earlier vd. Wakes go preempt on a vd win else
 # idle with a skip otherwise. Queues use the upstream library with per
-# CPU placement and FIFO fallback. Queues hold without a bound.
+# CPU placement and FIFO fallback. Queues hold bounded at 64 total.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
+grep -q "FLOW_QUEUE_CAP = 64ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
 grep -q "SCX_DHQ_MODE_BALANCED" "${DISP_HDR}" || fail "mode use missing"
 grep -q "scx_dhq_create_balanced" "${DISP_HDR}" || fail "queue create missing"
-grep -q "SCX_DHQ_INF_CAPACITY" "${DISP_HDR}" || fail "unbounded cap missing"
+grep -q "(u64)FLOW_QUEUE_CAP" "${DISP_HDR}" || fail "bounded create missing"
+if grep -q "SCX_DHQ_INF_CAPACITY" "${DISP_HDR}" 2>/dev/null; then
+    fail "unbounded cap reappeared"
+fi
 if grep -q "10ULL" "${DISP_HDR}" 2>/dev/null; then
-    fail "bounded cap reappeared"
+    fail "stale cap reappeared"
 fi
 if grep -q "256ULL" "${DISP_HDR}" 2>/dev/null; then
     fail "old percpu cap reappeared"
@@ -713,7 +717,7 @@ grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose m
 
 # Scheduler README stays minimal with deadline plus per-CPU plus FIFO
 # plus fixed slice plus idle plus preempt plus restart plus dual strand
-# plus unbounded plus overflow plus tail plus burst vd target.
+# plus bounded at 64 plus overflow plus tail plus burst vd target.
 grep -q "burst" "${SRC_DIR}/README.md" || fail "readme burst missing"
 grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
@@ -724,7 +728,7 @@ grep -q "idle" "${SRC_DIR}/README.md" || fail "readme idle missing"
 grep -q "preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
 grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
 grep -q "strand" "${SRC_DIR}/README.md" || fail "readme strand missing"
-grep -q "without bound" "${SRC_DIR}/README.md" || fail "readme unbounded missing"
+grep -q "bounded at 64" "${SRC_DIR}/README.md" || fail "readme bounded missing"
 grep -q "least queued" "${SRC_DIR}/README.md" || fail "readme least missing"
 grep -q "most loaded" "${SRC_DIR}/README.md" || fail "readme most missing"
 grep -q "remote last" "${SRC_DIR}/README.md" || fail "readme remote missing"
@@ -737,11 +741,20 @@ if grep -q "first strand only" "${SRC_DIR}/README.md" 2>/dev/null; then
 fi
 grep -q "overflow" "${SRC_DIR}/README.md" || fail "readme overflow missing"
 grep -q "tail" "${SRC_DIR}/README.md" || fail "readme tail missing"
+if grep -q "without bound" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme unbounded reappeared"
+fi
+if grep -q "without a bound" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme unbounded reappeared"
+fi
+if grep -q "no bound" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme unbounded reappeared"
+fi
 if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme bounded cap reappeared"
+    fail "readme stale cap reappeared"
 fi
 if grep -q "10ms" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme bounded bound reappeared"
+    fail "readme stale bound reappeared"
 fi
 if grep -q "aspirational" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme ideal reappeared"
@@ -760,7 +773,7 @@ if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/b
     fail "float outside fair reappeared"
 fi
 
-# Unbounded queues with waiting counts plus least load plus most load steal.
+# Bounded queues with waiting counts plus least load plus most load steal.
 # Placement scans once for the fewest waiting tasks and dispatch steals
 # the most loaded queue first with remote kept last with both strands.
 grep -q "flow_qcnt" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "waiting counts missing"
@@ -786,11 +799,26 @@ grep -q "balance-only guard" "${ENQ_HDR}" || fail "enqueue guard missing"
 grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/intf.h" || fail "intf recency missing"
 grep -q "balance-only guard" "${SRC_DIR}/src/bpf/intf.h" || fail "intf guard missing"
 grep -q "per-CPU recency" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps recency missing"
-grep -q "without a bound" "${SRC_DIR}/src/bpf/intf.h" || fail "unbounded prose missing"
-grep -q "without a bound" "${ENQ_HDR}" || fail "enqueue unbounded prose missing"
-grep -q "without a bound" "${DISP_HDR}" || fail "dispatch unbounded prose missing"
+grep -q "FLOW_QUEUE_CAP" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap prose missing"
+grep -q "bounded at 64" "${SRC_DIR}/src/bpf/intf.h" || fail "bounded prose missing"
+grep -q "bounded at 64" "${ENQ_HDR}" || fail "enqueue bounded prose missing"
+grep -q "bounded at 64" "${DISP_HDR}" || fail "dispatch bounded prose missing"
+grep -q "bounded at 64" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps bounded prose missing"
+grep -q "bounded at 64" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "main bounded prose missing"
+if grep -q "SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "unbounded cap reappeared"
+fi
+if grep -q "without bound" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "unbounded prose reappeared"
+fi
+if grep -q "without a bound" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "unbounded prose reappeared"
+fi
+if grep -q "no bound" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "unbounded prose reappeared"
+fi
 if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "bounded prose reappeared"
+    fail "stale bounded prose reappeared"
 fi
 
 # Single handle per CPU stays with no second index and no per strand counts.

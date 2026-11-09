@@ -13,12 +13,13 @@
  * as a balance-only guard.
  * Draining peeks both heads and pops the earlier vd with ties to the
  * first strand. Remote queues drain last with both strands in vd order,
- * so locality comes from order alone. Each per CPU queue holds without a bound with one millis
+ * so locality comes from order alone. Each per CPU queue holds bounded at 64 total
+ * as a 32+32 split with at most one extra on one side with one millis
  * slices. Depth signal reuses the guard and the queued plus fallback
  * plus steal counts with no extra probe. Waiting counts track queued
  * tasks per CPU for placement and stay internal. One fallback queue
  * holds tasks that have no usable CPU in FIFO order as a best effort
- * overflow without a bound promise. Pinned tasks run on their local
+ * overflow with no extra promise. Pinned tasks run on their local
  * queue.
  * Shares are read from the cgroup map on each enqueue and folded
  * with the task nice weight. A task pays
@@ -32,7 +33,7 @@
  * last run length. A shared enqueue with a due time ahead of the
  * running due time kicks for preempt
  * with idle wakes otherwise. Each running instance kicks at most once. A runnable yield with no burnt time still moves the
- * stored time forward by one. Each per CPU queue holds without a bound
+ * stored time forward by one. Each per CPU queue holds bounded at 64 total
  * with the fallback holding at most one thousand twenty four.
  * Steal moves with local first then the most loaded queue then mates
  * then the rest of the same LLC then same node then remote last with both strands
@@ -66,6 +67,7 @@ enum flow_consts {
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_MAX_LLCS = 64ULL,
 	FLOW_MAX_NODES = 8ULL,
+	FLOW_QUEUE_CAP = 64ULL,
 	FLOW_FALLBACK_CAP = 1024ULL,
 	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_SLICE_FLOOR_NS = 62500ULL,

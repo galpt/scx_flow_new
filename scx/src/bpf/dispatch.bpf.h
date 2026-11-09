@@ -7,7 +7,7 @@
  * the same node, then distant queues last, then fallback. The most loaded
  * pick scans waiting counts with mates first on ties and lowest id
  * after that. Idle work starts at once with no wait for warm tasks.
- * Queues hold without a bound and empty queues are skipped with no
+ * Queues hold bounded at 64 total and empty queues are skipped with no
  * peek through waiting counts. Mates compare the cluster hint with
  * no extra walk. Each queue drains the earlier vd across both strands
  * with ties to the first strand. Remote queues drain last with both
@@ -40,7 +40,7 @@
  * on a queued task keeps the queue and wakes the new owner, counting
  * the wake when the owner is usable. A task with no usable CPU waits
  * in the fallback queue until the mask widens. Init creates one queue
- * per CPU with one handle and one total count and the fallback queue.
+ * per CPU bounded at 64 total with one handle and one total count and the fallback queue.
  * Each handle holds both strands with per-CPU recency and no per strand
  * count. Queues use the upstream library in
  * virtual time mode. Liveness comes from the upstream tree, so CPUs
@@ -772,9 +772,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 			continue;
 		if (!flow_cpu_live((u32)cpu))
 			continue;
-		/* One upstream queue per CPU in virtual time mode with
-		 * no bound and at most one extra task on one side. */
-		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, SCX_DHQ_INF_CAPACITY,
+		/* One upstream queue per CPU in virtual time mode bounded at 64 total
+		 * with at most one extra task on one side. */
+		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, (u64)FLOW_QUEUE_CAP,
 							   (u64)SCX_DHQ_MODE_BALANCED, 1ULL);
 		if (!dhq) {
 			scx_bpf_error("queue create failed");

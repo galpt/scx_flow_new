@@ -11,7 +11,7 @@
  * pointers in arena memory, the per CPU waiting counts, the forward
  * coalescing state, and two switches for cluster choice plus thread shape. Each
  * CPU owns one handle with no second index, so one queue holds both
- * strands with per-CPU recency and a balance-only guard and no bound.
+ * strands with per-CPU recency and a balance-only guard bounded at 64 total.
  * A zero handle means
  * the CPU is offline or its queue was never built. Counts hold one total
  * per CPU for least load inserts and most load steals with saturation

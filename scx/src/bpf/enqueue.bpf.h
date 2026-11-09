@@ -13,7 +13,7 @@
  * The upstream queue keeps insertion order for equal vd, so the code
  * adds no extra tie handling. A strand that refuses an insert tries
  * the other strand once before the fallback queue. Queues hold
- * without a bound, so inserts refuse only on strand balance as a balance-only guard.
+ * bounded at 64 total, so inserts refuse only on strand balance as a balance-only guard.
  * Pinned tasks join the local queue in order with
  * a single slice. Exiting tasks use the local queue when allowed and
  * the owner queue otherwise with a short slice. Tasks that have no
@@ -117,8 +117,8 @@ static __always_inline u64 flow_warm_strand(s32 last, s32 tgt)
 	return (u64)SCX_DHQ_STRAND_A;
 }
 /* Try the picked strand once, then the other strand once. A reject
- * from both means strand balance refused as a balance-only guard. Queues hold without
- * a bound. */
+ * from both means strand balance refused as a balance-only guard. Queues hold
+ * bounded at 64 total. */
 static __always_inline int flow_try_insert_dhq(scx_dhq_t *dhq, u64 pid, u64 key, u64 first)
 {
 	u64 second;
@@ -326,7 +326,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Queues hold without a bound. */
+		 * Queues hold bounded at 64 total. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_combine(flow_cgroup_lookup(READ_ONCE(t->cgrp_id)),
 				     flow_nice_weight(p));
