@@ -349,7 +349,7 @@ grep -q "flow_nice_weight" "${FAIR_HDR}" || fail "nice weight missing"
 if grep -rq "flow_combine" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "combine reappeared"
 fi
-[ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "nice use drifted"
+[ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "5" ] || fail "nice use drifted"
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
@@ -379,6 +379,28 @@ fi
 if grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" 2>/dev/null; then
     fail "wakeup branch reappeared"
 fi
+# True overload control with guaranteed admit plus bounded evict plus reclaim.
+# Admit checks live plus tolerance plus bound plus room plus cap. Evict scans
+# at most eight ready tasks for the latest deadline in the lowest band.
+# Bands come from the nice weight through the fair helper with no new field.
+# Rejects stay FIFO. Stopping plus tick reclaim at most one saved delta.
+grep -q "FLOW_RED_TOL_NS = 64000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red tol missing"
+grep -q "FLOW_RED_EMAX_NS = 256000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red emax missing"
+grep -q "FLOW_RED_EVICT_MAX = 8ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red evict bound missing"
+grep -q "flow_red_cost" "${FAIR_HDR}" || fail "red cost missing"
+grep -q "flow_red_exceed" "${FAIR_HDR}" || fail "red exceed missing"
+grep -q "flow_red_gate" "${FAIR_HDR}" || fail "red gate missing"
+grep -q "flow_band_for_weight" "${FAIR_HDR}" || fail "band helper missing"
+grep -q "128U << 3" "${FAIR_HDR}" || fail "band shift missing"
+grep -q "128U >> 3" "${FAIR_HDR}" || fail "band shift missing"
+grep -q "flow_try_evict_one" "${ENQ_HDR}" || fail "evict helper missing"
+grep -q "flow_reclaim_kick" "${DISP_HDR}" || fail "reclaim helper missing"
+grep -q "flow_red_gate(cost, exceed, nr)" "${ENQ_HDR}" || fail "gate use missing"
+grep -q "flow_band_for_weight(w)" "${ENQ_HDR}" || fail "band use missing"
+grep -q "flow_reclaim_kick(saved" "${DISP_HDR}" || fail "reclaim use missing"
+grep -q "scx_edq_try_peek_nth_hold" "${ENQ_HDR}" || fail "bounded scan missing"
+grep -q "scx_edq_try_remove" "${ENQ_HDR}" || fail "evict remove missing"
+grep -q "__COMPAT_scx_bpf_dsq_peek" "${DISP_HDR}" || fail "reclaim peek missing"
 grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
 grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
 grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"

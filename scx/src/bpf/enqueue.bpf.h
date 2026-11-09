@@ -24,7 +24,10 @@
  * are checked again before each wake, so a task is never kicked toward
  * a CPU outside its current mask. The queue node lives in arena memory
  * beside the task with the pid for owner lookup. Rejects fall back to
- * the FIFO queue with no extra probe. Queues hold
+ * the FIFO queue with no extra probe. Overload admits with live plus
+ * tolerance plus bound plus room plus cap and evicts at most one ready
+ * task with the latest deadline in the lowest band through a bounded
+ * scan of at most eight. Queues hold
  * bounded at 64 total with eligibility always eligible.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
@@ -135,6 +138,105 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	}
 	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 	flow_stat_inc(llc, 6);
+}
+/* Bounded evict one for overload. Scans at most eight ready tasks on the
+ * target queue and keeps the latest deadline in the lowest implicit band.
+ * The victim moves to the fallback queue in FIFO order and the caller
+ * admits the newcomer. Ready means still queued. Compare only with no
+ * divide and a single remove, so one pass never holds across the host. */
+static __always_inline bool flow_try_evict_one(struct scx_edq __arena *edq,
+					       s64 new_vd, u32 new_band, u32 llc)
+{
+	u64 best_raw = 0;
+	s32 best_pid = -1;
+	u32 best_band = 4U;
+	s64 best_vd = 0;
+	bool have_best = false;
+	int i;
+	if (!edq)
+		return false;
+	for (i = 0; i < 8; i++) {
+		u64 raw = 0;
+		struct flow_arena_task __arena *at;
+		s32 pid;
+		struct task_struct *ph;
+		struct flow_task_ctx *vt;
+		u32 vb;
+		s64 vvd;
+		int r = scx_edq_try_peek_nth_hold(edq, (u32)i, &raw);
+		if (r || !raw)
+			break;
+		at = (struct flow_arena_task __arena *)raw;
+		pid = READ_ONCE(at->pid);
+		ph = bpf_task_from_pid(pid);
+		if (!ph) {
+			scx_edq_task_drop((scx_edq_task_t *)at);
+			continue;
+		}
+		vt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
+		if (!vt) {
+			bpf_task_release(ph);
+			scx_edq_task_drop((scx_edq_task_t *)at);
+			continue;
+		}
+		if (!(READ_ONCE(vt->flags) & (u32)FLOW_FLAG_QUEUED)) {
+			bpf_task_release(ph);
+			scx_edq_task_drop((scx_edq_task_t *)at);
+			continue;
+		}
+		vb = flow_band_for_weight(flow_nice_weight(ph));
+		vvd = READ_ONCE(vt->vd);
+		bpf_task_release(ph);
+		if (!have_best || vb < best_band ||
+		    (vb == best_band && vvd > best_vd)) {
+			if (have_best && best_raw)
+				scx_edq_task_drop((scx_edq_task_t *)best_raw);
+			best_raw = raw;
+			best_pid = pid;
+			best_band = vb;
+			best_vd = vvd;
+			have_best = true;
+		} else {
+			scx_edq_task_drop((scx_edq_task_t *)at);
+		}
+	}
+	if (!have_best || !best_raw || best_pid < 0)
+		return false;
+	if (best_band > new_band) {
+		scx_edq_task_drop((scx_edq_task_t *)best_raw);
+		return false;
+	}
+	if (best_band == new_band && best_vd < new_vd) {
+		scx_edq_task_drop((scx_edq_task_t *)best_raw);
+		return false;
+	}
+	{
+		struct flow_arena_task __arena *best_at =
+			(struct flow_arena_task __arena *)best_raw;
+		int r = scx_edq_try_remove(edq, (scx_edq_task_t *)best_at);
+		scx_edq_task_drop((scx_edq_task_t *)best_at);
+		if (r)
+			return false;
+	}
+	{
+		struct task_struct *vp = bpf_task_from_pid(best_pid);
+		struct flow_task_ctx *lt;
+		u64 slice = (u64)FLOW_SLICE_MIN_NS;
+		if (!vp) {
+			flow_queued_dec(llc);
+			return true;
+		}
+		lt = bpf_task_storage_get(&task_ctx_stor, vp, 0, 0);
+		if (lt) {
+			u64 s = READ_ONCE(lt->slice_rem);
+			if (s)
+				slice = s;
+		}
+		scx_bpf_dsq_insert(vp, (u64)FLOW_FALLBACK_DSQ, slice, 0);
+		flow_stat_inc(llc, 2);
+		bpf_task_release(vp);
+		return true;
+	}
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
@@ -283,7 +385,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
 		 * Queues hold bounded at 64 total with pure deadline order
-		 * and a single kick. */
+		 * and a single kick. Overload admits with live plus tolerance
+		 * plus bound plus room plus cap and evicts at most one ready
+		 * task with the latest deadline in the lowest band through a
+		 * bounded scan of at most eight. Rejects fall back to FIFO. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_nice_weight(p);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
@@ -294,9 +399,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		bool can_queue = false;
 		void __arena *mem = 0;
 		if (edq) {
+			u64 cost = flow_red_cost(READ_ONCE(t->burst_ns));
+			u64 exceed = flow_red_exceed(cost);
+			u64 nr = scx_edq_nr_queued(edq);
+			bool over = flow_red_gate(cost, exceed, nr);
 			mem = __scx_task_data(p);
-			if (mem && scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP)
+			if (mem && !over && nr < (u64)FLOW_QUEUE_CAP)
 				can_queue = true;
+			else if (mem && (over || nr >= (u64)FLOW_QUEUE_CAP)) {
+				u32 nb = flow_band_for_weight(w);
+				if (flow_try_evict_one(edq, vd, nb, llc)) {
+					if (scx_edq_nr_queued(edq) <
+					    (u64)FLOW_QUEUE_CAP)
+						can_queue = true;
+				}
+			}
 		}
 		t->vtime = floored;
 		t->vd = vd;

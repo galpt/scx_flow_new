@@ -19,7 +19,13 @@
  * to the floored time through the shared charge path, so a larger
  * weight or a shorter run gives an earlier due time with no extra
  * divide. Burst holds the last run length between the floor and
- * one slice with shift only moves.
+ * one slice with shift only moves. Overload cost holds the run length
+ * between the floor and one slice. Exceed holds the cost past tolerance
+ * else zero. The gate admits with live plus tolerance plus bound plus
+ * room plus cap and rejects large costs on a full target. Bands map the
+ * nice weight between one and sixteen thousand three hundred eighty four
+ * with base one hundred twenty eight through shift only moves with no
+ * new field, so the lowest band holds the lightest share.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -131,6 +137,56 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 	}
 	b = b - (b >> 2) + (u >> 2);
 	return flow_burst_clamp(b);
+}
+/* Overload cost for one burst. Holds the run length between the floor
+ * and one slice, so a larger burst pays more with saturating clamp only. */
+static __always_inline u64 flow_red_cost(u64 burst_ns)
+{
+	return flow_burst_clamp(burst_ns);
+}
+/* Overload exceed past tolerance. Holds zero when the cost sits within
+ * tolerance else the cost past tolerance, so small costs admit at once
+ * with saturating math only. */
+static __always_inline u64 flow_red_exceed(u64 cost)
+{
+	u64 tol = (u64)FLOW_RED_TOL_NS;
+	if (cost <= tol)
+		return 0;
+	return cost - tol;
+}
+/* Overload gate for one newcomer cost with target room. Rejects when the
+ * cost sits past the bound and the target holds no room under the cap,
+ * so small costs plus room admit and overload drains to fallback with
+ * the caps kept. Compare only with no divide. */
+static __always_inline bool flow_red_gate(u64 cost, u64 exceed, u64 queued)
+{
+	u64 emax = (u64)FLOW_RED_EMAX_NS;
+	if (!exceed)
+		return false;
+	if (cost <= emax)
+		return false;
+	if (queued < (u64)FLOW_QUEUE_CAP)
+		return false;
+	return true;
+}
+/* Implicit band for one nice weight. Maps between one and sixteen
+ * thousand three hundred eighty four with base one hundred twenty eight
+ * through shift only moves, so the lightest share sits in the lowest
+ * band with no new field and no divide. */
+static __always_inline u32 flow_band_for_weight(u32 w)
+{
+	u32 cw = w;
+	if (!cw || cw < 1U)
+		cw = 1U;
+	if (cw > 16384U)
+		cw = 16384U;
+	if (cw >= (128U << 3))
+		return 3U;
+	if (cw >= 128U)
+		return 2U;
+	if (cw >= (128U >> 3))
+		return 1U;
+	return 0U;
 }
 static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 {

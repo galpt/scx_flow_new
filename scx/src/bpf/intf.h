@@ -17,7 +17,14 @@
  * by the burst to the floored time through the shared charge path,
  * so a larger weight or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
- * last run length. A shared enqueue with a due time ahead of the
+ * last run length. Overload keeps a guaranteed admit with live plus
+ * tolerance plus bound plus room plus cap. A full target evicts at most
+ * one ready task with the latest deadline in the lowest implicit band
+ * through a bounded scan of at most eight. Bands come from the nice
+ * weight through the fair helper with no new field. Rejects stay in the
+ * fallback queue in FIFO order. Stopping plus tick reclaim at most one
+ * saved delta from burst past burnt with room plus live plus allowed
+ * and idle only kick. A shared enqueue with a due time ahead of the
  * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
  * holds bounded at 64 total with the fallback holding at most one
@@ -54,6 +61,9 @@ enum flow_consts {
 	FLOW_MAX_NODES = 8ULL,
 	FLOW_QUEUE_CAP = 64ULL,
 	FLOW_FALLBACK_CAP = 1024ULL,
+	FLOW_RED_TOL_NS = 64000ULL,
+	FLOW_RED_EMAX_NS = 256000ULL,
+	FLOW_RED_EVICT_MAX = 8ULL,
 	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_SLICE_FLOOR_NS = 62500ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,
