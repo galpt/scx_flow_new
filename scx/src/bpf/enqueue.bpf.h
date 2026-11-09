@@ -94,6 +94,7 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	u32 rllc;
 	u32 last;
 	s64 run_vd;
+	u32 c;
 	if (tgt < 0 || !p || !flow_cpu_ok((u32)tgt) || !flow_cpu_allowed(tgt, p) ||
 	    !flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 8);
@@ -104,7 +105,14 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		flow_stat_inc(llc, 7);
 		return;
 	}
-	rs = &flow_running_state[(u32)tgt];
+	/* Reassert the bound on the index used below so the verifier
+	 * keeps the range across the calls above. The barrier keeps the
+	 * compiler from folding the check away with the earlier one. */
+	c = (u32)tgt;
+	asm volatile ("" : "+r" (c));
+	if (c >= (u32)FLOW_MAX_CPUS)
+		return;
+	rs = &flow_running_state[c];
 	rgen = READ_ONCE(rs->gen);
 	rllc = READ_ONCE(rs->llc_id);
 	if (!rgen || !flow_llc_ok(rllc) || rllc != llc) {
@@ -274,14 +282,27 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Queues hold bounded at 64 total. */
+		 * Queues hold bounded at 64 total. A wakeup enqueue nudges the
+		 * due time earlier by at most one eighth of the nice step with
+		 * shift only moves. Pinned plus exiting plus no CPU plus
+		 * fallback stay without the nudge with a single kick. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_nice_weight(p);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
+		s64 base_vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
+		s64 vd = base_vd;
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
 		struct scx_edq __arena *edq = no_cpu ? 0 : flow_edq_for_cpu(tgt);
 		bool fell = true;
+		bool can_queue = false;
+		void __arena *mem = 0;
+		if (edq) {
+			mem = __scx_task_data(p);
+			if (mem && scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP)
+				can_queue = true;
+		}
+		if (can_queue && (enq_flags & SCX_ENQ_WAKEUP))
+			vd = flow_vd_wakeup_assist(base_vd, floored, w);
 		t->vtime = floored;
 		t->vd = vd;
 		t->slice_rem = slice_len;
@@ -289,18 +310,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		/* Mirror the due time beside the stored time so later reads see the same due time for order checks. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		/* Rejects fall back to FIFO with no extra probe. */
-		if (edq) {
-			void __arena *mem = __scx_task_data(p);
-			if (mem) {
-				struct flow_arena_task __arena *at = mem;
-				u64 dl = flow_edq_deadline(vd);
-				WRITE_ONCE(at->pid, p->pid);
-				if (scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP) {
-					int ret = scx_edq_insert(edq,
-								 (scx_edq_task_t *)at,
-								 dl, 0, slice_len);
-					if (!ret)
-						fell = false;
+		if (can_queue) {
+			struct flow_arena_task __arena *at = mem;
+			u64 dl = flow_edq_deadline(vd);
+			WRITE_ONCE(at->pid, p->pid);
+			{
+				int ret = scx_edq_insert(edq,
+							 (scx_edq_task_t *)at,
+							 dl, 0, slice_len);
+				if (!ret)
+					fell = false;
+				else {
+					/* Fallback stays without the nudge. */
+					t->vd = base_vd;
+					scx_bpf_task_set_dsq_vtime(p, base_vd);
+					vd = base_vd;
 				}
 			}
 		}
