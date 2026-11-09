@@ -45,7 +45,7 @@ done
 [ -L "${SRC_DIR}/src/bpf/lib" ] || fail "lib link missing"
 [ "$(readlink "${SRC_DIR}/src/bpf/lib")" = "../../../../../lib" ] || fail "lib link drifted"
 [ -L "${SRC_DIR}/lib" ] || fail "top lib link missing"
-[ "$(readlink "${SRC_DIR}/lib")" = "../../../../../lib" ] || fail "top lib link drifted"
+[ "$(readlink "${SRC_DIR}/lib")" = "../../../lib" ] || fail "top lib link drifted"
 grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled edq missing"
 if grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" 2>/dev/null; then
     fail "angled dhq reappeared"
@@ -196,7 +196,8 @@ grep -q '\.\./\.\./\.\./\.\./\.\./lib' "${INST}" || fail "lib symlink missing"
 grep -q 'rm -rf "${DEST}/src/bpf/lib"' "${INST}" || fail "lib remove missing"
 grep -q 'rm -rf "${DEST}/lib"' "${INST}" || fail "top lib remove missing"
 grep -q 'readlink "${DEST}/lib"' "${INST}" || fail "top lib guard missing"
-grep -q 'ln -s ../../../../../lib "${DEST}/lib"' "${INST}" || fail "top lib symlink missing"
+grep -q 'ln -s ../../../lib "${DEST}/lib"' "${INST}" || fail "top lib symlink missing"
+grep -q 'ln -s ../../../../../lib "${DEST}/src/bpf/lib"' "${INST}" || fail "lib symlink missing"
 
 # Kernels below 7.1 are refused with a parsable kernel check.
 grep -q '7\.1' "${INST}" || fail "kernel gate missing"
