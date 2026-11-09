@@ -42,7 +42,8 @@ done
 [ ! -e "${SRC_DIR}/src/bpf/edq.bpf.c" ] || fail "own edq source reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/topology.bpf.h" ] || fail "own topology header reappeared"
 [ ! -e "${SRC_DIR}/src/bpf/topology.bpf.c" ] || fail "own topology source reappeared"
-[ ! -e "${SRC_DIR}/src/bpf/lib" ] || fail "vendored lib reappeared"
+[ -L "${SRC_DIR}/src/bpf/lib" ] || fail "lib link missing"
+[ "$(readlink "${SRC_DIR}/src/bpf/lib")" = "../../../../../lib" ] || fail "lib link drifted"
 grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" || fail "angled edq missing"
 if grep -q '<lib/dhq.h>' "${SRC_DIR}/src/bpf/main.bpf.c" 2>/dev/null; then
     fail "angled dhq reappeared"
