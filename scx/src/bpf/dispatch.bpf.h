@@ -30,10 +30,11 @@
  * stored time and mirrors the stored time beside it. A runnable
  * yield with no burnt time still moves the stored time forward by
  * one. The tick charges the burnt delta and moves the due time
- * with the left slice and mirrors the due time beside it, so
- * stopping charges only the tail past the last tick. When the
- * slice is exhausted at the tick, the stored slice stays while
- * the running horizon moves out, so the two views diverge until
+ * with the burst left while inside it and the left slice past it
+ * and mirrors the due time beside it, so stopping charges only
+ * the tail past the last tick. When the slice is exhausted at
+ * the tick, the stored slice stays while the running horizon
+ * moves out by one slice, so the two views diverge until
  * stopping charges the tail. A busy core runs at max and an idle
  * core runs at half. The
  * set call never sends zero and never steers placement. A mask change
@@ -610,18 +611,22 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->slice_rem = cur;
 		return;
 	}
-	/* Charge the burnt delta, then move the due time with the left
-	 * slice in both the stored and running views, so the running
-	 * horizon prices what is left. Stopping later charges only the
-	 * tail past this tick. */
+	/* Charge the burnt delta, then move the due time with the burst
+	 * left while inside it and the left slice past it in both the
+	 * stored and running views, so the running horizon keeps the
+	 * burst bound. Stopping later charges only the tail past this tick. */
 	have = READ_ONCE(t->slice_rem);
 	if (cur && cur < have) {
 		u64 delta = have - cur;
+		u64 burnt = (cur < (u64)FLOW_SLICE_MIN_NS) ?
+			    ((u64)FLOW_SLICE_MIN_NS - cur) : (u64)FLOW_SLICE_MIN_NS;
+		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
+		u64 rem = (burnt < b) ? (b - burnt) : cur;
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		u32 w = flow_combine(flow_cgroup_lookup(cgid),
 				     flow_nice_weight(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
-		s64 nvd = flow_vd_for(nv, cur, w);
+		s64 nvd = flow_vd_for(nv, rem, w);
 		t->vtime = nv;
 		t->vd = nvd;
 		t->slice_rem = cur;
@@ -631,13 +636,14 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
 		 * stopping still charges the tail, but move the running horizon
-		 * out so a wake can preempt at once with the two views diverged
-		 * until stopping. Seed the burst to one slice for the next run. */
+		 * out by one slice so a wake can preempt at once with the two
+		 * views diverged until stopping. Seed the burst to one slice
+		 * for the next run. */
 		u64 cgid = READ_ONCE(t->cgrp_id);
 		u32 w = flow_combine(flow_cgroup_lookup(cgid),
 				     flow_nice_weight(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
-		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_FLOOR_NS, w);
+		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
 		rs->vtime = nv;
 		rs->vd = nvd;
 		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;

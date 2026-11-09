@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.7" ] || fail "version not at 5.2.7"
+[ "${want}" = "5.2.8" ] || fail "version not at 5.2.8"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -361,8 +361,8 @@ grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "
 grep -q "flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS)" "${FAIR_HDR}" || fail "floor cap missing"
 grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
 grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
-grep -q "flow_vd_for(nv, cur, w)" "${DISP_HDR}" || fail "tick vd missing"
-grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_FLOOR_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
+grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"
+grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
 [ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
 grep -q "flow_cgroup_lookup" "${ENQ_HDR}" || fail "cgroup lookup missing"
 grep -q "SCX_DHQ_STRAND_A" "${ENQ_HDR}" || fail "strand use missing"
