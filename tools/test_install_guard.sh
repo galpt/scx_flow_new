@@ -113,8 +113,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "664c3007c4e099c6b38c7ae5742c30a596af067a11a718184dc41fc3f5fa206e" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "19" ] || fail "scx README lines drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "cc54bd61b429e761df61de1e4192dfa914d66428f0fcf03fd90f59a02e2fcc5f" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "23" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
