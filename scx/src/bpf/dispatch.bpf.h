@@ -671,10 +671,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	/* One embedded queue per CPU in deadline order bounded at 64 total.
-	 * The array lives in arena memory for the queue address space.
-	 * Fresh pages start zeroed, which is the empty queue state. */
-	flow_edqs = scx_static_alloc(sizeof(struct scx_edq) * (size_t)FLOW_MAX_CPUS,
+	/* One embedded queue per live CPU in deadline order bounded at
+	 * 64 total. The table holds one entry per CPU id below the
+	 * observed count, so every live id stays in range while the
+	 * request stays within the static area cap. The array lives in
+	 * arena memory for the queue address space. Fresh pages start
+	 * zeroed, which is the empty queue state. */
+	flow_edqs = scx_static_alloc(sizeof(struct scx_edq) * (size_t)n,
 				     __alignof__(struct scx_edq));
 	if (!flow_edqs) {
 		scx_bpf_error("queue alloc failed");
