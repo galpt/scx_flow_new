@@ -69,6 +69,10 @@ enum flow_consts {
 	FLOW_EXIT_SLICE_NS = 1000ULL,
 	FLOW_FAIR_BASE_NS = 20000ULL,
 	FLOW_FAIR_EXTRA_NS = 1000ULL,
+	FLOW_RUN_WIN_NS = 30000000000ULL,
+	FLOW_RUN_SPAN_NS = 4000000000ULL,
+	FLOW_RUN_NEED = 4ULL,
+	FLOW_RUN_RING = 8ULL,
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
@@ -81,7 +85,11 @@ enum flow_consts {
  * left in the current quantum. Gen identifies the running instance.
  * Llc records the last enqueue target. Flags holds the queued bit.
  * Vd holds the due time for queue order. Burst holds the run length
- * used for the due time. */
+ * used for the due time. Run holds eight recent run lengths with
+ * close stamps for stable tasks. Head is the next slot masked with
+ * seven. Pruned counts stale drops. Min plus max hold the kept range.
+ * Known marks a stable range for the hard path. Total holds the
+ * current run sum capped at thirty seconds. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -90,6 +98,15 @@ struct flow_task_ctx {
 	u32 flags;
 	s64 vd;
 	u64 burst_ns;
+	u64 run_dur[8];
+	u64 run_stamp[8];
+	u64 run_min;
+	u64 run_max;
+	u64 run_total;
+	u32 run_head;
+	u32 run_pruned;
+	u32 run_known;
+	u32 run_pad;
 };
 /* Arena per task queue node. Storage holds the upstream queue node
  * with the pid beside it for owner lookup. The node sits at offset

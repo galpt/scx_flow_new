@@ -447,6 +447,20 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		total_used = 0;
 	old_b = flow_burst_clamp(READ_ONCE(t->burst_ns));
 	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
+	/* Recent run sum grows by the tail here. Ticks already added
+	 * their deltas, so this adds only the tail past the last tick.
+	 * Prune drops stamps past the window and freezes on a zero or
+	 * backward clock. Close pushes the sum on sleep only, so tasks
+	 * that never sleep stay unknown with no extra probe. */
+	flow_run_add(t, used);
+	{
+		u64 now = bpf_ktime_get_ns();
+		if (now) {
+			flow_run_prune(t, now);
+			if (!runnable)
+				flow_run_close(t, now);
+		}
+	}
 	/* Burnt time pays here into the stored time, scaled by the nice
 	 * weight with saturation and mirrored as the stored time beside it. The
 	 * tick already moved the left slice forward, so this charges only
@@ -504,8 +518,16 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	/* Charge the burnt delta, then move the due time with the burst
 	 * left while inside it and the left slice past it in both the
 	 * stored and running views, so the running horizon keeps the
-	 * burst bound. Stopping later charges only the tail past this tick. */
+	 * burst bound. Stopping later charges only the tail past this tick.
+	 * The run sum grows by the delta here and freezes prune on a zero
+	 * or backward clock. The exhausted branch adds nothing here since
+	 * stopping charges that tail. */
 	have = READ_ONCE(t->slice_rem);
+	{
+		u64 now = bpf_ktime_get_ns();
+		if (now)
+			flow_run_prune(t, now);
+	}
 	if (cur && cur < have) {
 		u64 delta = have - cur;
 		u64 burnt = (cur < (u64)FLOW_SLICE_MIN_NS) ?
@@ -517,6 +539,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		s64 nvd = flow_vd_for(nv, rem, w);
 		u64 saved = (b > burnt) ? (b - burnt) : 0;
 		u32 rllc = READ_ONCE(t->llc_id);
+		flow_run_add(t, delta);
 		t->vtime = nv;
 		t->vd = nvd;
 		t->slice_rem = cur;
@@ -604,6 +627,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->gen = 0;
 	t->llc_id = 0;
 	t->flags = 0;
+	flow_run_reset(t);
 }
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
 {
@@ -622,6 +646,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p, struct scx_i
 		t->gen = 0;
 		t->llc_id = 0;
 		t->flags = 0;
+		flow_run_reset(t);
 		scx_bpf_task_set_dsq_vtime(p, 0);
 	}
 	/* One arena node per task for the queue. The node sits at offset

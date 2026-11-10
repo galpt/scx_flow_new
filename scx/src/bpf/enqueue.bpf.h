@@ -388,7 +388,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * and a single kick. Overload admits with live plus tolerance
 		 * plus bound plus room plus cap and evicts at most one ready
 		 * task with the latest deadline in the lowest band through a
-		 * bounded scan of at most eight. Rejects fall back to FIFO. */
+		 * bounded scan of at most eight. Rejects fall back to FIFO.
+		 * Steady tasks price by the kept max with the shared charge
+		 * path and run in one slice quanta, while unknown tasks keep
+		 * the burst path with no extra probe. Enqueue reads the cached
+		 * flag with no clock and no scan. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_nice_weight(p);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
@@ -398,8 +402,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		bool fell = true;
 		bool can_queue = false;
 		void __arena *mem = 0;
+		u64 cost = flow_red_cost(READ_ONCE(t->burst_ns));
+		u64 ref = READ_ONCE(t->run_max);
+		u32 known = READ_ONCE(t->run_known);
+		if (known && ref) {
+			u64 eff = flow_run_eff(ref, READ_ONCE(t->burst_ns));
+			vd = flow_run_vd(floored, eff, w);
+			slice_len = flow_run_slice(ref);
+			cost = eff;
+		}
 		if (edq) {
-			u64 cost = flow_red_cost(READ_ONCE(t->burst_ns));
 			u64 exceed = flow_red_exceed(cost);
 			u64 nr = scx_edq_nr_queued(edq);
 			bool over = flow_red_gate(cost, exceed, nr);

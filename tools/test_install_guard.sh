@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.14" ] || fail "version not at 5.2.14"
+[ "${want}" = "5.2.15" ] || fail "version not at 5.2.15"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -120,8 +120,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "cc54bd61b429e761df61de1e4192dfa914d66428f0fcf03fd90f59a02e2fcc5f" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "23" ] || fail "scx README lines drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "6b3d6e1d0d81a1cfdc4ca807d404997b41348bc465981ec9b75d66268f35b449" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "25" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -930,5 +930,57 @@ fi
 # remote, then fallback, with one forward wake per unrunnable head.
 grep -q "flow_drain_cpu" "${DISP_HDR}" || fail "drain helper missing"
 grep -q "flow_try_move_edq" "${DISP_HDR}" || fail "move helper missing"
+
+# Safe but accurate run length path with unknown fallback.
+# Storage holds eight pairs plus range plus flag plus sum under the
+# task storage cap with integer only and bounded scans. Close runs on
+# sleep only with saturating add plus prune past the window and a
+# freeze on a zero or backward clock. Enqueue reads the cached flag
+# with no clock and no scan. Steady tasks price by the kept max with
+# the shared charge path and one slice quanta, unknown tasks keep the
+# burst path with no long hold.
+grep -q "FLOW_RUN_WIN_NS = 30000000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run window missing"
+grep -q "FLOW_RUN_SPAN_NS = 4000000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run span missing"
+grep -q "FLOW_RUN_NEED = 4ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run need missing"
+grep -q "run_dur\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run dur missing"
+grep -q "run_stamp\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run stamp missing"
+grep -q "run_known" "${SRC_DIR}/src/bpf/intf.h" || fail "run known missing"
+grep -q "run_total" "${SRC_DIR}/src/bpf/intf.h" || fail "run total missing"
+grep -q "flow_run_reset" "${FAIR_HDR}" || fail "run reset missing"
+grep -q "flow_run_add" "${FAIR_HDR}" || fail "run add missing"
+grep -q "flow_run_prune" "${FAIR_HDR}" || fail "run prune missing"
+grep -q "flow_run_close" "${FAIR_HDR}" || fail "run close missing"
+grep -q "flow_run_recalc" "${FAIR_HDR}" || fail "run recalc missing"
+grep -q "flow_run_ref" "${FAIR_HDR}" || fail "run ref missing"
+grep -q "flow_run_eff" "${FAIR_HDR}" || fail "run eff missing"
+grep -q "flow_run_vd" "${FAIR_HDR}" || fail "run vd missing"
+grep -q "flow_run_slice" "${FAIR_HDR}" || fail "run slice missing"
+grep -q "min_d >> 3" "${FAIR_HDR}" || fail "run band missing"
+grep -q "& 7U" "${FAIR_HDR}" || fail "run mask missing"
+grep -q "bpf_ktime_get_ns" "${DISP_HDR}" || fail "run clock missing"
+grep -q "flow_run_add(t, used)" "${DISP_HDR}" || fail "run stop add missing"
+grep -q "flow_run_close(t, now)" "${DISP_HDR}" || fail "run close use missing"
+grep -q "flow_run_prune(t, now)" "${DISP_HDR}" || fail "run prune use missing"
+grep -q "flow_run_reset(t)" "${DISP_HDR}" || fail "run reset use missing"
+grep -q "flow_run_eff(ref" "${ENQ_HDR}" || fail "run eff use missing"
+grep -q "flow_run_vd(floored, eff, w)" "${ENQ_HDR}" || fail "run vd use missing"
+grep -q "flow_run_slice(ref)" "${ENQ_HDR}" || fail "run slice use missing"
+grep -q "known && ref" "${ENQ_HDR}" || fail "run gate use missing"
+grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "unknown vd missing"
+if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "float outside fair reappeared"
+fi
+# Unknown fallback keeps fixed slice with no long hold.
+if grep -q "30000000000ULL.*slice\|slice.*30000000000ULL" "${ENQ_HDR}" "${DISP_HDR}" 2>/dev/null; then
+    fail "long slice reappeared"
+fi
+grep -q "flow_run_slice" "${FAIR_HDR}" || fail "slice clamp missing"
+# Scheduler README keeps virtual deadline in full words with run prose.
+grep -q "Virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
+grep -q "kept" "${SRC_DIR}/README.md" || fail "readme kept missing"
+grep -q "Unknown tasks keep the burst path" "${SRC_DIR}/README.md" || fail "readme unknown missing"
+if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme short vd reappeared"
+fi
 
 echo "guard tests passed"

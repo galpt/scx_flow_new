@@ -25,7 +25,10 @@
  * room plus cap and rejects large costs on a full target. Bands map the
  * nice weight between one and sixteen thousand three hundred eighty four
  * with base one hundred twenty eight through shift only moves with no
- * new field, so the lowest band holds the lightest share.
+ * new field, so the lowest band holds the lightest share. Run keeps
+ * eight recent run lengths with close stamps plus the kept range plus
+ * a stable flag plus the current sum, so steady tasks price by the
+ * kept max with short tasks exact and long tasks in one slice quanta.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -226,5 +229,193 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 		}
 		return want;
 	}
+}
+ /* Recent run lengths with close stamps. The ring holds eight pairs
+  * with the next slot masked by seven. Total holds the current run
+  * sum capped at thirty seconds. Prune drops stamps past the window
+  * and freezes on a zero or backward clock. Close pushes the sum on
+  * sleep only, so tasks that never sleep stay unknown. The stable
+  * flag needs four kept plus a four second span plus a tight range
+  * with short tasks exact under the floor. Enqueue reads the cached
+  * flag with no clock and no scan. Integer only with bounded scans. */
+static __always_inline void flow_run_reset(struct flow_task_ctx *t)
+{
+	int i;
+	if (!t)
+		return;
+	for (i = 0; i < 8; i++) {
+		t->run_dur[i] = 0;
+		t->run_stamp[i] = 0;
+	}
+	t->run_min = 0;
+	t->run_max = 0;
+	t->run_total = 0;
+	t->run_head = 0;
+	t->run_pruned = 0;
+	t->run_known = 0;
+	t->run_pad = 0;
+}
+static __always_inline void flow_run_add(struct flow_task_ctx *t, u64 delta)
+{
+	u64 cur;
+	u64 win;
+	if (!t || !delta)
+		return;
+	win = (u64)FLOW_RUN_WIN_NS;
+	if (delta > win)
+		delta = win;
+	cur = READ_ONCE(t->run_total);
+	if (cur >= win)
+		return;
+	if (delta >= win - cur)
+		t->run_total = win;
+	else
+		t->run_total = cur + delta;
+}
+static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
+{
+	u64 min_d = 0;
+	u64 max_d = 0;
+	u64 min_s = 0;
+	u64 max_s = 0;
+	u64 kept = 0;
+	bool have = false;
+	int i;
+	if (!t)
+		return;
+	for (i = 0; i < 8; i++) {
+		u64 d = READ_ONCE(t->run_dur[i]);
+		u64 s = READ_ONCE(t->run_stamp[i]);
+		if (!d || !s)
+			continue;
+		if (!have) {
+			min_d = d;
+			max_d = d;
+			min_s = s;
+			max_s = s;
+			have = true;
+		} else {
+			if (d < min_d)
+				min_d = d;
+			if (d > max_d)
+				max_d = d;
+			if (s < min_s)
+				min_s = s;
+			if (s > max_s)
+				max_s = s;
+		}
+		kept++;
+	}
+	if (!have) {
+		t->run_min = 0;
+		t->run_max = 0;
+		t->run_known = 0;
+		return;
+	}
+	t->run_min = min_d;
+	t->run_max = max_d;
+	if (max_d < (u64)FLOW_SLICE_FLOOR_NS) {
+		t->run_known = 1;
+		return;
+	}
+	if (kept < (u64)FLOW_RUN_NEED) {
+		t->run_known = 0;
+		return;
+	}
+	if (max_s < min_s || max_s - min_s < (u64)FLOW_RUN_SPAN_NS) {
+		t->run_known = 0;
+		return;
+	}
+	if (max_d < min_d || max_d - min_d > (min_d >> 3)) {
+		t->run_known = 0;
+		return;
+	}
+	t->run_known = 1;
+}
+static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
+{
+	u64 win;
+	int i;
+	if (!t || !now)
+		return;
+	win = (u64)FLOW_RUN_WIN_NS;
+	for (i = 0; i < 8; i++) {
+		u64 s = READ_ONCE(t->run_stamp[i]);
+		if (s && s > now)
+			return;
+	}
+	for (i = 0; i < 8; i++) {
+		u64 s = READ_ONCE(t->run_stamp[i]);
+		u64 d = READ_ONCE(t->run_dur[i]);
+		if (!s || !d)
+			continue;
+		if (now - s > win) {
+			t->run_dur[i] = 0;
+			t->run_stamp[i] = 0;
+			t->run_pruned++;
+		}
+	}
+	flow_run_recalc(t);
+}
+static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
+{
+	u64 tot;
+	u64 win;
+	u32 idx;
+	int i;
+	if (!t || !now)
+		return;
+	tot = READ_ONCE(t->run_total);
+	if (!tot)
+		return;
+	win = (u64)FLOW_RUN_WIN_NS;
+	if (tot > win)
+		tot = win;
+	for (i = 0; i < 8; i++) {
+		u64 s = READ_ONCE(t->run_stamp[i]);
+		if (s && s > now)
+			return;
+	}
+	idx = READ_ONCE(t->run_head) & 7U;
+	if (idx >= 8U)
+		return;
+	t->run_dur[idx] = tot;
+	t->run_stamp[idx] = now;
+	t->run_head++;
+	t->run_total = 0;
+	flow_run_recalc(t);
+}
+static __always_inline u64 flow_run_ref(struct flow_task_ctx *t)
+{
+	if (!t)
+		return 0;
+	if (!READ_ONCE(t->run_known))
+		return 0;
+	return READ_ONCE(t->run_max);
+}
+static __always_inline u64 flow_run_eff(u64 ref, u64 burst_ns)
+{
+	u64 b = flow_burst_clamp(burst_ns);
+	u64 e = ref > b ? ref : b;
+	if (e > (u64)FLOW_RUN_WIN_NS)
+		e = (u64)FLOW_RUN_WIN_NS;
+	return e;
+}
+static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
+{
+	s64 vd = flow_fair_charge(floored, eff, w);
+	if (vd <= floored)
+		return flow_fair_cap_add(floored, 1);
+	return vd;
+}
+static __always_inline u64 flow_run_slice(u64 ref)
+{
+	if (!ref)
+		return (u64)FLOW_SLICE_MIN_NS;
+	if (ref < (u64)FLOW_SLICE_FLOOR_NS)
+		return (u64)FLOW_SLICE_FLOOR_NS;
+	if (ref > (u64)FLOW_SLICE_MIN_NS)
+		return (u64)FLOW_SLICE_MIN_NS;
+	return ref;
 }
 #endif
