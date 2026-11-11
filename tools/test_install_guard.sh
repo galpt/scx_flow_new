@@ -855,15 +855,17 @@ grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor pr
 # Seed plus display share one known-or-fallback helper with sorted LLC order.
 # Known means neither minus one nor 65535. The display count delegates to
 # the seed helper, so both report the same groups on every host. True size
-# adds two more users sharing the same helper with no split: the true size
-# seed plus the per core display.
+# adds three more users sharing the same helper with no split: the true
+# size seed plus the per core display plus the capped per core display.
+# Production users stay at five. Test helpers are excluded here so
+# test adds never drift the gate.
 grep -q "fn core_cluster" "${SRC_DIR}/src/topology.rs" || fail "known helper missing"
 grep -q "cluster_id != -1" "${SRC_DIR}/src/topology.rs" || fail "sentinel narrow missing"
 if grep -q "cluster_id >= 0" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
     fail "broad unknown reappeared"
 fi
-[ "$(grep -c "cpu_ccx(topo, &llc_ids)" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "5" ] || fail "seed display split"
-[ "$(grep -c "llc_ids.sort_unstable" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "5" ] || fail "fallback order drifted"
+[ "$(sed '/#\[cfg(test)/,$d' "${SRC_DIR}/src/topology.rs" | grep -c "cpu_ccx(topo, &llc_ids)" | tr -d ' ')" = "5" ] || fail "seed display split"
+[ "$(sed '/#\[cfg(test)/,$d' "${SRC_DIR}/src/topology.rs" | grep -c "llc_ids.sort_unstable" | tr -d ' ')" = "5" ] || fail "fallback order drifted"
 
 # Dispatch liveness keeps every queued task reachable. Deadline order
 # drains in deadline order, slices stay at the floor with no zero
@@ -1237,18 +1239,27 @@ grep -q "seed_topology_lstopo" "${SRC_DIR}/src/run.rs" || fail "true size use mi
 grep -q "val\[8\]" "${SRC_DIR}/src/topology.rs" || fail "seed bucket bytes missing"
 # List tool runs once with no flags plus no retry. Output caps at one
 # megabyte plus sixty four thousand lines. Timeout is ten seconds.
-# PATH lookup matches the absolute path byte for byte. Sudo keeps
-# root env clean with no user env pass. Failures keep BPF defaults.
+# Absolute paths run first with PATH fallback. Both paths match byte
+# for byte. Standard error stays closed. Sudo keeps root env clean
+# with no user env pass. Failures keep BPF defaults.
 grep -q "lstopo-no-graphics" "${SRC_DIR}/src/run.rs" || fail "list tool missing"
+grep -q "/usr/bin/lstopo-no-graphics" "${SRC_DIR}/src/run.rs" || fail "absolute list tool missing"
 grep -q "1_048_576" "${SRC_DIR}/src/run.rs" || fail "byte cap missing"
 grep -q "64_000" "${SRC_DIR}/src/run.rs" || fail "line cap missing"
 grep -q "timeout" "${SRC_DIR}/src/run.rs" || fail "timeout missing"
+grep -q "/usr/bin/timeout" "${SRC_DIR}/src/run.rs" || fail "absolute timeout missing"
+grep -q "Stdio::null" "${SRC_DIR}/src/run.rs" || fail "stderr close missing"
 grep -q "topology seed failed, using BPF defaults" "${SRC_DIR}/src/run.rs" || fail "warn text drifted"
 # Per core display stays always on at info with K plus M suffix only.
 # The tree stays at debug. The brief stays at or below one hundred
 # sixty chars. Lines cap at sixty four with an overflow count.
+# Capped builds keep large hosts bounded with no tail strings.
 grep -q "render_per_core_lines" "${SRC_DIR}/src/topology.rs" || fail "per-core helper missing"
 grep -q "render_per_core_lines" "${SRC_DIR}/src/run.rs" || fail "per-core use missing"
+grep -q "render_per_core_lines_capped" "${SRC_DIR}/src/topology.rs" || fail "per-core cap missing"
+grep -q "render_per_core_lines_capped" "${SRC_DIR}/src/run.rs" || fail "per-core cap use missing"
+grep -q "render_topo_lines_capped" "${SRC_DIR}/src/topology.rs" || fail "tree cap missing"
+grep -q "render_topo_lines_capped" "${SRC_DIR}/src/run.rs" || fail "tree cap use missing"
 grep -q "format_kb" "${SRC_DIR}/src/topology.rs" || fail "size format missing"
 grep -q 'info!("Topology: {line}")' "${SRC_DIR}/src/run.rs" || fail "per-core info missing"
 if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then

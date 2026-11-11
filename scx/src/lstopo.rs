@@ -106,6 +106,7 @@ fn kb_for_number_unit(val: u32, unit: &str) -> Option<u32> {
 
 /// First cache size in kibibytes found in a segment.
 /// Scans for digits followed by KB plus MB plus GB.
+/// Dotted plus comma numbers read unknown with no size.
 /// Returns zero when no size is present. Never panics.
 fn first_size_kb(segment: &str) -> u32 {
     let bytes: &[u8] = segment.as_bytes();
@@ -114,6 +115,11 @@ fn first_size_kb(segment: &str) -> u32 {
         if bytes[i].is_ascii_digit() {
             let rest: &str = &segment[i..];
             if let Some((val, tail)) = parse_u32_head(rest) {
+                // Dotted plus comma numbers read unknown with no size.
+                // This blocks second number matches on split values.
+                if tail.starts_with('.') || tail.starts_with(',') {
+                    return 0;
+                }
                 let tail_trim: &str = tail.trim_start();
                 if tail_trim.starts_with("KB")
                     || tail_trim.starts_with("MB")
@@ -123,7 +129,6 @@ fn first_size_kb(segment: &str) -> u32 {
                     if let Some(kb) = kb_for_number_unit(val, unit) {
                         return kb;
                     }
-                    return u32::MAX;
                 }
             }
             while i < bytes.len() && bytes[i].is_ascii_digit() {
@@ -195,13 +200,6 @@ fn is_ignored_line(content: &str) -> bool {
     }
     if content.contains("OSDev") {
         return true;
-    }
-    if content.contains("Bridge") && !content.contains("Package") {
-        // Covers Bridge leaves while keeping Package lines.
-        // Package never carries Bridge. IO bridges always do.
-        if content.contains("HostBridge") || content.contains("PCIBridge") {
-            return true;
-        }
     }
     false
 }
@@ -315,8 +313,10 @@ pub fn parse_lstopo_text(text: &str) -> Result<LstopoView> {
         if raw.len() > 1_048_576 {
             continue;
         }
-        let indent: usize = raw.len().wrapping_sub(raw.trim_start_matches(' ').len());
-        let content: &str = raw.trim_start_matches(' ');
+        // Tabs plus spaces both count as indent.
+        // Trim keeps both so nested rows stay linked.
+        let indent: usize = raw.len().wrapping_sub(raw.trim_start().len());
+        let content: &str = raw.trim_start();
         let trimmed: &str = content.trim();
         if trimmed.is_empty() {
             continue;
@@ -423,14 +423,17 @@ pub fn parse_lstopo_text(text: &str) -> Result<LstopoView> {
         }
         // Die plus L3 share one size on console combined lines.
         // One size fills both so size facts stay complete.
-        if line_die.is_none() && line_l3.is_some() && trimmed.contains("Die") {
+        // Word match blocks substring fills on other tokens.
+        if line_die.is_none() && line_l3.is_some() && contains_word(trimmed, "Die") {
             line_die = line_l3;
         }
-        if line_l3.is_none() && line_die.is_some() && trimmed.contains("L3") {
+        if line_l3.is_none() && line_die.is_some() && contains_word(trimmed, "L3") {
             line_l3 = line_die;
         }
         if has_pu {
-            let key: Option<u32> = pu_p.or(pu_l);
+            // Kernel number keys the row. Logical only rows are skipped.
+            // This blocks mis maps when physical ids are absent.
+            let key: Option<u32> = pu_p;
             let k: u32 = match key {
                 Some(v) => v,
                 None => continue,
@@ -512,7 +515,10 @@ pub fn lstopo_parse_caches(text: &str) -> Result<BTreeMap<u32, (u32, u32, u32, u
 
 #[cfg(test)]
 mod tests {
+    use super::contains_word;
     use super::die_ccx_hint;
+    use super::first_size_kb;
+    use super::is_ignored_line;
     use super::l1_fold_kb;
     use super::lstopo_parse_caches;
     use super::parse_lstopo_text;
@@ -605,5 +611,206 @@ mod tests {
         assert_eq!(view.cpus.len(), 2);
         assert!(view.cpus.contains_key(&0));
         assert!(view.cpus.contains_key(&1));
+    }
+
+    #[test]
+    fn logical_only_rows_are_skipped() {
+        // Kernel number keys the row. Logical only rows are skipped.
+        // This blocks mis maps when physical ids are absent.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16MB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0\n        PU L#1\n";
+        assert!(parse_lstopo_text(text).is_err());
+    }
+
+    #[test]
+    fn mixed_logical_and_physical_keeps_physical() {
+        // One row carries a kernel number. One row carries logical only.
+        // Only the kernel row stays. No logical fallback fills the key.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16MB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n        PU L#1\n";
+        let view = parse_lstopo_text(text).unwrap();
+        assert_eq!(view.cpus.len(), 1);
+        assert!(view.cpus.contains_key(&0));
+        assert!(!view.cpus.contains_key(&1));
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.pu_l, Some(0));
+        assert_eq!(row.pu_p, 0);
+    }
+
+    #[test]
+    fn die_substring_does_not_fill_die() {
+        // Substring Die in another token fills no die share.
+        // Word match blocks fills on other tokens.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16MB) + DielectricFoo\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 16384);
+        assert_eq!(row.die_kb, 0);
+    }
+
+    #[test]
+    fn die_word_still_fills_die() {
+        // Word Die shares one size with level three.
+        // One size fills both so facts stay complete.
+        let text = "Machine\n  Package L#0\n    Die L#0 + L3 L#0 (96MB)\n      L2 L#0 (1024KB) + L1d L#0 (48KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 98304);
+        assert_eq!(row.die_kb, 98304);
+    }
+
+    #[test]
+    fn l3_substring_does_not_fill_l3() {
+        // Substring L3 in another token fills no level three share.
+        // Word match blocks fills on other tokens.
+        let text = "Machine\n  Package L#0\n    Die L#0 (96MB) + L3Foo\n      L2 L#0 (1024KB) + L1d L#0 (48KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.die_kb, 98304);
+        assert_eq!(row.l3_kb, 0);
+    }
+
+    #[test]
+    fn l3_word_still_fills_l3() {
+        // Word L3 shares one size with die.
+        // One size fills both so facts stay complete.
+        let text = "Machine\n  Package L#0\n    Die L#0 (96MB) + L3 L#0\n      L2 L#0 (1024KB) + L1d L#0 (48KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.die_kb, 98304);
+        assert_eq!(row.l3_kb, 98304);
+    }
+
+    #[test]
+    fn tab_indent_links_parent_sizes() {
+        // Tabs plus spaces both count as indent.
+        // Nested rows stay linked through tab levels.
+        let text = "Machine\n\tPackage L#0\n\t\tL3 L#0 (16MB)\n\t\t\tL2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n\t\t\t\tPU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        assert_eq!(view.cpus.len(), 1);
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 16384);
+        assert_eq!(row.l2_kb, 512);
+        assert_eq!(row.l1d_kb, 32);
+        assert_eq!(row.l1i_kb, 32);
+    }
+
+    #[test]
+    fn mixed_space_tab_indent_links() {
+        // Mixed indent still links parent shares.
+        // Trim keeps both so rows stay linked.
+        let text = "Machine\n \tPackage L#0\n \t\tL3 L#0 (16MB)\n \t\t\tL2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n \t\t\t\tPU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 16384);
+        assert_eq!(row.l2_kb, 512);
+    }
+
+    #[test]
+    fn tab_indented_io_still_ignored() {
+        // Tab indented IO lines add no rows.
+        // HostBridge plus PCI stay ignored at any indent.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16MB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n\tHostBridge\n\t\tPCIBridge\n";
+        let view = parse_lstopo_text(text).unwrap();
+        assert_eq!(view.cpus.len(), 1);
+    }
+
+    #[test]
+    fn dotted_size_reads_unknown() {
+        // Dotted numbers read unknown with no size.
+        // No second number match fills the share.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (1.5MB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 0);
+        assert_eq!(row.l2_kb, 512);
+    }
+
+    #[test]
+    fn dotted_size_blocks_second_number() {
+        // Split value 1.5MB never reads as 5MB.
+        // Five megabytes would be five thousand one hundred twenty kibibytes.
+        // Unknown stays zero with no match.
+        assert_eq!(first_size_kb("1.5MB"), 0);
+        assert_ne!(first_size_kb("1.5MB"), 5120);
+        assert_eq!(first_size_kb("32KB"), 32);
+    }
+
+    #[test]
+    fn comma_size_reads_unknown() {
+        // Comma numbers read unknown with no size.
+        // No second number match fills the share.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16,384KB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        let row = view.cpus.get(&0).unwrap();
+        assert_eq!(row.l3_kb, 0);
+    }
+
+    #[test]
+    fn comma_blocks_second_number() {
+        // Split value 16,384KB never reads as 384KB.
+        // Unknown stays zero with no match.
+        assert_eq!(first_size_kb("16,384KB"), 0);
+        assert_ne!(first_size_kb("16,384KB"), 384);
+        assert_eq!(first_size_kb("16384KB"), 16384);
+    }
+
+    #[test]
+    fn unknown_unit_reads_zero_not_max() {
+        // Unknown units read zero with no max.
+        // The dead max branch stays removed.
+        assert_eq!(first_size_kb("16XB"), 0);
+        assert_ne!(first_size_kb("16XB"), u32::MAX);
+        assert_eq!(first_size_kb("16MB"), 16384);
+        assert_eq!(first_size_kb("no size here"), 0);
+    }
+
+    #[test]
+    fn hostbridge_and_pcibridge_still_ignored() {
+        // IO helpers stay ignored exhaustively.
+        // Package lines stay kept with no fail.
+        assert!(is_ignored_line("HostBridge"));
+        assert!(is_ignored_line("PCIBridge L#1"));
+        assert!(is_ignored_line("PCI 01:00.0 (VGA)"));
+        assert!(is_ignored_line("Block(Disk) \"nvme0n1\""));
+        assert!(is_ignored_line("Network L#0 (Address=aa) \"eth0\""));
+        assert!(is_ignored_line("depth 0: 1 Machine (type #0)"));
+        assert!(is_ignored_line("Special depth -4: 7 Bridge (type #14)"));
+        assert!(!is_ignored_line("Package L#0"));
+        assert!(!is_ignored_line("L3 L#0 (16MB)"));
+        assert!(!is_ignored_line("PU L#0 (P#0)"));
+    }
+
+    #[test]
+    fn package_line_stays_kept() {
+        // Package lines carry no Bridge block now.
+        // Removal keeps Package plus cache rows linked.
+        let text = "Machine\n  Package L#0\n    L3 L#0 (16MB)\n      L2 L#0 (512KB) + L1d L#0 (32KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        assert_eq!(view.cpus.len(), 1);
+        assert_eq!(view.cpus.get(&0).unwrap().l3_kb, 16384);
+    }
+
+    #[test]
+    fn plain_sizes_still_parse() {
+        // Plain units keep exact kibibytes.
+        // All math stays integer only with no float.
+        assert_eq!(first_size_kb("32KB"), 32);
+        assert_eq!(first_size_kb("512KB"), 512);
+        assert_eq!(first_size_kb("16MB"), 16384);
+        assert_eq!(first_size_kb("96MB"), 98304);
+        assert_eq!(first_size_kb("1GB"), 1048576);
+    }
+
+    #[test]
+    fn word_bounds_block_substring() {
+        // Word bounds block CPU plus Cache suffix matches.
+        // Keeps L2 from matching L2Cache twice.
+        assert!(contains_word("L3 L#0", "L3"));
+        assert!(!contains_word("L3Cache", "L3"));
+        assert!(contains_word("Die L#0", "Die"));
+        assert!(!contains_word("DielectricFoo", "Die"));
+        assert!(contains_word("PU L#0", "PU"));
+        assert!(!contains_word("CPU", "PU"));
+        assert!(contains_word("Core L#0", "Core"));
+        assert!(!contains_word("Score", "Core"));
     }
 }

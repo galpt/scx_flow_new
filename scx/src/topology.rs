@@ -154,7 +154,7 @@ pub fn describe_topo_summary(topo: &Topology) -> String {
     )
 }
 
-/// Sched use brief for info logs. Names shape plus leverage action.
+/// Sched use brief for info logs. Names shape plus use action.
 pub fn describe_sched_use(topo: &Topology) -> String {
     let groups: usize = describe_topo_groups(topo);
     let llcs: usize = topo.all_llcs.len();
@@ -522,7 +522,7 @@ pub fn render_per_core_lines(
     let ccx_map = cpu_ccx(topo, &llc_ids);
     let mut core_ids: Vec<usize> = topo.all_cores.keys().copied().collect();
     core_ids.sort_unstable();
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::with_capacity(core_ids.len());
     for cid in core_ids {
         let core = match topo.all_cores.get(&cid) {
             Some(v) => v,
@@ -550,11 +550,11 @@ pub fn render_per_core_lines(
                 // All threads on one core share one cache view.
                 let mut found: Option<(u32, u32, u32, u32)> = None;
                 for pu in pus.iter() {
-                    if let Some(cpu) = topo.all_cpus.get(pu) {
-                        if let Some(row) = v.cpus.get(&(cpu.id as u32)) {
-                            found = Some((row.l1d_kb, row.l1i_kb, row.l2_kb, row.l3_kb));
-                            break;
-                        }
+                    if let Some(cpu) = topo.all_cpus.get(pu)
+                        && let Some(row) = v.cpus.get(&(cpu.id as u32))
+                    {
+                        found = Some((row.l1d_kb, row.l1i_kb, row.l2_kb, row.l3_kb));
+                        break;
                     }
                 }
                 match found {
@@ -586,6 +586,234 @@ pub fn render_per_core_lines(
     out
 }
 
+/// Per core lines capped at a limit. Returns capped lines plus total.
+/// Builds only capped lines so large hosts stay bounded. Total counts
+/// all cores with no tail strings. Callers show capped lines plus
+/// an overflow count line. Limit zero keeps empty plus total.
+pub fn render_per_core_lines_capped(
+    topo: &Topology,
+    view: Option<&crate::lstopo::LstopoView>,
+    limit: usize,
+) -> (Vec<String>, usize) {
+    let mut llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+    llc_ids.sort_unstable();
+    let ccx_map = cpu_ccx(topo, &llc_ids);
+    let mut core_ids: Vec<usize> = topo.all_cores.keys().copied().collect();
+    core_ids.sort_unstable();
+    let mut out: Vec<String> = Vec::with_capacity(limit.min(core_ids.len()));
+    let mut total: usize = 0;
+    for cid in core_ids {
+        let core = match topo.all_cores.get(&cid) {
+            Some(v) => v,
+            None => continue,
+        };
+        total = total.wrapping_add(1);
+        if out.len() >= limit {
+            continue;
+        }
+        let mut pus: Vec<usize> = core.cpus.keys().copied().collect();
+        pus.sort_unstable();
+        let pair: String = pus
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+            .join("+");
+        let first_cpu: usize = pus.first().copied().unwrap_or(0);
+        let group: u32 = ccx_map.get(&first_cpu).copied().unwrap_or(CCX_UNKNOWN);
+        let group_text: String = if group == CCX_UNKNOWN {
+            String::from("unknown")
+        } else {
+            group.to_string()
+        };
+        let llc: usize = core.llc_id;
+        let node: usize = core.node_id;
+        let (l1d, l1i, l2, l3): (String, String, String, String) = match view {
+            Some(v) => {
+                // Core shares come from the first PU row on the core.
+                // All threads on one core share one cache view.
+                let mut found: Option<(u32, u32, u32, u32)> = None;
+                for pu in pus.iter() {
+                    if let Some(cpu) = topo.all_cpus.get(pu)
+                        && let Some(row) = v.cpus.get(&(cpu.id as u32))
+                    {
+                        found = Some((row.l1d_kb, row.l1i_kb, row.l2_kb, row.l3_kb));
+                        break;
+                    }
+                }
+                match found {
+                    Some((a, b, c, d)) => (format_kb(a), format_kb(b), format_kb(c), format_kb(d)),
+                    None => (
+                        String::from("unknown"),
+                        String::from("unknown"),
+                        String::from("unknown"),
+                        String::from("unknown"),
+                    ),
+                }
+            }
+            None => (
+                String::from("unknown"),
+                String::from("unknown"),
+                String::from("unknown"),
+                String::from("unknown"),
+            ),
+        };
+        out.push(format!(
+            "Core L{} P{} cpus {} LLC {} node {} group {} L1d {} L1i {} L2 {} L3 {}",
+            core.id, core.kernel_id, pair, llc, node, group_text, l1d, l1i, l2, l3
+        ));
+    }
+    (out, total)
+}
+
+/// Tree lines capped at a limit. Returns capped lines plus total.
+/// Counts all lines with no tail strings. Large trees stay bounded.
+/// Limit zero keeps empty plus total. L is Topology id.
+/// P is kernel id.
+pub fn render_topo_lines_capped(topo: &Topology, limit: usize) -> (Vec<String>, usize) {
+    let mut out: Vec<String> = Vec::with_capacity(limit.min(1088));
+    let mut total: usize = 0;
+    let push_capped = |out: &mut Vec<String>, total: &mut usize, line: String| {
+        *total = total.wrapping_add(1);
+        if out.len() < limit {
+            out.push(line);
+        }
+    };
+    push_capped(&mut out, &mut total, String::from("Machine"));
+    let groups: usize = describe_topo_groups(topo);
+    let show_cluster: bool = groups > 1;
+    let mut pkg_set: BTreeSet<usize> = BTreeSet::new();
+    for cpu in topo.all_cpus.values() {
+        pkg_set.insert(cpu.package_id);
+    }
+    let mut pkgs: Vec<usize> = pkg_set.into_iter().collect();
+    pkgs.sort();
+    let mut pkg_l: usize = 0;
+    for pkg_p in pkgs {
+        push_capped(&mut out, &mut total, format!("  Package L{pkg_l} P{pkg_p}"));
+        pkg_l = pkg_l.wrapping_add(1);
+        let mut node_ids: Vec<usize> = Vec::new();
+        for (nid, node) in topo.nodes.iter() {
+            let mut has: bool = false;
+            for cpu in node.all_cpus.values() {
+                if cpu.package_id == pkg_p {
+                    has = true;
+                    break;
+                }
+            }
+            if has {
+                node_ids.push(*nid);
+            }
+        }
+        node_ids.sort();
+        for nid in node_ids {
+            let node = match topo.nodes.get(&nid) {
+                Some(n) => n,
+                None => continue,
+            };
+            push_capped(
+                &mut out,
+                &mut total,
+                format!("    Node L{} P{}", node.id, node.id),
+            );
+            let mut llcs: Vec<usize> = Vec::new();
+            for (lid, llc) in node.llcs.iter() {
+                let mut has: bool = false;
+                for cpu in llc.all_cpus.values() {
+                    if cpu.package_id == pkg_p {
+                        has = true;
+                        break;
+                    }
+                }
+                if has {
+                    llcs.push(*lid);
+                }
+            }
+            llcs.sort_by(|a, b| {
+                let la = match node.llcs.get(a) {
+                    Some(v) => v,
+                    None => return std::cmp::Ordering::Equal,
+                };
+                let lb = match node.llcs.get(b) {
+                    Some(v) => v,
+                    None => return std::cmp::Ordering::Equal,
+                };
+                match la.kernel_id.cmp(&lb.kernel_id) {
+                    std::cmp::Ordering::Equal => la.id.cmp(&lb.id),
+                    other => other,
+                }
+            });
+            for lid in llcs {
+                let llc = match node.llcs.get(&lid) {
+                    Some(v) => v,
+                    None => continue,
+                };
+                push_capped(
+                    &mut out,
+                    &mut total,
+                    format!("      L3 L{} P{}", llc.id, llc.kernel_id),
+                );
+                let mut core_ids: Vec<usize> = Vec::new();
+                for (cid, core) in llc.cores.iter() {
+                    let mut has: bool = false;
+                    for cpu in core.cpus.values() {
+                        if cpu.package_id == pkg_p {
+                            has = true;
+                            break;
+                        }
+                    }
+                    if has {
+                        core_ids.push(*cid);
+                    }
+                }
+                core_ids.sort_by(|a, b| {
+                    let ca = match llc.cores.get(a) {
+                        Some(v) => v,
+                        None => return std::cmp::Ordering::Equal,
+                    };
+                    let cb = match llc.cores.get(b) {
+                        Some(v) => v,
+                        None => return std::cmp::Ordering::Equal,
+                    };
+                    match ca.kernel_id.cmp(&cb.kernel_id) {
+                        std::cmp::Ordering::Equal => ca.id.cmp(&cb.id),
+                        other => other,
+                    }
+                });
+                for cid in core_ids {
+                    let core = match llc.cores.get(&cid) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let cluster: Option<isize> = core_cluster(core);
+                    let suffix: String = match cluster {
+                        Some(c) if show_cluster => format!(" cluster C{c}"),
+                        _ => String::new(),
+                    };
+                    push_capped(
+                        &mut out,
+                        &mut total,
+                        format!("        Core+L2 L{} P{}{}", core.id, core.kernel_id, suffix),
+                    );
+                    let mut pu_ids: Vec<usize> = core.cpus.keys().copied().collect();
+                    pu_ids.sort();
+                    for pu in pu_ids {
+                        let cpu = match core.cpus.get(&pu) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        push_capped(
+                            &mut out,
+                            &mut total,
+                            format!("          PU L{} P{}", cpu.id, cpu.id),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    (out, total)
+}
+
 #[cfg(test)]
 mod tests {
     use super::CCX_UNKNOWN;
@@ -597,10 +825,10 @@ mod tests {
     use super::describe_sched_use;
     use super::describe_topo_groups;
     use super::describe_topo_summary;
-    use super::format_kb;
     use super::kb_for_bytes;
-    use super::render_per_core_lines;
+    use super::render_per_core_lines_capped;
     use super::render_topo_lines;
+    use super::render_topo_lines_capped;
     use super::smt_on;
     use scx_utils::Core;
     use scx_utils::CoreType;
@@ -1235,5 +1463,177 @@ mod tests {
         // Die stays size only with no cluster feed.
         assert_eq!(r0.die_kb, 98304);
         assert_eq!(crate::lstopo::die_ccx_hint(r0.die_kb), None);
+    }
+
+    #[test]
+    fn brief_has_no_leverage_word() {
+        // Brief uses plain words with no buzzwords.
+        // Names shape plus use action stays short.
+        let topo = single_host_topo();
+        let brief = describe_sched_use(&topo);
+        assert!(!brief.contains("leverage"));
+        assert!(brief.contains("Topology:"));
+        assert!(brief.contains("SMT on"));
+        assert!(brief.len() <= 160);
+        let off = multi_package_topo();
+        let off_brief = describe_sched_use(&off);
+        assert!(!off_brief.contains("leverage"));
+        assert!(off_brief.len() <= 160);
+    }
+
+    #[test]
+    fn per_core_capped_matches_full_prefix() {
+        // Capped build matches the full prefix with no tail strings.
+        // Large hosts stay bounded at sixty four lines.
+        use super::render_per_core_lines;
+        let topo = large_topo();
+        let full = render_per_core_lines(&topo, None);
+        assert_eq!(full.len(), 542);
+        let (capped, total) = render_per_core_lines_capped(&topo, None, 64);
+        assert_eq!(total, 542);
+        assert_eq!(capped.len(), 64);
+        assert_eq!(capped, full.into_iter().take(64).collect::<Vec<String>>());
+        assert_eq!(total.wrapping_sub(64), 478);
+    }
+
+    #[test]
+    fn per_core_capped_total_counts_all() {
+        // Total counts all cores with no tail strings.
+        // Hidden count is total minus sixty four.
+        let topo = large_topo();
+        let (capped, total) = render_per_core_lines_capped(&topo, None, 64);
+        assert_eq!(total, 542);
+        assert_eq!(capped.len(), 64);
+        let marker = format!("...+{} more", total.wrapping_sub(64));
+        assert_eq!(marker, String::from("...+478 more"));
+    }
+
+    #[test]
+    fn per_core_capped_limit_zero_keeps_empty_plus_total() {
+        // Limit zero keeps empty plus total.
+        // No strings are built on this path.
+        let topo = large_topo();
+        let (capped, total) = render_per_core_lines_capped(&topo, None, 0);
+        assert!(capped.is_empty());
+        assert_eq!(total, 542);
+        let single = single_host_topo();
+        let (empty, single_total) = render_per_core_lines_capped(&single, None, 0);
+        assert!(empty.is_empty());
+        assert_eq!(single_total, 2);
+    }
+
+    #[test]
+    fn per_core_capped_limit_beyond_total_keeps_all() {
+        // Large limit keeps all lines with no overflow.
+        // Total equals capped length on this path.
+        let topo = large_topo();
+        let (capped, total) = render_per_core_lines_capped(&topo, None, 1000);
+        assert_eq!(total, 542);
+        assert_eq!(capped.len(), 542);
+        let single = single_host_topo();
+        let (all, single_total) = render_per_core_lines_capped(&single, None, 64);
+        assert_eq!(single_total, 2);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn per_core_capped_small_host_no_overflow() {
+        // Small hosts keep all lines with no marker.
+        // First line still carries core plus sizes.
+        use super::render_per_core_lines;
+        use crate::lstopo::LstopoCpu;
+        use crate::lstopo::LstopoView;
+        let topo = single_host_topo();
+        let mut view = LstopoView::default();
+        for pu in [0u32, 1, 2, 3] {
+            view.cpus.insert(
+                pu,
+                LstopoCpu {
+                    pu_l: Some(pu),
+                    pu_p: pu,
+                    core_l: Some(pu / 2),
+                    l1d_kb: 32,
+                    l1i_kb: 32,
+                    l2_kb: 512,
+                    l3_kb: 16384,
+                    die_kb: 0,
+                },
+            );
+        }
+        let full = render_per_core_lines(&topo, Some(&view));
+        let (capped, total) = render_per_core_lines_capped(&topo, Some(&view), 64);
+        assert_eq!(total, 2);
+        assert_eq!(capped, full);
+        assert!(capped[0].contains("L1d 32K"));
+    }
+
+    #[test]
+    fn per_core_capped_limit_one_keeps_first() {
+        // Limit one keeps the first core only.
+        // Total still counts all cores.
+        let topo = large_topo();
+        let (capped, total) = render_per_core_lines_capped(&topo, None, 1);
+        assert_eq!(capped.len(), 1);
+        assert_eq!(total, 542);
+        assert!(capped[0].contains("Core"));
+    }
+
+    #[test]
+    fn topo_capped_matches_full_prefix() {
+        // Capped tree matches the full prefix.
+        // Large trees stay bounded at sixty four lines.
+        let topo = large_topo();
+        let full = render_topo_lines(&topo);
+        assert_eq!(full.len(), 1088);
+        let (capped, total) = render_topo_lines_capped(&topo, 64);
+        assert_eq!(total, 1088);
+        assert_eq!(capped.len(), 64);
+        assert_eq!(capped, full.into_iter().take(64).collect::<Vec<String>>());
+    }
+
+    #[test]
+    fn topo_capped_total_is_1088() {
+        // Total counts all tree lines with no tail strings.
+        // Hidden count is total minus sixty four.
+        let topo = large_topo();
+        let (capped, total) = render_topo_lines_capped(&topo, 64);
+        assert_eq!(total, 1088);
+        assert_eq!(capped.len(), 64);
+        let marker = format!("...+{} more", total.wrapping_sub(64));
+        assert_eq!(marker, String::from("...+1024 more"));
+        assert_eq!(capped[0], String::from("Machine"));
+    }
+
+    #[test]
+    fn topo_capped_zero_and_overflow() {
+        // Limit zero keeps empty plus total.
+        // Large limit keeps all lines.
+        let topo = large_topo();
+        let (empty, total) = render_topo_lines_capped(&topo, 0);
+        assert!(empty.is_empty());
+        assert_eq!(total, 1088);
+        let (all, full_total) = render_topo_lines_capped(&topo, 5000);
+        assert_eq!(full_total, 1088);
+        assert_eq!(all.len(), 1088);
+        let single = single_host_topo();
+        let (small, small_total) = render_topo_lines_capped(&single, 64);
+        assert_eq!(small_total, 10);
+        assert_eq!(small.len(), 10);
+    }
+
+    #[test]
+    fn capped_builds_stay_bounded() {
+        // Capped lengths never pass the limit.
+        // Capacity stays near the limit with no full build.
+        let topo = large_topo();
+        for limit in [0usize, 1, 10, 64, 100] {
+            let (per_core, per_total) = render_per_core_lines_capped(&topo, None, limit);
+            assert!(per_core.len() <= limit);
+            assert_eq!(per_total, 542);
+            assert!(per_core.capacity() <= limit.wrapping_add(16));
+            let (tree, tree_total) = render_topo_lines_capped(&topo, limit);
+            assert!(tree.len() <= limit);
+            assert_eq!(tree_total, 1088);
+        }
     }
 }
