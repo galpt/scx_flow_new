@@ -550,7 +550,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
 		 * stopping still charges the tail, but move the running horizon
-		 * out by one slice so a wake can preempt at once with the two
+		 * out by one slice so a wake can land at once with the two
 		 * views diverged until stopping. Seed the burst to one slice
 		 * for the next run. */
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));

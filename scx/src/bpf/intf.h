@@ -22,7 +22,7 @@
  * last run length. A full target keeps the newcomer in the fallback
  * queue in FIFO order with no evict. Stopping plus tick keep the burst
  * and run state with idle only kick and no reclaim. A shared enqueue with a due time ahead of the
- * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
+ * running due time wakes idle only. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
  * holds bounded at 64 total with the fallback holding at most one
  * thousand twenty four. Queues come from the upstream deadline
@@ -141,7 +141,7 @@ struct flow_cpu_ctx {
  * moves to a local queue. Fallback counts fallback inserts. Steal
  * counts remote moves, with a split count kept on the thief.
  * Duplicate counts requeues dropped while already queued. Kick
- * counts preempt plus idle and skipped wakes. Overrun counts full
+ * counts idle plus skipped wakes with the preempt count at zero. Overrun counts full
  * slice burns. Blocked counts stops that leave the task runnable.
  * Orphan counts mask change kicks. Forward counts heads passed to
  * their owner. */

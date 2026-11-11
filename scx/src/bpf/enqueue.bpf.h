@@ -14,10 +14,10 @@
  * no usable CPU skip the floor and stay FIFO. The charge scales with
  * the effective weight. Each shared enqueue checks the idle flag first, then the
  * running deadline on the target for an earlier deadline win. Idle targets take
- * an idle wake and never preempt. Each running instance kicks at most once.
- * A deadline win kicks for preempt on a win, else it counts a skip with no wake. A wake goes only to an idle target, else it counts a
+ * an idle wake and running targets keep running. Each running instance kicks at most once.
+ * A deadline win kicks idle on a win, else it counts a skip with no wake. A wake goes only to an idle target, else it counts a
  * skip with no wake. The kernel idle flag decides the idle wake.
- * Preempts stay in the same LLC with an allowed live target. Local
+ * Wakes stay in the same LLC with an allowed live target. Local
  * inserts are not counted in the shared gauge. Shared and fallback
  * inserts count the gauge, and fallback inserts also count fallback.
  * Dequeue drops the gauge on cancel. Masks
@@ -91,12 +91,12 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 }
-/* Deadline wins kick for preempt with one kick per run. Each miss
+/* Deadline wins wake idle with one kick per run. Each miss
  * counts a skip with no wake. Misses split by cause with no new
  * counter. A bad or masked or offline target skips. A stale run
  * skips. An already kicked run skips. A late due time skips. A lost
  * race skips. A changed run after the win skips, so a stale kick
- * never preempts a fresh run. The token keeps the low thirty two bits
+ * never wakes a fresh run. The token keeps the low thirty two bits
  * of the run count, so a repeat needs four billion runs on one CPU. */
 static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
 {
@@ -173,8 +173,8 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
-	flow_stat_inc(llc, 6);
+	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
+	flow_stat_inc(llc, 7);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {

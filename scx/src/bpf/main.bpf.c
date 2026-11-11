@@ -7,7 +7,7 @@
  * and there is one fallback
  * queue in FIFO order. Queues hold bounded at 64 total.
  * Ties leave in insertion order. Deadline order sets the queue with
- * preempts for shared tasks with an earlier deadline. Queues come from
+ * idle wakes for shared tasks with an earlier deadline. Queues come from
  * the upstream deadline library and placement follows the
  * upstream topology library. Tables are written once, so a CPU that
  * arrives late needs a restart to be seen. Settings live in the
