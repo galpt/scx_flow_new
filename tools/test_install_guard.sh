@@ -1138,6 +1138,24 @@ if awk '/flow_set_cpumask/,/^}/' "${DISP_HDR}" | grep -q "t->vd\|t->vtime\|burst
     fail "mask path rewrites deadline"
 fi
 
+# Affinity stays closed on every path. The constrained target keeps the
+# hint only when allowed plus live. The pick rechecks the winner with a
+# first allowed fallback. Every kick rechecks mask plus liveness. Pinned
+# plus exiting plus maskless tasks keep FIFO fallback. The tier orders
+# allowed plus live CPUs only and never widens the mask.
+grep -q "flow_cpu_allowed(hint, p) && flow_cpu_live" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "hint gate missing"
+grep -q "return flow_first_allowed(p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick fallback missing"
+grep -q "cpus_ptr" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "mask null guard missing"
+grep -q "nr_cpus_allowed" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pin detect missing"
+grep -q "is_migration_disabled" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "migration pin missing"
+grep -q "bpf_cpumask_test_cpu" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "mask test missing"
+grep -q "bpf_cpumask_first" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "first mask read missing"
+grep -q "no_cpu" "${ENQ_HDR}" || fail "maskless path missing"
+grep -q "PF_EXITING" "${ENQ_HDR}" || fail "exiting path missing"
+grep -q "flow_stat_inc(qllc, 11)" "${DISP_HDR}" || fail "orphan count missing"
+grep -q "flow_cpu_allowed(owner, p)" "${DISP_HDR}" || fail "owner recheck missing"
+grep -q "flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx)" "${DISP_HDR}" || fail "group match call missing"
+
 # Cache idle orders the drain by cache tier with no size map and no seed change.
 # The group tier read plus the tier match plus the empty check stay
 # allowlisted by exact name. Any other cache helper fails closed here.
