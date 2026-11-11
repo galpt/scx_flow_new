@@ -1101,6 +1101,43 @@ grep -q "Misses split by cause" "${ENQ_HDR}" || fail "kick cause prose missing"
 # Kicks count every miss with an LLC recheck after the win.
 grep -q "rllc = READ_ONCE(rs->llc_id)" "${ENQ_HDR}" || fail "llc recheck missing"
 
+# Edge cases stay closed with no slice or deadline drift on wake paths.
+# Wake helpers never write task time or slice or run state. The win path
+# keeps the single kick token with skips otherwise. Exiting tasks keep
+# the one microsecond slice. Init fails closed on a missing tree or an
+# over bound CPU count.
+wake_block() {
+    awk '/^static __always_inline void flow_kick_idle_only\(/,/^}/' "${ENQ_HDR}"
+    awk '/^static __always_inline void flow_kick_vd\(/,/^}/' "${ENQ_HDR}"
+    awk '/^static __always_inline void flow_forward_from_peeked\(/,/^}/' "${DISP_HDR}"
+    awk '/^static __always_inline void flow_rekick_unrunnable\(/,/^}/' "${DISP_HDR}"
+}
+if wake_block | grep -q "slice_rem *=\|->vd *=\|->vtime *=\|burst_ns *=\|run_dur\|run_total\|run_min\|run_max\|run_head\|run_known\|run_stamp\|run_pruned\|run_pad\|->llc_id *=\|->flags *=\|->gen *=" 2>/dev/null; then
+    fail "wake path writes task state"
+fi
+# The wake path never mutates run or burst state. Enqueue reads the kept
+# max plus the burst path only.
+if grep -q "flow_run_add\|flow_run_close\|flow_run_prune\|flow_burst_update" "${ENQ_HDR}" 2>/dev/null; then
+    fail "run mutate leaked into enqueue"
+fi
+# Deadline keys saturate negatives at zero.
+grep -q "flow_edq_deadline" "${ENQ_HDR}" || fail "deadline helper missing"
+grep -q "if (vd < 0)" "${ENQ_HDR}" || fail "deadline saturate drifted"
+# The floor keeps uniqueness through the compare swap plus one.
+grep -q "want = last + 1" "${FAIR_HDR}" || fail "floor uniqueness missing"
+grep -q "__sync_val_compare_and_swap(&flow_llc_seq" "${FAIR_HDR}" || fail "floor swap missing"
+# Exiting tasks keep the one microsecond slice with no zero insert.
+grep -q "FLOW_EXIT_SLICE_NS = 1000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "exit slice missing"
+# Init fails closed on a missing tree or an over bound count.
+grep -q "topology tree missing" "${DISP_HDR}" || fail "tree guard missing"
+grep -q "return -ENODEV" "${DISP_HDR}" || fail "tree fail closed missing"
+grep -q "CPU count over bound" "${DISP_HDR}" || fail "count guard missing"
+grep -q "return -E2BIG" "${DISP_HDR}" || fail "count fail closed missing"
+# Mask change on a queued task never rewrites the due time.
+if awk '/flow_set_cpumask/,/^}/' "${DISP_HDR}" | grep -q "t->vd\|t->vtime\|burst_ns" 2>/dev/null; then
+    fail "mask path rewrites deadline"
+fi
+
 # Cache idle orders the drain by cache tier with no size map and no seed change.
 # The group tier read plus the tier match plus the empty check stay
 # allowlisted by exact name. Any other cache helper fails closed here.
