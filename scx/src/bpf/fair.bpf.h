@@ -88,6 +88,17 @@ static __always_inline u32 flow_eff_w(u32 nw, u32 sw)
 		return s;
 	return n < s ? n : s;
 }
+/* Effective step from one slice over weight. The base step equals one
+ * slice times the default weight divided by the clamped weight, so the
+ * step spans ten thousand at weight ten thousand through one million at
+ * weight one hundred to one hundred million at weight one. The table
+ * below gives weight against step and the scaled floor at sixty two
+ * thousand five hundred. Weight one hundred steps one million with a
+ * scaled floor of sixty two thousand five hundred. Weight ten thousand
+ * steps ten thousand with a scaled floor of six hundred twenty five.
+ * Weight one steps one hundred million with a scaled floor of six
+ * million two hundred fifty thousand. Integer divide only with no
+ * rounding beyond the divide. */
 static __always_inline u64 flow_fair_step(u32 w)
 {
 	u32 cw = w;
@@ -96,8 +107,8 @@ static __always_inline u64 flow_fair_step(u32 w)
 	if (cw > (u32)FLOW_CGROUP_WEIGHT_MAX)
 		cw = (u32)FLOW_CGROUP_WEIGHT_MAX;
 	if (!cw)
-		return (u64)FLOW_FAIR_BASE_NS;
-	return (u64)FLOW_FAIR_BASE_NS * (u64)FLOW_CGROUP_WEIGHT_DFLT / (u64)cw;
+		return (u64)FLOW_SLICE_MIN_NS;
+	return (u64)FLOW_SLICE_MIN_NS * (u64)FLOW_CGROUP_WEIGHT_DFLT / (u64)cw;
 }
 static __always_inline s64 flow_fair_cap_add(s64 base, u64 add)
 {
@@ -108,6 +119,11 @@ static __always_inline s64 flow_fair_cap_add(s64 base, u64 add)
 		return vmax;
 	return base + (s64)add;
 }
+/* Overflow bound with the burst clamp. The due time path feeds at most
+ * one slice, so hi stays at most one with lo below one slice and the
+ * scaled sum stays at most twice the step with two hundred million as
+ * the top at weight one. The general path keeps the hi guard plus the
+ * saturating add with no wrap. */
 static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
@@ -117,7 +133,7 @@ static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 	u64 lo;
 	u64 scaled;
 	if (!st)
-		st = (u64)FLOW_FAIR_BASE_NS;
+		st = (u64)FLOW_SLICE_MIN_NS;
 	if (!slice)
 		slice = (u64)FLOW_SLICE_MIN_NS;
 	hi = used / slice;
@@ -150,7 +166,7 @@ static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
 }
 /* Track the last run length. An overrun snaps to one slice. A run
  * that ends early while still runnable only moves up past the old
- * value by half the gap and holds otherwise, since the stop cut the
+ * value by a quarter of the gap and holds otherwise, since the stop cut the
  * run short. A sleep moves by a quarter toward the run length. */
 static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 					     u64 cur, bool runnable)
@@ -163,7 +179,7 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 		return (u64)FLOW_SLICE_MIN_NS;
 	if (runnable) {
 		if (u > b)
-			b = b - (b >> 1) + (u >> 1);
+			b = b - (b >> 2) + (u >> 2);
 		return flow_burst_clamp(b);
 	}
 	b = b - (b >> 2) + (u >> 2);
@@ -186,7 +202,7 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 				want = last + 1;
 			next = want;
 		} else {
-			s64 cap = flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS);
+			s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
 			if (want < cap)
 				next = want;
 			else
@@ -377,8 +393,8 @@ static __always_inline u64 flow_run_eff(u64 ref, u64 burst_ns)
 {
 	u64 b = flow_burst_clamp(burst_ns);
 	u64 e = ref > b ? ref : b;
-	if (e > (u64)FLOW_RUN_WIN_NS)
-		e = (u64)FLOW_RUN_WIN_NS;
+	if (e > (u64)FLOW_SLICE_MIN_NS)
+		e = (u64)FLOW_SLICE_MIN_NS;
 	return e;
 }
 static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
