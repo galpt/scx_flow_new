@@ -43,7 +43,8 @@ const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_arena_task>() ==
  * Scheduler holds the skeleton, the link, and the stats server.
  * It drives the run loop until shutdown or exit. The arena library
  * stays alive for the whole run so queue and topology memory stays
- * valid while the scheduler is attached.
+ * valid while the scheduler is attached. Placement plus drain read the
+ * seed plus the tree in BPF, so the run loop adds no per task cache state.
  */
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
