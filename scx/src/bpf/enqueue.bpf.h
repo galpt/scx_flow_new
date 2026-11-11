@@ -224,7 +224,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 						struct flow_arena_task __arena *at = mem;
 						u64 dl = flow_edq_deadline(raw_v);
 						WRITE_ONCE(at->pid, p->pid);
-						if (scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP) {
+						/* Unbounded admit with the insert return
+						 * as the sole test and no room probe. */
+						{
 							int ret = scx_edq_insert(edq,
 										 (scx_edq_task_t *)at,
 										 dl, 0,
@@ -295,7 +297,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				struct flow_arena_task __arena *at = mem;
 				u64 dl = flow_edq_deadline(raw_v);
 				WRITE_ONCE(at->pid, p->pid);
-				if (scx_edq_nr_queued(edq) < (u64)FLOW_QUEUE_CAP) {
+				/* Unbounded admit with the insert return
+				 * as the sole test and no room probe. */
+				{
 					int ret = scx_edq_insert(edq,
 								 (scx_edq_task_t *)at,
 								 dl, 0,
@@ -351,9 +355,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			slice_len = flow_run_slice(ref);
 		}
 		if (edq) {
-			u64 nr = scx_edq_nr_queued(edq);
 			mem = __scx_task_data(p);
-			if (mem && nr < (u64)FLOW_QUEUE_CAP)
+			if (mem)
 				can_queue = true;
 		}
 		t->vtime = floored;
