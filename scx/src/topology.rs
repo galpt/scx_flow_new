@@ -27,7 +27,7 @@ pub fn smt_on(topo: &Topology) -> bool {
     topo.all_cores.values().any(|c| c.cpus.len() > 1)
 }
 
-/// Group count with unknown fallback.
+/// Group count with unknown fallback. Minus one and 65535 count as unknown.
 fn describe_topo_groups(topo: &Topology) -> usize {
     let mut seen: BTreeSet<isize> = BTreeSet::new();
     for core in topo.all_cores.values() {
@@ -82,7 +82,7 @@ pub fn describe_topo_summary(topo: &Topology) -> String {
     )
 }
 
-/// Sched use brief for info logs.
+/// Sched use brief for info logs. Names shape plus leverage action.
 pub fn describe_sched_use(topo: &Topology) -> String {
     let groups: usize = describe_topo_groups(topo);
     let llcs: usize = topo.all_llcs.len();
@@ -92,12 +92,12 @@ pub fn describe_sched_use(topo: &Topology) -> String {
     let llc_text: &str = if llcs == 1 { "LLC" } else { "LLCs" };
     let node_text: &str = if nodes == 1 { "node" } else { "nodes" };
     format!(
-        "Topology: SMT {}, {} {}, {} {}, {} {}. Drain group LLC node remote fallback idle only. Constrained L1>L2>L3.",
+        "Topology: SMT {}, {} {}, {} {}, {} {}. Place local first then drain group LLC node remote fallback idle only. Constrained L1>L2>L3.",
         smt_text, groups, group_text, llcs, llc_text, nodes, node_text
     )
 }
 
-/// Tree lines for debug logs.
+/// Tree lines for debug logs. L is Topology id and P is kernel id.
 pub fn render_topo_lines(topo: &Topology) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     out.push(String::from("Machine"));
@@ -506,18 +506,18 @@ mod tests {
 
     fn multi_package_topo() -> Topology {
         let mut a0: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
-        a0.insert(0, mk_cpu(0, 0, 0, 0, 0, -1));
+        a0.insert(0, mk_cpu(0, 0, 0, 0, 2, -1));
         let mut a1: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
-        a1.insert(1, mk_cpu(1, 1, 0, 0, 0, -1));
+        a1.insert(1, mk_cpu(1, 1, 0, 0, 2, -1));
         let mut acores: BTreeMap<usize, Arc<Core>> = BTreeMap::new();
         acores.insert(0, mk_core(0, 0, -1, a0, 0, 0));
         acores.insert(1, mk_core(1, 1, -1, a1, 0, 0));
         let mut allcs: BTreeMap<usize, Arc<Llc>> = BTreeMap::new();
         allcs.insert(0, mk_llc(0, 0, acores, 0));
         let mut b0: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
-        b0.insert(2, mk_cpu(2, 2, 1, 1, 1, -1));
+        b0.insert(2, mk_cpu(2, 2, 1, 1, 5, -1));
         let mut b1: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
-        b1.insert(3, mk_cpu(3, 3, 1, 1, 1, -1));
+        b1.insert(3, mk_cpu(3, 3, 1, 1, 5, -1));
         let mut bcores: BTreeMap<usize, Arc<Core>> = BTreeMap::new();
         bcores.insert(2, mk_core(2, 2, -1, b0, 1, 1));
         bcores.insert(3, mk_core(3, 3, -1, b1, 1, 1));
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(
             brief,
             String::from(
-                "Topology: SMT on, 2 groups, 1 LLC, 1 node. Drain group LLC node remote fallback idle only. Constrained L1>L2>L3."
+                "Topology: SMT on, 2 groups, 1 LLC, 1 node. Place local first then drain group LLC node remote fallback idle only. Constrained L1>L2>L3."
             )
         );
         assert!(brief.len() <= 160);
@@ -585,20 +585,25 @@ mod tests {
         let lines = render_topo_lines(&topo);
         assert_eq!(lines.len(), 15);
         assert_eq!(lines[0], String::from("Machine"));
-        assert_eq!(lines[1], String::from("  Package L0 P0"));
+        assert_eq!(lines[1], String::from("  Package L0 P2"));
         assert_eq!(lines[2], String::from("    Node L0 P0"));
         assert_eq!(lines[3], String::from("      L3 L0 P0"));
         assert_eq!(lines[4], String::from("        Core+L2 L0 P0"));
         assert_eq!(lines[5], String::from("          PU L0 P0"));
         assert_eq!(lines[6], String::from("        Core+L2 L1 P1"));
         assert_eq!(lines[7], String::from("          PU L1 P1"));
-        assert_eq!(lines[8], String::from("  Package L1 P1"));
+        assert_eq!(lines[8], String::from("  Package L1 P5"));
         assert_eq!(lines[9], String::from("    Node L1 P1"));
         assert_eq!(lines[10], String::from("      L3 L1 P1"));
         assert_eq!(lines[11], String::from("        Core+L2 L2 P2"));
         assert_eq!(lines[12], String::from("          PU L2 P2"));
         assert_eq!(lines[13], String::from("        Core+L2 L3 P3"));
         assert_eq!(lines[14], String::from("          PU L3 P3"));
+        let summary = describe_topo_summary(&topo);
+        assert_eq!(
+            summary,
+            String::from("4 cpus 2 packages 2 nodes 2 llcs 2 groups")
+        );
         let brief = describe_sched_use(&topo);
         assert!(brief.len() <= 160);
         assert!(brief.contains("SMT off"));
@@ -632,7 +637,10 @@ mod tests {
         assert!(brief.contains("groups"));
         assert!(brief.contains("LLC"));
         assert!(brief.contains("node"));
-        assert!(brief.contains("Drain"));
+        assert!(brief.contains("Place"));
+        assert!(brief.contains("local"));
+        assert!(brief.contains("first"));
+        assert!(brief.contains("drain"));
         assert!(brief.contains("group"));
         assert!(brief.contains("remote"));
         assert!(brief.contains("fallback"));
