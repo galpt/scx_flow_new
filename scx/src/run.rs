@@ -65,11 +65,18 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, flow_ops, open_opts)
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
+        let topo = match scx_utils::Topology::new().context("topology discovery") {
+            Ok(t) => Some(t),
+            Err(e) => {
+                warn!("topology discovery failed, using defaults: {e:#}");
+                None
+            }
+        };
         {
             // Thread shape defaults on in BPF so a missed seed stays conservative.
-            let smt_on = crate::topology::detect_smt().unwrap_or(true);
+            let smt_flag = topo.as_ref().map(crate::topology::smt_on).unwrap_or(true);
             match skel.maps.data_data.as_mut() {
-                Some(data) => data.flow_smt_enabled = if smt_on { 1 } else { 0 },
+                Some(data) => data.flow_smt_enabled = if smt_flag { 1 } else { 0 },
                 None => warn!("smt seed missed, using kernel default"),
             }
             // Arena sizing needs the host CPU count before load so the bitmap
@@ -86,9 +93,30 @@ impl<'a> Scheduler<'a> {
         let task_size = std::mem::size_of::<crate::bpf_intf::flow_arena_task>();
         let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)
             .context("arena setup failed")?;
-        match crate::topology::seed_topology(&mut skel) {
-            Ok(text) => info!("Topology: {text}"),
-            Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
+        if let Some(t) = topo.as_ref() {
+            // Summary plus brief at info.
+            match crate::topology::seed_topology(&mut skel, t) {
+                Ok(text) => info!("Topology: {text}"),
+                Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
+            }
+            info!("Topology: {}", crate::topology::describe_topo_summary(t));
+            info!("{}", crate::topology::describe_sched_use(t));
+            // Tree at debug.
+            if log::log_enabled!(log::Level::Debug) {
+                let topo_lines = crate::topology::render_topo_lines(t);
+                // Cap keeps debug bounded.
+                let total = topo_lines.len();
+                if total > 64 {
+                    for line in topo_lines.into_iter().take(64) {
+                        log::debug!("Topology: {line}");
+                    }
+                    log::debug!("Topology: ...+{} more", total - 64);
+                } else {
+                    for line in topo_lines {
+                        log::debug!("Topology: {line}");
+                    }
+                }
+            }
         }
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
