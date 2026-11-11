@@ -526,6 +526,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->gen = ng;
 	rs->llc_id = llc;
 	rs->vd = READ_ONCE(t->vd);
+	rs->start_ts = bpf_ktime_get_ns();
 	t->gen = ng;
 	t->slice_rem = sl;
 	t->llc_id = llc;

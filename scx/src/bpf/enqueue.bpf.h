@@ -14,8 +14,9 @@
  * no usable CPU skip the floor and stay FIFO. The charge scales with
  * the effective weight. Each shared enqueue checks the idle flag first, then the
  * running deadline on the target for an earlier deadline win. Idle targets take
- * an idle wake and running targets keep running. Each running instance kicks at most once.
- * A deadline win kicks idle on a win, else it counts a skip with no wake. A wake goes only to an idle target, else it counts a
+ * an idle wake and running targets keep running unless the guarded win
+ * fires. Each running instance kicks at most once.
+ * A deadline win preempts on a guarded win, else it counts a skip with no wake. A wake goes only to an idle target, else it counts a
  * skip with no wake. The kernel idle flag decides the idle wake.
  * Wakes stay in the same LLC with an allowed live target. Local
  * inserts are not counted in the shared gauge. Shared and fallback
@@ -91,28 +92,41 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 }
-/* Deadline wins wake idle with one kick per run. Each miss
- * counts a skip with no wake. Misses split by cause with no new
- * counter. A bad or masked or offline target skips. A stale run
- * skips. An already kicked run skips. A late due time skips. A lost
- * race skips. A changed run after the win skips, so a stale kick
- * never wakes a fresh run. The token keeps the low thirty two bits
- * of the run count, so a repeat needs four billion runs on one CPU. */
+/* Guarded deadline wins preempt with one kick per run. Seven steps run
+ * target then idle then run then token then gap then wall then win. Each
+ * miss counts a skip with no wake. Misses split by cause with no new
+ * counter. A bad or masked or offline target skips. An idle target takes
+ * an idle wake. A stale run skips. An already kicked run skips. A late due
+ * time past the gap skips. A fresh run under granularity skips. A short
+ * tail skips. A lost race skips. A changed run after the win skips, so a
+ * stale kick never wakes a fresh run. The token keeps the low thirty two
+ * bits of the run count, so a repeat needs four billion runs on one CPU.
+ * Gates run gap then granularity then tail with no reorder. */
 static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
 {
+	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	struct flow_running_state *rs;
 	u64 rgen;
 	u32 rllc;
 	u32 last;
 	s64 run_vd;
+	s64 win;
+	u64 start;
+	u64 now;
+	u64 ran;
+	u64 rem;
 	u32 c;
 	u64 fresh_gen;
 	s64 fresh_vd;
+	/* Step one of seven keeps the target gate. A bad or masked or
+	 * offline target skips with no wake. */
 	if (tgt < 0 || !p || !flow_cpu_ok((u32)tgt) || !flow_cpu_allowed(tgt, p) ||
 	    !flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
+	/* Step two of seven keeps the idle fast path. An idle target takes
+	 * an idle wake with no preempt. */
 	if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
 		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 		flow_stat_inc(llc, 7);
@@ -130,20 +144,49 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	rs = &flow_running_state[c];
 	rgen = READ_ONCE(rs->gen);
 	rllc = READ_ONCE(rs->llc_id);
+	/* Step three of seven keeps the run gate. A stale run skips. */
 	if (!rgen || !flow_llc_ok(rllc) || rllc != llc) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
 	last = READ_ONCE(rs->pad);
+	/* Step four of seven keeps the token gate. An already kicked run
+	 * skips. */
 	if ((u32)rgen == last) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
 	run_vd = READ_ONCE(rs->vd);
-	if (!(new_vd < run_vd)) {
+	/* Step five of seven keeps the gap gate. The win needs the new due
+	 * time plus the gap below the running due time with signed
+	 * saturation, else a late due time skips. */
+	win = new_vd;
+	if (win >= vmax - (s64)FLOW_KICK_GAP_NS)
+		win = vmax;
+	else
+		win += (s64)FLOW_KICK_GAP_NS;
+	if (!(win < run_vd)) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
+	/* Step six of seven keeps the wall gates. A fresh run under
+	 * granularity skips with cache plus lock protected, then a short
+	 * tail skips with the tail protected. Wraparound reads zero. */
+	start = READ_ONCE(rs->start_ts);
+	now = bpf_ktime_get_ns();
+	ran = now > start ? now - start : 0;
+	if (ran < (u64)FLOW_KICK_GRAN_NS) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	rem = READ_ONCE(rs->slice_rem);
+	if (rem < (u64)FLOW_KICK_TAIL_NS) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	/* Step seven of seven wins the token then rechecks the run. A lost
+	 * race skips with the token spent, so each run still kicks at most
+	 * once. */
 	if (__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen) != last) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -162,7 +205,7 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		return;
 	}
 	fresh_vd = READ_ONCE(rs->vd);
-	if (!(new_vd < fresh_vd)) {
+	if (!(win < fresh_vd)) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -173,8 +216,8 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-	flow_stat_inc(llc, 7);
+	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
+	flow_stat_inc(llc, 6);
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {

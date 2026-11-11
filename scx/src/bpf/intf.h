@@ -78,6 +78,9 @@ enum flow_consts {
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
 	FLOW_FALLBACK_DSQ = 0x6100ULL,
 	FLOW_FLAG_QUEUED = 1ULL,
+	FLOW_KICK_GAP_NS = 100000ULL,
+	FLOW_KICK_GRAN_NS = 200000ULL,
+	FLOW_KICK_TAIL_NS = 100000ULL,
 };
 /* Per task state. Vtime is charged service. Slice holds the time
  * left in the current quantum. Gen identifies the running instance.
@@ -121,7 +124,9 @@ struct flow_arena_task {
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
  * generation, so each run kicks at most once. Virtual deadline mirrors
- * the running task due time for gap checks. */
+ * the running task due time for gap checks. Start holds the run start
+ * wall time for granularity checks. Slice holds the left slice for tail
+ * checks. The view holds forty eight bytes. */
 struct flow_running_state {
 	s64 vtime;
 	u64 slice_rem;
@@ -129,7 +134,10 @@ struct flow_running_state {
 	u32 llc_id;
 	u32 pad;
 	s64 vd;
+	u64 start_ts;
 };
+/* The running view holds forty eight bytes with no growth. */
+_Static_assert(sizeof(struct flow_running_state) == 48, "flow_running_state size drifted");
 /* Per CPU seed from userspace. Holds the CPU id plus the cluster
  * index assigned at startup. Cache and node placement come from the
  * upstream topology tree, so no cached copy lives here. The cluster
