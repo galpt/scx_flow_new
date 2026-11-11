@@ -5,26 +5,23 @@
  * Each CPU owns one queue ordered by virtual deadline. Ties
  * leave in insertion order. One fallback queue holds tasks that have
  * no usable CPU in FIFO order as a best effort overflow with no extra
- * promise. Pinned tasks run on their local queue. Placement keeps the
+ * promise. Each task holds at most one fallback slot through the queued
+ * bit, so the backlog stays within the live task count. Pinned tasks run on their local queue. Placement keeps the
  * constrained target with no load scan. Draining walks local first
  * then same LLC then same node then distant remote last in deadline order
  * with idle starts at once. Each per CPU queue holds bounded at 64
  * total with one millis slices. Each enqueue prices the task by its
- * nice weight. A task pays for the time it burns, scaled by that weight. Fresh times move past
+ * effective weight from nice plus live share. A task pays for the time
+ * it burns, scaled by that weight. Fresh times move past
  * a per LLC floor so two tasks never share the same value, with a
  * direct store of the last observed value plus one when the loop
- * loses too often. Virtual deadline adds a nice based step scaled
+ * loses too often. Virtual deadline adds an effective based step scaled
  * by the burst to the floored time through the shared charge path,
- * so a larger weight or a shorter run gives an earlier due time.
+ * so a larger effective weight or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
- * last run length. Overload keeps a guaranteed admit with live plus
- * tolerance plus bound plus room plus cap. A full target evicts at most
- * one ready task with the latest deadline in the lowest implicit band
- * through a bounded scan of at most eight. Bands come from the nice
- * weight through the fair helper with no new field. Rejects stay in the
- * fallback queue in FIFO order. Stopping plus tick reclaim at most one
- * saved delta from burst past burnt with room plus live plus allowed
- * and idle only kick. A shared enqueue with a due time ahead of the
+ * last run length. A full target keeps the newcomer in the fallback
+ * queue in FIFO order with no evict. Stopping plus tick keep the burst
+ * and run state with idle only kick and no reclaim. A shared enqueue with a due time ahead of the
  * running due time kicks for preempt with idle wakes otherwise. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
  * holds bounded at 64 total with the fallback holding at most one
@@ -61,9 +58,6 @@ enum flow_consts {
 	FLOW_MAX_NODES = 8ULL,
 	FLOW_QUEUE_CAP = 64ULL,
 	FLOW_FALLBACK_CAP = 1024ULL,
-	FLOW_RED_TOL_NS = 64000ULL,
-	FLOW_RED_EMAX_NS = 256000ULL,
-	FLOW_RED_EVICT_MAX = 8ULL,
 	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_SLICE_FLOOR_NS = 62500ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,

@@ -2,11 +2,15 @@
 /*
  * Fair charging for the flow scheduler.
  *
- * The base charge scales with the nice weight. Values saturate at
+ * The base charge scales with the effective weight. Values saturate at
  * the top. The task nice weight comes from a small table over minus
  * twenty to nineteen with zero as one hundred, read from the task
  * static priority minus one hundred twenty. Out of range tasks keep
- * the default.
+ * the default. The live share reads as the default with clamp to one
+ * through ten thousand and no map. The hierarchy walk stays out of
+ * budget, so misses keep nice only. The effective weight keeps the
+ * smaller of the two clamped weights with no divide, so the tighter
+ * bound governs.
  * Fresh times move past the per LLC floor through a short
  * compare and swap loop, so each stored time stays unique with
  * the winner publishing its value at once. When the loop loses
@@ -15,17 +19,11 @@
  * the input time directly. The floor rises over time and never
  * moves backward for a given LLC. When the time runs ahead of the
  * floor, the floor moves up by at most one base step per enqueue,
- * so one far time cannot pull the floor with it. Virtual deadline adds the burst scaled nice step
+ * so one far time cannot pull the floor with it. Virtual deadline adds the burst scaled effective step
  * to the floored time through the shared charge path, so a larger
- * weight or a shorter run gives an earlier due time with no extra
+ * effective weight or a shorter run gives an earlier due time with no extra
  * divide. Burst holds the last run length between the floor and
- * one slice with shift only moves. Overload cost holds the run length
- * between the floor and one slice. Exceed holds the cost past tolerance
- * else zero. The gate admits with live plus tolerance plus bound plus
- * room plus cap and rejects large costs on a full target. Bands map the
- * nice weight between one and sixteen thousand three hundred eighty four
- * with base one hundred twenty eight through shift only moves with no
- * new field, so the lowest band holds the lightest share. Run keeps
+ * one slice with shift only moves. Run keeps
  * eight recent run lengths with close stamps plus the kept range plus
  * a stable flag plus the current sum, so steady tasks price by the
  * kept max with short tasks exact and long tasks in one slice quanta.
@@ -59,6 +57,36 @@ static __always_inline u32 flow_nice_weight(const struct task_struct *p)
 	if (idx >= 40U)
 		return (u32)FLOW_CGROUP_WEIGHT_DFLT;
 	return flow_nice_table[idx];
+}
+/* Live share with miss default and clamp and no map. The hierarchy walk
+ * stays out of budget, so this keeps the default with nice only and no
+ * extra table and no new op by design. */
+static __always_inline u32 flow_share_live(const struct task_struct *p)
+{
+	(void)p;
+	return (u32)FLOW_CGROUP_WEIGHT_DFLT;
+}
+/* Effective weight from nice plus share with clamp only and no divide.
+ * Each side clamps to one through ten thousand with miss default one
+ * hundred. A default side keeps the other side, else the smaller wins,
+ * so the tighter bound governs with integer only and bounded cost. */
+static __always_inline u32 flow_eff_w(u32 nw, u32 sw)
+{
+	u32 n = nw;
+	u32 s = sw;
+	if (n == (u32)FLOW_CGROUP_WEIGHT_INVALID || n < (u32)FLOW_CGROUP_WEIGHT_MIN)
+		n = (u32)FLOW_CGROUP_WEIGHT_DFLT;
+	else if (n > (u32)FLOW_CGROUP_WEIGHT_MAX)
+		n = (u32)FLOW_CGROUP_WEIGHT_MAX;
+	if (s == (u32)FLOW_CGROUP_WEIGHT_INVALID || s < (u32)FLOW_CGROUP_WEIGHT_MIN)
+		s = (u32)FLOW_CGROUP_WEIGHT_DFLT;
+	else if (s > (u32)FLOW_CGROUP_WEIGHT_MAX)
+		s = (u32)FLOW_CGROUP_WEIGHT_MAX;
+	if (s == (u32)FLOW_CGROUP_WEIGHT_DFLT)
+		return n;
+	if (n == (u32)FLOW_CGROUP_WEIGHT_DFLT)
+		return s;
+	return n < s ? n : s;
 }
 static __always_inline u64 flow_fair_step(u32 w)
 {
@@ -140,56 +168,6 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 	}
 	b = b - (b >> 2) + (u >> 2);
 	return flow_burst_clamp(b);
-}
-/* Overload cost for one burst. Holds the run length between the floor
- * and one slice, so a larger burst pays more with saturating clamp only. */
-static __always_inline u64 flow_red_cost(u64 burst_ns)
-{
-	return flow_burst_clamp(burst_ns);
-}
-/* Overload exceed past tolerance. Holds zero when the cost sits within
- * tolerance else the cost past tolerance, so small costs admit at once
- * with saturating math only. */
-static __always_inline u64 flow_red_exceed(u64 cost)
-{
-	u64 tol = (u64)FLOW_RED_TOL_NS;
-	if (cost <= tol)
-		return 0;
-	return cost - tol;
-}
-/* Overload gate for one newcomer cost with target room. Rejects when the
- * cost sits past the bound and the target holds no room under the cap,
- * so small costs plus room admit and overload drains to fallback with
- * the caps kept. Compare only with no divide. */
-static __always_inline bool flow_red_gate(u64 cost, u64 exceed, u64 queued)
-{
-	u64 emax = (u64)FLOW_RED_EMAX_NS;
-	if (!exceed)
-		return false;
-	if (cost <= emax)
-		return false;
-	if (queued < (u64)FLOW_QUEUE_CAP)
-		return false;
-	return true;
-}
-/* Implicit band for one nice weight. Maps between one and sixteen
- * thousand three hundred eighty four with base one hundred twenty eight
- * through shift only moves, so the lightest share sits in the lowest
- * band with no new field and no divide. */
-static __always_inline u32 flow_band_for_weight(u32 w)
-{
-	u32 cw = w;
-	if (!cw || cw < 1U)
-		cw = 1U;
-	if (cw > 16384U)
-		cw = 16384U;
-	if (cw >= (128U << 3))
-		return 3U;
-	if (cw >= 128U)
-		return 2U;
-	if (cw >= (128U >> 3))
-		return 1U;
-	return 0U;
 }
 static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 {
@@ -385,6 +363,8 @@ static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
 	t->run_total = 0;
 	flow_run_recalc(t);
 }
+/* Guard kept helper with no caller in tree. Reads the kept max when
+ * stable else zero for later use. */
 static __always_inline u64 flow_run_ref(struct flow_task_ctx *t)
 {
 	if (!t)

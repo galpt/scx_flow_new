@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.15" ] || fail "version not at 5.2.15"
+[ "${want}" = "5.2.16-eevdf-only" ] || fail "version not at 5.2.16-eevdf-only"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -120,8 +120,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "6b3d6e1d0d81a1cfdc4ca807d404997b41348bc465981ec9b75d66268f35b449" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "25" ] || fail "scx README lines drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c6b3b3ae05b7c2223db367c31fa844da687495e7d904d05427e2fa5f23b56173" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "23" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -370,7 +370,7 @@ grep -q "flow_nice_weight" "${FAIR_HDR}" || fail "nice weight missing"
 if grep -rq "flow_combine" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "combine reappeared"
 fi
-[ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "5" ] || fail "nice use drifted"
+[ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "nice use drifted"
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
@@ -400,35 +400,84 @@ fi
 if grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" 2>/dev/null; then
     fail "wakeup branch reappeared"
 fi
-# True overload control with guaranteed admit plus bounded evict plus reclaim.
-# Admit checks live plus tolerance plus bound plus room plus cap. Evict scans
-# at most eight ready tasks for the latest deadline in the lowest band.
-# Bands come from the nice weight through the fair helper with no new field.
-# Rejects stay FIFO. Stopping plus tick reclaim at most one saved delta.
-grep -q "FLOW_RED_TOL_NS = 64000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red tol missing"
-grep -q "FLOW_RED_EMAX_NS = 256000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red emax missing"
-grep -q "FLOW_RED_EVICT_MAX = 8ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "red evict bound missing"
-grep -q "flow_red_cost" "${FAIR_HDR}" || fail "red cost missing"
-grep -q "flow_red_exceed" "${FAIR_HDR}" || fail "red exceed missing"
-grep -q "flow_red_gate" "${FAIR_HDR}" || fail "red gate missing"
-grep -q "flow_band_for_weight" "${FAIR_HDR}" || fail "band helper missing"
-grep -q "128U << 3" "${FAIR_HDR}" || fail "band shift missing"
-grep -q "128U >> 3" "${FAIR_HDR}" || fail "band shift missing"
-grep -q "flow_try_evict_one" "${ENQ_HDR}" || fail "evict helper missing"
-grep -q "flow_reclaim_kick" "${DISP_HDR}" || fail "reclaim helper missing"
-grep -q "flow_red_gate(cost, exceed, nr)" "${ENQ_HDR}" || fail "gate use missing"
-grep -q "flow_band_for_weight(w)" "${ENQ_HDR}" || fail "band use missing"
-grep -q "flow_reclaim_kick(saved" "${DISP_HDR}" || fail "reclaim use missing"
-grep -q "scx_edq_try_peek_nth_hold" "${ENQ_HDR}" || fail "bounded scan missing"
-grep -q "scx_edq_try_remove" "${ENQ_HDR}" || fail "evict remove missing"
-grep -q "__COMPAT_scx_bpf_dsq_peek" "${DISP_HDR}" || fail "reclaim peek missing"
+# No overload control with bare admit plus FIFO fallback and no reclaim.
+# Admit checks room plus cap only. A full target keeps the newcomer in
+# FIFO with no evict and no band. Stopping plus tick keep burst plus run
+# with no saved reclaim.
+if grep -q "FLOW_RED_TOL_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "red tol reappeared"
+fi
+if grep -q "FLOW_RED_EMAX_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "red emax reappeared"
+fi
+if grep -q "FLOW_RED_EVICT_MAX" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "red evict bound reappeared"
+fi
+if grep -q "flow_red_cost" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "red cost reappeared"
+fi
+if grep -q "flow_red_exceed" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "red exceed reappeared"
+fi
+if grep -q "flow_red_gate" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "red gate reappeared"
+fi
+if grep -q "flow_band_for_weight" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "band helper reappeared"
+fi
+if grep -q "128U << 3" "${FAIR_HDR}" 2>/dev/null; then
+    fail "band shift reappeared"
+fi
+if grep -q "128U >> 3" "${FAIR_HDR}" 2>/dev/null; then
+    fail "band shift reappeared"
+fi
+if grep -q "flow_try_evict_one" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "evict helper reappeared"
+fi
+if grep -q "flow_reclaim_kick" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "reclaim helper reappeared"
+fi
+if grep -q "flow_red_gate(cost, exceed, nr)" "${ENQ_HDR}" 2>/dev/null; then
+    fail "gate use reappeared"
+fi
+if grep -q "flow_band_for_weight(w)" "${ENQ_HDR}" 2>/dev/null; then
+    fail "band use reappeared"
+fi
+if grep -q "flow_reclaim_kick(saved" "${DISP_HDR}" 2>/dev/null; then
+    fail "reclaim use reappeared"
+fi
+if grep -q "scx_edq_try_peek_nth_hold" "${ENQ_HDR}" 2>/dev/null; then
+    fail "bounded evict scan reappeared"
+fi
+if grep -q "scx_edq_try_remove" "${ENQ_HDR}" 2>/dev/null; then
+    fail "evict remove reappeared"
+fi
+if grep -q "tolerance plus bound plus room plus cap" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "overload prose reappeared"
+fi
+if grep -q "lowest band" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "band prose reappeared"
+fi
+if grep -q "lowest implicit band" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "band prose reappeared"
+fi
+if grep -q "saved delta" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "reclaim prose reappeared"
+fi
+grep -q "nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" || fail "bare admit missing"
+grep -q "with no evict" "${ENQ_HDR}" || fail "no evict prose missing"
+grep -q "with no evict" "${SRC_DIR}/src/bpf/intf.h" || fail "no evict prose missing"
+grep -q "no reclaim" "${SRC_DIR}/src/bpf/intf.h" || fail "no reclaim prose missing"
+grep -q "no reclaim" "${DISP_HDR}" || fail "no reclaim prose missing"
 grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
 grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
 grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"
 grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
 [ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
-# Nice only weight with no group share. The weight comes from the nice
-# table alone with no combine and no group map.
+# Effective weight from nice plus live share with clamp combine and no map.
+# Live share reads as the default with clamp to one through ten thousand.
+# Hierarchy walk stays out of budget, so misses keep nice only. Steady
+# tasks price the kept max through the shared charge path.
 if grep -rq "cgrp_weight_stor" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "group map reappeared"
 fi
@@ -449,6 +498,14 @@ if grep -rq "cgroup_init\|cgroup_exit\|cgroup_move\|cgroup_set_weight" "${SRC_DI
 fi
 grep -q "flow_nice_weight(p)" "${ENQ_HDR}" || fail "nice use missing"
 grep -q "flow_nice_weight(p)" "${DISP_HDR}" || fail "nice dispatch use missing"
+grep -q "flow_share_live" "${FAIR_HDR}" || fail "share live missing"
+grep -q "flow_eff_w" "${FAIR_HDR}" || fail "eff combine missing"
+grep -q "flow_share_live(p)" "${ENQ_HDR}" || fail "share live use missing"
+grep -q "flow_eff_w(flow_nice_weight(p)" "${ENQ_HDR}" || fail "eff use missing"
+grep -q "flow_eff_w(flow_nice_weight(p)" "${DISP_HDR}" || fail "eff dispatch use missing"
+grep -q "n < s ? n : s" "${FAIR_HDR}" || fail "clamp combine missing"
+grep -q "FLOW_CGROUP_WEIGHT_MIN" "${FAIR_HDR}" || fail "share clamp missing"
+grep -q "FLOW_CGROUP_WEIGHT_MAX" "${FAIR_HDR}" || fail "share clamp missing"
 if grep -q "SCX_DHQ_STRAND_A\|SCX_DHQ_STRAND_B" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "strand reappeared"
 fi
@@ -981,6 +1038,87 @@ grep -q "kept" "${SRC_DIR}/README.md" || fail "readme kept missing"
 grep -q "Unknown tasks keep the burst path" "${SRC_DIR}/README.md" || fail "readme unknown missing"
 if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme short vd reappeared"
+fi
+
+# Family A stays excluded with no slow field plus helpers.
+# Task storage stays at two hundred sixteen bytes with the run ring
+# plus range plus flag plus sum and no slow path. The four Family A
+# names stay absent from BPF with no revert needed.
+if grep -rq "slow" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "slow reappeared"
+fi
+if grep -rq "idle_decay\|idle-decay" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "idle decay reappeared"
+fi
+if grep -rq "fast_known\|fast-known" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "fast known reappeared"
+fi
+if grep -rq "max_stamp\|max-stamp" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "max stamp reappeared"
+fi
+grep -q "run_min" "${SRC_DIR}/src/bpf/intf.h" || fail "run min missing"
+grep -q "run_max" "${SRC_DIR}/src/bpf/intf.h" || fail "run max missing"
+grep -q "run_head" "${SRC_DIR}/src/bpf/intf.h" || fail "run head missing"
+grep -q "run_pruned" "${SRC_DIR}/src/bpf/intf.h" || fail "run pruned missing"
+grep -q "run_pad" "${SRC_DIR}/src/bpf/intf.h" || fail "run pad missing"
+# Narrowed deadline fit keeps deadline plus reference plus lag plus reweight
+# plus floor plus slice with no count divide and no retroactive update.
+# Reference keeps max with shift only. Lag rides the stored time with clamp.
+# Reweight applies at enqueue time only.
+grep -q "Virtual deadline" "${SRC_DIR}/src/bpf/intf.h" || fail "narrowed deadline prose missing"
+grep -q "Virtual deadline" "${FAIR_HDR}" || fail "narrowed vd prose missing"
+grep -q "flow_fair_charge" "${DISP_HDR}" || fail "narrowed charge missing"
+if grep -rq "retroactive" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "retroactive reappeared"
+fi
+if grep -rq "count_divide\|count-divide" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "count divide reappeared"
+fi
+if grep -q "count / \|/ count" "${FAIR_HDR}" 2>/dev/null; then
+    fail "count divide reappeared"
+fi
+# Scheduler README keeps virtual deadline in full words with run prose.
+grep -q "Virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
+grep -q "kept" "${SRC_DIR}/README.md" || fail "readme kept missing"
+grep -q "Unknown tasks keep the burst path" "${SRC_DIR}/README.md" || fail "readme unknown missing"
+if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme short vd reappeared"
+fi
+# Kick keeps one per run with separable skips plus a freshness check.
+# Each miss counts the same skip counter with no new counter.
+# The win rechecks mask plus liveness plus generation plus due time
+# before the preempt, so a stale kick never hits a fresh run.
+grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
+grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
+grep -q "Freshness check after the win" "${ENQ_HDR}" || fail "kick freshness missing"
+grep -q "fresh_gen" "${ENQ_HDR}" || fail "kick gen recheck missing"
+grep -q "fresh_vd" "${ENQ_HDR}" || fail "kick vd recheck missing"
+grep -q "Misses split by cause" "${ENQ_HDR}" || fail "kick cause prose missing"
+
+# Kicks count every miss with an LLC recheck after the win.
+grep -q "rllc = READ_ONCE(rs->llc_id)" "${ENQ_HDR}" || fail "llc recheck missing"
+
+# EEVDF isolate keeps the original drain with no cache helpers and no seed change.
+if grep -q "flow_cpu_l2b" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "cache helper leaked into eevdf isolate"
+fi
+if grep -q "flow_l2_larger\|flow_l3_prefer" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "cache compare leaked into eevdf isolate"
+fi
+if grep -q "flow_edq_empty" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "empty check leaked into eevdf isolate"
+fi
+if grep -q "TOPO_FOR_EACH_CORE" "${DISP_HDR}" 2>/dev/null; then
+    fail "core walk leaked into eevdf isolate"
+fi
+if grep -q "l2_bucket\|l3_bucket\|cache_cls" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "cache seed leaked into eevdf isolate"
+fi
+if grep -q "seed_topology_with\|lstopo_caches" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
+    fail "cache seed leaked into eevdf userspace"
+fi
+if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then
+    fail "cache order leaked into eevdf isolate"
 fi
 
 echo "guard tests passed"

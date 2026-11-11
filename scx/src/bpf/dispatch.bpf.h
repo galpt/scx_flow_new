@@ -27,9 +27,8 @@
  * placement. A mask change on a queued task keeps the queue and wakes
  * the new owner, counting the wake when the owner is usable. A task
  * with no usable CPU waits in the fallback queue until the mask widens.
- * Stopping plus tick reclaim at most one saved delta from burst past
- * burnt with room plus live plus allowed and idle only kick, so overload
- * drains with no new op. Init creates one embedded queue per CPU bounded at 64 total
+ * Stopping plus tick keep the burst and run state with idle only kick
+ * and no reclaim. Init creates one embedded queue per CPU bounded at 64 total
  * and the fallback queue. Queues
  * use the upstream deadline library with always eligible tasks. Liveness comes from
  * the upstream tree, so CPUs that arrive late need a restart to be seen.
@@ -103,32 +102,6 @@ static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 l
 	if (!ph)
 		return;
 	owner = flow_first_allowed(ph);
-	flow_kick_idle_only(owner, ph, llc);
-}
-/* Reclaim one fallback head with saved burst. Peeks the fallback queue
- * once and kicks the idle owner once when the target holds room with
- * live plus allowed, so overload drains with no extra probe and no new
- * op. Saved zero skips with no kick. Compare only with no divide. */
-static __always_inline void flow_reclaim_kick(u64 saved, u32 llc)
-{
-	struct task_struct *ph;
-	s32 owner;
-	struct scx_edq __arena *edq;
-	if (!saved)
-		return;
-	if (!flow_llc_ok(llc))
-		return;
-	ph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
-	if (!ph)
-		return;
-	owner = flow_first_allowed(ph);
-	if (owner < 0)
-		return;
-	edq = flow_edq_for_cpu(owner);
-	if (!edq)
-		return;
-	if (scx_edq_nr_queued(edq) >= (u64)FLOW_QUEUE_CAP)
-		return;
 	flow_kick_idle_only(owner, ph, llc);
 }
 static __always_inline int flow_try_move_edq(u32 cpu, u32 llc, u32 vllc,
@@ -418,7 +391,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	u64 have;
 	u64 used;
 	u64 total_used;
-	u64 old_b;
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -445,7 +417,6 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		total_used = (u64)FLOW_SLICE_MIN_NS - cur;
 	else
 		total_used = 0;
-	old_b = flow_burst_clamp(READ_ONCE(t->burst_ns));
 	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
 	/* Recent run sum grows by the tail here. Ticks already added
 	 * their deltas, so this adds only the tail past the last tick.
@@ -461,7 +432,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 				flow_run_close(t, now);
 		}
 	}
-	/* Burnt time pays here into the stored time, scaled by the nice
+	/* Burnt time pays here into the stored time, scaled by the effective
 	 * weight with saturation and mirrored as the stored time beside it. The
 	 * tick already moved the left slice forward, so this charges only
 	 * the tail past the last tick. A runnable yield with no burnt time
@@ -469,7 +440,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	 * cannot hold the queue head. */
 	if (used) {
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
-					  flow_nice_weight(p));
+					  flow_eff_w(flow_nice_weight(p),
+						    flow_share_live(p)));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 		if (!cur)
@@ -482,17 +454,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	rs->slice_rem = cur;
 	t->slice_rem = cur;
 	/* A sleeping task leaves the core idle at half. A runnable task
-	 * keeps its count with no frequency change. Reclaim at most one
-	 * saved delta from burst past burnt with room plus live plus
-	 * allowed and idle only kick. */
+	 * keeps its count with no frequency change. */
 	if (runnable)
 		flow_stat_inc(rs->llc_id, 10);
 	else
 		flow_cpuperf_mark(cpu, true);
-	{
-		u64 saved = (old_b > total_used) ? (old_b - total_used) : 0;
-		flow_reclaim_kick(saved, READ_ONCE(rs->llc_id));
-	}
 }
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
@@ -534,11 +500,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 			    ((u64)FLOW_SLICE_MIN_NS - cur) : (u64)FLOW_SLICE_MIN_NS;
 		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
 		u64 rem = (burnt < b) ? (b - burnt) : cur;
-		u32 w = flow_nice_weight(p);
+		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
 		s64 nvd = flow_vd_for(nv, rem, w);
-		u64 saved = (b > burnt) ? (b - burnt) : 0;
-		u32 rllc = READ_ONCE(t->llc_id);
 		flow_run_add(t, delta);
 		t->vtime = nv;
 		t->vd = nvd;
@@ -546,18 +510,13 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		rs->vtime = nv;
 		rs->vd = nvd;
 		scx_bpf_task_set_dsq_vtime(p, nvd);
-		/* Reclaim at most one saved delta with room plus live plus
-		 * allowed and idle only kick. */
-		if (!flow_llc_ok(rllc))
-			rllc = 0;
-		flow_reclaim_kick(saved, rllc);
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
 		 * stopping still charges the tail, but move the running horizon
 		 * out by one slice so a wake can preempt at once with the two
 		 * views diverged until stopping. Seed the burst to one slice
 		 * for the next run. */
-		u32 w = flow_nice_weight(p);
+		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
 		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
 		rs->vtime = nv;
