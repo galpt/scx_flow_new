@@ -8,8 +8,10 @@
  * promise. Each task holds at most one fallback slot through the queued
  * bit, so the backlog stays within the live task count. Pinned tasks run on their local queue. Placement keeps the
  * constrained target with no load scan. Draining walks local first
- * then same LLC then same node then distant remote last in deadline order
- * with idle starts at once. Each per CPU queue holds bounded at 64
+ * then same cache group then same LLC then same node then distant
+ * remote then fallback last in deadline order with tiers L1 greater
+ * than L2 greater than L3 and short form L1>L2>L3 with idle starts
+ * at once. Each per CPU queue holds bounded at 64
  * total with one millis slices. Each enqueue prices the task by its
  * effective weight from nice plus live share. A task pays for the time
  * it burns, scaled by that weight. Fresh times move past
@@ -78,7 +80,8 @@ enum flow_consts {
 /* Per task state. Vtime is charged service. Slice holds the time
  * left in the current quantum. Gen identifies the running instance.
  * Llc records the last enqueue target. Flags holds the queued bit.
- * Vd holds the due time for queue order. Burst holds the run length
+ * Virtual deadline holds the due time for queue order. Burst holds the
+ * run length
  * used for the due time. Run holds eight recent run lengths with
  * close stamps for stable tasks. Head is the next slot masked with
  * seven. Pruned counts stale drops. Min plus max hold the kept range.
@@ -115,8 +118,8 @@ struct flow_arena_task {
 	u32 pad;
 };
 /* Per CPU running view. Gen counts runs. Pad holds the last kicked
- * generation, so each run kicks at most once. Vd mirrors the running
- * task due time for gap checks. */
+ * generation, so each run kicks at most once. Virtual deadline mirrors
+ * the running task due time for gap checks. */
 struct flow_running_state {
 	s64 vtime;
 	u64 slice_rem;

@@ -54,17 +54,30 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 		return false;
 	return topo_contains(topo_all, cpu) ? true : false;
 }
+/* Unknown cluster reads as all ones, so group zero stays a valid match.
+ * The value never collides with a seeded group id, which stays small. */
+#define FLOW_CCX_UNKNOWN 0xFFFFFFFFU
 static __always_inline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
+	u32 c;
 	if (!p || !p->cpus_ptr)
 		return -1;
 	first = bpf_cpumask_first(p->cpus_ptr);
-	if (!flow_cpu_live(first))
-		return -1;
-	if (!flow_cpu_allowed((s32)first, p))
-		return -1;
-	return (s32)first;
+	if (flow_cpu_ok(first) && flow_cpu_live(first) && flow_cpu_allowed((s32)first, p))
+		return (s32)first;
+	/* The first mask bit can be offline while a later bit stays usable.
+	 * Scan the mask in fixed order for the first allowed live CPU, so
+	 * only tasks with no usable CPU fall back to minus one. Bounded scan
+	 * within the CPU bound with mask plus live checks only and no widening. */
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		if (!flow_cpu_live(c))
+			continue;
+		if (!flow_cpu_allowed((s32)c, p))
+			continue;
+		return (s32)c;
+	}
+	return -1;
 }
 static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
@@ -95,25 +108,31 @@ static __always_inline u32 flow_cpu_ccx(u32 cpu)
 	u32 key = cpu;
 	struct flow_cpu_ctx *cc;
 	if (!flow_cpu_ok(cpu))
-		return 0;
+		return (u32)FLOW_CCX_UNKNOWN;
 	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
 	if (!cc)
-		return 0;
+		return (u32)FLOW_CCX_UNKNOWN;
 	return READ_ONCE(cc->ccx_id);
 }
-/* Same cluster match on the seed view with the seed flag gate. The
- * flag gates the match, so unknown groups never match and fixed
- * order covers them. */
+/* Same cluster match on the seed view with the seed flag gate. Both group
+ * ids must be known, so unknown reads as all ones never match and fixed
+ * order covers them. The seed flag stays always on with init one and no
+ * userspace seed as an interim, so the gate stays for a later seed without
+ * changing the match. */
 static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 {
-	return use && cx == hint;
+	if (!use)
+		return false;
+	if (cx == (u32)FLOW_CCX_UNKNOWN || hint == (u32)FLOW_CCX_UNKNOWN)
+		return false;
+	return cx == hint;
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 hint = prev_cpu;
 	s32 tgt;
 	int hint_llc = -1;
-	u32 hint_ccx = 0;
+	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
 	bool have_hint_topo = false;
 	s32 best = -1;
 	int best_score = 99;

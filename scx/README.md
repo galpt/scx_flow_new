@@ -10,7 +10,7 @@ max run length with short tasks exact and long tasks in one slice quanta.
 Unknown tasks keep the burst path. A full target keeps the newcomer in
 fallback in FIFO order with no evict. Stopping plus tick keep the burst
 and run state with idle only kick and no reclaim. Dispatch drains local first,
-then same LLC, then same node, then remote. Wakeups wake idle only with preempt on an earlier deadline. Slice is fixed at 1ms, and hotplug needs restart.
+then same LLC, then same node, then remote. Wakeups wake idle only with no preempt even on an earlier deadline. Slice is fixed at 1ms, and hotplug needs restart.
 
 ## Typical Use Cases
 

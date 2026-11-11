@@ -120,7 +120,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c6b3b3ae05b7c2223db367c31fa844da687495e7d904d05427e2fa5f23b56173" ] || fail "scx README drifted"
+# Cache idle keeps every wake idle only with no preempt site.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "f481825ce8cd558658214d157a7e84594fb0439914b780f4e17f89e096dc3259" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "23" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -659,10 +660,11 @@ fi
 # Ops stay at thirteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "ops count drifted"
 
-# Cache idle drain keeps five bounded loops with no new program.
-# One scan lives in select for the seed pick. Four victim passes live
-# in dispatch for same group plus same LLC plus same node plus remote.
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted"
+# Cache idle drain keeps six bounded loops with no new program.
+# One scan lives in select for the seed pick plus one scan for the first
+# allowed fallback. Four victim passes live in dispatch for same group
+# plus same LLC plus same node plus remote.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "6" ] || fail "loop budget drifted"
 
 # Queues are one per CPU plus fallback with deadline order and insertion ties.
 # Fair scales base by nice weight with a per LLC floor. Deadline sets the order with
@@ -1186,5 +1188,56 @@ fi
 if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then
     fail "cache order drifted"
 fi
+
+# Unknown group stays distinct with no zero conflation. The sentinel reads
+# as all ones with both known gate plus fixed order cover plus allowed live
+# bounds kept on every path.
+grep -q "FLOW_CCX_UNKNOWN" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "unknown sentinel missing"
+grep -q "0xFFFFFFFF" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "sentinel value missing"
+grep -q "never match" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "unknown prose missing"
+grep -q "all ones" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "sentinel prose missing"
+grep -q "all ones" "${DISP_HDR}" || fail "dispatch sentinel prose missing"
+if grep -q "return use && cx == hint" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "zero conflation reappeared"
+fi
+
+# Shared header drains by cache tier with fallback and ordered prose.
+grep -q "same cache group" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier prose missing"
+grep -q "L1>L2>L3" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier order missing"
+grep -q "L1 greater" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier words missing"
+grep -q "then fallback last" "${SRC_DIR}/src/bpf/intf.h" || fail "intf fallback prose missing"
+
+# First allowed scans past an offline head with mask plus live bounds.
+grep -q "Scan the mask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "fallback scan prose missing"
+grep -q "no usable CPU fall back" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "fallback scan bound missing"
+
+# Same LLC drain probes once with empty hoist plus TOCTOU cover.
+grep -q "already tried group" "${DISP_HDR}" || fail "dedup prose missing"
+grep -q "probes once" "${DISP_HDR}" || fail "dedup bound missing"
+grep -q "next dispatch covers" "${DISP_HDR}" || fail "toctou prose missing"
+grep -q "before the group lookup" "${DISP_HDR}" || fail "hoist prose missing"
+grep -q "before the dedup lookup" "${DISP_HDR}" || fail "dedup hoist prose missing"
+grep -q "flow_edq_empty(&flow_edqs\[victim\])" "${DISP_HDR}" || fail "empty hoist missing"
+
+# Cluster gate stays always on with init one and no userspace seed.
+grep -q "always on" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "always on prose missing"
+grep -q "init one" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "always on seed missing"
+
+# Fallback peek stays borrowed with no release.
+grep -q "borrowed" "${DISP_HDR}" || fail "borrowed prose missing"
+grep -q "no release" "${DISP_HDR}" || fail "borrowed release prose missing"
+
+# Scheduler README keeps idle only with no preempt site.
+grep -q "with no preempt even on" "${SRC_DIR}/README.md" || fail "readme idle only missing"
+
+# Shared header keeps Virtual deadline in full words with no shorthand.
+grep -q "Virtual deadline holds" "${SRC_DIR}/src/bpf/intf.h" || fail "intf deadline words missing"
+grep -q "Virtual deadline mirrors" "${SRC_DIR}/src/bpf/intf.h" || fail "intf mirror words missing"
+if grep -q "Vd holds\|Vd mirrors" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "short deadline reappeared"
+fi
+
+# Guard kept helpers stay with no new dead helper.
+grep -q "flow_fb_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "fb inc missing"
 
 echo "guard tests passed"

@@ -274,32 +274,49 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
 	 * tasks stay near warm cache. The group match needs the seed flag
-	 * with both group ids known, so unknown groups match nothing and
-	 * the pass below covers them in fixed order. */
+	 * with both group ids known, so unknown reads as all ones match
+	 * nothing and the pass below covers them in fixed order. Empty
+	 * queues skip before the group lookup, so idle victims cost one
+	 * counter read with no topology walk. The empty check can race a
+	 * new enqueue, which stays safe since the next dispatch covers the
+	 * new head. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
+		u32 vccx;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
 			continue;
+		if (flow_edqs && flow_edq_empty(&flow_edqs[victim]))
+			continue;
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || (u32)vl != llc)
 			continue;
-		if (!flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx))
+		vccx = flow_cpu_ccx(victim);
+		if (!flow_ccx_match(use_ccx, vccx, my_ccx))
 			continue;
 		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
+	/* Same LLC victims drain next in fixed order with already tried group
+	 * victims skipped, so each queue probes once per dispatch. Empty
+	 * queues skip before the dedup lookup. The empty check can race a
+	 * new enqueue, which stays safe since the next dispatch covers the
+	 * new head. */
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
 			continue;
+		if (flow_edqs && flow_edq_empty(&flow_edqs[victim]))
+			continue;
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || (u32)vl != llc)
+			continue;
+		if (flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx))
 			continue;
 		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
@@ -333,6 +350,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
 			return;
 	}
+	/* The compat peek returns a borrowed reference with no release, so
+	 * the task stays valid for the check below with no extra hold.
+	 * The borrowed head is checked for mask plus liveness before any
+	 * move, so a raced exit stays safe with no use after free. */
 	{
 		struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
 		if (ph) {
@@ -362,6 +383,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 	if (saw_unrunnable) {
+		/* Borrowed reference as above with no release, so the rekick
+		 * stays safe with no extra hold. */
 		struct task_struct *rh = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
 		if (rh)
 			flow_rekick_unrunnable(rh, llc);
