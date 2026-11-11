@@ -2,9 +2,13 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own queue first, then queues on the same LLC,
- * then the same node, then distant queues, then fallback. Each queue
- * drains in deadline order. A head that cannot run here
+ * Each CPU drains its own queue first, then the same cache group,
+ * then the rest of the same LLC, then the same node, then distant
+ * queues, then fallback. Tiers stay L1 greater than L2 greater than L3,
+ * so closer caches drain first in fixed order. Short form is L1>L2>L3.
+ * Empty queues skip before any group lookup. Both known group ids gate
+ * the group match, so unknown groups fall through to fixed order. Each
+ * queue drains in deadline order. A head that cannot run here
  * sends one wake to its owner and stays queued. Each victim keeps
  * its own forward slot with the fallback on the last slot, so one
  * victim does not hide another. A dead head is dropped with its count
@@ -63,6 +67,14 @@ static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 	if (!perf)
 		return;
 	scx_bpf_cpuperf_set((s32)cpu, perf);
+}
+/* Empty queues skip before any group lookup, so idle victims cost one
+ * counter read with no topology walk. */
+static __always_inline bool flow_edq_empty(struct scx_edq __arena *edq)
+{
+	if (!edq)
+		return true;
+	return scx_edq_nr_queued(edq) == 0;
 }
 static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
@@ -212,6 +224,9 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	if (!flow_edqs)
 		return 0;
 	edq = &flow_edqs[victim];
+	/* Empty queues skip before the LLC lookup below. */
+	if (flow_edq_empty(edq))
+		return 0;
 	vllc = topo_cpu_to_llc_id(victim);
 	if (vllc < 0 || !flow_llc_ok((u32)vllc))
 		return 0;
@@ -231,6 +246,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	u32 victim;
 	int v;
 	bool saw_unrunnable = false;
+	bool use_ccx;
+	u32 my_ccx;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
@@ -255,6 +272,26 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	}
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
+	/* Same cache group victims drain first inside the same LLC, so
+	 * tasks stay near warm cache. The group match needs the seed flag
+	 * with both group ids known, so unknown groups match nothing and
+	 * the pass below covers them in fixed order. */
+	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
+	my_ccx = flow_cpu_ccx(c);
+	bpf_for(victim, 0, FLOW_MAX_CPUS) {
+		int vl;
+		if (victim == c)
+			continue;
+		if (!flow_cpu_live(victim))
+			continue;
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || (u32)vl != llc)
+			continue;
+		if (!flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx))
+			continue;
+		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+			return;
+	}
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		if (victim == c)
