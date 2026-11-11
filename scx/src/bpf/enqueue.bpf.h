@@ -277,7 +277,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
-		flow_fb_inc(llc, 4);
+		/* Single slot per task through the queued bit. A duplicate
+		 * requeue drops with the duplicate count only and no gauge
+		 * move and no fallback move and no extra probe, so the
+		 * backlog stays within the live task count with FIFO order
+		 * kept and no new counter. */
+		flow_stat_inc(llc, 4);
 		return;
 	}
 	if (p->flags & PF_EXITING) {
