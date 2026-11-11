@@ -852,6 +852,17 @@ fi
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
 grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
 
+# Seed plus display share one known-or-fallback helper with sorted LLC order.
+# Known means neither minus one nor 65535. The display count delegates to
+# the seed helper, so both report the same groups on every host.
+grep -q "fn core_cluster" "${SRC_DIR}/src/topology.rs" || fail "known helper missing"
+grep -q "cluster_id != -1" "${SRC_DIR}/src/topology.rs" || fail "sentinel narrow missing"
+if grep -q "cluster_id >= 0" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
+    fail "broad unknown reappeared"
+fi
+[ "$(grep -c "cpu_ccx(topo, &llc_ids)" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "3" ] || fail "seed display split"
+[ "$(grep -c "llc_ids.sort_unstable" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "3" ] || fail "fallback order drifted"
+
 # Dispatch liveness keeps every queued task reachable. Deadline order
 # drains in deadline order, slices stay at the floor with no zero
 # insert, kicks never take minus one without a skip, forward slots stay

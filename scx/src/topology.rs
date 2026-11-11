@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Context;
 use anyhow::Result;
+use scx_utils::Core;
 use scx_utils::Topology;
 
 use crate::BpfSkel;
@@ -27,42 +28,28 @@ pub fn smt_on(topo: &Topology) -> bool {
     topo.all_cores.values().any(|c| c.cpus.len() > 1)
 }
 
+/// Known cluster for a core or none. Minus one and 65535 are unknown.
+fn core_cluster(core: &Core) -> Option<isize> {
+    if core.cluster_id != -1 && core.cluster_id != 65535 {
+        return Some(core.cluster_id);
+    }
+    for cpu in core.cpus.values() {
+        if cpu.cluster_id != -1 && cpu.cluster_id != 65535 {
+            return Some(cpu.cluster_id);
+        }
+    }
+    None
+}
+
 /// Group count with unknown fallback. Minus one and 65535 count as unknown.
 fn describe_topo_groups(topo: &Topology) -> usize {
-    let mut seen: BTreeSet<isize> = BTreeSet::new();
-    for core in topo.all_cores.values() {
-        if core.cluster_id >= 0 && core.cluster_id != 65535 {
-            seen.insert(core.cluster_id);
-        } else {
-            for cpu in core.cpus.values() {
-                if cpu.cluster_id >= 0 && cpu.cluster_id != 65535 {
-                    seen.insert(cpu.cluster_id);
-                }
-            }
-        }
+    let mut llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+    llc_ids.sort_unstable();
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    for v in cpu_ccx(topo, &llc_ids).values() {
+        seen.insert(*v);
     }
-    if seen.is_empty() {
-        let mut total: usize = 0;
-        for llc in topo.all_llcs.values() {
-            let mut pos: usize = 0;
-            let mut chunks: usize = 0;
-            for _ in llc.cores.values() {
-                if pos == 0 {
-                    chunks = chunks.wrapping_add(1);
-                }
-                pos = pos.wrapping_add(1);
-                if pos == GROUP_WIDTH {
-                    pos = 0;
-                }
-            }
-            total = total.wrapping_add(chunks);
-        }
-        if total == 0 {
-            return 1;
-        }
-        return total;
-    }
-    seen.len()
+    seen.len().max(1)
 }
 
 /// Shape summary for info logs.
@@ -198,17 +185,7 @@ pub fn render_topo_lines(topo: &Topology) -> Vec<String> {
                         Some(v) => v,
                         None => continue,
                     };
-                    let mut cluster: Option<isize> = None;
-                    if core.cluster_id >= 0 && core.cluster_id != 65535 {
-                        cluster = Some(core.cluster_id);
-                    } else {
-                        for cpu in core.cpus.values() {
-                            if cpu.cluster_id >= 0 && cpu.cluster_id != 65535 {
-                                cluster = Some(cpu.cluster_id);
-                                break;
-                            }
-                        }
-                    }
+                    let cluster: Option<isize> = core_cluster(core);
                     let suffix: String = match cluster {
                         Some(c) if show_cluster => format!(" cluster C{c}"),
                         _ => String::new(),
@@ -239,21 +216,45 @@ fn chunk_index(pos: usize) -> usize {
 }
 
 /// Map each CPU to a cluster id inside its LLC.
-/// Cores sort by id within each LLC and split every four.
-/// Ids count up across LLCs in LLC order. Splits stay safe: a
-/// larger cluster becomes two neighbors, never a distant merge.
+/// Known clusters map first in sorted order, else cores sort by id
+/// within each LLC and split every four. Ids count up across LLCs
+/// in LLC order. Splits stay safe and never merge distant cores.
 fn cpu_ccx(topo: &Topology, llc_ids: &[usize]) -> BTreeMap<usize, u32> {
-    let mut cores_per_llc: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-    for cpu in topo.all_cpus.values() {
-        let idx = llc_ids.iter().position(|v| *v == cpu.llc_id).unwrap_or(0);
-        cores_per_llc.entry(idx).or_default().insert(cpu.core_id);
+    let mut known: BTreeSet<isize> = BTreeSet::new();
+    for core in topo.all_cores.values() {
+        if let Some(c) = core_cluster(core) {
+            known.insert(c);
+        }
+    }
+    let mut slot: BTreeMap<isize, u32> = BTreeMap::new();
+    let mut next: u32 = 0;
+    for c in known {
+        slot.insert(c, next);
+        next = next.wrapping_add(1);
     }
     let mut core_ccx: BTreeMap<(usize, usize), u32> = BTreeMap::new();
-    let mut next: u32 = 0;
-    let mut ordered: Vec<usize> = cores_per_llc.keys().copied().collect();
+    for (id, core) in topo.all_cores.iter() {
+        let c = match core_cluster(core) {
+            Some(v) => v,
+            None => continue,
+        };
+        let idx = llc_ids.iter().position(|v| *v == core.llc_id).unwrap_or(0);
+        if let Some(s) = slot.get(&c) {
+            core_ccx.insert((idx, *id), *s);
+        }
+    }
+    let mut unknown_per_llc: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (id, core) in topo.all_cores.iter() {
+        if core_cluster(core).is_some() {
+            continue;
+        }
+        let idx = llc_ids.iter().position(|v| *v == core.llc_id).unwrap_or(0);
+        unknown_per_llc.entry(idx).or_default().insert(*id);
+    }
+    let mut ordered: Vec<usize> = unknown_per_llc.keys().copied().collect();
     ordered.sort_unstable();
     for idx in ordered {
-        let cores: Vec<usize> = cores_per_llc
+        let cores: Vec<usize> = unknown_per_llc
             .get(&idx)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
@@ -339,7 +340,9 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::chunk_index;
+    use super::cpu_ccx;
     use super::describe_sched_use;
+    use super::describe_topo_groups;
     use super::describe_topo_summary;
     use super::render_topo_lines;
     use super::smt_on;
@@ -351,6 +354,7 @@ mod tests {
     use scx_utils::Node;
     use scx_utils::Topology;
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     #[test]
@@ -547,6 +551,31 @@ mod tests {
         mk_topo(nodes)
     }
 
+    fn two_core_topo(first: isize, second: isize) -> Topology {
+        let mut c0: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
+        c0.insert(0, mk_cpu(0, 0, 0, 0, 0, first));
+        let mut c1: BTreeMap<usize, Arc<Cpu>> = BTreeMap::new();
+        c1.insert(1, mk_cpu(1, 1, 0, 0, 0, second));
+        let mut cores: BTreeMap<usize, Arc<Core>> = BTreeMap::new();
+        cores.insert(0, mk_core(0, 0, first, c0, 0, 0));
+        cores.insert(1, mk_core(1, 1, second, c1, 0, 0));
+        let mut llcs: BTreeMap<usize, Arc<Llc>> = BTreeMap::new();
+        llcs.insert(0, mk_llc(0, 0, cores, 0));
+        let mut nodes: BTreeMap<usize, Node> = BTreeMap::new();
+        nodes.insert(0, mk_node(0, llcs));
+        mk_topo(nodes)
+    }
+
+    fn seeded_groups(topo: &Topology) -> usize {
+        let mut llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+        llc_ids.sort_unstable();
+        let mut seen: BTreeSet<u32> = BTreeSet::new();
+        for v in cpu_ccx(topo, &llc_ids).values() {
+            seen.insert(*v);
+        }
+        seen.len().max(1)
+    }
+
     #[test]
     fn single_host_tree_shape() {
         let topo = single_host_topo();
@@ -670,5 +699,33 @@ mod tests {
         let off_brief = describe_sched_use(&off);
         assert!(off_brief.len() <= 160);
         assert!(off_brief.contains("SMT off"));
+    }
+
+    #[test]
+    fn seed_groups_match_describe_with_known_clusters() {
+        let topo = single_host_topo();
+        assert_eq!(describe_topo_groups(&topo), 2);
+        assert_eq!(seeded_groups(&topo), 2);
+        let mixed = two_core_topo(7, -1);
+        assert_eq!(describe_topo_groups(&mixed), 2);
+        assert_eq!(seeded_groups(&mixed), 2);
+        let lines = render_topo_lines(&mixed);
+        assert_eq!(lines[4], String::from("        Core+L2 L0 P0 cluster C7"));
+        assert_eq!(lines[6], String::from("        Core+L2 L1 P1"));
+        let unknown = multi_package_topo();
+        assert_eq!(describe_topo_groups(&unknown), 2);
+        assert_eq!(seeded_groups(&unknown), 2);
+    }
+
+    #[test]
+    fn unknown_sentinels_share_fallback_count() {
+        for sentinel in [-1isize, 65535] {
+            let topo = two_core_topo(sentinel, sentinel);
+            assert_eq!(describe_topo_groups(&topo), 1);
+            assert_eq!(seeded_groups(&topo), 1);
+            for line in render_topo_lines(&topo) {
+                assert!(!line.contains("cluster"));
+            }
+        }
     }
 }
