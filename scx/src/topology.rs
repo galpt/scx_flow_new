@@ -28,6 +28,43 @@ pub fn smt_on(topo: &Topology) -> bool {
     topo.all_cores.values().any(|c| c.cpus.len() > 1)
 }
 
+/// Bucket ladder for one aggregated per CPU cache share in kibibytes.
+/// Mirrors cache_bucket in the shared BPF header. Zero means unknown
+/// with no size. Larger numbers mean larger caches. The top value caps
+/// with no wrap. All compares stay integer only with no float.
+pub fn cache_bucket(kb: u32) -> u8 {
+    if kb == 0 {
+        return 0;
+    }
+    if kb <= 256 {
+        return 1;
+    }
+    if kb <= 1024 {
+        return 2;
+    }
+    if kb <= 8192 {
+        return 3;
+    }
+    if kb <= 524288 {
+        return 4;
+    }
+    255
+}
+
+/// Seed row for one CPU in BPF byte order. Offsets match flow_cpu_ctx
+/// with the bucket bytes at eight through eleven. The class byte stays
+/// zero reserved for a future level split with no ABI change.
+pub fn cpu_seed_bytes(cpu: u32, ccx: u32, l2: u8, l3: u8, cls: u8, rsv: u8) -> [u8; 16] {
+    let mut val = [0u8; 16];
+    val[0..4].copy_from_slice(&cpu.to_ne_bytes());
+    val[4..8].copy_from_slice(&ccx.to_ne_bytes());
+    val[8] = l2;
+    val[9] = l3;
+    val[10] = cls;
+    val[11] = rsv;
+    val
+}
+
 /// Known cluster for a core or none. Minus one and 65535 are unknown.
 fn core_cluster(core: &Core) -> Option<isize> {
     if core.cluster_id != -1 && core.cluster_id != 65535 {
@@ -284,9 +321,13 @@ fn cpu_ccx(topo: &Topology, llc_ids: &[usize]) -> BTreeMap<usize, u32> {
 }
 
 /// Seed one CPU row per online CPU into the BPF view.
-/// Writes the CPU id plus the cluster hint; cache and node come
-/// from the upstream tree. The cluster stays here as an interim
-/// until it moves into the tree data pointer.
+/// Writes the CPU id plus the cluster hint plus three size buckets
+/// from one aggregated per CPU share; cache and node come from the
+/// upstream tree. The cluster stays here as an interim until it moves
+/// into the tree data pointer. Level one stays grouping only with no
+/// size use. Per level parse stays rejected with no new tool and no
+/// new file read, so both level buckets share the single share openly
+/// until a level split lands with no ABI change.
 /// Failures return an error.
 pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> {
     use libbpf_rs::MapCore;
@@ -316,12 +357,11 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
             continue;
         }
         let ccx = ccx_map.get(&cpu).copied().unwrap_or(0);
+        let bytes: usize = topo.all_cpus.get(&cpu).map(|c| c.cache_size).unwrap_or(0);
+        let kb: u32 = (bytes >> 10).min(u32::MAX as usize) as u32;
+        let bkt = cache_bucket(kb);
         let key = (cpu as u32).to_ne_bytes();
-        let mut val = [0u8; 16];
-        val[0..4].copy_from_slice(&(cpu as u32).to_ne_bytes());
-        val[4..8].copy_from_slice(&ccx.to_ne_bytes());
-        val[8..12].copy_from_slice(&0u32.to_ne_bytes());
-        val[12..16].copy_from_slice(&0u32.to_ne_bytes());
+        let val = cpu_seed_bytes(cpu as u32, ccx, bkt, bkt, 0, 0);
         skel.maps
             .cpu_ctx_stor
             .update(&key, &val, libbpf_rs::MapFlags::ANY)
@@ -339,8 +379,10 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
 
 #[cfg(test)]
 mod tests {
+    use super::cache_bucket;
     use super::chunk_index;
     use super::cpu_ccx;
+    use super::cpu_seed_bytes;
     use super::describe_sched_use;
     use super::describe_topo_groups;
     use super::describe_topo_summary;
@@ -356,6 +398,40 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::sync::Arc;
+
+    #[test]
+    fn buckets_ladder_unknown_first_cap_last() {
+        assert_eq!(cache_bucket(0), 0);
+        assert_eq!(cache_bucket(1), 1);
+        assert_eq!(cache_bucket(256), 1);
+        assert_eq!(cache_bucket(257), 2);
+        assert_eq!(cache_bucket(1024), 2);
+        assert_eq!(cache_bucket(1025), 3);
+        assert_eq!(cache_bucket(8192), 3);
+        assert_eq!(cache_bucket(8193), 4);
+        assert_eq!(cache_bucket(524288), 4);
+        assert_eq!(cache_bucket(524289), 255);
+        assert_eq!(cache_bucket(u32::MAX), 255);
+    }
+
+    #[test]
+    fn seed_bytes_round_trip() {
+        let val = cpu_seed_bytes(7, 3, 2, 4, 0, 0);
+        assert_eq!(val.len(), 16);
+        assert_eq!(u32::from_ne_bytes([val[0], val[1], val[2], val[3]]), 7);
+        assert_eq!(u32::from_ne_bytes([val[4], val[5], val[6], val[7]]), 3);
+        assert_eq!(val[8], 2);
+        assert_eq!(val[9], 4);
+        assert_eq!(val[10], 0);
+        assert_eq!(val[11], 0);
+        assert_eq!(&val[12..16], &[0, 0, 0, 0]);
+        let kb: u32 = (3usize << 20 >> 10).min(u32::MAX as usize) as u32;
+        assert_eq!(cache_bucket(kb), 3);
+        assert_eq!(
+            cpu_seed_bytes(0, 0, cache_bucket(0), cache_bucket(0), 0, 0)[8],
+            0
+        );
+    }
 
     #[test]
     fn chunks_split_every_four() {

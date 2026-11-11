@@ -39,6 +39,11 @@ use crate::stats::Metrics;
 /// stays within five hundred twelve bytes. A drift fails the build here.
 const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_arena_task>() == 136);
 
+/// CPU seed size lock. The seed holds the CPU id plus the cluster hint
+/// plus three size buckets plus one reserved byte beside the pad, so the
+/// row stays sixteen bytes with no growth. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_cpu_ctx>() == 16);
+
 /*
  * Scheduler holds the skeleton, the link, and the stats server.
  * It drives the run loop until shutdown or exit. The arena library

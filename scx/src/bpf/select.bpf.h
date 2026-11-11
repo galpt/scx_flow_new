@@ -12,7 +12,9 @@
  * threads. Tiers stay L1 greater than L2 greater than L3, so the same
  * cluster wins inside the same LLC before the wider LLC and node fall
  * back in fixed order. Short form is L1>L2>L3. No sibling probe runs
- * and each CPU stands single with fail closed choice. Every check
+ * and each CPU stands single with fail closed choice. Inside the same
+ * cache tiers ties prefer larger buckets first within tier when both
+ * buckets are known, else fixed order covers unknown sizes. Every check
  * returns minus one on failure.
  * Masks are tested again before each wake, so a task is never kicked
  * toward a CPU outside its current mask. Frequency follows core
@@ -119,6 +121,38 @@ static __always_inline u32 flow_cpu_ccx(u32 cpu)
  * order covers them. The seed flag stays always on with init one and no
  * userspace seed as an interim, so the gate stays for a later seed without
  * changing the match. */
+/* Size buckets read as u8 with zero meaning unknown. A miss reads
+ * unknown, so unknown sizes keep fixed order with no match. */
+static __always_inline u8 flow_cpu_l2bkt(u32 cpu)
+{
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
+		return 0;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return 0;
+	return READ_ONCE(cc->l2_bkt);
+}
+static __always_inline u8 flow_cpu_l3bkt(u32 cpu)
+{
+	u32 key = cpu;
+	struct flow_cpu_ctx *cc;
+	if (!flow_cpu_ok(cpu))
+		return 0;
+	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
+	if (!cc)
+		return 0;
+	return READ_ONCE(cc->l3_bkt);
+}
+/* Larger check with the both known gate. Unknown sizes never match,
+ * so fixed order covers them. Compares stay u8 with no promotion. */
+static __always_inline bool flow_cache_larger(u8 a, u8 b)
+{
+	if (!a || !b)
+		return false;
+	return a > b;
+}
 static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 {
 	if (!use)
@@ -137,6 +171,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	s32 best = -1;
 	int best_score = 99;
 	bool best_same = false;
+	u8 best_bkt = 0;
 	bool use_ccx;
 	bool smt_on;
 	u32 c;
@@ -168,6 +203,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	bpf_for(c, 0, FLOW_MAX_CPUS) {
 		u32 l;
 		u32 cx;
+		u8 cb;
 		int score;
 		int vllc;
 		bool same_node = false;
@@ -180,6 +216,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			continue;
 		l = (u32)vllc;
 		cx = flow_cpu_ccx(c);
+		cb = flow_cpu_l3bkt(c);
 		if (hint_node && topo_contains(hint_node, c))
 			same_node = true;
 		score = 3;
@@ -200,18 +237,22 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			best_score = score;
 			best = (s32)c;
 			best_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
-			if (score == -1)
-				break;
-			if (score == 0 && (!use_ccx || best_same))
-				break;
+			best_bkt = cb;
 		} else if (score == best_score) {
-			/* Tie favor stays even with threads on; only the fast pick is gated. */
+			/* Tie favor stays even with threads on; only the fast pick is gated.
+			 * Inside the cache tiers the tie then prefers larger buckets first
+			 * within tier when both buckets are known, else fixed order keeps
+			 * unknown sizes. The full scan stays bounded with no early break
+			 * so the largest known bucket wins. */
 			bool cur_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
 			if (cur_same && !best_same) {
 				best = (s32)c;
 				best_same = true;
-				if (score == 0)
-					break;
+				best_bkt = cb;
+			} else if (cur_same == best_same && score <= 0 && have_hint_topo &&
+				   flow_cache_larger(cb, best_bkt)) {
+				best = (s32)c;
+				best_bkt = cb;
 			}
 		}
 	}

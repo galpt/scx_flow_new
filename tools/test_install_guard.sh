@@ -1169,28 +1169,45 @@ grep -q "flow_stat_inc(qllc, 11)" "${DISP_HDR}" || fail "orphan count missing"
 grep -q "flow_cpu_allowed(owner, p)" "${DISP_HDR}" || fail "owner recheck missing"
 grep -q "flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx)" "${DISP_HDR}" || fail "group match call missing"
 
-# Cache idle orders the drain by cache tier with no size map and no seed change.
-# The group tier read plus the tier match plus the empty check stay
+# True size orders the drain by bucket within tier with no size map growth.
+# The bucket readers plus the larger compare plus the seed fields stay
 # allowlisted by exact name. Any other cache helper fails closed here.
 grep -q "flow_cpu_ccx" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier read missing"
 grep -q "flow_ccx_match" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier match missing"
+grep -q "flow_cpu_l2bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "l2 bucket read missing"
+grep -q "flow_cpu_l3bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "l3 bucket read missing"
+grep -q "flow_cache_larger" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "larger compare missing"
+grep -q "cache_bucket" "${SRC_DIR}/src/bpf/intf.h" || fail "bucket helper missing"
+grep -q "l2_bkt" "${SRC_DIR}/src/bpf/intf.h" || fail "l2 seed field missing"
+grep -q "l3_bkt" "${SRC_DIR}/src/bpf/intf.h" || fail "l3 seed field missing"
+grep -q "cache_cls" "${SRC_DIR}/src/bpf/intf.h" || fail "class seed field missing"
+grep -q "rsv" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved seed field missing"
 grep -q "flow_edq_empty" "${DISP_HDR}" || fail "empty check missing"
 grep -q "L1>L2>L3" "${DISP_HDR}" || fail "tier order missing"
 grep -q "L1 greater than L2 greater than L3" "${DISP_HDR}" || fail "tier prose missing"
 grep -q "L1>L2>L3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick tier order missing"
+grep -q "larger buckets first within tier" "${DISP_HDR}" || fail "larger tier prose missing"
+grep -q "larger buckets first within tier" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick larger prose missing"
+grep -q "larger buckets first within tier" "${SRC_DIR}/src/bpf/intf.h" || fail "intf larger prose missing"
 grep -q "Empty queues skip" "${DISP_HDR}" || fail "empty skip prose missing"
 grep -q "Both known" "${DISP_HDR}" || fail "known gate prose missing"
 grep -q "fixed order" "${DISP_HDR}" || fail "fixed order prose missing"
-if grep -rq "flow_cpu_l2b" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "cache size helper reappeared"
+grep -q "_Static_assert(sizeof(struct flow_cpu_ctx) == 16" "${SRC_DIR}/src/bpf/intf.h" || fail "seed size assert missing"
+grep -q "flow_cpu_ctx>() == 16" "${SRC_DIR}/src/run.rs" || fail "run seed assert missing"
+grep -q "val\[8\]" "${SRC_DIR}/src/topology.rs" || fail "seed bucket bytes missing"
+if grep -rho "flow_cpu_l[0-9a-z_]*b[a-z]*" "${SRC_DIR}/src/bpf" 2>/dev/null | grep -vx -e "flow_cpu_l2bkt" -e "flow_cpu_l3bkt" | grep -q .; then
+    fail "cache helper outside allowlist"
 fi
 if grep -rq "flow_l2_larger\|flow_l3_prefer" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "cache compare reappeared"
 fi
+if grep -rn "bkt *>" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null | grep -v "flow_cache_larger" | grep -q .; then
+    fail "size compare outside gate"
+fi
 if grep -rq "TOPO_FOR_EACH_CORE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "core walk reappeared"
 fi
-if grep -q "l2_bucket\|l3_bucket\|cache_cls" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+if grep -q "l2_bucket\|l3_bucket" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "cache seed reappeared"
 fi
 if grep -q "seed_topology_with\|lstopo_caches" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then

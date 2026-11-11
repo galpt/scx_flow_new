@@ -11,7 +11,8 @@
  * then same cache group then same LLC then same node then distant
  * remote then fallback last in deadline order with tiers L1 greater
  * than L2 greater than L3 and short form L1>L2>L3 with idle starts
- * at once. Each per CPU queue holds bounded at 64
+ * at once. Size breaks ties only inside one tier with larger buckets first within tier
+ * when both buckets are known. Each per CPU queue holds bounded at 64
  * total with one millis slices. Each enqueue prices the task by its
  * effective weight from nice plus live share. A task pays for the time
  * it burns, scaled by that weight. Fresh times move past
@@ -132,13 +133,39 @@ struct flow_running_state {
  * index assigned at startup. Cache and node placement come from the
  * upstream topology tree, so no cached copy lives here. The cluster
  * index stays here as an interim until it moves into the tree data
- * pointer, which needs a non-zero data size at tree build time. */
+ * pointer, which needs a non-zero data size at tree build time. The
+ * spare word holds three size buckets plus one reserved byte. Each
+ * bucket is a u8 with zero meaning unknown. The buckets share one
+ * aggregated per CPU share from userspace. The seed stays sixteen
+ * bytes total. */
 struct flow_cpu_ctx {
 	u32 cpu_id;
 	u32 ccx_id;
-	u32 reserved;
+	u8 l2_bkt;
+	u8 l3_bkt;
+	u8 cache_cls;
+	u8 rsv;
 	u32 pad;
 };
+/* The seed stays sixteen bytes with no growth. */
+_Static_assert(sizeof(struct flow_cpu_ctx) == 16, "flow_cpu_ctx size drifted");
+/* Bucket ladder over kibibytes. Zero means unknown with no size.
+ * Larger numbers mean larger caches. Values cap at the top with no
+ * wrap. Compares stay u8 with no promotion. */
+static __always_inline u8 cache_bucket(u32 kb)
+{
+	if (!kb)
+		return 0;
+	if (kb <= 256U)
+		return 1;
+	if (kb <= 1024U)
+		return 2;
+	if (kb <= 8192U)
+		return 3;
+	if (kb <= 524288U)
+		return 4;
+	return 255;
+}
 /* Per LLC counters. The order matches the userspace reader.
  * Queued counts tasks waiting in shared queues. Dispatched counts
  * moves to a local queue. Fallback counts fallback inserts. Steal

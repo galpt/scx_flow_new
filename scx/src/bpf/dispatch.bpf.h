@@ -5,7 +5,8 @@
  * Each CPU drains its own queue first, then the same cache group,
  * then the rest of the same LLC, then the same node, then distant
  * queues, then fallback. Tiers stay L1 greater than L2 greater than L3,
- * so closer caches drain first in fixed order. Short form is L1>L2>L3.
+ * so closer caches drain first with larger buckets first within tier
+ * when both buckets are known and fixed order else. Short form is L1>L2>L3.
  * Empty queues skip before any group lookup. Both known group ids gate
  * the group match, so unknown groups fall through to fixed order. Each
  * queue drains in deadline order. A head that cannot run here
@@ -248,6 +249,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	bool saw_unrunnable = false;
 	bool use_ccx;
 	u32 my_ccx;
+	u32 best_victim = (u32)FLOW_MAX_CPUS;
+	u32 first_victim = (u32)FLOW_MAX_CPUS;
+	u8 best_bkt = 0;
+	bool have_best = false;
+	bool have_first = false;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
@@ -273,18 +279,28 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
-	 * tasks stay near warm cache. The group match needs the seed flag
-	 * with both group ids known, so unknown reads as all ones match
-	 * nothing and the pass below covers them in fixed order. Empty
-	 * queues skip before the group lookup, so idle victims cost one
-	 * counter read with no topology walk. The empty check can race a
-	 * new enqueue, which stays safe since the next dispatch covers the
-	 * new head. */
+	 * tasks stay near warm cache. Larger buckets first within tier
+	 * orders the group victims when both buckets are known, else the
+	 * first fixed victim covers unknown sizes. The pass tracks the best
+	 * known larger victim plus the first fixed victim in one scan with
+	 * no new loop, then drains best first with fixed fallback. The group
+	 * match needs the seed flag with both group ids known, so unknown
+	 * reads as all ones match nothing and the fixed victim covers them.
+	 * Empty queues skip before the group lookup, so idle victims cost
+	 * one counter read with no topology walk. The empty check can race
+	 * a new enqueue, which stays safe since the next dispatch covers
+	 * the new head. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
+	best_victim = (u32)FLOW_MAX_CPUS;
+	first_victim = (u32)FLOW_MAX_CPUS;
+	best_bkt = 0;
+	have_best = false;
+	have_first = false;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		u32 vccx;
+		u8 vb;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
@@ -297,16 +313,38 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		vccx = flow_cpu_ccx(victim);
 		if (!flow_ccx_match(use_ccx, vccx, my_ccx))
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-			return;
+		vb = flow_cpu_l2bkt(victim);
+		if (!have_first) {
+			first_victim = victim;
+			have_first = true;
+		}
+		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+			best_victim = victim;
+			best_bkt = vb;
+			have_best = true;
+		}
 	}
-	/* Same LLC victims drain next in fixed order with already tried group
-	 * victims skipped, so each queue probes once per dispatch. Empty
-	 * queues skip before the dedup lookup. The empty check can race a
-	 * new enqueue, which stays safe since the next dispatch covers the
-	 * new head. */
+	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
+		return;
+	if (have_first && (!have_best || first_victim != best_victim) &&
+	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
+		return;
+	/* Same LLC victims drain next with larger buckets first within tier
+	 * when both buckets are known and fixed order else, with already tried group
+	 * victims skipped, so each queue probes once per dispatch. The pass
+	 * tracks the best known larger victim plus the first fixed victim in
+	 * one scan with no new loop, then drains best first with fixed
+	 * fallback. Empty queues skip before the dedup lookup. The empty check
+	 * can race a new enqueue, which stays safe since the next dispatch
+	 * covers the new head. */
+	best_victim = (u32)FLOW_MAX_CPUS;
+	first_victim = (u32)FLOW_MAX_CPUS;
+	best_bkt = 0;
+	have_best = false;
+	have_first = false;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
+		u8 vb;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
@@ -318,9 +356,22 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx))
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-			return;
+		vb = flow_cpu_l3bkt(victim);
+		if (!have_first) {
+			first_victim = victim;
+			have_first = true;
+		}
+		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+			best_victim = victim;
+			best_bkt = vb;
+			have_best = true;
+		}
 	}
+	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
+		return;
+	if (have_first && (!have_best || first_victim != best_victim) &&
+	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
+		return;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		if (victim == c)
