@@ -122,7 +122,7 @@ fi
 # Scheduler README stays byte identical with no doc drift.
 # Queues admit without bound with a guarded preempt on a much earlier
 # Virtual deadline.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "7b4d2e878b2412c3d3b7ef9a7e46c92996a52ce8a311d0a88f0466c1c977739f" ] || fail "scx README drifted"
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "b6f286125c46c80172f4e6b686d1049f5ad4e335998cde00dec40778c93fc4e2" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "25" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
@@ -1429,7 +1429,7 @@ grep -q "rs->start_ts = bpf_ktime_get_ns()" "${DISP_HDR}" || fail "start stamp w
 grep -q "start = READ_ONCE(rs->start_ts)" "${ENQ_HDR}" || fail "start stamp read missing"
 
 # Kick gates stay locked in gap then granularity then tail order with
-# twelve skips plus one idle plus one preempt. The asserts below read
+# thirteen skips plus one idle plus one preempt. The asserts below read
 # source text only, so no kernel kick delivery behavior is assumed.
 # Delivery timing plus compat paths stay unasserted by design.
 grep -q "Step seven of seven" "${ENQ_HDR}" || fail "kick seven step missing"
@@ -1447,7 +1447,7 @@ grep -q "__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen)" "${ENQ_HDR}" ||
 grep -q "if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {" "${ENQ_HDR}" || fail "freshness mask live missing"
 kick_body="$(awk '/^static __always_inline void flow_kick_vd\(/,/^}/' "${ENQ_HDR}")"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_cpu_allowed(tgt, p)" | tr -d ' ')" = "2" ] || fail "mask checks drifted"
-[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 8)" | tr -d ' ')" = "12" ] || fail "skip sites drifted"
+[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 8)" | tr -d ' ')" = "13" ] || fail "skip sites drifted"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 7)" | tr -d ' ')" = "1" ] || fail "idle count drifted"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 6)" | tr -d ' ')" = "1" ] || fail "preempt count drifted"
 
@@ -1456,6 +1456,53 @@ pre_at="$(grep -n "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -
 idle_at="$(grep -n "kick_idle" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
 skip_at="$(grep -n "kick_skip" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
 [ "${pre_at}" -lt "${idle_at}" ] && [ "${idle_at}" -lt "${skip_at}" ] || fail "kick counter order drifted"
+
+# Stage 6 remediation pins for 5.2.18 tip findings with no behavior drift beyond the guarded tail plus alloc bound.
+# Floor prose uses the floor step with the base kept reserved and best effort uniqueness.
+grep -q "one floor step per enqueue" "${FAIR_HDR}" || fail "floor step prose missing"
+if grep -q "one base step per enqueue" "${FAIR_HDR}" 2>/dev/null; then
+    fail "stale base step reappeared"
+fi
+grep -q "kept unused reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "base reserved missing"
+grep -q "Kept reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "cap reserved missing"
+grep -q "stay reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "cap prose missing"
+grep -q "best effort unique" "${FAIR_HDR}" || fail "best effort prose missing"
+grep -q "rare duplicate" "${FAIR_HDR}" || fail "duplicate prose missing"
+grep -q "nothing when the time runs ahead" "${FAIR_HDR}" || fail "fallback store prose missing"
+grep -q "keeping the burst path with a floor slice" "${FAIR_HDR}" || fail "fair short fix missing"
+if grep -q "short tasks exact" "${FAIR_HDR}" 2>/dev/null; then
+    fail "stale exact reappeared"
+fi
+# Kick heuristic plus storm trade plus collision plus tail recheck stay documented.
+grep -q "tear free heuristic" "${ENQ_HDR}" || fail "heuristic prose missing"
+grep -q "dispatch still correct" "${ENQ_HDR}" || fail "heuristic dispatch prose missing"
+if grep -q "cache plus lock protected" "${ENQ_HDR}" 2>/dev/null; then
+    fail "stale lock prose reappeared"
+fi
+grep -q "prevent storms" "${ENQ_HDR}" || fail "storm prose missing"
+grep -q "even earlier Virtual deadline" "${ENQ_HDR}" || fail "tradeoff prose missing"
+grep -q "four billion runs" "${ENQ_HDR}" || fail "gen collision prose missing"
+grep -q "leaves one gauge unit behind" "${ENQ_HDR}" || fail "gauge drift prose missing"
+grep -q "Every non duplicate ends in a" "${ENQ_HDR}" || fail "pairing prose missing"
+grep -q "telemetry only" "${ENQ_HDR}" || fail "telemetry prose missing"
+grep -q "Every non duplicate ends in a" "${SRC_DIR}/src/bpf/intf.h" || fail "intf pairing missing"
+grep -q "fresh_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail recheck missing"
+grep -q "fresh_rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail recheck gate missing"
+grep -q "short tail after the win" "${ENQ_HDR}" || fail "tail recheck prose missing"
+grep -q "post win tail recheck" "${ENQ_HDR}" || fail "tail header prose missing"
+# Alloc bound stays explicit with no new table.
+grep -q "scx_bpf_nr_cpu_ids" "${ENQ_HDR}" || fail "alloc bound missing"
+grep -q "scx_bpf_nr_cpu_ids" "${DISP_HDR}" || fail "drain bound missing"
+grep -q "Bound the index by the live table size" "${DISP_HDR}" || fail "bound prose missing"
+# Start stamp plain store stays benign with fail closed skip plus generation cover.
+grep -q "plain store on an aligned eight byte" "${DISP_HDR}" || fail "start store prose missing"
+grep -q "torn read yields" "${DISP_HDR}" || fail "torn prose missing"
+grep -q "covers recycle" "${DISP_HDR}" || fail "recycle prose missing"
+# Scheduler README keeps the floor slice fix with no stale exact.
+grep -q "keeping the burst path with a floor slice" "${SRC_DIR}/README.md" || fail "readme short fix missing"
+if grep -q "short tasks exact" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme stale exact reappeared"
+fi
 
 # No internal design labels leak into shipped prose or comments. The
 # guard script plus the changelog plus the excluded specs stay out of

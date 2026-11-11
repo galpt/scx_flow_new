@@ -223,6 +223,9 @@ static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int stea
 	u32 slot;
 	if (!flow_cpu_ok(victim) || !flow_cpu_live(victim))
 		return 0;
+	/* Bound the index by the live table size with no new table. */
+	if ((u64)victim >= scx_bpf_nr_cpu_ids())
+		return 0;
 	if (!flow_edqs)
 		return 0;
 	edq = &flow_edqs[victim];
@@ -315,6 +318,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		if (!flow_cpu_live(victim))
 			continue;
+		if ((u64)victim >= scx_bpf_nr_cpu_ids())
+			continue;
 		if (flow_edqs && flow_edq_empty(&flow_edqs[victim]))
 			continue;
 		vl = topo_cpu_to_llc_id(victim);
@@ -378,6 +383,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
+			continue;
+		if ((u64)victim >= scx_bpf_nr_cpu_ids())
 			continue;
 		if (flow_edqs && flow_edq_empty(&flow_edqs[victim]))
 			continue;
@@ -526,6 +533,10 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	rs->gen = ng;
 	rs->llc_id = llc;
 	rs->vd = READ_ONCE(t->vd);
+	/* The start stamp uses a plain store on an aligned eight byte
+	 * word with a tear free read in the kick path. A torn read yields
+	 * zero ran with a fail closed skip and the generation recheck
+	 * covers recycle with no extra fence. */
 	rs->start_ts = bpf_ktime_get_ns();
 	t->gen = ng;
 	t->slice_rem = sl;

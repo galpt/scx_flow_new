@@ -21,7 +21,8 @@
  * Wakes stay in the same LLC with an allowed live target. Local
  * inserts are not counted in the shared gauge. Shared and fallback
  * inserts count the gauge, and fallback inserts also count fallback.
- * Dequeue drops the gauge on cancel. Masks
+ * Dequeue drops the gauge on cancel. Every non duplicate ends in a
+ * queue insert with the gauge paired by a saturating floor for telemetry only. Masks
  * are checked again before each wake, so a task is never kicked toward
  * a CPU outside its current mask. The queue node lives in arena memory
  * beside the task with the pid for owner lookup. An insert miss keeps
@@ -43,6 +44,8 @@
 static __always_inline struct scx_edq __arena *flow_edq_for_cpu(s32 tgt)
 {
 	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
+		return 0;
+	if ((u64)(u32)tgt >= scx_bpf_nr_cpu_ids())
 		return 0;
 	if (!flow_cpu_live((u32)tgt))
 		return 0;
@@ -101,7 +104,10 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
  * tail skips. A lost race skips. A changed run after the win skips, so a
  * stale kick never wakes a fresh run. The token keeps the low thirty two
  * bits of the run count, so a repeat needs four billion runs on one CPU.
- * Gates run gap then granularity then tail with no reorder. */
+ * Gates run gap then granularity then tail with no reorder. Each run kicks
+ * at most once to prevent storms, so a later even earlier Virtual deadline
+ * in the same run misses with no second kick. The post win tail recheck
+ * keeps the same tail bound with the token already spent. */
 static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
@@ -118,6 +124,7 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	u32 c;
 	u64 fresh_gen;
 	s64 fresh_vd;
+	u64 fresh_rem;
 	/* Step one of seven keeps the target gate. A bad or masked or
 	 * offline target skips with no wake. */
 	if (tgt < 0 || !p || !flow_cpu_ok((u32)tgt) || !flow_cpu_allowed(tgt, p) ||
@@ -170,8 +177,9 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		return;
 	}
 	/* Step six of seven keeps the wall gates. A fresh run under
-	 * granularity skips with cache plus lock protected, then a short
-	 * tail skips with the tail protected. Wraparound reads zero. */
+	 * granularity skips on a tear free heuristic read, then a short
+	 * tail skips on a tear free heuristic read. A heuristic skip can
+	 * miss a preempt with dispatch still correct. Wraparound reads zero. */
 	start = READ_ONCE(rs->start_ts);
 	now = bpf_ktime_get_ns();
 	ran = now > start ? now - start : 0;
@@ -194,7 +202,8 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	/* Freshness check after the win. The run may have ended and
 	 * the mask may have moved while winning the token. A changed
 	 * run skips with the token spent, so each run still kicks at
-	 * most once. */
+	 * most once. A short tail after the win skips with the token
+	 * spent to avoid a wasted preempt on a tail below the bound. */
 	if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -206,6 +215,11 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	}
 	fresh_vd = READ_ONCE(rs->vd);
 	if (!(win < fresh_vd)) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	fresh_rem = READ_ONCE(rs->slice_rem);
+	if (fresh_rem < (u64)FLOW_KICK_TAIL_NS) {
 		flow_stat_inc(llc, 8);
 		return;
 	}

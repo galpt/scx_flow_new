@@ -16,9 +16,9 @@
  * with one millis slices. Each enqueue prices the task by its
  * effective weight from nice plus live share. A task pays for the time
  * it burns, scaled by that weight. Fresh times move past
- * a per LLC floor so two tasks never share the same value, with a
+ * a per LLC floor so stored times stay best effort unique, with a
  * direct store of the last observed value plus one when the loop
- * loses too often. Virtual deadline adds an effective based step scaled
+ * loses too often. A rare duplicate keeps insertion order with no extra promise. Virtual deadline adds an effective based step scaled
  * by the burst to the floored time through the shared charge path,
  * so a larger effective weight or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
@@ -31,7 +31,10 @@
  * in FIFO order with no extra bound. Queues come from the upstream deadline
  * library with always eligible tasks, and placement follows the upstream
  * topology library with liveness from the same tree. Arena holds one
- * queue node per task beside the task state.
+ * queue node per task beside the task state. The base constant stays
+ * kept unused reserved with no reader. The queue caps stay reserved
+ * with no reader for sizing only. Every non duplicate ends in a queue
+ * insert with the gauge paired by a saturating floor for telemetry only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -59,13 +62,13 @@ enum flow_consts {
 	FLOW_MAX_CPUS = 1024ULL,
 	FLOW_MAX_LLCS = 64ULL,
 	FLOW_MAX_NODES = 8ULL,
-	FLOW_QUEUE_CAP = 64ULL,
-	FLOW_FALLBACK_CAP = 1024ULL,
+	FLOW_QUEUE_CAP = 64ULL, /* Kept reserved. */
+	FLOW_FALLBACK_CAP = 1024ULL, /* Kept reserved. */
 	FLOW_SLICE_MIN_NS = 1000000ULL,
 	FLOW_SLICE_FLOOR_NS = 62500ULL,
 	FLOW_EXIT_SLICE_NS = 1000ULL,
-	FLOW_FAIR_BASE_NS = 20000ULL,
-	FLOW_FAIR_EXTRA_NS = 1000ULL,
+	FLOW_FAIR_BASE_NS = 20000ULL, /* Kept unused reserved. */
+	FLOW_FAIR_EXTRA_NS = 1000ULL, /* Kept unused reserved. */
 	FLOW_SEQ_FLOOR_STEP_NS = 1000000ULL,
 	FLOW_RUN_WIN_NS = 30000000000ULL,
 	FLOW_RUN_SPAN_NS = 4000000000ULL,

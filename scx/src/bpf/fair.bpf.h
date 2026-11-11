@@ -12,21 +12,25 @@
  * smaller of the two clamped weights with no divide, so the tighter
  * bound governs.
  * Fresh times move past the per LLC floor through a short
- * compare and swap loop, so each stored time stays unique with
+ * compare and swap loop, so stored times stay best effort unique with
  * the winner publishing its value at once. When the loop loses
  * too often, the last observed value plus one is stored directly
- * with no further retry. An invalid LLC skips the floor and keeps
+ * with no further retry. A rare duplicate keeps insertion order with
+ * no extra promise. An invalid LLC skips the floor and keeps
  * the input time directly. The floor rises over time and never
  * moves backward for a given LLC. When the time runs ahead of the
- * floor, the floor moves up by at most one base step per enqueue,
- * so one far time cannot pull the floor with it. Virtual deadline adds the burst scaled effective step
+ * floor, the floor moves up by at most one floor step per enqueue,
+ * so one far time cannot pull the floor with it. The fallback stores
+ * nothing when the time runs ahead, so uniqueness stays best effort.
+ * The base constant stays kept unused reserved with no reader. Virtual deadline adds the burst scaled effective step
  * to the floored time through the shared charge path, so a larger
  * effective weight or a shorter run gives an earlier due time with no extra
  * divide. Burst holds the last run length between the floor and
  * one slice with shift only moves. Run keeps
  * eight recent run lengths with close stamps plus the kept range plus
  * a stable flag plus the current sum, so steady tasks price by the
- * kept max with short tasks exact and long tasks in one slice quanta.
+ * kept max with short tasks keeping the burst path with a floor slice
+ * and long tasks in one slice quanta.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -230,7 +234,7 @@ static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
   * and freezes on a zero or backward clock. Close pushes the sum on
   * sleep only, so tasks that never sleep stay unknown. The stable
   * flag needs four kept plus a four second span plus a tight range
-  * with short tasks exact under the floor. Enqueue reads the cached
+  * with short tasks stable under the floor. Enqueue reads the cached
   * flag with no clock and no scan. Integer only with bounded scans. */
 static __always_inline void flow_run_reset(struct flow_task_ctx *t)
 {
