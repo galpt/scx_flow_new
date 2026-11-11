@@ -854,14 +854,16 @@ grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor pr
 
 # Seed plus display share one known-or-fallback helper with sorted LLC order.
 # Known means neither minus one nor 65535. The display count delegates to
-# the seed helper, so both report the same groups on every host.
+# the seed helper, so both report the same groups on every host. True size
+# adds two more users sharing the same helper with no split: the true size
+# seed plus the per core display.
 grep -q "fn core_cluster" "${SRC_DIR}/src/topology.rs" || fail "known helper missing"
 grep -q "cluster_id != -1" "${SRC_DIR}/src/topology.rs" || fail "sentinel narrow missing"
 if grep -q "cluster_id >= 0" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
     fail "broad unknown reappeared"
 fi
-[ "$(grep -c "cpu_ccx(topo, &llc_ids)" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "3" ] || fail "seed display split"
-[ "$(grep -c "llc_ids.sort_unstable" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "3" ] || fail "fallback order drifted"
+[ "$(grep -c "cpu_ccx(topo, &llc_ids)" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "5" ] || fail "seed display split"
+[ "$(grep -c "llc_ids.sort_unstable" "${SRC_DIR}/src/topology.rs" | tr -d ' ')" = "5" ] || fail "fallback order drifted"
 
 # Dispatch liveness keeps every queued task reachable. Deadline order
 # drains in deadline order, slices stay at the floor with no zero
@@ -1214,6 +1216,41 @@ fi
 if grep -q "seed_topology_with\|lstopo_caches" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
     fail "cache seed reappeared in userspace"
 fi
+# True size parser stays in one file with exact names only. Any other
+# cache helper fails closed here. Die stays size only with no cluster
+# feed. The fold takes max with no sum so inclusion never double counts.
+grep -q "parse_lstopo_text" "${SRC_DIR}/src/lstopo.rs" || fail "parser view missing"
+grep -q "lstopo_parse_caches" "${SRC_DIR}/src/lstopo.rs" || fail "parser entry missing"
+grep -q "die_ccx_hint" "${SRC_DIR}/src/lstopo.rs" || fail "die hint missing"
+grep -q "l1_fold_kb" "${SRC_DIR}/src/lstopo.rs" || fail "fold helper missing"
+grep -q "Die stays size only" "${SRC_DIR}/src/lstopo.rs" || fail "die prose missing"
+grep -q "die_ccx_hint" "${SRC_DIR}/src/topology.rs" || fail "die use missing"
+grep -q "Die stays size only" "${SRC_DIR}/src/topology.rs" || fail "die fallback prose missing"
+grep -q "l1_fold_kb" "${SRC_DIR}/src/topology.rs" || fail "fold use missing"
+if grep -rq "lstopo_parse_caches\|die_ccx_hint\|l1_fold_kb" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "parser helper in BPF reappeared"
+fi
+# True size seed keeps sixteen bytes with split buckets. Missing rows
+# read unknown with no match. The fallback seed stays for tool absence.
+grep -q "seed_topology_lstopo" "${SRC_DIR}/src/topology.rs" || fail "true size seed missing"
+grep -q "seed_topology_lstopo" "${SRC_DIR}/src/run.rs" || fail "true size use missing"
+grep -q "val\[8\]" "${SRC_DIR}/src/topology.rs" || fail "seed bucket bytes missing"
+# List tool runs once with no flags plus no retry. Output caps at one
+# megabyte plus sixty four thousand lines. Timeout is ten seconds.
+# PATH lookup matches the absolute path byte for byte. Sudo keeps
+# root env clean with no user env pass. Failures keep BPF defaults.
+grep -q "lstopo-no-graphics" "${SRC_DIR}/src/run.rs" || fail "list tool missing"
+grep -q "1_048_576" "${SRC_DIR}/src/run.rs" || fail "byte cap missing"
+grep -q "64_000" "${SRC_DIR}/src/run.rs" || fail "line cap missing"
+grep -q "timeout" "${SRC_DIR}/src/run.rs" || fail "timeout missing"
+grep -q "topology seed failed, using BPF defaults" "${SRC_DIR}/src/run.rs" || fail "warn text drifted"
+# Per core display stays always on at info with K plus M suffix only.
+# The tree stays at debug. The brief stays at or below one hundred
+# sixty chars. Lines cap at sixty four with an overflow count.
+grep -q "render_per_core_lines" "${SRC_DIR}/src/topology.rs" || fail "per-core helper missing"
+grep -q "render_per_core_lines" "${SRC_DIR}/src/run.rs" || fail "per-core use missing"
+grep -q "format_kb" "${SRC_DIR}/src/topology.rs" || fail "size format missing"
+grep -q 'info!("Topology: {line}")' "${SRC_DIR}/src/run.rs" || fail "per-core info missing"
 if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then
     fail "cache order drifted"
 fi
@@ -1293,13 +1330,28 @@ grep -q "vw.l3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "llc l3 split missing"
 grep -q "Group tier reads l2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "split prose missing"
 grep -q "pre > best_score" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie hoist missing"
 # L4: bucket ladder stays in sync both sides with identical thresholds.
+# Finer ladder separates live versus asymmetric shares with one through
+# ten plus unknown zero plus cap top. Edges at 48 plus 1024 plus 32768
+# plus 98304 join existing 256 plus 8192 plus 524288 with monotone order.
+grep -q "kb <= 32U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 32 missing"
+grep -q "kb <= 48U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 48 missing"
 grep -q "kb <= 256U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 256 missing"
+grep -q "kb <= 512U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 512 missing"
 grep -q "kb <= 1024U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 1024 missing"
 grep -q "kb <= 8192U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 8192 missing"
+grep -q "kb <= 16384U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 16384 missing"
+grep -q "kb <= 32768U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 32768 missing"
+grep -q "kb <= 98304U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 98304 missing"
 grep -q "kb <= 524288U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 524288 missing"
+grep -q "kb <= 32" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 32 missing"
+grep -q "kb <= 48" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 48 missing"
 grep -q "kb <= 256" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 256 missing"
+grep -q "kb <= 512" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 512 missing"
 grep -q "kb <= 1024" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 1024 missing"
 grep -q "kb <= 8192" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 8192 missing"
+grep -q "kb <= 16384" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 16384 missing"
+grep -q "kb <= 32768" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 32768 missing"
+grep -q "kb <= 98304" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 98304 missing"
 grep -q "kb <= 524288" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 524288 missing"
 grep -q "Mirrors cache_bucket in topology.rs" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf mirror missing"
 grep -q "Keep both in sync" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf sync prose missing"

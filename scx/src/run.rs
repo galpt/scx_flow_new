@@ -63,6 +63,61 @@ pub(crate) struct Scheduler<'a> {
     _arenalib: ArenaLib,
 }
 
+/// One list tool run with no flags. Standard output caps at one
+/// megabyte plus sixty four thousand lines max. Timeout is ten
+/// seconds which is ten thousand milliseconds. PATH lookup matches
+/// the absolute path byte for byte per the gate manifest. Sudo keeps
+/// root env clean with no user env pass. No retry follows on failure.
+fn run_lstopo_once(prog: &str) -> Result<String> {
+    use std::process::Command;
+    // Blocking run with no flags. The timeout wrapper bounds the
+    // wait at ten seconds with no retry on any failure.
+    let out = Command::new("timeout")
+        .arg("10s")
+        .arg(prog)
+        .output()
+        .context("list tool spawn failed")?;
+    if !out.status.success() {
+        anyhow::bail!("list tool exit failed");
+    }
+    // Standard output caps at one megabyte.
+    let mut bytes: Vec<u8> = out.stdout;
+    bytes.truncate(1_048_576);
+    // Empty standard error is expected. Content is ignored here.
+    let text: String = String::from_utf8_lossy(&bytes).into_owned();
+    // Line cap keeps sixty four thousand lines max.
+    let mut capped = String::new();
+    let mut count: usize = 0;
+    for line in text.lines() {
+        if count >= 64_000 {
+            break;
+        }
+        capped.push_str(line);
+        capped.push('\n');
+        count = count.wrapping_add(1);
+    }
+    if capped.is_empty() {
+        anyhow::bail!("list tool empty output");
+    }
+    Ok(capped)
+}
+
+/// Fetch the true size view before topology discovery. Single attempt
+/// with no retry. Any failure returns none so the seed keeps the
+/// aggregated fallback with BPF defaults. Never panics.
+fn fetch_lstopo_view() -> Option<crate::lstopo::LstopoView> {
+    // PATH lookup first. The absolute path reads
+    // /usr/bin/lstopo-no-graphics and matches PATH byte for byte.
+    let text: String = match run_lstopo_once("lstopo-no-graphics") {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    match crate::lstopo::parse_lstopo_text(&text) {
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
 impl<'a> Scheduler<'a> {
     pub fn init(
         opts: &'a Opts,
@@ -75,6 +130,9 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, flow_ops, open_opts)
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
+        // Blocking list fetch sits before topology discovery.
+        // After arena setup the seed consumes the view.
+        let lstopo_view: Option<crate::lstopo::LstopoView> = fetch_lstopo_view();
         let topo = match scx_utils::Topology::new().context("topology discovery") {
             Ok(t) => Some(t),
             Err(e) => {
@@ -105,12 +163,30 @@ impl<'a> Scheduler<'a> {
             .context("arena setup failed")?;
         if let Some(t) = topo.as_ref() {
             // Summary plus brief at info.
-            match crate::topology::seed_topology(&mut skel, t) {
+            let seed_text: Result<String> = match lstopo_view.as_ref() {
+                Some(v) => crate::topology::seed_topology_lstopo(&mut skel, t, v),
+                None => crate::topology::seed_topology(&mut skel, t),
+            };
+            match seed_text {
                 Ok(text) => info!("Topology: {text}"),
                 Err(e) => warn!("topology seed failed, using BPF defaults: {e:#}"),
             }
             info!("Topology: {}", crate::topology::describe_topo_summary(t));
             info!("{}", crate::topology::describe_sched_use(t));
+            // Per core true sizes at info with a sixty four line cap.
+            // The tree stays at debug.
+            let core_lines = crate::topology::render_per_core_lines(t, lstopo_view.as_ref());
+            let total_cores = core_lines.len();
+            if total_cores > 64 {
+                for line in core_lines.into_iter().take(64) {
+                    info!("Topology: {line}");
+                }
+                info!("Topology: ...+{} more", total_cores - 64);
+            } else {
+                for line in core_lines {
+                    info!("Topology: {line}");
+                }
+            }
             // Tree at debug.
             if log::log_enabled!(log::Level::Debug) {
                 let topo_lines = crate::topology::render_topo_lines(t);

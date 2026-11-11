@@ -34,27 +34,46 @@ pub fn smt_on(topo: &Topology) -> bool {
 /// known for a match, so unknown falls through to fixed order fail closed.
 pub const CCX_UNKNOWN: u32 = 0xFFFFFFFF;
 
-/// Bucket ladder for one aggregated per CPU cache share in kibibytes.
+/// Bucket ladder for one per CPU cache share in kibibytes.
 /// Mirrors cache_bucket in the shared BPF header with identical thresholds
-/// at 256 plus 1024 plus 8192 plus 524288. Zero means unknown
-/// with no size. Larger numbers mean larger caches. The top value caps
-/// with no wrap. All compares stay integer only with no float. Keep both
-/// sides in sync when thresholds move.
+/// at 32 plus 48 plus 256 plus 512 plus 1024 plus 8192 plus 16384 plus
+/// 32768 plus 98304 plus 524288. Zero means unknown with no size.
+/// Larger numbers mean larger caches. The top value caps with no wrap.
+/// All compares stay integer only with no float. Keep both sides in
+/// sync when thresholds move.
 pub fn cache_bucket(kb: u32) -> u8 {
     if kb == 0 {
         return 0;
     }
-    if kb <= 256 {
+    if kb <= 32 {
         return 1;
     }
-    if kb <= 1024 {
+    if kb <= 48 {
         return 2;
     }
-    if kb <= 8192 {
+    if kb <= 256 {
         return 3;
     }
-    if kb <= 524288 {
+    if kb <= 512 {
         return 4;
+    }
+    if kb <= 1024 {
+        return 5;
+    }
+    if kb <= 8192 {
+        return 6;
+    }
+    if kb <= 16384 {
+        return 7;
+    }
+    if kb <= 32768 {
+        return 8;
+    }
+    if kb <= 98304 {
+        return 9;
+    }
+    if kb <= 524288 {
+        return 10;
     }
     255
 }
@@ -354,9 +373,9 @@ fn cpu_ccx(topo: &Topology, llc_ids: &[usize]) -> BTreeMap<usize, u32> {
 /// from one aggregated per CPU share; cache and node come from the
 /// upstream tree. The cluster stays here as an interim until it moves
 /// into the tree data pointer. Level one stays grouping only with no
-/// size use. Per level parse stays rejected with no new tool and no
-/// new file read, so both level buckets share the single share openly
-/// until a level split lands with no ABI change.
+/// size use. True size rows use the list view when present with a
+/// level split, else both level buckets share the single share openly
+/// as a fallback with no ABI change.
 /// Failures return an error.
 pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> {
     use libbpf_rs::MapCore;
@@ -406,6 +425,167 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
     ))
 }
 
+/// Format kibibytes with K plus M suffix only. Zero reads unknown
+/// with no size. Values below one mebibyte read as K. Values at
+/// or above one mebibyte with no remainder read as M. All math
+/// stays integer only with no float. No byte form appears here.
+pub fn format_kb(kb: u32) -> String {
+    if kb == 0 {
+        return String::from("unknown");
+    }
+    if kb >= 1024 && kb.wrapping_rem(1024) == 0 {
+        return format!("{}M", kb.wrapping_div(1024));
+    }
+    format!("{kb}K")
+}
+
+/// Seed one CPU row per online CPU with true sizes from the list view.
+/// Group tier reads the folded level one plus level two max.
+/// LLC tier reads level three. Die stays size only with no cluster
+/// feed through the hint helper. Missing rows read unknown with
+/// no match. Skips ids at or above the CPU bound with no error.
+/// Failures return an error.
+pub fn seed_topology_lstopo(
+    skel: &mut BpfSkel<'_>,
+    topo: &Topology,
+    view: &crate::lstopo::LstopoView,
+) -> Result<String> {
+    use libbpf_rs::MapCore;
+    let mut llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+    llc_ids.sort_unstable();
+    let mut node_ids: Vec<usize> = topo.nodes.keys().copied().collect();
+    node_ids.sort_unstable();
+    if llc_ids.len() > crate::bpf_intf::flow_consts_FLOW_MAX_LLCS as usize {
+        anyhow::bail!("LLC count over bound");
+    }
+    if node_ids.len() > crate::bpf_intf::flow_consts_FLOW_MAX_NODES as usize {
+        anyhow::bail!("node count over bound");
+    }
+    let ccx_map = cpu_ccx(topo, &llc_ids);
+    let mut groups: BTreeSet<u32> = BTreeSet::new();
+    for v in ccx_map.values() {
+        groups.insert(*v);
+    }
+    let mut seeded = 0u32;
+    let mut cpus: Vec<usize> = topo.all_cpus.keys().copied().collect();
+    cpus.sort_unstable();
+    for cpu in cpus {
+        if cpu >= crate::bpf_intf::flow_consts_FLOW_MAX_CPUS as usize {
+            continue;
+        }
+        let cpu_ref = match topo.all_cpus.get(&cpu) {
+            Some(v) => v,
+            None => continue,
+        };
+        let ccx = ccx_map.get(&cpu).copied().unwrap_or(CCX_UNKNOWN);
+        let (l2_bkt, l3_bkt) = match view.cpus.get(&(cpu_ref.id as u32)) {
+            Some(row) => {
+                let _ = crate::lstopo::die_ccx_hint(row.die_kb);
+                let folded: u32 = crate::lstopo::l1_fold_kb(row.l1d_kb, row.l1i_kb, row.l2_kb);
+                (cache_bucket(folded), cache_bucket(row.l3_kb))
+            }
+            None => {
+                // Missing row stays unknown with no match.
+                // Both buckets read zero so fixed order covers it.
+                (0, 0)
+            }
+        };
+        let key = (cpu as u32).to_ne_bytes();
+        let val = cpu_seed_bytes(cpu as u32, ccx, l2_bkt, l3_bkt, 0, 0);
+        skel.maps
+            .cpu_ctx_stor
+            .update(&key, &val, libbpf_rs::MapFlags::ANY)
+            .with_context(|| format!("cpu seed failed for cpu {cpu}"))?;
+        seeded += 1;
+    }
+    Ok(format!(
+        "{} cpus {} llcs {} nodes {} groups",
+        seeded,
+        llc_ids.len(),
+        node_ids.len(),
+        groups.len().max(1),
+    ))
+}
+
+/// Per core true size lines for info logs. Each line carries core id
+/// plus cpu pair plus llc plus node plus group plus data plus
+/// instruction plus level two plus level three shares. Units use K
+/// plus M suffix with no byte form. Unknown reads unknown with no
+/// size. Cores sort by id. Callers cap at sixty four with an overflow
+/// count line. The tree stays at debug.
+pub fn render_per_core_lines(
+    topo: &Topology,
+    view: Option<&crate::lstopo::LstopoView>,
+) -> Vec<String> {
+    let mut llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+    llc_ids.sort_unstable();
+    let ccx_map = cpu_ccx(topo, &llc_ids);
+    let mut core_ids: Vec<usize> = topo.all_cores.keys().copied().collect();
+    core_ids.sort_unstable();
+    let mut out: Vec<String> = Vec::new();
+    for cid in core_ids {
+        let core = match topo.all_cores.get(&cid) {
+            Some(v) => v,
+            None => continue,
+        };
+        let mut pus: Vec<usize> = core.cpus.keys().copied().collect();
+        pus.sort_unstable();
+        let pair: String = pus
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<String>>()
+            .join("+");
+        let first_cpu: usize = pus.first().copied().unwrap_or(0);
+        let group: u32 = ccx_map.get(&first_cpu).copied().unwrap_or(CCX_UNKNOWN);
+        let group_text: String = if group == CCX_UNKNOWN {
+            String::from("unknown")
+        } else {
+            group.to_string()
+        };
+        let llc: usize = core.llc_id;
+        let node: usize = core.node_id;
+        let (l1d, l1i, l2, l3): (String, String, String, String) = match view {
+            Some(v) => {
+                // Core shares come from the first PU row on the core.
+                // All threads on one core share one cache view.
+                let mut found: Option<(u32, u32, u32, u32)> = None;
+                for pu in pus.iter() {
+                    if let Some(cpu) = topo.all_cpus.get(pu) {
+                        if let Some(row) = v.cpus.get(&(cpu.id as u32)) {
+                            found = Some((row.l1d_kb, row.l1i_kb, row.l2_kb, row.l3_kb));
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some((a, b, c, d)) => (format_kb(a), format_kb(b), format_kb(c), format_kb(d)),
+                    None => (
+                        String::from("unknown"),
+                        String::from("unknown"),
+                        String::from("unknown"),
+                        String::from("unknown"),
+                    ),
+                }
+            }
+            None => {
+                // Fallback shows unknown with no size when the list
+                // view is absent. The aggregated share stays in BPF.
+                (
+                    String::from("unknown"),
+                    String::from("unknown"),
+                    String::from("unknown"),
+                    String::from("unknown"),
+                )
+            }
+        };
+        out.push(format!(
+            "Core L{} P{} cpus {} LLC {} node {} group {} L1d {} L1i {} L2 {} L3 {}",
+            core.id, core.kernel_id, pair, llc, node, group_text, l1d, l1i, l2, l3
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::CCX_UNKNOWN;
@@ -417,7 +597,9 @@ mod tests {
     use super::describe_sched_use;
     use super::describe_topo_groups;
     use super::describe_topo_summary;
+    use super::format_kb;
     use super::kb_for_bytes;
+    use super::render_per_core_lines;
     use super::render_topo_lines;
     use super::smt_on;
     use scx_utils::Core;
@@ -435,13 +617,25 @@ mod tests {
     fn buckets_ladder_unknown_first_cap_last() {
         assert_eq!(cache_bucket(0), 0);
         assert_eq!(cache_bucket(1), 1);
-        assert_eq!(cache_bucket(256), 1);
-        assert_eq!(cache_bucket(257), 2);
-        assert_eq!(cache_bucket(1024), 2);
-        assert_eq!(cache_bucket(1025), 3);
-        assert_eq!(cache_bucket(8192), 3);
-        assert_eq!(cache_bucket(8193), 4);
-        assert_eq!(cache_bucket(524288), 4);
+        assert_eq!(cache_bucket(32), 1);
+        assert_eq!(cache_bucket(33), 2);
+        assert_eq!(cache_bucket(48), 2);
+        assert_eq!(cache_bucket(49), 3);
+        assert_eq!(cache_bucket(256), 3);
+        assert_eq!(cache_bucket(257), 4);
+        assert_eq!(cache_bucket(512), 4);
+        assert_eq!(cache_bucket(513), 5);
+        assert_eq!(cache_bucket(1024), 5);
+        assert_eq!(cache_bucket(1025), 6);
+        assert_eq!(cache_bucket(8192), 6);
+        assert_eq!(cache_bucket(8193), 7);
+        assert_eq!(cache_bucket(16384), 7);
+        assert_eq!(cache_bucket(16385), 8);
+        assert_eq!(cache_bucket(32768), 8);
+        assert_eq!(cache_bucket(32769), 9);
+        assert_eq!(cache_bucket(98304), 9);
+        assert_eq!(cache_bucket(98305), 10);
+        assert_eq!(cache_bucket(524288), 10);
         assert_eq!(cache_bucket(524289), 255);
         assert_eq!(cache_bucket(u32::MAX), 255);
     }
@@ -457,7 +651,7 @@ mod tests {
         assert_eq!(cache_bucket(kb_for_bytes(1)), 1);
         assert_eq!(cache_bucket(kb_for_bytes(1023)), 1);
         assert_eq!(kb_for_bytes(1025), 2);
-        assert_eq!(cache_bucket(kb_for_bytes(3 << 20)), 3);
+        assert_eq!(cache_bucket(kb_for_bytes(3 << 20)), 6);
     }
 
     #[test]
@@ -507,6 +701,35 @@ mod tests {
     }
 
     #[test]
+    fn finer_ladder_separates_live_vs_asym() {
+        // Live host shares versus reference asymmetric shares map to
+        // distinct buckets so bigger orders first within tier.
+        // L1d 32 versus 48, L2 512 versus 1024, L3 16M versus 32M versus 96M.
+        assert!(cache_larger(cache_bucket(48), cache_bucket(32)));
+        assert!(cache_larger(cache_bucket(1024), cache_bucket(512)));
+        assert!(cache_larger(cache_bucket(32768), cache_bucket(16384)));
+        assert!(cache_larger(cache_bucket(98304), cache_bucket(32768)));
+        assert!(cache_larger(cache_bucket(98304), cache_bucket(16384)));
+        // Monotone order holds across the full ladder.
+        let ladder: [u32; 11] = [0, 32, 48, 256, 512, 1024, 8192, 16384, 32768, 98304, 524288];
+        let mut prev: u8 = 0;
+        for (i, kb) in ladder.iter().enumerate() {
+            let bkt = cache_bucket(*kb);
+            if i == 0 {
+                assert_eq!(bkt, 0);
+            } else {
+                assert!(bkt > prev);
+            }
+            prev = bkt;
+        }
+        assert_eq!(cache_bucket(u32::MAX), 255);
+        // u8 compares stay integer only with no float.
+        assert!(cache_larger(10, 9));
+        assert!(!cache_larger(9, 10));
+        assert!(!cache_larger(0, 10));
+    }
+
+    #[test]
     fn split_buckets_keep_tier_order() {
         // Synthetic split: group tier uses l2 and LLC tier uses l3.
         let val = cpu_seed_bytes(9, 2, 4, 1, 0, 0);
@@ -532,7 +755,7 @@ mod tests {
         assert_eq!(val[11], 0);
         assert_eq!(&val[12..16], &[0, 0, 0, 0]);
         let kb: u32 = (3usize << 20 >> 10).min(u32::MAX as usize) as u32;
-        assert_eq!(cache_bucket(kb), 3);
+        assert_eq!(cache_bucket(kb), 6);
         assert_eq!(
             cpu_seed_bytes(0, 0, cache_bucket(0), cache_bucket(0), 0, 0)[8],
             0
@@ -909,5 +1132,108 @@ mod tests {
                 assert!(!line.contains("cluster"));
             }
         }
+    }
+
+    #[test]
+    fn format_kb_uses_k_plus_m_only() {
+        use super::format_kb;
+        assert_eq!(format_kb(0), String::from("unknown"));
+        assert_eq!(format_kb(32), String::from("32K"));
+        assert_eq!(format_kb(48), String::from("48K"));
+        assert_eq!(format_kb(512), String::from("512K"));
+        assert_eq!(format_kb(1024), String::from("1M"));
+        assert_eq!(format_kb(16384), String::from("16M"));
+        assert_eq!(format_kb(32768), String::from("32M"));
+        assert_eq!(format_kb(98304), String::from("96M"));
+        // No byte form appears on any line.
+        for v in [32u32, 512, 1024, 16384, 98304] {
+            let s = format_kb(v);
+            assert!(!s.contains('B'));
+        }
+    }
+
+    #[test]
+    fn per_core_lines_carry_true_sizes() {
+        use super::format_kb;
+        use super::render_per_core_lines;
+        use crate::lstopo::LstopoCpu;
+        use crate::lstopo::LstopoView;
+        let topo = single_host_topo();
+        let mut view = LstopoView::default();
+        for pu in [0u32, 1, 2, 3] {
+            view.cpus.insert(
+                pu,
+                LstopoCpu {
+                    pu_l: Some(pu),
+                    pu_p: pu,
+                    core_l: Some(pu / 2),
+                    l1d_kb: 32,
+                    l1i_kb: 32,
+                    l2_kb: 512,
+                    l3_kb: 16384,
+                    die_kb: 0,
+                },
+            );
+        }
+        let lines = render_per_core_lines(&topo, Some(&view));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("Core L0"));
+        assert!(lines[0].contains("cpus 0+1"));
+        assert!(lines[0].contains("LLC 0"));
+        assert!(lines[0].contains("node 0"));
+        assert!(lines[0].contains("L1d 32K"));
+        assert!(lines[0].contains("L1i 32K"));
+        assert!(lines[0].contains("L2 512K"));
+        assert!(lines[0].contains("L3 16M"));
+        assert_eq!(format_kb(48), String::from("48K"));
+        // Missing rows read unknown with no match.
+        let empty = LstopoView::default();
+        let missing = render_per_core_lines(&topo, Some(&empty));
+        assert!(missing[0].contains("unknown"));
+        // Fallback with no view reads unknown as well.
+        let fallback = render_per_core_lines(&topo, None);
+        assert!(fallback[0].contains("unknown"));
+    }
+
+    #[test]
+    fn per_core_cap_counts_hidden() {
+        use super::render_per_core_lines;
+        let topo = large_topo();
+        let lines = render_per_core_lines(&topo, None);
+        assert_eq!(lines.len(), 542);
+        let total = lines.len();
+        assert!(total > 64);
+        let hidden = total.wrapping_sub(64);
+        assert_eq!(hidden, 478);
+        let marker = format!("...+{} more", hidden);
+        assert_eq!(marker, String::from("...+478 more"));
+        let first: Vec<String> = lines.into_iter().take(64).collect();
+        assert_eq!(first.len(), 64);
+        assert!(first[0].contains("Core"));
+    }
+
+    #[test]
+    fn pu_p_maps_to_kernel_id() {
+        use crate::lstopo::l1_fold_kb;
+        use crate::lstopo::parse_lstopo_text;
+        // PU P number equals Cpu id. Core plus LLC plus Node
+        // resolve via membership with Node membership explicit.
+        // L counts up from zero versus P keeps kernel id.
+        let text = "Machine (47GB total)\n  Package L#0\n    NUMANode L#0 (P#0 47GB)\n    Die L#0 + L3 L#0 (96MB)\n      L2 L#0 (1024KB) + L1d L#0 (48KB) + L1i L#0 (32KB) + Core L#0\n        PU L#0 (P#0)\n        PU L#1 (P#16)\n";
+        let view = parse_lstopo_text(text).unwrap();
+        // L maps logical order while P keeps kernel ids.
+        assert!(view.cpus.contains_key(&0));
+        assert!(view.cpus.contains_key(&16));
+        let r0 = view.cpus.get(&0).unwrap();
+        assert_eq!(r0.pu_l, Some(0));
+        assert_eq!(r0.pu_p, 0);
+        let r16 = view.cpus.get(&16).unwrap();
+        assert_eq!(r16.pu_l, Some(1));
+        assert_eq!(r16.pu_p, 16);
+        // Fold uses max with no sum so inclusion never double counts.
+        assert_eq!(l1_fold_kb(r0.l1d_kb, r0.l1i_kb, r0.l2_kb), 1024);
+        // Die stays size only with no cluster feed.
+        assert_eq!(r0.die_kb, 98304);
+        assert_eq!(crate::lstopo::die_ccx_hint(r0.die_kb), None);
     }
 }

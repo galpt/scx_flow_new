@@ -161,14 +161,26 @@ static __always_inline u8 cache_bucket(u32 kb)
 {
 	if (!kb)
 		return 0;
-	if (kb <= 256U)
+	if (kb <= 32U)
 		return 1;
-	if (kb <= 1024U)
+	if (kb <= 48U)
 		return 2;
-	if (kb <= 8192U)
+	if (kb <= 256U)
 		return 3;
-	if (kb <= 524288U)
+	if (kb <= 512U)
 		return 4;
+	if (kb <= 1024U)
+		return 5;
+	if (kb <= 8192U)
+		return 6;
+	if (kb <= 16384U)
+		return 7;
+	if (kb <= 32768U)
+		return 8;
+	if (kb <= 98304U)
+		return 9;
+	if (kb <= 524288U)
+		return 10;
 	return 255;
 }
 /* Per LLC counters. The order matches the userspace reader.
