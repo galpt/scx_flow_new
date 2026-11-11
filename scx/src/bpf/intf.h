@@ -83,7 +83,8 @@ enum flow_consts {
  * close stamps for stable tasks. Head is the next slot masked with
  * seven. Pruned counts stale drops. Min plus max hold the kept range.
  * Known marks a stable range for the hard path. Total holds the
- * current run sum capped at thirty seconds. */
+ * current run sum capped at thirty seconds. The state holds two
+ * hundred sixteen bytes. */
 struct flow_task_ctx {
 	s64 vtime;
 	u64 slice_rem;
@@ -105,7 +106,9 @@ struct flow_task_ctx {
 /* Arena per task queue node. Storage holds the upstream queue node
  * with the pid beside it for owner lookup. The node sits at offset
  * zero so a queue pop address is also this address. Sized for the
- * task allocator with spare words for growth. */
+ * task allocator with spare words for growth. The node holds one
+ * hundred thirty six bytes, so state plus node stay within five
+ * hundred twelve bytes per task. */
 struct flow_arena_task {
 	u64 storage[16];
 	s32 pid;

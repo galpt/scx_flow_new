@@ -34,6 +34,11 @@ use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
 use crate::stats::Metrics;
 
+/// Arena node size lock. The BPF queue node holds one hundred thirty six
+/// bytes beside the two hundred sixteen byte task state, so per task memory
+/// stays within five hundred twelve bytes. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_arena_task>() == 136);
+
 /*
  * Scheduler holds the skeleton, the link, and the stats server.
  * It drives the run loop until shutdown or exit. The arena library
