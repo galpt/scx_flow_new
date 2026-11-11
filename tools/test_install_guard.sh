@@ -865,8 +865,8 @@ fi
 
 # Dispatch liveness keeps every queued task reachable. Deadline order
 # drains in deadline order, slices stay at the floor with no zero
-# insert, kicks never take minus one without a skip, forward slots stay
-# per victim with the fallback reserved, and a tail re-kick covers heads
+# insert, kicks never take minus one without a skip, forward slots hash
+# with the fallback reserved, and a tail re-kick covers heads
 # that could not run here.
 grep -q "deadline order" "${DISP_HDR}" || fail "deadline order prose missing"
 grep -q "slice = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
@@ -886,7 +886,8 @@ grep -q "victim &" "${DISP_HDR}" || fail "forward slot missing"
 grep -q "(u32)FLOW_MAX_LLCS" "${DISP_HDR}" || fail "fallback slot missing"
 grep -q "flow_rekick_unrunnable" "${DISP_HDR}" || fail "re-kick helper missing"
 grep -q "saw_unrunnable" "${DISP_HDR}" || fail "unrunnable flag missing"
-grep -q "its own forward slot" "${DISP_HDR}" || fail "forward slot prose missing"
+grep -q "Forward slots hash by" "${DISP_HDR}" || fail "forward slot prose missing"
+grep -q "dedup key" "${DISP_HDR}" || fail "forward dedup prose missing"
 grep -q "dead head is dropped" "${DISP_HDR}" || fail "dead pop prose missing"
 grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
 grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
@@ -1167,7 +1168,7 @@ grep -q "no_cpu" "${ENQ_HDR}" || fail "maskless path missing"
 grep -q "PF_EXITING" "${ENQ_HDR}" || fail "exiting path missing"
 grep -q "flow_stat_inc(qllc, 11)" "${DISP_HDR}" || fail "orphan count missing"
 grep -q "flow_cpu_allowed(owner, p)" "${DISP_HDR}" || fail "owner recheck missing"
-grep -q "flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx)" "${DISP_HDR}" || fail "group match call missing"
+grep -q "flow_ccx_match(use_ccx," "${DISP_HDR}" || fail "group match call missing"
 
 # True size orders the drain by bucket within tier with no size map growth.
 # The bucket readers plus the larger compare plus the seed fields stay
@@ -1267,5 +1268,69 @@ fi
 
 # Guard kept helpers stay with no new dead helper.
 grep -q "flow_fb_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "fb inc missing"
+
+# Stage 6 true-size fixes stay locked with no regression.
+# L1 plus S-LOW: select keeps known priority matching the drain with
+# have_best_bkt, so unknown never blocks a later known bucket.
+grep -q "have_best_bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select known priority missing"
+grep -q "cb && (!have_best_bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select unknown block fix missing"
+grep -q "known priority matching the drain" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select known prose missing"
+# L2: dispatch tracks second best in the same scan with at most three tries and no new loop.
+grep -q "best2_victim" "${DISP_HDR}" || fail "second best missing"
+grep -q "have_best2" "${DISP_HDR}" || fail "second best flag missing"
+grep -q "best2_bkt" "${DISP_HDR}" || fail "second best bucket missing"
+grep -q "at most three tries" "${DISP_HDR}" || fail "three try prose missing"
+grep -q "no new loop" "${DISP_HDR}" || fail "no new loop prose missing"
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "6" ] || fail "loop budget drifted with second best"
+if grep -q "u32 best_victim =" "${DISP_HDR}" 2>/dev/null; then
+    fail "dispatch dead store reappeared"
+fi
+# L3 plus perf: tier bucket split with group l2 and LLC l3 after one seed lookup hoisted to competitive tiers.
+grep -q "flow_cpu_view" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "coalesced view missing"
+grep -q "flow_cpu_view" "${DISP_HDR}" || fail "dispatch view missing"
+grep -q "vw.l2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "group l2 split missing"
+grep -q "vw.l3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "llc l3 split missing"
+grep -q "Group tier reads l2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "split prose missing"
+grep -q "pre > best_score" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie hoist missing"
+# L4: bucket ladder stays in sync both sides with identical thresholds.
+grep -q "kb <= 256U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 256 missing"
+grep -q "kb <= 1024U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 1024 missing"
+grep -q "kb <= 8192U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 8192 missing"
+grep -q "kb <= 524288U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 524288 missing"
+grep -q "kb <= 256" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 256 missing"
+grep -q "kb <= 1024" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 1024 missing"
+grep -q "kb <= 8192" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 8192 missing"
+grep -q "kb <= 524288" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 524288 missing"
+grep -q "Mirrors cache_bucket in topology.rs" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf mirror missing"
+grep -q "Keep both in sync" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf sync prose missing"
+grep -q "cache_larger" "${SRC_DIR}/src/topology.rs" || fail "rust larger missing"
+# L5: sub-KiB rounds up to known small with no unknown conflation.
+grep -q "kb_for_bytes" "${SRC_DIR}/src/topology.rs" || fail "kb round up missing"
+grep -q "saturating_add(1023)" "${SRC_DIR}/src/topology.rs" || fail "round up math missing"
+# L6: task state stays two hundred sixteen bytes with asserts both sides.
+grep -q '_Static_assert(sizeof(struct flow_task_ctx) == 216' "${SRC_DIR}/src/bpf/intf.h" || fail "task size assert missing"
+grep -q 'flow_task_ctx>() == 216' "${SRC_DIR}/src/run.rs" || fail "run task assert missing"
+# L7: missing seed reads unknown with no zero conflation.
+grep -q "CCX_UNKNOWN" "${SRC_DIR}/src/topology.rs" || fail "rust unknown missing"
+grep -q "unwrap_or(CCX_UNKNOWN)" "${SRC_DIR}/src/topology.rs" || fail "unknown miss fix missing"
+grep -q "0xFFFFFFFF" "${SRC_DIR}/src/topology.rs" || fail "rust sentinel value missing"
+# L8 plus S-INFO: compares promote per C rules with identical result.
+grep -q "promote to int" "${SRC_DIR}/src/bpf/intf.h" || fail "intf promote prose missing"
+grep -q "promote to int" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select promote prose missing"
+if grep -q "no promotion" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "stale no promotion reappeared"
+fi
+# L9: forward slots hash with dedup key and fallback on the last slot.
+grep -q "Forward slots hash by" "${DISP_HDR}" || fail "forward hash prose missing"
+grep -q "dedup key" "${DISP_HDR}" || fail "forward dedup prose missing"
+grep -q "sixty four slots" "${DISP_HDR}" || fail "forward slot count missing"
+# L10: intentional bounds stay documented with fail closed guards.
+grep -q "operational queue table caps at five hundred twelve" "${DISP_HDR}" || fail "dual bound prose missing"
+grep -q "single node default" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary prose missing"
+grep -q "No core walk runs here" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "core walk prose missing"
+grep -q "Sentinel never matches" "${DISP_HDR}" || fail "sentinel prose missing"
+# S-INFO: fallback stays single slot per live task with FIFO and no extra bound.
+grep -q "one slot per live task" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback single slot prose missing"
+grep -q "no extra bound" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback bound prose missing"
 
 echo "guard tests passed"

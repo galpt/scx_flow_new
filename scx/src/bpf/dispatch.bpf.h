@@ -10,9 +10,10 @@
  * Empty queues skip before any group lookup. Both known group ids gate
  * the group match, so unknown groups fall through to fixed order. Each
  * queue drains in deadline order. A head that cannot run here
- * sends one wake to its owner and stays queued. Each victim keeps
- * its own forward slot with the fallback on the last slot, so one
- * victim does not hide another. A dead head is dropped with its count
+ * sends one wake to its owner and stays queued. Forward slots hash by
+ * victim mask with sixty four slots plus the fallback on the last slot,
+ * so sixteen victims share one slot with dedup key of pid plus vtime
+ * plus owner. A dead head is dropped with its count
  * and the next queue is tried. The fallback drops its count from the
  * task and wakes the owner when the move fails. A dispatch that moved
  * nothing but saw such a head wakes the fallback head again without
@@ -249,11 +250,14 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	bool saw_unrunnable = false;
 	bool use_ccx;
 	u32 my_ccx;
-	u32 best_victim = (u32)FLOW_MAX_CPUS;
-	u32 first_victim = (u32)FLOW_MAX_CPUS;
-	u8 best_bkt = 0;
-	bool have_best = false;
-	bool have_first = false;
+	u32 best_victim;
+	u32 best2_victim;
+	u32 first_victim;
+	u8 best_bkt;
+	u8 best2_bkt;
+	bool have_best;
+	bool have_best2;
+	bool have_first;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
@@ -280,27 +284,33 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
 	 * tasks stay near warm cache. Larger buckets first within tier
-	 * orders the group victims when both buckets are known, else the
+	 * orders the group victims with known priority, else the
 	 * first fixed victim covers unknown sizes. The pass tracks the best
-	 * known larger victim plus the first fixed victim in one scan with
-	 * no new loop, then drains best first with fixed fallback. The group
+	 * plus second best known larger victims plus the first fixed victim
+	 * in one scan with no new loop, then drains best plus first plus
+	 * second best with at most three tries. The group
 	 * match needs the seed flag with both group ids known, so unknown
 	 * reads as all ones match nothing and the fixed victim covers them.
+	 * Sentinel never matches by design with fail closed fallthrough.
 	 * Empty queues skip before the group lookup, so idle victims cost
 	 * one counter read with no topology walk. The empty check can race
 	 * a new enqueue, which stays safe since the next dispatch covers
-	 * the new head. */
+	 * the new head. One seed lookup returns cluster plus buckets. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
 	best_victim = (u32)FLOW_MAX_CPUS;
+	best2_victim = (u32)FLOW_MAX_CPUS;
 	first_victim = (u32)FLOW_MAX_CPUS;
 	best_bkt = 0;
+	best2_bkt = 0;
 	have_best = false;
+	have_best2 = false;
 	have_first = false;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		u32 vccx;
 		u8 vb;
+		struct flow_cpu_view vw;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
@@ -310,18 +320,29 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || (u32)vl != llc)
 			continue;
-		vccx = flow_cpu_ccx(victim);
+		vw = flow_cpu_view(victim);
+		vccx = vw.ccx;
 		if (!flow_ccx_match(use_ccx, vccx, my_ccx))
 			continue;
-		vb = flow_cpu_l2bkt(victim);
+		vb = vw.l2;
 		if (!have_first) {
 			first_victim = victim;
 			have_first = true;
 		}
 		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+			if (have_best && best_victim != victim) {
+				best2_victim = best_victim;
+				best2_bkt = best_bkt;
+				have_best2 = true;
+			}
 			best_victim = victim;
 			best_bkt = vb;
 			have_best = true;
+		} else if (vb && victim != best_victim &&
+			   (!have_best2 || flow_cache_larger(vb, best2_bkt))) {
+			best2_victim = victim;
+			best2_bkt = vb;
+			have_best2 = true;
 		}
 	}
 	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
@@ -329,22 +350,31 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	if (have_first && (!have_best || first_victim != best_victim) &&
 	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
 		return;
+	if (have_best2 && (!have_best || best2_victim != best_victim) &&
+	    (!have_first || best2_victim != first_victim) &&
+	    flow_drain_cpu(c, llc, best2_victim, 1, &saw_unrunnable))
+		return;
 	/* Same LLC victims drain next with larger buckets first within tier
-	 * when both buckets are known and fixed order else, with already tried group
+	 * with known priority and fixed order else, with already tried group
 	 * victims skipped, so each queue probes once per dispatch. The pass
-	 * tracks the best known larger victim plus the first fixed victim in
-	 * one scan with no new loop, then drains best first with fixed
-	 * fallback. Empty queues skip before the dedup lookup. The empty check
+	 * tracks the best plus second best known larger victims plus the first
+	 * fixed victim in one scan with no new loop, then drains best plus
+	 * first plus second best with at most three tries.
+	 * Empty queues skip before the dedup lookup. The empty check
 	 * can race a new enqueue, which stays safe since the next dispatch
-	 * covers the new head. */
+	 * covers the new head. One seed lookup returns cluster plus buckets. */
 	best_victim = (u32)FLOW_MAX_CPUS;
+	best2_victim = (u32)FLOW_MAX_CPUS;
 	first_victim = (u32)FLOW_MAX_CPUS;
 	best_bkt = 0;
+	best2_bkt = 0;
 	have_best = false;
+	have_best2 = false;
 	have_first = false;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		u8 vb;
+		struct flow_cpu_view vw;
 		if (victim == c)
 			continue;
 		if (!flow_cpu_live(victim))
@@ -354,23 +384,38 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		vl = topo_cpu_to_llc_id(victim);
 		if (vl < 0 || (u32)vl != llc)
 			continue;
-		if (flow_ccx_match(use_ccx, flow_cpu_ccx(victim), my_ccx))
+		vw = flow_cpu_view(victim);
+		if (flow_ccx_match(use_ccx, vw.ccx, my_ccx))
 			continue;
-		vb = flow_cpu_l3bkt(victim);
+		vb = vw.l3;
 		if (!have_first) {
 			first_victim = victim;
 			have_first = true;
 		}
 		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+			if (have_best && best_victim != victim) {
+				best2_victim = best_victim;
+				best2_bkt = best_bkt;
+				have_best2 = true;
+			}
 			best_victim = victim;
 			best_bkt = vb;
 			have_best = true;
+		} else if (vb && victim != best_victim &&
+			   (!have_best2 || flow_cache_larger(vb, best2_bkt))) {
+			best2_victim = victim;
+			best2_bkt = vb;
+			have_best2 = true;
 		}
 	}
 	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
 		return;
 	if (have_first && (!have_best || first_victim != best_victim) &&
 	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
+		return;
+	if (have_best2 && (!have_best || best2_victim != best_victim) &&
+	    (!have_first || best2_victim != first_victim) &&
+	    flow_drain_cpu(c, llc, best2_victim, 1, &saw_unrunnable))
 		return;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
@@ -806,6 +851,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	/* Thread shape keeps the userspace seed with the source default on miss. */
 	flow_ccx_prefer = 1;
+	/* Intentional: static cap is one thousand twenty four while the
+	 * operational queue table caps at five hundred twelve. The first
+	 * check guards the static area and the second guards the arena table,
+	 * so both stay fail closed with no silent truncation. */
 	if (n > 512ULL) {
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;

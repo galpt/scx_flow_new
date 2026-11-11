@@ -28,10 +28,18 @@ pub fn smt_on(topo: &Topology) -> bool {
     topo.all_cores.values().any(|c| c.cpus.len() > 1)
 }
 
+/// Unknown cluster sentinel for a missing seed row. Matches
+/// FLOW_CCX_UNKNOWN in the BPF select header with all ones, so group
+/// zero stays a valid match and a miss never collides. Both ids must be
+/// known for a match, so unknown falls through to fixed order fail closed.
+pub const CCX_UNKNOWN: u32 = 0xFFFFFFFF;
+
 /// Bucket ladder for one aggregated per CPU cache share in kibibytes.
-/// Mirrors cache_bucket in the shared BPF header. Zero means unknown
+/// Mirrors cache_bucket in the shared BPF header with identical thresholds
+/// at 256 plus 1024 plus 8192 plus 524288. Zero means unknown
 /// with no size. Larger numbers mean larger caches. The top value caps
-/// with no wrap. All compares stay integer only with no float.
+/// with no wrap. All compares stay integer only with no float. Keep both
+/// sides in sync when thresholds move.
 pub fn cache_bucket(kb: u32) -> u8 {
     if kb == 0 {
         return 0;
@@ -49,6 +57,27 @@ pub fn cache_bucket(kb: u32) -> u8 {
         return 4;
     }
     255
+}
+
+/// Both known larger check mirroring flow_cache_larger in the BPF select
+/// header. Unknown never wins, so fixed order covers it. Select and drain
+/// add known priority around this gate, so an unknown best never blocks a
+/// later known bucket within one tier.
+pub fn cache_larger(a: u8, b: u8) -> bool {
+    if a == 0 || b == 0 {
+        return false;
+    }
+    a > b
+}
+
+/// Kibibytes for a byte share with round up. Zero bytes stay unknown with
+/// no size. Any positive bytes map to at least one kibibyte, so a known
+/// small share lands in bucket one instead of unknown.
+pub fn kb_for_bytes(bytes: usize) -> u32 {
+    if bytes == 0 {
+        return 0;
+    }
+    ((bytes.saturating_add(1023)) >> 10).min(u32::MAX as usize) as u32
 }
 
 /// Seed row for one CPU in BPF byte order. Offsets match flow_cpu_ctx
@@ -356,9 +385,9 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
         if !topo.all_cpus.contains_key(&cpu) {
             continue;
         }
-        let ccx = ccx_map.get(&cpu).copied().unwrap_or(0);
+        let ccx = ccx_map.get(&cpu).copied().unwrap_or(CCX_UNKNOWN);
         let bytes: usize = topo.all_cpus.get(&cpu).map(|c| c.cache_size).unwrap_or(0);
-        let kb: u32 = (bytes >> 10).min(u32::MAX as usize) as u32;
+        let kb: u32 = kb_for_bytes(bytes);
         let bkt = cache_bucket(kb);
         let key = (cpu as u32).to_ne_bytes();
         let val = cpu_seed_bytes(cpu as u32, ccx, bkt, bkt, 0, 0);
@@ -379,13 +408,16 @@ pub fn seed_topology(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<String> 
 
 #[cfg(test)]
 mod tests {
+    use super::CCX_UNKNOWN;
     use super::cache_bucket;
+    use super::cache_larger;
     use super::chunk_index;
     use super::cpu_ccx;
     use super::cpu_seed_bytes;
     use super::describe_sched_use;
     use super::describe_topo_groups;
     use super::describe_topo_summary;
+    use super::kb_for_bytes;
     use super::render_topo_lines;
     use super::smt_on;
     use scx_utils::Core;
@@ -412,6 +444,80 @@ mod tests {
         assert_eq!(cache_bucket(524288), 4);
         assert_eq!(cache_bucket(524289), 255);
         assert_eq!(cache_bucket(u32::MAX), 255);
+    }
+
+    #[test]
+    fn sub_kb_rounds_to_known_small() {
+        assert_eq!(kb_for_bytes(0), 0);
+        assert_eq!(cache_bucket(kb_for_bytes(0)), 0);
+        assert_eq!(kb_for_bytes(1), 1);
+        assert_eq!(kb_for_bytes(512), 1);
+        assert_eq!(kb_for_bytes(1023), 1);
+        assert_eq!(kb_for_bytes(1024), 1);
+        assert_eq!(cache_bucket(kb_for_bytes(1)), 1);
+        assert_eq!(cache_bucket(kb_for_bytes(1023)), 1);
+        assert_eq!(kb_for_bytes(1025), 2);
+        assert_eq!(cache_bucket(kb_for_bytes(3 << 20)), 3);
+    }
+
+    #[test]
+    fn unknown_sentinel_never_collides() {
+        assert_eq!(CCX_UNKNOWN, 0xFFFFFFFFu32);
+        assert_eq!(CCX_UNKNOWN, u32::MAX);
+        let val = cpu_seed_bytes(5, CCX_UNKNOWN, 1, 1, 0, 0);
+        assert_eq!(
+            u32::from_ne_bytes([val[4], val[5], val[6], val[7]]),
+            0xFFFFFFFFu32
+        );
+        assert_ne!(u32::from_ne_bytes([val[4], val[5], val[6], val[7]]), 0u32);
+    }
+
+    #[test]
+    fn larger_needs_both_known_with_tie_priority() {
+        assert!(!cache_larger(0, 0));
+        assert!(!cache_larger(0, 1));
+        assert!(!cache_larger(1, 0));
+        assert!(!cache_larger(2, 2));
+        assert!(cache_larger(2, 1));
+        assert!(cache_larger(255, 4));
+        assert!(!cache_larger(1, 2));
+        // Tie equivalent: a known bucket replaces an unknown best,
+        // larger replaces smaller, equal keeps fixed order.
+        let mut best: u8 = 0;
+        let mut have: bool = false;
+        for cur in [0u8, 1, 2] {
+            if cur != 0 && (!have || cache_larger(cur, best)) {
+                best = cur;
+                have = true;
+            }
+        }
+        assert!(have);
+        assert_eq!(best, 2);
+        // Unknown first never blocks a later known of any size.
+        let mut best2: u8 = 0;
+        let mut have2: bool = false;
+        for cur in [0u8, 1] {
+            if cur != 0 && (!have2 || cache_larger(cur, best2)) {
+                best2 = cur;
+                have2 = true;
+            }
+        }
+        assert!(have2);
+        assert_eq!(best2, 1);
+    }
+
+    #[test]
+    fn split_buckets_keep_tier_order() {
+        // Synthetic split: group tier uses l2 and LLC tier uses l3.
+        let val = cpu_seed_bytes(9, 2, 4, 1, 0, 0);
+        assert_eq!(val[8], 4);
+        assert_eq!(val[9], 1);
+        assert!(cache_larger(4, 3));
+        assert!(cache_larger(val[8], 3));
+        assert!(!cache_larger(val[9], 4));
+        let group_pick = val[8];
+        let llc_pick = val[9];
+        assert_ne!(group_pick, llc_pick);
     }
 
     #[test]

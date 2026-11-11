@@ -27,8 +27,8 @@
  * and run state with idle only kick and no reclaim. A shared enqueue with a due time ahead of the
  * running due time wakes idle only. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
- * holds bounded at 64 total with the fallback holding at most one
- * thousand twenty four. Queues come from the upstream deadline
+ * holds bounded at 64 total with the fallback holding at most one slot per live task
+ * in FIFO order with no extra bound. Queues come from the upstream deadline
  * library with always eligible tasks, and placement follows the upstream
  * topology library with liveness from the same tree. Arena holds one
  * queue node per task beside the task state.
@@ -149,9 +149,14 @@ struct flow_cpu_ctx {
 };
 /* The seed stays sixteen bytes with no growth. */
 _Static_assert(sizeof(struct flow_cpu_ctx) == 16, "flow_cpu_ctx size drifted");
+/* The task state stays two hundred sixteen bytes with no growth, so state
+ * plus node stay within five hundred twelve bytes per task. */
+_Static_assert(sizeof(struct flow_task_ctx) == 216, "flow_task_ctx size drifted");
 /* Bucket ladder over kibibytes. Zero means unknown with no size.
  * Larger numbers mean larger caches. Values cap at the top with no
- * wrap. Compares stay u8 with no promotion. */
+ * wrap. Mirrors cache_bucket in topology.rs with identical thresholds.
+ * Keep both in sync. Compares promote to int per C rules with identical
+ * result and no extra budget. */
 static __always_inline u8 cache_bucket(u32 kb)
 {
 	if (!kb)

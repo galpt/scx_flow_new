@@ -39,6 +39,11 @@ use crate::stats::Metrics;
 /// stays within five hundred twelve bytes. A drift fails the build here.
 const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_arena_task>() == 136);
 
+/// Task state size lock. The state holds two hundred sixteen bytes with the
+/// run ring plus range plus flag plus sum, so state plus node stay within
+/// five hundred twelve bytes per task. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() == 216);
+
 /// CPU seed size lock. The seed holds the CPU id plus the cluster hint
 /// plus three size buckets plus one reserved byte beside the pad, so the
 /// row stays sixteen bytes with no growth. A drift fails the build here.
