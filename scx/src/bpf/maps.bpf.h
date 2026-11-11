@@ -9,7 +9,7 @@
  * the per LLC floor, the per CPU queues as one embedded queue per CPU
  * in arena memory, the forward coalescing state, and two
  * switches for cluster choice plus thread shape. Each CPU owns one
- * queue in deadline order bounded at 64 total. A null queue means the CPU
+ * queue in deadline order without bound. A null queue means the CPU
  * is offline or its queue was never built. Thread shape defaults on so a
  * missed seed stays conservative. The CPU plus LLC tables are written once, so a
  * CPU that arrives late needs a restart to be seen. Liveness comes

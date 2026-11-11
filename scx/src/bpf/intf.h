@@ -12,8 +12,8 @@
  * remote then fallback last in deadline order with tiers L1 greater
  * than L2 greater than L3 and short form L1>L2>L3 with idle starts
  * at once. Size breaks ties only inside one tier with larger buckets first within tier
- * when both buckets are known. Each per CPU queue holds bounded at 64
- * total with one millis slices. Each enqueue prices the task by its
+ * when both buckets are known. Each per CPU queue holds without bound
+ * with one millis slices. Each enqueue prices the task by its
  * effective weight from nice plus live share. A task pays for the time
  * it burns, scaled by that weight. Fresh times move past
  * a per LLC floor so two tasks never share the same value, with a
@@ -22,12 +22,12 @@
  * by the burst to the floored time through the shared charge path,
  * so a larger effective weight or a shorter run gives an earlier due time.
  * Slices hold one fixed quantum with a small floor. Burst holds the
- * last run length. A full target keeps the newcomer in the fallback
+ * last run length. An insert miss keeps the newcomer in the fallback
  * queue in FIFO order with no evict. Stopping plus tick keep the burst
- * and run state with idle only kick and no reclaim. A shared enqueue with a due time ahead of the
- * running due time wakes idle only. Each running instance kicks at most once.
+ * and run state with guarded preempt and no reclaim. A shared enqueue with a due time ahead of the
+ * running due time preempts guarded. Each running instance kicks at most once.
  * A runnable yield with no burnt time still moves the stored time forward by one. Each per CPU queue
- * holds bounded at 64 total with the fallback holding at most one slot per live task
+ * holds without bound with the fallback holding at most one slot per live task
  * in FIFO order with no extra bound. Queues come from the upstream deadline
  * library with always eligible tasks, and placement follows the upstream
  * topology library with liveness from the same tree. Arena holds one

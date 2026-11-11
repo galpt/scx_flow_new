@@ -33,8 +33,8 @@
  * placement. A mask change on a queued task keeps the queue and wakes
  * the new owner, counting the wake when the owner is usable. A task
  * with no usable CPU waits in the fallback queue until the mask widens.
- * Stopping plus tick keep the burst and run state with idle only kick
- * and no reclaim. Init creates one embedded queue per CPU bounded at 64 total
+ * Stopping plus tick keep the burst and run state with guarded preempt
+ * and no reclaim. Init creates one embedded queue per CPU without bound
  * and the fallback queue. Queues
  * use the upstream deadline library with always eligible tasks. Liveness comes from
  * the upstream tree, so CPUs that arrive late need a restart to be seen.
@@ -860,8 +860,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	/* One embedded queue per live CPU in deadline order bounded at
-	 * 64 total. The table holds one entry per CPU id below the
+	/* One embedded queue per live CPU in deadline order without bound.
+	 * The table holds one entry per CPU id below the
 	 * observed count, so every live id stays in range while the
 	 * request stays within the static area cap. The array lives in
 	 * arena memory for the queue address space. Fresh pages start

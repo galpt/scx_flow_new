@@ -24,9 +24,9 @@
  * Dequeue drops the gauge on cancel. Masks
  * are checked again before each wake, so a task is never kicked toward
  * a CPU outside its current mask. The queue node lives in arena memory
- * beside the task with the pid for owner lookup. A full target keeps
+ * beside the task with the pid for owner lookup. An insert miss keeps
  * the newcomer in the FIFO queue with no extra probe. Queues hold
- * bounded at 64 total with eligibility always eligible.
+ * without bound with eligibility always eligible.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -374,8 +374,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
-		 * Queues hold bounded at 64 total with pure deadline order
-		 * and a single kick. A full target keeps the newcomer in
+		 * Queues hold without bound with pure deadline order
+		 * and a single kick. An insert miss keeps the newcomer in
 		 * FIFO with no evict. Steady tasks price by the kept max
 		 * with the shared charge path and run in one slice quanta,
 		 * while unknown tasks keep the burst path with no extra
@@ -408,7 +408,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		t->llc_id = llc;
 		/* Mirror the due time beside the stored time so later reads see the same due time for order checks. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
-		/* A full target keeps the newcomer in FIFO with no extra probe. */
+		/* An insert miss keeps the newcomer in FIFO with no extra probe. */
 		if (can_queue) {
 			struct flow_arena_task __arena *at = mem;
 			u64 dl = flow_edq_deadline(vd);

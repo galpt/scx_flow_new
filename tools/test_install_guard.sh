@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.17" ] || fail "version not at 5.2.17"
+[ "${want}" = "5.2.18" ] || fail "version not at 5.2.18"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -120,9 +120,10 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-# Cache idle keeps every wake idle only with no preempt site.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "f481825ce8cd558658214d157a7e84594fb0439914b780f4e17f89e096dc3259" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "23" ] || fail "scx README lines drifted"
+# Queues admit without bound with a guarded preempt on a much earlier
+# Virtual deadline.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "7b4d2e878b2412c3d3b7ef9a7e46c92996a52ce8a311d0a88f0466c1c977739f" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "25" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -385,10 +386,12 @@ grep -q "burst_ns" "${SRC_DIR}/src/bpf/intf.h" || fail "burst field missing"
 grep -q "flow_burst_clamp" "${FAIR_HDR}" || fail "burst clamp missing"
 grep -q "flow_burst_update" "${FAIR_HDR}" || fail "burst update missing"
 grep -q "flow_vd_for(s64 floored, u64 burst_ns, u32 w)" "${FAIR_HDR}" || fail "vd arg drifted"
-grep -q "b >> 1" "${FAIR_HDR}" || fail "burst half shift missing"
-grep -q "b >> 2" "${FAIR_HDR}" || fail "burst quarter shift missing"
+if grep -q "b >> 1" "${FAIR_HDR}" 2>/dev/null; then
+    fail "loose half shift reappeared"
+fi
+[ "$(grep -c ">> 2" "${FAIR_HDR}" | tr -d ' ')" = "2" ] || fail "burst quarter shift drifted"
 grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "burst vd use missing"
-grep -q "flow_fair_cap_add(last, (u64)FLOW_FAIR_BASE_NS)" "${FAIR_HDR}" || fail "floor cap missing"
+grep -q "flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS)" "${FAIR_HDR}" || fail "floor cap drifted"
 grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "vd floor missing"
 # Pure proxy keeps deadline order with no wakeup nudge. Any assist helper
 # plus wakeup branch plus eighth shift must not return.
@@ -401,10 +404,18 @@ fi
 if grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" 2>/dev/null; then
     fail "wakeup branch reappeared"
 fi
-# No overload control with bare admit plus FIFO fallback and no reclaim.
-# Admit checks room plus cap only. A full target keeps the newcomer in
-# FIFO with no evict and no band. Stopping plus tick keep burst plus run
-# with no saved reclaim.
+# No overload control with unbounded admit plus FIFO fallback and no reclaim.
+# Admit uses the insert return as the sole test with no room probe. An
+# insert miss keeps the newcomer in FIFO with no evict and no band.
+# Stopping plus tick keep burst plus run with no saved reclaim.
+if grep -q "scx_edq_nr_queued" "${ENQ_HDR}" 2>/dev/null; then
+    fail "room probe reappeared"
+fi
+if grep -q "nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" 2>/dev/null; then
+    fail "room gate reappeared"
+fi
+grep -q "as the sole test" "${ENQ_HDR}" || fail "sole test prose missing"
+[ "$(grep -c "scx_edq_insert" "${ENQ_HDR}" | tr -d ' ')" = "3" ] || fail "insert sites drifted"
 if grep -q "FLOW_RED_TOL_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "red tol reappeared"
 fi
@@ -465,7 +476,6 @@ fi
 if grep -q "saved delta" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "reclaim prose reappeared"
 fi
-grep -q "nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" || fail "bare admit missing"
 grep -q "with no evict" "${ENQ_HDR}" || fail "no evict prose missing"
 grep -q "with no evict" "${SRC_DIR}/src/bpf/intf.h" || fail "no evict prose missing"
 grep -q "no reclaim" "${SRC_DIR}/src/bpf/intf.h" || fail "no reclaim prose missing"
@@ -517,14 +527,18 @@ grep -q "deadline order" "${ENQ_HDR}" || fail "deadline order prose missing"
 grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice missing"
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
-grep -q "new_vd < run_vd" "${ENQ_HDR}" || fail "strict compare missing"
-# Cache idle keeps every wake idle only with no preempt site.
-# The deadline win path counts idle on a win with skips otherwise.
-if grep -rq "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "preempt kick reappeared"
-fi
-grep -q "kicks idle on a win" "${ENQ_HDR}" || fail "idle win prose missing"
-grep -q "wakes idle only" "${SRC_DIR}/src/bpf/intf.h" || fail "idle only prose missing"
+grep -q "new_vd < run_vd" "${ENQ_HDR}" && fail "raw compare reappeared"
+grep -q "win < run_vd" "${ENQ_HDR}" || fail "gap compare missing"
+grep -q "win < fresh_vd" "${ENQ_HDR}" || fail "gap recheck missing"
+# Guarded preempt keeps a single preempt site on the guarded win path.
+# All other wakes stay idle only. The win counts preempt with idle on
+# the fast path and skips otherwise.
+[ "$(grep -rh "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "1" ] || fail "preempt site drifted"
+grep -q "scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT)" "${ENQ_HDR}" || fail "guarded preempt missing"
+grep -q "flow_stat_inc(llc, 6)" "${ENQ_HDR}" || fail "preempt count missing"
+[ "$(grep -c "SCX_KICK_IDLE" "${ENQ_HDR}" | tr -d ' ')" = "2" ] || fail "idle kick sites drifted"
+grep -q "preempts on a guarded win" "${ENQ_HDR}" || fail "guarded win prose missing"
+grep -q "preempts guarded" "${SRC_DIR}/src/bpf/intf.h" || fail "guarded prose missing"
 grep -q "FIFO" "${ENQ_HDR}" || fail "fifo prose missing"
 grep -q "scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback fifo insert missing"
 if grep -q "insert_vtime.*FALLBACK\|FALLBACK.*insert_vtime" "${ENQ_HDR}" 2>/dev/null; then
@@ -554,7 +568,7 @@ fi
 if grep -q "FLOW_HIST_LEN\|FLOW_LAT_KINDS\|FLOW_LAT_BUCKETS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "hist const reappeared"
 fi
-if grep -q "GAP\|NORM\|BATCH" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+if grep -e "GAP" -e "NORM" -e "BATCH" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null | grep -v "FLOW_KICK_GAP_NS" | grep -q .; then
     fail "old band const reappeared"
 fi
 if grep -q "edf\|slack" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${DISP_HDR}" 2>/dev/null; then
@@ -696,7 +710,7 @@ fi
 grep -q "scx_edq_insert" "${ENQ_HDR}" || fail "queue insert missing"
 grep -q "scx_edq_pop" "${DISP_HDR}" || fail "queue pop missing"
 grep -q "scx_edq_peek_hold" "${DISP_HDR}" || fail "queue peek missing"
-grep -q "scx_edq_nr_queued" "${ENQ_HDR}" || fail "queue cap check missing"
+grep -q "scx_edq_nr_queued" "${DISP_HDR}" || fail "queue empty check missing"
 grep -q "scx_edq_try_remove" "${DISP_HDR}" || fail "queue remove missing"
 grep -q "scx_edq_task_init" "${DISP_HDR}" || fail "task init missing"
 grep -q "scx_edq_task_detach" "${DISP_HDR}" || fail "task detach missing"
@@ -913,15 +927,7 @@ fi
 if grep -qi "mate\|strand\|warm" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme strand reappeared"
 fi
-if grep -q "without bound" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme unbounded reappeared"
-fi
-if grep -q "without a bound" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme unbounded reappeared"
-fi
-if grep -q "no bound" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme unbounded reappeared"
-fi
+grep -q "without bound" "${SRC_DIR}/README.md" || fail "readme unbounded missing"
 if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme stale cap reappeared"
 fi
@@ -972,11 +978,14 @@ grep -q "flow_constrained_target(task_cpu, p)" "${ENQ_HDR}" || fail "constrained
 grep -q "flow_edq_for_cpu(tgt)" "${ENQ_HDR}" || fail "queue helper use missing"
 grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "drain signature missing"
 grep -q "FLOW_QUEUE_CAP" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap prose missing"
-grep -q "bounded at 64" "${SRC_DIR}/src/bpf/intf.h" || fail "bounded prose missing"
-grep -q "bounded at 64" "${ENQ_HDR}" || fail "enqueue bounded prose missing"
-grep -q "bounded at 64" "${DISP_HDR}" || fail "dispatch bounded prose missing"
-grep -q "bounded at 64" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps bounded prose missing"
-grep -q "bounded at 64" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "main bounded prose missing"
+grep -q "without bound" "${SRC_DIR}/src/bpf/intf.h" || fail "intf unbounded prose missing"
+grep -q "without bound" "${ENQ_HDR}" || fail "enqueue unbounded prose missing"
+grep -q "without bound" "${DISP_HDR}" || fail "dispatch unbounded prose missing"
+grep -q "without bound" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps unbounded prose missing"
+grep -q "without bound" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "main unbounded prose missing"
+if grep -q "bounded at 64" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "bounded prose reappeared"
+fi
 if grep -q "SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "unbounded cap reappeared"
 fi
@@ -1304,8 +1313,8 @@ grep -q "init one" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "always on seed mis
 grep -q "borrowed" "${DISP_HDR}" || fail "borrowed prose missing"
 grep -q "no release" "${DISP_HDR}" || fail "borrowed release prose missing"
 
-# Scheduler README keeps idle only with no preempt site.
-grep -q "with no preempt even on" "${SRC_DIR}/README.md" || fail "readme idle only missing"
+# Scheduler README keeps guarded preempt with no idle only claim.
+grep -q "guarded preempt" "${SRC_DIR}/README.md" || fail "readme guarded missing"
 
 # Shared header keeps Virtual deadline in full words with no shorthand.
 grep -q "Virtual deadline holds" "${SRC_DIR}/src/bpf/intf.h" || fail "intf deadline words missing"
@@ -1395,5 +1404,64 @@ grep -q "Sentinel never matches" "${DISP_HDR}" || fail "sentinel prose missing"
 # S-INFO: fallback stays single slot per live task with FIFO and no extra bound.
 grep -q "one slot per live task" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback single slot prose missing"
 grep -q "no extra bound" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback bound prose missing"
+
+# Slice step math stays locked with the floor symbol plus the overflow
+# bound plus the slice capped effective run. The base constant stays
+# kept unused with no delete.
+grep -q "FLOW_SEQ_FLOOR_STEP_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "floor step missing"
+grep -q "FLOW_SLICE_MIN_NS \* (u64)FLOW_CGROUP_WEIGHT_DFLT" "${FAIR_HDR}" || fail "slice step drifted"
+if grep -q "FLOW_FAIR_BASE_NS \* (u64)FLOW_CGROUP_WEIGHT_DFLT" "${FAIR_HDR}" 2>/dev/null; then
+    fail "base step reappeared"
+fi
+grep -q "one hundred million at weight one" "${FAIR_HDR}" || fail "step table missing"
+grep -q "two hundred million" "${FAIR_HDR}" || fail "overflow proof missing"
+grep -q "e > (u64)FLOW_SLICE_MIN_NS" "${FAIR_HDR}" || fail "run eff cap drifted"
+
+# Guarded kick constants plus the run start stamp stay locked. The
+# running view holds forty eight bytes with the timestamp written only
+# in the running path and read only in the kick path.
+grep -q "FLOW_KICK_GAP_NS = 100000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick gap missing"
+grep -q "FLOW_KICK_GRAN_NS = 200000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick granularity missing"
+grep -q "FLOW_KICK_TAIL_NS = 100000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick tail missing"
+grep -q "start_ts" "${SRC_DIR}/src/bpf/intf.h" || fail "start stamp missing"
+grep -q '_Static_assert(sizeof(struct flow_running_state) == 48' "${SRC_DIR}/src/bpf/intf.h" || fail "running size assert missing"
+grep -q "rs->start_ts = bpf_ktime_get_ns()" "${DISP_HDR}" || fail "start stamp write missing"
+grep -q "start = READ_ONCE(rs->start_ts)" "${ENQ_HDR}" || fail "start stamp read missing"
+
+# Kick gates stay locked in gap then granularity then tail order with
+# twelve skips plus one idle plus one preempt. The asserts below read
+# source text only, so no kernel kick delivery behavior is assumed.
+# Delivery timing plus compat paths stay unasserted by design.
+grep -q "Step seven of seven" "${ENQ_HDR}" || fail "kick seven step missing"
+grep -q "gap then granularity then tail" "${ENQ_HDR}" || fail "kick gate order prose missing"
+gap_at="$(grep -n "FLOW_KICK_GAP_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
+gran_at="$(grep -n "FLOW_KICK_GRAN_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
+tail_at="$(grep -n "FLOW_KICK_TAIL_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
+[ "${gap_at}" -lt "${gran_at}" ] && [ "${gran_at}" -lt "${tail_at}" ] || fail "kick gate order drifted"
+grep -q "win >= vmax - (s64)FLOW_KICK_GAP_NS" "${ENQ_HDR}" || fail "gap saturate missing"
+grep -q "now > start ? now - start : 0" "${ENQ_HDR}" || fail "wraparound read missing"
+grep -q "ran < (u64)FLOW_KICK_GRAN_NS" "${ENQ_HDR}" || fail "granularity gate missing"
+grep -q "rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail read missing"
+grep -q "rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail gate missing"
+grep -q "__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen)" "${ENQ_HDR}" || fail "kick token missing"
+grep -q "if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {" "${ENQ_HDR}" || fail "freshness mask live missing"
+kick_body="$(awk '/^static __always_inline void flow_kick_vd\(/,/^}/' "${ENQ_HDR}")"
+[ "$(printf '%s' "${kick_body}" | grep -c "flow_cpu_allowed(tgt, p)" | tr -d ' ')" = "2" ] || fail "mask checks drifted"
+[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 8)" | tr -d ' ')" = "12" ] || fail "skip sites drifted"
+[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 7)" | tr -d ' ')" = "1" ] || fail "idle count drifted"
+[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 6)" | tr -d ' ')" = "1" ] || fail "preempt count drifted"
+
+# Kick counters keep order with preempt before idle before skip.
+pre_at="$(grep -n "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
+idle_at="$(grep -n "kick_idle" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
+skip_at="$(grep -n "kick_skip" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
+[ "${pre_at}" -lt "${idle_at}" ] && [ "${idle_at}" -lt "${skip_at}" ] || fail "kick counter order drifted"
+
+# No internal design labels leak into shipped prose or comments. The
+# guard script plus the changelog plus the excluded specs stay out of
+# this scan by design.
+if grep -rnE "H-[0-9]|SEC-[0-9]|PERF-[0-9]|FR-[0-9]|REQ-[0-9]" "${SRC_DIR}/README.md" "${SRC_DIR}/src/bpf" "${SRC_DIR}/src/"*.rs "${REPO_DIR}/README.md" 2>/dev/null | grep -q .; then
+    fail "design label reappeared"
+fi
 
 echo "guard tests passed"

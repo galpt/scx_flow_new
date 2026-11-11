@@ -5,9 +5,10 @@
  * Thin glue that pulls in area headers in order and declares
  * the ops table. Each CPU owns one upstream queue in deadline order
  * and there is one fallback
- * queue in FIFO order. Queues hold bounded at 64 total.
+ * queue in FIFO order. Queues hold without bound.
  * Ties leave in insertion order. Deadline order sets the queue with
- * idle wakes for shared tasks with an earlier deadline. Queues come from
+ * idle wakes for shared tasks plus a guarded preempt on a much earlier
+ * deadline. Queues come from
  * the upstream deadline library and placement follows the
  * upstream topology library. Tables are written once, so a CPU that
  * arrives late needs a restart to be seen. Settings live in the
