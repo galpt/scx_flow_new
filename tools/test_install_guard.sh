@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.16" ] || fail "version not at 5.2.16"
+[ "${want}" = "5.2.17" ] || fail "version not at 5.2.17"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -517,15 +517,13 @@ grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" || fail "fixed slice m
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
 grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
 grep -q "new_vd < run_vd" "${ENQ_HDR}" || fail "strict compare missing"
-grep -q "SCX_KICK_PREEMPT" "${ENQ_HDR}" || fail "preempt kick missing"
-if grep -q "SCX_KICK_PREEMPT" "${DISP_HDR}" 2>/dev/null; then
-    fail "preempt kick drifted to dispatch"
+# Cache idle keeps every wake idle only with no preempt site.
+# The deadline win path counts idle on a win with skips otherwise.
+if grep -rq "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "preempt kick reappeared"
 fi
-[ "$(grep -rl "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "1" ] || fail "preempt kick not enqueue only"
-grep -q "flow_stat_inc(llc, 6)" "${ENQ_HDR}" || fail "preempt count missing"
-if grep -q "flow_stat_inc(llc, 6)" "${DISP_HDR}" 2>/dev/null; then
-    fail "preempt count drifted to dispatch"
-fi
+grep -q "kicks idle on a win" "${ENQ_HDR}" || fail "idle win prose missing"
+grep -q "wakes idle only" "${SRC_DIR}/src/bpf/intf.h" || fail "idle only prose missing"
 grep -q "FIFO" "${ENQ_HDR}" || fail "fifo prose missing"
 grep -q "scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback fifo insert missing"
 if grep -q "insert_vtime.*FALLBACK\|FALLBACK.*insert_vtime" "${ENQ_HDR}" 2>/dev/null; then
@@ -585,7 +583,7 @@ grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
 
 # Deadline order stays with one kick per run and idle fast path.
 # Each run kicks at most once, idle targets take idle wakes, each
-# deadline win kicks for preempt, and a runnable yield with no burn still
+# deadline win kicks idle, and a runnable yield with no burn still
 # moves time.
 grep -q "Each running instance kicks at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "kick bound prose missing"
 grep -q "Each running instance kicks at most once" "${ENQ_HDR}" || fail "enqueue kick bound prose missing"
@@ -661,10 +659,15 @@ fi
 # Ops stay at thirteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "ops count drifted"
 
+# Cache idle drain keeps five bounded loops with no new program.
+# One scan lives in select for the seed pick. Four victim passes live
+# in dispatch for same group plus same LLC plus same node plus remote.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted"
+
 # Queues are one per CPU plus fallback with deadline order and insertion ties.
 # Fair scales base by nice weight with a per LLC floor. Deadline sets the order with
-# a strict preempt on an earlier deadline. Wakes go preempt on a deadline win else
-# idle with a skip otherwise. Queues use the upstream library with per
+# a strict earlier deadline win. Wakes go idle only with a skip otherwise.
+# Queues use the upstream library with per
 # CPU placement and FIFO fallback. Queues hold bounded at 64 total.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
 grep -q "FLOW_QUEUE_CAP = 64ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap missing"
@@ -1098,27 +1101,35 @@ grep -q "Misses split by cause" "${ENQ_HDR}" || fail "kick cause prose missing"
 # Kicks count every miss with an LLC recheck after the win.
 grep -q "rllc = READ_ONCE(rs->llc_id)" "${ENQ_HDR}" || fail "llc recheck missing"
 
-# EEVDF isolate keeps the original drain with no cache helpers and no seed change.
-if grep -q "flow_cpu_l2b" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "cache helper leaked into eevdf isolate"
+# Cache idle orders the drain by cache tier with no size map and no seed change.
+# The group tier read plus the tier match plus the empty check stay
+# allowlisted by exact name. Any other cache helper fails closed here.
+grep -q "flow_cpu_ccx" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier read missing"
+grep -q "flow_ccx_match" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier match missing"
+grep -q "flow_edq_empty" "${DISP_HDR}" || fail "empty check missing"
+grep -q "L1>L2>L3" "${DISP_HDR}" || fail "tier order missing"
+grep -q "L1 greater than L2 greater than L3" "${DISP_HDR}" || fail "tier prose missing"
+grep -q "L1>L2>L3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick tier order missing"
+grep -q "Empty queues skip" "${DISP_HDR}" || fail "empty skip prose missing"
+grep -q "Both known" "${DISP_HDR}" || fail "known gate prose missing"
+grep -q "fixed order" "${DISP_HDR}" || fail "fixed order prose missing"
+if grep -rq "flow_cpu_l2b" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "cache size helper reappeared"
 fi
-if grep -q "flow_l2_larger\|flow_l3_prefer" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "cache compare leaked into eevdf isolate"
+if grep -rq "flow_l2_larger\|flow_l3_prefer" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "cache compare reappeared"
 fi
-if grep -q "flow_edq_empty" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "empty check leaked into eevdf isolate"
-fi
-if grep -q "TOPO_FOR_EACH_CORE" "${DISP_HDR}" 2>/dev/null; then
-    fail "core walk leaked into eevdf isolate"
+if grep -rq "TOPO_FOR_EACH_CORE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "core walk reappeared"
 fi
 if grep -q "l2_bucket\|l3_bucket\|cache_cls" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    fail "cache seed leaked into eevdf isolate"
+    fail "cache seed reappeared"
 fi
 if grep -q "seed_topology_with\|lstopo_caches" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
-    fail "cache seed leaked into eevdf userspace"
+    fail "cache seed reappeared in userspace"
 fi
 if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then
-    fail "cache order leaked into eevdf isolate"
+    fail "cache order drifted"
 fi
 
 echo "guard tests passed"
