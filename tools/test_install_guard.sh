@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.21" ] || fail "version not at 5.2.21"
+[ "${want}" = "5.2.22" ] || fail "version not at 5.2.22"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -383,12 +383,10 @@ grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
 grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
-if grep -q "flow_vd_for" "${ENQ_HDR}" 2>/dev/null; then
-    fail "stale vd use reappeared"
-fi
-if grep -q "flow_run_vd" "${ENQ_HDR}" 2>/dev/null; then
-    fail "stale run vd use reappeared"
-fi
+# Gated response keeps the fallback charge path beside the single use.
+# The fallback due time plus the run due time stay in enqueue only.
+grep -q "flow_vd_for" "${ENQ_HDR}" || fail "fallback vd use missing"
+grep -q "flow_run_vd" "${ENQ_HDR}" || fail "fallback run vd use missing"
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
 # Burst run length scales the vd step with shift only moves and a
 # bounded floor. The vd takes three args with the burst in the middle
@@ -1050,6 +1048,16 @@ if grep -q "vd_HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/sel
 fi
 if grep -q "HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
     fail "response name outside fair plus enqueue reappeared"
+fi
+# Gated response runs only when every input proves usable.
+# The gate stays in fair with the single enqueue use and
+# no other file naming it.
+grep -q "hrrn_ready" "${FAIR_HDR}" || fail "ready helper missing"
+[ "$(grep -c "hrrn_ready" "${FAIR_HDR}" | tr -d ' ')" = "1" ] || fail "ready helper drifted"
+grep -q "hrrn_ready(t, sref, eff, W, S, w, no_cpu)" "${ENQ_HDR}" || fail "ready use missing"
+[ "$(grep -c "hrrn_ready" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "ready sites drifted"
+if grep -q "hrrn_ready" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "ready helper outside fair plus enqueue reappeared"
 fi
 
 # No load balancing remains with constrained placement plus topology drain.

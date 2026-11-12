@@ -737,12 +737,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * quanta, while unknown tasks keep the burst path with no
 		 * extra probe. Enqueue reads the smoothed reference from
 		 * the cached flag with no clock and no scan. Wait comes
-		 * from the floor advance with no new clock and no scan. */
+		 * from the floor advance with no new clock and no scan.
+		 * The fallback prices the due time with the shared charge
+		 * path first. The gated response replaces both the due time
+		 * and the slice only when every input proves usable. */
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
 		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
-		s64 vd;
+		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
 		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
 		struct flow_rb_root __arena *rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
 		bool fell = true;
@@ -750,15 +753,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u64 eff = 0;
 		u64 S;
 		u64 W;
+		bool ready;
 		if (sref) {
 			eff = flow_smoothed_eff(sref, READ_ONCE(t->burst_ns));
+			vd = flow_run_vd(floored, eff, w);
 			slice_len = flow_run_slice(sref);
 		}
 		S = sref ? eff : b;
 		W = floored > base ? (u64)(floored - base) : (u64)0;
 		if (W > (u64)FLOW_RUN_WIN_NS)
 			W = (u64)FLOW_RUN_WIN_NS;
-		vd = vd_HRRN(floored, W, S, w);
+		ready = hrrn_ready(t, sref, eff, W, S, w, no_cpu);
+		if (ready) {
+			vd = vd_HRRN(floored, W, S, w);
+			slice_len = flow_run_slice(sref);
+		}
 		t->vtime = floored;
 		t->vd = vd;
 		t->slice_rem = slice_len;

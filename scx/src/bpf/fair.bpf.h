@@ -510,6 +510,21 @@ static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
 		return flow_fair_cap_add(floored, 1);
 	return vd;
 }
+/* Readiness gate for the single response path. Every input stays
+ * usable before the response runs. A null task plus no CPU plus an
+ * unknown reference plus a zero effective value plus a service
+ * mismatch plus a service outside the floor through slice range plus
+ * a zero wait plus a wait past the run window plus a zero weight
+ * plus an invalid weight each keep the fallback path. The checks
+ * hold compares only with no divide and no clock and no scan and
+ * no shared state read. */
+static __always_inline bool hrrn_ready(struct flow_task_ctx *t, u64 sref, u64 eff, u64 W, u64 S, u32 w, bool no_cpu)
+{
+	return t != 0 && !no_cpu && sref != 0 && eff != 0 && S == eff &&
+	       S >= (u64)FLOW_SLICE_FLOOR_NS && S <= (u64)FLOW_SLICE_MIN_NS &&
+	       W != 0 && W <= (u64)FLOW_RUN_WIN_NS && w != 0 &&
+	       w != (u32)FLOW_CGROUP_WEIGHT_INVALID;
+}
 /* Single response due time with wait over service. The step comes from
  * the weight only with no tuning. Service stays in the floor through
  * slice range with clamp only. Wait stays capped at the run window
