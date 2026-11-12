@@ -76,7 +76,8 @@ static __always_inline void flow_rb_unlock(struct flow_rb_root __arena *r)
 {
 	if (!r)
 		return;
-	__sync_lock_release(&r->lock);
+	/* Exchange clears the lock with BPF backend support. */
+	(void)__sync_lock_test_and_set(&r->lock, 0);
 }
 /* Insert one entry into the owner tree with BST order and ties chained
  * right for RB_DUPLICATE-compatible order with no full RB balancing.
