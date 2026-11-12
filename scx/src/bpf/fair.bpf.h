@@ -510,6 +510,44 @@ static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
 		return flow_fair_cap_add(floored, 1);
 	return vd;
 }
+/* Single response due time with wait over service. The step comes from
+ * the weight only with no tuning. Service stays in the floor through
+ * slice range with clamp only. Wait stays capped at the run window
+ * with min only and no clock and no scan. The response is step times
+ * service over wait plus service with zero plus denominator guards.
+ * Zero wait keeps max boost with full step. Max wait keeps min boost
+ * with a small scaled term. The sum stays bounded at twice the step
+ * with saturation through the shared cap helper and no wrap. The
+ * caller passes service plus wait from existing locals with no new
+ * storage and no ring walk. This keeps pure arithmetic with integer
+ * only and no extra state. */
+static __always_inline s64 vd_HRRN(s64 floored, u64 W, u64 S, u32 w)
+{
+	u64 step = flow_fair_step(w);
+	u64 s = S;
+	u64 win = W;
+	u64 denom;
+	u64 resp;
+	if (!step)
+		step = (u64)FLOW_SLICE_MIN_NS;
+	if (!s)
+		return flow_fair_cap_add(floored, 1);
+	if (s < (u64)FLOW_SLICE_FLOOR_NS)
+		s = (u64)FLOW_SLICE_FLOOR_NS;
+	if (s > (u64)FLOW_SLICE_MIN_NS)
+		s = (u64)FLOW_SLICE_MIN_NS;
+	if (win > (u64)FLOW_RUN_WIN_NS)
+		win = (u64)FLOW_RUN_WIN_NS;
+	denom = win + s;
+	if (!denom)
+		return flow_fair_cap_add(floored, 1);
+	resp = step * s / denom;
+	if (resp > step)
+		resp = step;
+	if (!resp)
+		resp = 1;
+	return flow_fair_cap_add(floored, resp);
+}
 static __always_inline u64 flow_run_slice(u64 ref)
 {
 	if (!ref)

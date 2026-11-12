@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.20" ] || fail "version not at 5.2.20"
+[ "${want}" = "5.2.21" ] || fail "version not at 5.2.21"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -381,7 +381,14 @@ fi
 [ "$(grep -rh "flow_nice_weight" "${ENQ_HDR}" "${DISP_HDR}" | wc -l | tr -d ' ')" = "4" ] || fail "nice use drifted"
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
-grep -q "flow_vd_for" "${ENQ_HDR}" || fail "vd use missing"
+grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
+grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
+if grep -q "flow_vd_for" "${ENQ_HDR}" 2>/dev/null; then
+    fail "stale vd use reappeared"
+fi
+if grep -q "flow_run_vd" "${ENQ_HDR}" 2>/dev/null; then
+    fail "stale run vd use reappeared"
+fi
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
 # Burst run length scales the vd step with shift only moves and a
 # bounded floor. The vd takes three args with the burst in the middle
@@ -397,7 +404,9 @@ if grep -q "b >> 1" "${FAIR_HDR}" 2>/dev/null; then
 fi
 # Burst keeps two quarter moves plus one shared fold line with the same gain.
 [ "$(grep -c ">> 2" "${FAIR_HDR}" | tr -d ' ')" = "3" ] || fail "burst quarter shift drifted"
-grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "burst vd use missing"
+grep -q "flow_burst_clamp(READ_ONCE(t->burst_ns))" "${ENQ_HDR}" || fail "burst clamp use missing"
+grep -q "sref ? eff : b" "${ENQ_HDR}" || fail "service bind missing"
+grep -q "FLOW_RUN_WIN_NS" "${ENQ_HDR}" || fail "wait cap missing"
 grep -q "flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS)" "${FAIR_HDR}" || fail "floor cap drifted"
 grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "vd floor missing"
 # Pure proxy keeps deadline order with no wakeup nudge. Any assist helper
@@ -1030,6 +1039,19 @@ if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/b
     fail "float outside fair reappeared"
 fi
 
+# Single response helper stays in fair with one enqueue user.
+# The helper plus the short name appear only in fair plus the single
+# enqueue use with no other file naming either.
+grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
+grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
+[ "$(grep -c "vd_HRRN" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "response sites drifted"
+if grep -q "vd_HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "response helper outside fair plus enqueue reappeared"
+fi
+if grep -q "HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
+    fail "response name outside fair plus enqueue reappeared"
+fi
+
 # No load balancing remains with constrained placement plus topology drain.
 # Enqueue joins the queue of the constrained target with no least pick
 # and no waiting counts. Dispatch drains in topology order with no
@@ -1144,10 +1166,10 @@ grep -q "flow_run_prune(t, now)" "${DISP_HDR}" || fail "run prune use missing"
 grep -q "flow_run_reset(t)" "${DISP_HDR}" || fail "run reset use missing"
 grep -q "flow_smoothed_ref(t)" "${ENQ_HDR}" || fail "smoothed ref use missing"
 grep -q "flow_smoothed_eff(" "${ENQ_HDR}" || fail "smoothed eff use missing"
-grep -q "flow_run_vd(floored, eff, w)" "${ENQ_HDR}" || fail "run vd use missing"
+grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
 grep -q "flow_run_slice(sref)" "${ENQ_HDR}" || fail "run slice use missing"
 grep -q "if (sref)" "${ENQ_HDR}" || fail "run gate use missing"
-grep -q "flow_vd_for(floored, READ_ONCE(t->burst_ns), w)" "${ENQ_HDR}" || fail "unknown vd missing"
+grep -q "sref ? eff : b" "${ENQ_HDR}" || fail "service bind missing"
 if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
     fail "float outside fair reappeared"
 fi
@@ -1610,7 +1632,7 @@ if grep -q "short tasks exact" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme stale exact reappeared"
 fi
 
-# Pure-UFS 5.2.20 pins with no EDQ and no new wire bytes.
+# Pure-UFS 5.2.21 pins with no EDQ and no new wire bytes.
 # LAG_MAX caps lateness at eight milliseconds with integer only.
 grep -q "FLOW_LAG_MAX_NS = 8000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lag max missing"
 grep -q "flow_lag_clamp" "${FAIR_HDR}" || fail "lag clamp missing"
