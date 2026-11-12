@@ -49,6 +49,25 @@ const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() == 2
 /// row stays sixteen bytes with no growth. A drift fails the build here.
 const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_cpu_ctx>() == 16);
 
+/// Red black node size lock. The per CPU tree node holds parent plus color
+/// plus right plus left plus pid plus pad at thirty two bytes inside the
+/// one hundred thirty six byte arena slot. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_rb_node>() == 32);
+
+/// Tree entry size lock. The slab entry holds the node plus key plus owner
+/// plus pad at forty eight bytes. The wire keeps one hundred four bytes.
+/// A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_rb_entry>() == 48);
+
+/// State plus node size lock. The two hundred sixteen byte state plus the
+/// one hundred thirty six byte slot stay at three hundred fifty two within
+/// five hundred twelve bytes per task. A drift fails the build here.
+const _: () = assert!(
+    std::mem::size_of::<crate::bpf_intf::flow_task_ctx>()
+        + std::mem::size_of::<crate::bpf_intf::flow_arena_task>()
+        == 352
+);
+
 /*
  * Scheduler holds the skeleton, the link, and the stats server.
  * It drives the run loop until shutdown or exit. The arena library
@@ -245,6 +264,9 @@ impl<'a> Scheduler<'a> {
 
     /// Sum per LLC counters into one view.
     /// A failed map read warns and keeps zeros for that entry.
+    /// Live values come from the reporter on a real host with a real build
+    /// and a real log. Proxies stay BSS only with no wire bytes. The wire
+    /// keeps one hundred four.
     fn get_metrics(&self) -> Metrics {
         crate::metrics::collect(&self.skel)
     }

@@ -25,7 +25,11 @@
  * The base constant stays kept unused reserved with no reader. Virtual deadline adds the burst scaled effective step
  * to the floored time through the shared charge path, so a larger
  * effective weight or a shorter run gives an earlier due time with no extra
- * divide. Burst holds the last run length between the floor and
+ * divide. Two level vruntime keeps vtime as charged service plus due time
+ * as the floored time plus the burst scaled step with lag clamped at
+ * LAG_MAX with integer only. Lag caps at eight milliseconds
+ * with saturation at zero on skew and at LAG_MAX on excess and no wrap.
+ * Burst holds the last run length between the floor and
  * one slice with shift only moves. Run keeps
  * eight recent run lengths with close stamps plus the kept range plus
  * a stable flag plus the current sum, so steady tasks price by the
@@ -38,6 +42,10 @@
 #define __FLOW_FAIR_BPF_H
 #include "intf.h"
 #include "maps.bpf.h"
+#include <lib/sdt_alloc.h>
+/* Slab for BST entries with one entry per queued task at most through
+ * the queued bit, so the backlog stays within the live task count. */
+static struct scx_allocator flow_rb_alloc;
 /* Nice weight on the weight scale from minus twenty to nineteen.
  * Strictly falls from ten thousand to one with one hundred at zero.
  * Fits in read only data with direct indexing and no loop. */
@@ -123,6 +131,35 @@ static __always_inline s64 flow_fair_cap_add(s64 base, u64 add)
 		return vmax;
 	return base + (s64)add;
 }
+/* Lag clamp at eight milliseconds with integer only. Lag is now minus
+ * start. Skew saturates at zero. Excess saturates at LAG_MAX. The clamp
+ * counts the lag sample in BSS. Kick path only with no pricing use.
+ * Pricing stays vruntime only. */
+static __always_inline u64 flow_lag_clamp(u64 lag)
+{
+	if (lag > (u64)FLOW_LAG_MAX_NS) {
+		__sync_fetch_and_add(&m_lag_clamp, 1ULL);
+		return (u64)FLOW_LAG_MAX_NS;
+	}
+	return lag;
+}
+/* Tree order is plain BST. Leftmost wins. Ties chain right. Order
+ * matches RB_DUPLICATE-compatible order with no full RB balancing.
+ * The tree is an unbalanced BST. Depth stays bound at RB_MAX_DEPTH.
+ * Contention plus depth overflow plus alloc miss fall back to FIFO.
+ * Order is pure deadline with bias. Dl equals vd plus 0x8000000000000000.
+ * Unsigned compare matches signed order. Nodes live in slab memory.
+ * The node holds thirty two bytes plus key plus owner. Task slots stay
+ * reserved at one hundred thirty six. The per queued worst stays at four
+ * hundred within five hundred twelve. Roots use try locks. Contention
+ * falls back with no wait. Leftmost walks use the bounded hold. The loop
+ * budget stays at six. Depth is a last sample plus a max sample. Duplicate
+ * counts equal keys. Leftmost counts pops. All stay BSS only.
+ * No rotations run. Order stays straight line. */
+static __always_inline u64 flow_rb_deadline(s64 vd)
+{
+	return (u64)vd + 0x8000000000000000ULL;
+}
 /* Overflow bound with the burst clamp. The due time path feeds at most
  * one slice, so hi stays at most one with lo below one slice and the
  * scaled sum stays at most twice the step with two hundred million as
@@ -188,6 +225,64 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 	}
 	b = b - (b >> 2) + (u >> 2);
 	return flow_burst_clamp(b);
+}
+/* Smoothed pricing folds five run observables with one shared shift gain.
+ * Burst length plus ring durations plus ring stamps plus run sum plus kept
+ * range feed one effective duration with shift only and saturation. The gain
+ * stays at one quarter for all five criteria with no per criterion tuning.
+ * New value equals old minus the quarter of old plus the quarter of sample.
+ * A zero sample freezes with no move. A zero old takes the sample as init.
+ * Saturation uses the shared cap helper with slice caps where bounded. A
+ * backward clock freezes prune and close with no ring move. The smoothed
+ * reference derives from the kept max in the ring with zero new bytes. The
+ * effective value keeps the larger of reference and burst with a slice cap.
+ * Order holds since a larger effective value never yields an earlier virtual
+ * deadline. The global fold counts recalc passes in BSS only with no wire
+ * bytes. Read the counters with a BSS dump. Enqueue prices stable tasks by
+ * the smoothed reference through the shared charge path with unknown tasks
+ * keeping the burst path. Lag clamp stays on the kick path with no pricing
+ * use there. */
+u64 m_ewma_fold;
+u64 m_ewma_sat;
+u64 m_ewma_freeze;
+static __always_inline u64 flow_ewma_next(u64 old, u64 sample)
+{
+	if (!sample)
+		return old;
+	if (!old)
+		return sample;
+	return old - (old >> 2) + (sample >> 2);
+}
+/* Smoothed reference for the enqueue known path with a BSS fold count.
+ * Unknown tasks return zero with a freeze count, so the caller keeps
+ * the burst path. Stable tasks price by this value with no clock and
+ * no scan. */
+static __always_inline u64 flow_smoothed_ref(struct flow_task_ctx *t)
+{
+	u64 ref;
+	if (!t)
+		return 0;
+	if (!READ_ONCE(t->run_known))
+		return 0;
+	ref = READ_ONCE(t->run_max);
+	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
+	if (!ref)
+		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
+	return ref;
+}
+/* Smoothed effective duration for the enqueue known path from reference
+ * plus burst with max and slice cap. Larger input never yields an earlier
+ * virtual deadline. Saturation at the slice cap counts in BSS. Enqueue
+ * feeds this value to the shared charge path. */
+static __always_inline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
+{
+	u64 b = flow_burst_clamp(burst_ns);
+	u64 e = ref > b ? ref : b;
+	if (e > (u64)FLOW_SLICE_MIN_NS) {
+		__sync_fetch_and_add(&m_ewma_sat, 1ULL);
+		e = (u64)FLOW_SLICE_MIN_NS;
+	}
+	return e;
 }
 static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
 {
@@ -281,6 +376,7 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 	int i;
 	if (!t)
 		return;
+	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
 	for (i = 0; i < 8; i++) {
 		u64 d = READ_ONCE(t->run_dur[i]);
 		u64 s = READ_ONCE(t->run_stamp[i]);
@@ -308,27 +404,33 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 		t->run_min = 0;
 		t->run_max = 0;
 		t->run_known = 0;
+		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
 	t->run_min = min_d;
 	t->run_max = max_d;
 	if (max_d < (u64)FLOW_SLICE_FLOOR_NS) {
 		t->run_known = 1;
+		__sync_fetch_and_add(&m_ewma_sat, 1ULL);
 		return;
 	}
 	if (kept < (u64)FLOW_RUN_NEED) {
 		t->run_known = 0;
+		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
 	if (max_s < min_s || max_s - min_s < (u64)FLOW_RUN_SPAN_NS) {
 		t->run_known = 0;
+		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
 	if (max_d < min_d || max_d - min_d > (min_d >> 3)) {
 		t->run_known = 0;
+		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
 		return;
 	}
 	t->run_known = 1;
+	__sync_fetch_and_add(&m_ewma_sat, 1ULL);
 }
 static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 {

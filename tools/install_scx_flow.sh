@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.2.18"
+VER="5.2.20"
 # Pinned fork ref, same as repo CI.
 # The commit id matches the upstream sched-ext/scx main id used in CI.
 # The installer fetches from the galpt/scx mirror while CI fetches from
@@ -214,15 +214,15 @@ rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 # Queues come from the upstream library with no vendored copy.
 # Both lib paths stay as upstream links for include parity.
 if [ "$(readlink "${DEST}/lib" 2>/dev/null)" != "../../../../../lib" ]; then
-    rm -rf "${DEST}/lib"
+    rm -rf -- "${DEST}/lib"
     ln -s ../../../../../lib "${DEST}/lib"
 fi
 if [ "$(readlink "${DEST}/src/bpf/lib" 2>/dev/null)" != "../../../../../lib" ]; then
-    rm -rf "${DEST}/src/bpf/lib"
+    rm -rf -- "${DEST}/src/bpf/lib"
     ln -s ../../../../../lib "${DEST}/src/bpf/lib"
 fi
 if [ "$(readlink "${DEST}/LICENSE" 2>/dev/null)" != "../../../LICENSE" ]; then
-    rm -f "${DEST}/LICENSE"
+    rm -f -- "${DEST}/LICENSE"
     ln -s ../../../LICENSE "${DEST}/LICENSE"
 fi
 
@@ -244,7 +244,7 @@ install -m 0755 "${WS}/target/release/${BIN}" \
 # a while on first run with a fresh download.
 if [ "${CLEAN:-0}" = "1" ]; then
     echo "cleaning workspace target to save space"
-    rm -rf "${WS}/target"
+    rm -rf -- "${WS}/target"
 fi
 
 echo "done"
