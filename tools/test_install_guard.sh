@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.22" ] || fail "version not at 5.2.22"
+[ "${want}" = "5.2.23" ] || fail "version not at 5.2.23"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -1162,7 +1162,7 @@ grep -q "& 7U" "${FAIR_HDR}" || fail "run mask missing"
 grep -q "flow_ewma_next" "${FAIR_HDR}" || fail "ewma fold missing"
 grep -q "flow_smoothed_ref" "${FAIR_HDR}" || fail "smoothed ref missing"
 grep -q "flow_smoothed_eff" "${FAIR_HDR}" || fail "smoothed eff missing"
-grep -q "old - (old >> 2) + (sample >> 2)" "${FAIR_HDR}" || fail "ewma gain missing"
+grep -F "(old + 3 * sample) >> 2" "${FAIR_HDR}" || fail "ewma gain missing"
 grep -q "m_ewma_fold" "${FAIR_HDR}" || fail "ewma fold counter missing"
 grep -q "m_ewma_sat" "${FAIR_HDR}" || fail "ewma sat counter missing"
 grep -q "m_ewma_freeze" "${FAIR_HDR}" || fail "ewma freeze counter missing"
