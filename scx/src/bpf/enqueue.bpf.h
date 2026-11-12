@@ -107,9 +107,9 @@ static __always_inline bool flow_rb_insert(struct flow_rb_root __arena *r, struc
 	}
 	cur = READ_ONCE(r->root);
 	if (!cur) {
-		e->node.__rb_parent_color = 0;
-		e->node.rb_left = 0;
-		e->node.rb_right = 0;
+		WRITE_ONCE(e->node.__rb_parent_color, 0);
+		WRITE_ONCE(e->node.rb_left, 0);
+		WRITE_ONCE(e->node.rb_right, 0);
 		WRITE_ONCE(r->root, (u64)e);
 		r->cnt++;
 		done_depth = 1;
@@ -142,8 +142,8 @@ static __always_inline bool flow_rb_insert(struct flow_rb_root __arena *r, struc
 					return false;
 				}
 				e->node.__rb_parent_color = parent;
-				e->node.rb_left = 0;
-				e->node.rb_right = 0;
+				WRITE_ONCE(e->node.rb_left, 0);
+				WRITE_ONCE(e->node.rb_right, 0);
 				WRITE_ONCE(c->node.rb_left, (u64)e);
 				r->cnt++;
 				done_depth = depth;
@@ -166,8 +166,8 @@ static __always_inline bool flow_rb_insert(struct flow_rb_root __arena *r, struc
 					return false;
 				}
 				e->node.__rb_parent_color = parent;
-				e->node.rb_left = 0;
-				e->node.rb_right = 0;
+				WRITE_ONCE(e->node.rb_left, 0);
+				WRITE_ONCE(e->node.rb_right, 0);
 				WRITE_ONCE(c->node.rb_right, (u64)e);
 				r->cnt++;
 				done_depth = depth;
@@ -599,9 +599,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 						__sync_fetch_and_add(&m_fb_alloc, 1ULL);
 					} else {
 						u64 dl = flow_rb_deadline(raw_v);
-						e->node.__rb_parent_color = 0;
-						e->node.rb_left = 0;
-						e->node.rb_right = 0;
+						WRITE_ONCE(e->node.__rb_parent_color, 0);
+						WRITE_ONCE(e->node.rb_left, 0);
+						WRITE_ONCE(e->node.rb_right, 0);
 						WRITE_ONCE(e->node.pid, p->pid);
 						WRITE_ONCE(e->node.pad, 0U);
 						WRITE_ONCE(e->key, dl);
@@ -687,9 +687,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				} else {
 					struct flow_arena_task __arena *at = mem;
 					WRITE_ONCE(at->storage[0], dl);
-					e->node.__rb_parent_color = 0;
-					e->node.rb_left = 0;
-					e->node.rb_right = 0;
+					WRITE_ONCE(e->node.__rb_parent_color, 0);
+					WRITE_ONCE(e->node.rb_left, 0);
+					WRITE_ONCE(e->node.rb_right, 0);
 					WRITE_ONCE(e->node.pid, p->pid);
 					WRITE_ONCE(e->node.pad, 0U);
 					WRITE_ONCE(e->key, dl);
@@ -780,9 +780,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 				} else {
 					struct flow_arena_task __arena *at = mem;
 					WRITE_ONCE(at->storage[0], dl);
-					e->node.__rb_parent_color = 0;
-					e->node.rb_left = 0;
-					e->node.rb_right = 0;
+					WRITE_ONCE(e->node.__rb_parent_color, 0);
+					WRITE_ONCE(e->node.rb_left, 0);
+					WRITE_ONCE(e->node.rb_right, 0);
 					WRITE_ONCE(e->node.pid, p->pid);
 					WRITE_ONCE(e->node.pad, 0U);
 					WRITE_ONCE(e->key, dl);
