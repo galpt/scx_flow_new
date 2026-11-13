@@ -79,6 +79,99 @@ static __noinline u64 flow_min_key_inf(u32 cpu)
 		return ~0ULL;
 	return k;
 }
+/* Victim selection for one LLC tier. Outlined so the two steep scans
+ * verify once instead of twice in dispatch. The caller reuses one
+ * struct for both tiers with tier two reading l2 plus a group match
+ * and any other tier reading l3 plus a group mismatch. */
+struct flow_victim_sel {
+	u32 best;
+	u32 best2;
+	u32 first;
+	u8 best_bkt;
+	u8 best2_bkt;
+	bool have_best;
+	bool have_best2;
+	bool have_first;
+};
+/* Tie-break on the stale-aware minimum with unknown failing closed.
+ * Outlined so the scan verifies the two reads once. */
+static __noinline bool flow_min_key_less(u32 a, u32 b)
+{
+	return flow_min_key_inf(a) < flow_min_key_inf(b);
+}
+/* Single LLC scan shared by the group tier and the LLC tier. The body
+ * is the former inline pass verbatim: self skip, live bound, empty
+ * skip before any group lookup, same LLC gate, one seed view, group
+ * gate per tier, unknown bucket covers fixed order, larger known
+ * buckets first with the stale-aware minimum tie-break, second best
+ * plus first fixed tracking with no new loop. */
+static __noinline void flow_scan_victims(u32 self, u32 llc, bool use_ccx,
+					 u32 my_ccx, int tier,
+					 struct flow_victim_sel *out)
+{
+	u32 victim;
+	bool want_l2;
+
+	if (!out)
+		return;
+	out->best = (u32)FLOW_MAX_CPUS;
+	out->best2 = (u32)FLOW_MAX_CPUS;
+	out->first = (u32)FLOW_MAX_CPUS;
+	out->best_bkt = 0;
+	out->best2_bkt = 0;
+	out->have_best = false;
+	out->have_best2 = false;
+	out->have_first = false;
+	want_l2 = (tier == 2);
+	bpf_for(victim, 0, FLOW_MAX_CPUS) {
+		int vl;
+		struct flow_cpu_view vw;
+		u8 vb;
+
+		if (victim == self)
+			continue;
+		/* No live gate so offline roots still reap with no new loop. */
+		if ((u64)victim >= scx_bpf_nr_cpu_ids())
+			continue;
+		if (flow_rb_is_empty(flow_rb_for_cpu((s32)victim)))
+			continue;
+		vl = topo_cpu_to_llc_id(victim);
+		if (vl < 0 || (u32)vl != llc)
+			continue;
+		vw = flow_cpu_view(victim);
+		if (want_l2) {
+			if (!flow_ccx_match(use_ccx, vw.ccx, my_ccx))
+				continue;
+			vb = vw.l2;
+		} else {
+			if (flow_ccx_match(use_ccx, vw.ccx, my_ccx))
+				continue;
+			vb = vw.l3;
+		}
+		if (!vb && !out->have_first) {
+			out->first = victim;
+			out->have_first = true;
+		}
+		if (vb && (!out->have_best || flow_cache_larger(vb, out->best_bkt) ||
+			    (out->have_best && vb == out->best_bkt &&
+			     out->best < (u32)FLOW_MAX_CPUS &&
+			     flow_min_key_less(victim, out->best)))) {
+			if (out->have_best && out->best != victim) {
+				out->best2 = out->best;
+				out->best2_bkt = out->best_bkt;
+				out->have_best2 = true;
+			}
+			out->best = victim;
+			out->best_bkt = vb;
+			out->have_best = true;
+		} else if (vb && victim != out->best &&
+			   (!out->have_best2 || flow_cache_larger(vb, out->best2_bkt))) {
+			out->best2 = victim;
+			out->best2_bkt = vb;
+			out->have_best2 = true;
+		}
+	}
+}
 static __noinline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
@@ -372,14 +465,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	bool saw_unrunnable = false;
 	bool use_ccx;
 	u32 my_ccx;
-	u32 best_victim;
-	u32 best2_victim;
-	u32 first_victim;
-	u8 best_bkt;
-	u8 best2_bkt;
-	bool have_best;
-	bool have_best2;
-	bool have_first;
+	struct flow_victim_sel sel;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
@@ -426,64 +512,15 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * the new head. One seed lookup returns cluster plus buckets. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
-	best_victim = (u32)FLOW_MAX_CPUS;
-	best2_victim = (u32)FLOW_MAX_CPUS;
-	first_victim = (u32)FLOW_MAX_CPUS;
-	best_bkt = 0;
-	best2_bkt = 0;
-	have_best = false;
-	have_best2 = false;
-	have_first = false;
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		u32 vccx;
-		u8 vb;
-		struct flow_cpu_view vw;
-		if (victim == c)
-			continue;
-		/* No live gate so offline roots still reap with no new loop. */
-		if ((u64)victim >= scx_bpf_nr_cpu_ids())
-			continue;
-		if (flow_rb_is_empty(flow_rb_for_cpu((s32)victim)))
-			continue;
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || (u32)vl != llc)
-			continue;
-		vw = flow_cpu_view(victim);
-		vccx = vw.ccx;
-		if (!flow_ccx_match(use_ccx, vccx, my_ccx))
-			continue;
-		vb = vw.l2;
-		if (!vb && !have_first) {
-			first_victim = victim;
-			have_first = true;
-		}
-		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
-			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
-			     flow_min_key_inf(victim) < flow_min_key_inf(best_victim)))) {
-			if (have_best && best_victim != victim) {
-				best2_victim = best_victim;
-				best2_bkt = best_bkt;
-				have_best2 = true;
-			}
-			best_victim = victim;
-			best_bkt = vb;
-			have_best = true;
-		} else if (vb && victim != best_victim &&
-			   (!have_best2 || flow_cache_larger(vb, best2_bkt))) {
-			best2_victim = victim;
-			best2_bkt = vb;
-			have_best2 = true;
-		}
-	}
-	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
+	flow_scan_victims(c, llc, use_ccx, my_ccx, 2, &sel);
+	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
-	if (have_first && (!have_best || first_victim != best_victim) &&
-	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
+	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
+	    flow_drain_cpu(c, llc, sel.first, 1, &saw_unrunnable))
 		return;
-	if (have_best2 && (!have_best || best2_victim != best_victim) &&
-	    (!have_first || best2_victim != first_victim) &&
-	    flow_drain_cpu(c, llc, best2_victim, 1, &saw_unrunnable))
+	if (sel.have_best2 && (!sel.have_best || sel.best2 != sel.best) &&
+	    (!sel.have_first || sel.best2 != sel.first) &&
+	    flow_drain_cpu(c, llc, sel.best2, 1, &saw_unrunnable))
 		return;
 	/* Same LLC victims drain next with larger buckets first within tier
 	 * with known priority and fixed order else, with already tried group
@@ -494,62 +531,15 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * Empty queues skip before the dedup lookup. The empty check
 	 * can race a new enqueue, which stays safe since the next dispatch
 	 * covers the new head. One seed lookup returns cluster plus buckets. */
-	best_victim = (u32)FLOW_MAX_CPUS;
-	best2_victim = (u32)FLOW_MAX_CPUS;
-	first_victim = (u32)FLOW_MAX_CPUS;
-	best_bkt = 0;
-	best2_bkt = 0;
-	have_best = false;
-	have_best2 = false;
-	have_first = false;
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		u8 vb;
-		struct flow_cpu_view vw;
-		if (victim == c)
-			continue;
-		/* No live gate so offline roots still reap with no new loop. */
-		if ((u64)victim >= scx_bpf_nr_cpu_ids())
-			continue;
-		if (flow_rb_is_empty(flow_rb_for_cpu((s32)victim)))
-			continue;
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || (u32)vl != llc)
-			continue;
-		vw = flow_cpu_view(victim);
-		if (flow_ccx_match(use_ccx, vw.ccx, my_ccx))
-			continue;
-		vb = vw.l3;
-		if (!vb && !have_first) {
-			first_victim = victim;
-			have_first = true;
-		}
-		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
-			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
-			     flow_min_key_inf(victim) < flow_min_key_inf(best_victim)))) {
-			if (have_best && best_victim != victim) {
-				best2_victim = best_victim;
-				best2_bkt = best_bkt;
-				have_best2 = true;
-			}
-			best_victim = victim;
-			best_bkt = vb;
-			have_best = true;
-		} else if (vb && victim != best_victim &&
-			   (!have_best2 || flow_cache_larger(vb, best2_bkt))) {
-			best2_victim = victim;
-			best2_bkt = vb;
-			have_best2 = true;
-		}
-	}
-	if (have_best && flow_drain_cpu(c, llc, best_victim, 1, &saw_unrunnable))
+	flow_scan_victims(c, llc, use_ccx, my_ccx, 3, &sel);
+	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
-	if (have_first && (!have_best || first_victim != best_victim) &&
-	    flow_drain_cpu(c, llc, first_victim, 1, &saw_unrunnable))
+	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
+	    flow_drain_cpu(c, llc, sel.first, 1, &saw_unrunnable))
 		return;
-	if (have_best2 && (!have_best || best2_victim != best_victim) &&
-	    (!have_first || best2_victim != first_victim) &&
-	    flow_drain_cpu(c, llc, best2_victim, 1, &saw_unrunnable))
+	if (sel.have_best2 && (!sel.have_best || sel.best2 != sel.best) &&
+	    (!sel.have_first || sel.best2 != sel.first) &&
+	    flow_drain_cpu(c, llc, sel.best2, 1, &saw_unrunnable))
 		return;
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
