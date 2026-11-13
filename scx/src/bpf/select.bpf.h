@@ -226,6 +226,7 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 }
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	const struct cpumask *idle_mask;
 	s32 hint = prev_cpu;
 	int hint_llc = -1;
 	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
@@ -247,14 +248,17 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	scx_arena_subprog_init();
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
-
-	/* Fast path: if task is pinned, or prev_cpu is allowed, live, and idle,
-	 * return immediately. Otherwise run the CCX/LLC/cache-bucket scan. */
 	if (flow_is_pinned(p))
 		return flow_constrained_target(hint, p);
-	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint)) {
-		if (scx_bpf_test_and_clear_cpu_idle(hint))
-			return hint;
+	idle_mask = scx_bpf_get_idle_cpumask();
+	if (!idle_mask)
+		return flow_constrained_target(hint, p);
+	/* Read-only idle check: keeps the idle bit intact for flow_enqueue to kick */
+	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint) &&
+	    bpf_cpumask_test_cpu((u32)hint, idle_mask) &&
+	    flow_rb_empty(flow_rb_for_cpu(hint))) {
+		scx_bpf_put_cpumask(idle_mask);
+		return hint;
 	}
 	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
 	    topo_contains(topo_all, (u32)hint)) {
@@ -282,9 +286,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
 			continue;
-		/* Prefer cores whose BST is currently empty, so fresh tasks
-		 * land where no backlog waits. Busy cores stay reachable
-		 * through the first allowed fallback when no empty core wins. */
+		if (!bpf_cpumask_test_cpu(c, idle_mask))
+			continue;
 		if (!flow_rb_empty(flow_rb_for_cpu((s32)c)))
 			continue;
 		vllc = topo_cpu_to_llc_id(c);
@@ -315,10 +318,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (have_hint_topo && !smt_on && hint_llc >= 0 &&
 		    l == (u32)hint_llc && flow_ccx_match(use_ccx, cx, hint_ccx))
 			score = -1;
-		/* Tier bucket split: group tier reads l2 and LLC tier reads l3.
-		 * Seeds stay equal today so the split is harmless, and a future
-		 * level divergence stays correct. Buckets fetch only for
-		 * competitive tiers with no extra lookup elsewhere. */
 		if (score == -1)
 			cb = vw.l2;
 		else if (score == 0)
@@ -351,9 +350,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			}
 		}
 	}
+	scx_bpf_put_cpumask(idle_mask);
 	/* The mask can change while scanning, check the pick again. */
 	if (best >= 0 && flow_cpu_allowed(best, p))
 		return best;
-	return flow_first_allowed(p);
+	return flow_constrained_target(hint, p);
 }
 #endif

@@ -682,17 +682,12 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
 		s64 nvd = flow_vd_for(nv, cur, w);
-		u64 tick_now = bpf_ktime_get_ns();
-
 		flow_run_add(t, delta);
 		t->vtime = nv;
 		t->vd = nvd;
 		t->slice_rem = cur;
 		rs->vtime = nv;
 		rs->vd = nvd;
-		rs->slice_rem = cur;
-		if (tick_now)
-			rs->start_ts = tick_now;
 		scx_bpf_task_set_dsq_vtime(p, nvd);
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
@@ -705,9 +700,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
 		rs->vtime = nv;
 		rs->vd = nvd;
+		rs->slice_rem = 0;
 		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
 	}
-	rs->slice_rem = cur;
 }
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
 {

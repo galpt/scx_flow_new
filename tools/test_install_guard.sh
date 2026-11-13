@@ -125,10 +125,10 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-# Queues admit without bound with a guarded preempt on a much earlier
-# Virtual deadline.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "b6f286125c46c80172f4e6b686d1049f5ad4e335998cde00dec40778c93fc4e2" ] || fail "scx README drifted"
-[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "25" ] || fail "scx README lines drifted"
+# Per-CPU BST orders by virtual deadline with EEVDF plus HRRN
+# and guarded preempt.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "6fab3ce17c022b81a6158329d7df3b2b63d8b8e7bada167ea2133c3c49a234d4" ] || fail "scx README drifted"
+[ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "15" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -988,16 +988,18 @@ grep -q "dead head is dropped" "${DISP_HDR}" || fail "dead pop prose missing"
 grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
 grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
 
-# Scheduler README stays minimal with deadline plus per-CPU plus FIFO
-# plus fixed slice plus idle plus preempt plus restart plus burst vd.
-grep -q "burst" "${SRC_DIR}/README.md" || fail "readme burst missing"
-grep -q "deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
+# Scheduler README stays minimal with virtual deadline plus per-CPU BST
+# plus EEVDF plus HRRN plus EWMA plus tier order plus guarded preempt.
+grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
 grep -q "per-CPU" "${SRC_DIR}/README.md" || fail "readme percpu missing"
+grep -q "binary search" "${SRC_DIR}/README.md" || fail "readme bst missing"
 grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"
-grep -q "fixed" "${SRC_DIR}/README.md" || fail "readme fixed missing"
+grep -q "EEVDF" "${SRC_DIR}/README.md" || fail "readme eevdf missing"
+grep -q "HRRN" "${SRC_DIR}/README.md" || fail "readme hrrn missing"
+grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
 grep -q "1ms" "${SRC_DIR}/README.md" || fail "readme slice missing"
 grep -q "idle" "${SRC_DIR}/README.md" || fail "readme idle missing"
-grep -q "preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
+grep -q "guarded preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
 grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
 if grep -q "least queued\|most loaded" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme load reappeared"
@@ -1005,7 +1007,8 @@ fi
 if grep -qi "mate\|strand\|warm" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme strand reappeared"
 fi
-grep -q "without bound" "${SRC_DIR}/README.md" || fail "readme unbounded missing"
+grep -q "bounded" "${SRC_DIR}/README.md" || fail "readme bounded missing"
+grep -q "L1 > L2 > L3" "${SRC_DIR}/README.md" || fail "readme tier missing"
 if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme stale cap reappeared"
 fi
@@ -1199,9 +1202,9 @@ if grep -q "30000000000ULL.*slice\|slice.*30000000000ULL" "${ENQ_HDR}" "${DISP_H
 fi
 grep -q "flow_run_slice" "${FAIR_HDR}" || fail "slice clamp missing"
 # Scheduler README keeps virtual deadline in full words with run prose.
-grep -q "Virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
-grep -q "kept" "${SRC_DIR}/README.md" || fail "readme kept missing"
-grep -q "Unknown tasks keep the burst path" "${SRC_DIR}/README.md" || fail "readme unknown missing"
+grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
+grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
+grep -q "Unpredicted tasks run pure EEVDF" "${SRC_DIR}/README.md" || fail "readme unknown missing"
 if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme short vd reappeared"
 fi
@@ -1244,9 +1247,9 @@ if grep -q "count / \|/ count" "${FAIR_HDR}" 2>/dev/null; then
     fail "count divide reappeared"
 fi
 # Scheduler README keeps virtual deadline in full words with run prose.
-grep -q "Virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
-grep -q "kept" "${SRC_DIR}/README.md" || fail "readme kept missing"
-grep -q "Unknown tasks keep the burst path" "${SRC_DIR}/README.md" || fail "readme unknown missing"
+grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
+grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
+grep -q "Unpredicted tasks run pure EEVDF" "${SRC_DIR}/README.md" || fail "readme unknown missing"
 if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme short vd reappeared"
 fi
@@ -1653,8 +1656,8 @@ grep -q "Bound the index by the live table size" "${DISP_HDR}" || fail "bound pr
 grep -q "plain store on an aligned eight byte" "${DISP_HDR}" || fail "start store prose missing"
 grep -q "torn read yields" "${DISP_HDR}" || fail "torn prose missing"
 grep -q "covers recycle" "${DISP_HDR}" || fail "recycle prose missing"
-# Scheduler README keeps the floor slice fix with no stale exact.
-grep -q "keeping the burst path with a floor slice" "${SRC_DIR}/README.md" || fail "readme short fix missing"
+# Scheduler README keeps the slice tail fix with no stale exact.
+grep -q "remaining slice tail" "${SRC_DIR}/README.md" || fail "readme slice tail missing"
 if grep -q "short tasks exact" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme stale exact reappeared"
 fi
