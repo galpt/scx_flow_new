@@ -220,6 +220,10 @@ static __noinline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
 /* Unified Lag-Conserving EEVDF Virtual Deadline.
  * Prices tasks by their smoothed burst estimate, adds a bounded penalty for
  * continuous non-sleeping CPU hogs, and deducts bounded virtual lag credit.
+ * When no lag credit applies the due time stays bound above the floor by a
+ * multiple of the fair step derived from existing bounds only, so a task
+ * far ahead in service cannot hold a distant due time past a stall.
+ * The multiple reuses LAG_MAX divided by SLICE_MIN with integer math only.
  */
 static __noinline s64 flow_eevdf_vd(struct flow_task_ctx *t, s64 floored,
 				    u64 lag_ns, u32 w)
@@ -251,6 +255,17 @@ static __noinline s64 flow_eevdf_vd(struct flow_task_ctx *t, s64 floored,
 	vd = flow_fair_charge(floored, req_ns, w);
 	if (vd <= floored)
 		return flow_fair_cap_add(floored, 1);
+	if (!clamped_lag) {
+		u64 k = (u64)FLOW_LAG_MAX_NS / (u64)FLOW_SLICE_MIN_NS;
+		u64 st = flow_fair_step(w);
+		u64 hi = st / (u64)FLOW_SLICE_MIN_NS;
+		u64 lo = st % (u64)FLOW_SLICE_MIN_NS;
+		u64 kstep = k * hi * (u64)FLOW_SLICE_MIN_NS + k * lo;
+		s64 bound = flow_fair_cap_add(floored, kstep);
+
+		if (vd > bound)
+			return bound;
+	}
 	return vd;
 }
 
@@ -290,6 +305,10 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 	return flow_burst_clamp(b);
 }
 
+/* Per LLC floor with bound catch-up. A stale base returns last plus one
+ * for uniqueness. A fresh base advances at most one STEP past last, so a
+ * single enqueue cannot lift the floor past a stall. Pricing stays
+ * unchanged. Zero means unseeded and reads fail open in callers. */
 static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;

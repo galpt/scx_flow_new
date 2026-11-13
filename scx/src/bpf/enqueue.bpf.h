@@ -305,6 +305,12 @@ static __always_inline bool flow_rb_remove(struct flow_rb_root __arena *r, u64 k
 			}
 			if (r->cnt)
 				r->cnt--;
+			/* Self-healing cached minimum. Zero means unknown
+			 * (empty or stale) and reads fail open in callers.
+			 * A remove hit invalidates the cache so a stale key
+			 * never blocks progress. */
+			if (flow_cpu_ok(owner))
+				WRITE_ONCE(flow_cpu_min_key[owner], 0);
 			flow_rb_unlock(r);
 			scx_free(&flow_rb_alloc, c);
 			return true;
@@ -548,7 +554,10 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	run_vd = READ_ONCE(rs->vd);
 	/* Step five of seven keeps the gap gate. The win needs the new due
 	 * time plus the gap below the running due time with signed
-	 * saturation, else a late due time skips. */
+	 * saturation, else a late due time skips. A far earlier win marks
+	 * an override in gap multiples with no new knob. The override
+	 * bypasses the wall gates below but still consumes the single token,
+	 * so each run still kicks at most once. */
 	win = new_vd;
 	if (win >= vmax - (s64)FLOW_KICK_GAP_NS)
 		win = vmax;
@@ -562,21 +571,28 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	 * granularity skips on a tear free heuristic read, then a short
 	 * tail skips on a tear free heuristic read unless the slice already
 	 * expired at the tick. A heuristic skip can miss a preempt with
-	 * dispatch still correct. Wraparound reads zero. */
+	 * dispatch still correct. Wraparound reads zero. An override win
+	 * far below the running due time bypasses both wall gates. */
 	start = READ_ONCE(rs->start_ts);
 	now = bpf_ktime_get_ns();
 	ran = flow_lag_clamp(now > start ? now - start : 0);
-	if (ran < (u64)FLOW_KICK_GRAN_NS) {
-		flow_stat_inc(llc, 8);
-		return;
-	}
-	raw_rem = READ_ONCE(rs->slice_rem);
-	/* Only skip when raw_rem > 0 (not already expired at tick) and
-	 * the tail is short. When raw_rem == 0 the task already overran
-	 * its slice at the tick, so bypass the tail gate. Outlined. */
-	if (!flow_kick_tail_ok(raw_rem, ran)) {
-		flow_stat_inc(llc, 8);
-		return;
+	{
+		s64 ov = (s64)FLOW_KICK_GAP_NS * 4;
+		bool over = win < vmax - ov && win + ov < run_vd;
+
+		if (!over && ran < (u64)FLOW_KICK_GRAN_NS) {
+			flow_stat_inc(llc, 8);
+			return;
+		}
+		raw_rem = READ_ONCE(rs->slice_rem);
+		/* Only skip when raw_rem > 0 (not already expired at tick) and
+		 * the tail is short. When raw_rem == 0 the task already overran
+		 * its slice at the tick, so bypass the tail gate. Outlined. A far
+		 * earlier win also bypasses the tail gate but still spends the token. */
+		if (!over && !flow_kick_tail_ok(raw_rem, ran)) {
+			flow_stat_inc(llc, 8);
+			return;
+		}
 	}
 	/* Step seven of seven wins the token then rechecks the run. A lost
 	 * race skips with the token spent, so each run still kicks at most
@@ -609,10 +625,15 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 		return;
 	}
 	fresh_raw_rem = READ_ONCE(rs->slice_rem);
-	if (!flow_kick_tail_ok(fresh_raw_rem, ran)) {
-		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
-		flow_stat_inc(llc, 8);
-		return;
+	{
+		s64 ov2 = (s64)FLOW_KICK_GAP_NS * 4;
+		bool over2 = win < vmax - ov2 && win + ov2 < fresh_vd;
+
+		if (!over2 && !flow_kick_tail_ok(fresh_raw_rem, ran)) {
+			(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
+			flow_stat_inc(llc, 8);
+			return;
+		}
 	}
 	/* The running CPU keeps its LLC for the whole run, so this recheck
 	 * always holds and only states the bound in the open. */

@@ -64,6 +64,20 @@ static __always_inline bool flow_rb_is_empty(struct flow_rb_root __arena *rb)
 		return true;
 	return flow_rb_empty(rb);
 }
+/* Stale-aware minimum key. Zero means unknown (empty or invalidated on
+ * remove) and reads as plus INF so unknown never wins a tie-break.
+ * Outlined so both drain tiers verify the read once. */
+static __noinline u64 flow_min_key_inf(u32 cpu)
+{
+	u64 k;
+
+	if (!flow_cpu_ok(cpu))
+		return ~0ULL;
+	k = READ_ONCE(flow_cpu_min_key[cpu]);
+	if (!k)
+		return ~0ULL;
+	return k;
+}
 static __noinline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
@@ -364,7 +378,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
-	if (flow_try_continue_prev(c, llc, prev))
+	/* Second continuation stays conditional so a failed first call plus an
+	 * empty own tree does not lift the floor twice. A seen unrunnable head
+	 * retests the continuation. Zero minimum means unknown and reads fail
+	 * open inside the helper. */
+	if (saw_unrunnable && flow_try_continue_prev(c, llc, prev))
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
 	 * tasks stay near warm cache. Larger buckets first within tier
@@ -416,7 +434,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
 			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
-			     READ_ONCE(flow_cpu_min_key[victim]) < READ_ONCE(flow_cpu_min_key[best_victim])))) {
+			     flow_min_key_inf(victim) < flow_min_key_inf(best_victim)))) {
 			if (have_best && best_victim != victim) {
 				best2_victim = best_victim;
 				best2_bkt = best_bkt;
@@ -482,7 +500,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		}
 		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
 			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
-			     READ_ONCE(flow_cpu_min_key[victim]) < READ_ONCE(flow_cpu_min_key[best_victim])))) {
+			     flow_min_key_inf(victim) < flow_min_key_inf(best_victim)))) {
 			if (have_best && best_victim != victim) {
 				best2_victim = best_victim;
 				best2_bkt = best_bkt;
