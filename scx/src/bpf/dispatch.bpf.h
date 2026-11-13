@@ -81,8 +81,8 @@ static __noinline u64 flow_min_key_inf(u32 cpu)
 }
 /* Victim selection for one LLC tier. Outlined so the two steep scans
  * verify once instead of twice in dispatch. The caller reuses one
- * struct for both tiers with tier two reading l2 plus a group match
- * and any other tier reading l3 plus a group mismatch. */
+ * struct for both tiers with use_l2 true reading l2 plus a group match
+ * and use_l2 false reading l3 plus a group mismatch. */
 struct flow_victim_sel {
 	u32 best;
 	u32 best2;
@@ -94,8 +94,9 @@ struct flow_victim_sel {
 	bool have_first;
 };
 /* Tie-break on the stale-aware minimum with unknown failing closed.
- * Outlined so the scan verifies the two reads once. */
-static __noinline bool flow_min_key_less(u32 a, u32 b)
+ * Inlined so the shared scan keeps one subprogram depth to the minimum
+ * read. */
+static __always_inline bool flow_min_key_less(u32 a, u32 b)
 {
 	return flow_min_key_inf(a) < flow_min_key_inf(b);
 }
@@ -106,14 +107,11 @@ static __noinline bool flow_min_key_less(u32 a, u32 b)
  * buckets first with the stale-aware minimum tie-break, second best
  * plus first fixed tracking with no new loop. */
 static __noinline void flow_scan_victims(u32 self, u32 llc, bool use_ccx,
-					 u32 my_ccx, int tier,
+					 u32 my_ccx, bool use_l2,
 					 struct flow_victim_sel *out)
 {
 	u32 victim;
-	bool want_l2;
 
-	if (!out)
-		return;
 	out->best = (u32)FLOW_MAX_CPUS;
 	out->best2 = (u32)FLOW_MAX_CPUS;
 	out->first = (u32)FLOW_MAX_CPUS;
@@ -122,7 +120,6 @@ static __noinline void flow_scan_victims(u32 self, u32 llc, bool use_ccx,
 	out->have_best = false;
 	out->have_best2 = false;
 	out->have_first = false;
-	want_l2 = (tier == 2);
 	bpf_for(victim, 0, FLOW_MAX_CPUS) {
 		int vl;
 		struct flow_cpu_view vw;
@@ -139,7 +136,7 @@ static __noinline void flow_scan_victims(u32 self, u32 llc, bool use_ccx,
 		if (vl < 0 || (u32)vl != llc)
 			continue;
 		vw = flow_cpu_view(victim);
-		if (want_l2) {
+		if (use_l2) {
 			if (!flow_ccx_match(use_ccx, vw.ccx, my_ccx))
 				continue;
 			vb = vw.l2;
@@ -512,7 +509,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * the new head. One seed lookup returns cluster plus buckets. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
-	flow_scan_victims(c, llc, use_ccx, my_ccx, 2, &sel);
+	flow_scan_victims(c, llc, use_ccx, my_ccx, true, &sel);
 	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
 	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
@@ -531,7 +528,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * Empty queues skip before the dedup lookup. The empty check
 	 * can race a new enqueue, which stays safe since the next dispatch
 	 * covers the new head. One seed lookup returns cluster plus buckets. */
-	flow_scan_victims(c, llc, use_ccx, my_ccx, 3, &sel);
+	flow_scan_victims(c, llc, use_ccx, my_ccx, false, &sel);
 	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
 	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&

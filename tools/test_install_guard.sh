@@ -743,11 +743,12 @@ fi
 # Ops stay at thirteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "ops count drifted"
 
-# Cache idle drain keeps six bounded loops with no new program.
+# Cache idle drain keeps five bounded loops with no new program.
 # One scan lives in select for the seed pick plus one scan for the first
-# allowed fallback. Four victim passes live in dispatch for same group
-# plus same LLC plus same node plus remote.
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "6" ] || fail "loop budget drifted"
+# allowed fallback. Three physical passes live in dispatch for the shared
+# victim scan plus same node plus remote, with the shared scan running
+# twice dynamically for same group plus same LLC.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted"
 
 # Queues are one per CPU plus fallback with deadline order and insertion ties.
 # Fair scales base by nice weight with a per LLC floor. Deadline sets the order with
@@ -1519,12 +1520,12 @@ grep -q "cb && (!have_best_bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "selec
 grep -q "smt_mask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select smt mask missing"
 grep -q "short_burst" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select burst missing"
 # L2: dispatch tracks second best in the same scan with at most three tries and no new loop.
-grep -q "best2_victim" "${DISP_HDR}" || fail "second best missing"
+grep -qE "best2_victim|->best2|\.best2" "${DISP_HDR}" || fail "second best missing"
 grep -q "have_best2" "${DISP_HDR}" || fail "second best flag missing"
 grep -q "best2_bkt" "${DISP_HDR}" || fail "second best bucket missing"
 grep -q "at most three tries" "${DISP_HDR}" || fail "three try prose missing"
 grep -q "no new loop" "${DISP_HDR}" || fail "no new loop prose missing"
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "6" ] || fail "loop budget drifted with second best"
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted with second best"
 if grep -q "u32 best_victim =" "${DISP_HDR}" 2>/dev/null; then
     fail "dispatch dead store reappeared"
 fi

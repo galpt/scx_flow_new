@@ -477,12 +477,16 @@ static __noinline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 	if (!t || !now)
 		return;
 	win = (u64)FLOW_RUN_WIN_NS;
+	/* Keep each run-history access at a fixed offset for the verifier. */
+	#pragma unroll
 	for (i = 0; i < 8; i++) {
 		u64 s = READ_ONCE(t->run_stamp[i]);
 
 		if (s && s > now)
 			return;
 	}
+	/* Keep each run-history access at a fixed offset for the verifier. */
+	#pragma unroll
 	for (i = 0; i < 8; i++) {
 		u64 s = READ_ONCE(t->run_stamp[i]);
 		u64 d = READ_ONCE(t->run_dur[i]);
@@ -517,6 +521,8 @@ static __noinline void flow_run_close(struct flow_task_ctx *t, u64 now)
 	win = (u64)FLOW_RUN_WIN_NS;
 	if (tot > win)
 		tot = win;
+	/* Keep each run-history access at a fixed offset for the verifier. */
+	#pragma unroll
 	for (i = 0; i < 8; i++) {
 		u64 s = READ_ONCE(t->run_stamp[i]);
 
