@@ -66,7 +66,8 @@ static __always_inline bool flow_rb_is_empty(struct flow_rb_root __arena *rb)
 }
 /* Stale-aware minimum key. Zero means unknown (empty or invalidated on
  * remove) and reads as plus INF so unknown never wins a tie-break.
- * Outlined so both drain tiers verify the read once. */
+ * Both drain tiers and the continuation read fail closed through this
+ * helper. Outlined so both drain tiers verify the read once. */
 static __noinline u64 flow_min_key_inf(u32 cpu)
 {
 	u64 k;
@@ -285,6 +286,7 @@ static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc,
 	u64 dl;
 	u64 min_k;
 	u64 now;
+	const s64 vmax = (s64)0x7fffffffffffffffLL;
 
 	if (!flow_cpu_ok(cpu))
 		return false;
@@ -303,14 +305,39 @@ static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc,
 		have = (u64)FLOW_SLICE_MIN_NS;
 	w = flow_task_weight(prev, t);
 	nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
-	floored = flow_seq_floor(llc, nv);
-	nvd = flow_eevdf_vd(t, floored, 0, w);
+	/* Provisional floor without install for the minimum check, so a
+	 * failed check never lifts the floor and a later retry with
+	 * unchanged inputs lifts once. Unknown minimum reads fail closed. */
+	{
+		s64 prov;
 
-	if (!q_empty) {
-		dl = flow_rb_deadline(nvd);
-		min_k = READ_ONCE(flow_cpu_min_key[cpu]);
-		if (min_k && dl > min_k)
-			return false;
+		if (!flow_llc_ok(llc)) {
+			prov = nv;
+		} else {
+			s64 last = READ_ONCE(flow_llc_seq[llc]);
+
+			if (nv <= last) {
+				if (last == vmax)
+					prov = last;
+				else
+					prov = last + 1;
+			} else {
+				s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
+
+				prov = nv < cap ? nv : cap;
+			}
+		}
+		nvd = flow_eevdf_vd(t, prov, 0, w);
+		if (!q_empty) {
+			dl = flow_rb_deadline(nvd);
+			min_k = READ_ONCE(flow_cpu_min_key[cpu]);
+			if (!min_k)
+				return false;
+			if (dl > min_k)
+				return false;
+		}
+		(void)flow_seq_floor(llc, nv);
+		floored = prov;
 	}
 
 	rs = &flow_running_state[cpu];
@@ -378,11 +405,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
 		return;
-	/* Second continuation stays conditional so a failed first call plus an
-	 * empty own tree does not lift the floor twice. A seen unrunnable head
-	 * retests the continuation. Zero minimum means unknown and reads fail
-	 * open inside the helper. */
-	if (saw_unrunnable && flow_try_continue_prev(c, llc, prev))
+	/* Second continuation retries after the own drain. A failed first call
+	 * never lifts the floor, so a retry with unchanged inputs lifts once.
+	 * Unknown minimum reads fail closed inside the helper. */
+	if (flow_try_continue_prev(c, llc, prev))
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
 	 * tasks stay near warm cache. Larger buckets first within tier

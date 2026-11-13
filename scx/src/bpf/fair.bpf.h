@@ -221,9 +221,9 @@ static __noinline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
  * Prices tasks by their smoothed burst estimate, adds a bounded penalty for
  * continuous non-sleeping CPU hogs, and deducts bounded virtual lag credit.
  * When no lag credit applies the due time stays bound above the floor by a
- * multiple of the fair step derived from existing bounds only, so a task
+ * single fair step derived from existing bounds only, so a task
  * far ahead in service cannot hold a distant due time past a stall.
- * The multiple reuses LAG_MAX divided by SLICE_MIN with integer math only.
+ * The single step reuses LAG_MAX divided by SLICE_MAX with integer math only.
  */
 static __noinline s64 flow_eevdf_vd(struct flow_task_ctx *t, s64 floored,
 				    u64 lag_ns, u32 w)
@@ -256,7 +256,7 @@ static __noinline s64 flow_eevdf_vd(struct flow_task_ctx *t, s64 floored,
 	if (vd <= floored)
 		return flow_fair_cap_add(floored, 1);
 	if (!clamped_lag) {
-		u64 k = (u64)FLOW_LAG_MAX_NS / (u64)FLOW_SLICE_MIN_NS;
+		u64 k = (u64)FLOW_LAG_MAX_NS / (u64)FLOW_SLICE_MAX_NS;
 		u64 st = flow_fair_step(w);
 		u64 hi = st / (u64)FLOW_SLICE_MIN_NS;
 		u64 lo = st % (u64)FLOW_SLICE_MIN_NS;
@@ -307,8 +307,8 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
 
 /* Per LLC floor with bound catch-up. A stale base returns last plus one
  * for uniqueness. A fresh base advances at most one STEP past last, so a
- * single enqueue cannot lift the floor past a stall. Pricing stays
- * unchanged. Zero means unseeded and reads fail open in callers. */
+ * single enqueue cannot lift the floor past a stall. Pricing uses the
+ * capped value. Zero means unseeded and reads fail open in callers. */
 static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
@@ -336,7 +336,7 @@ static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 				next = cap;
 		}
 		if (__sync_val_compare_and_swap(&flow_llc_seq[llc], last, next) == last)
-			return want;
+			return next;
 	}
 	s64 last = READ_ONCE(flow_llc_seq[llc]);
 
@@ -345,7 +345,13 @@ static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 			return vmax;
 		return __sync_add_and_fetch(&flow_llc_seq[llc], 1LL);
 	}
-	return v;
+	{
+		s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
+		s64 ret = v < cap ? v : cap;
+
+		(void)__sync_val_compare_and_swap(&flow_llc_seq[llc], last, ret);
+		return ret;
+	}
 }
 
 static __always_inline void flow_run_reset(struct flow_task_ctx *t)

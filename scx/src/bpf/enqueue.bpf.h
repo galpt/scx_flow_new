@@ -97,6 +97,8 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 		r->cnt++;
 		done_depth = 1;
 		flow_rb_unlock(r);
+		/* Keep the small key outside the lock. Zero means empty only, so a
+		 * set from zero is exact. A race keeps the small key best effort. */
 		{
 			u32 owner = READ_ONCE(e->owner);
 			if (flow_cpu_ok(owner)) {
@@ -138,6 +140,8 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 				done_depth = depth;
 				done_dup = saw_dup;
 				flow_rb_unlock(r);
+				/* Keep the small key outside the lock. Zero means empty only, so a
+				 * set from zero is exact. A race keeps the small key best effort. */
 				{
 					u32 owner = READ_ONCE(e->owner);
 					if (flow_cpu_ok(owner)) {
@@ -170,6 +174,8 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 				done_depth = depth;
 				done_dup = saw_dup;
 				flow_rb_unlock(r);
+				/* Keep the small key outside the lock. Zero means empty only, so a
+				 * set from zero is exact. A race keeps the small key best effort. */
 				{
 					u32 owner = READ_ONCE(e->owner);
 					if (flow_cpu_ok(owner)) {
@@ -305,12 +311,33 @@ static __always_inline bool flow_rb_remove(struct flow_rb_root __arena *r, u64 k
 			}
 			if (r->cnt)
 				r->cnt--;
-			/* Self-healing cached minimum. Zero means unknown
-			 * (empty or stale) and reads fail open in callers.
-			 * A remove hit invalidates the cache so a stale key
-			 * never blocks progress. */
-			if (flow_cpu_ok(owner))
-				WRITE_ONCE(flow_cpu_min_key[owner], 0);
+			/* Recompute the cached minimum to the true leftmost after a
+			 * remove hit, so zero means empty only and never a stale
+			 * entry. Reads fail closed in callers. */
+			{
+				u64 new_root = READ_ONCE(r->root);
+				u64 new_min = 0;
+				if (new_root) {
+					u64 cur3 = new_root;
+					u32 s3 = 0;
+					while (can_loop) {
+						struct flow_rb_entry __arena *ce = (void __arena *)(u64)cur3;
+						u64 l = READ_ONCE(ce->node.rb_left);
+						if (!l) {
+							new_min = READ_ONCE(ce->key);
+							break;
+						}
+						if (s3 >= 32U) {
+							new_min = 0;
+							break;
+						}
+						s3++;
+						cur3 = l;
+					}
+				}
+				if (flow_cpu_ok(owner))
+					WRITE_ONCE(flow_cpu_min_key[owner], new_min);
+			}
 			flow_rb_unlock(r);
 			scx_free(&flow_rb_alloc, c);
 			return true;
@@ -338,6 +365,33 @@ static __always_inline bool flow_rb_remove(struct flow_rb_root __arena *r, u64 k
 	}
 	flow_rb_unlock(r);
 	return false;
+}
+/* Successor minimum after a leftmost pop. A right child needs its leftmost
+ * descendant with the same bound, so the walk finds it here. No right
+ * child means the parent holds the successor. Zero means unknown and
+ * reads fail closed. Outlined so every pop verifies the walk once. */
+static __noinline u64 flow_rb_next_min(u64 right, u64 parent)
+{
+	if (right) {
+		u64 cur2 = right;
+		u32 s2 = 0;
+		while (can_loop) {
+			struct flow_rb_entry __arena *ce = (void __arena *)(u64)cur2;
+			u64 l = READ_ONCE(ce->node.rb_left);
+			if (!l)
+				return READ_ONCE(ce->key);
+			if (s2 >= 32U)
+				return 0;
+			s2++;
+			cur2 = l;
+		}
+		return 0;
+	}
+	if (parent) {
+		struct flow_rb_entry __arena *pp = (void __arena *)(u64)parent;
+		return READ_ONCE(pp->key);
+	}
+	return 0;
 }
 /* Pop the leftmost entry. The caller clears the queued bit plus the tree
  * bit first and owns the single dec on live moves only. Dead reaps free
@@ -390,16 +444,12 @@ static __always_inline struct flow_rb_entry __arena *flow_rb_pop(struct flow_rb_
 	}
 	if (r->cnt)
 		r->cnt--;
+	/* Refresh the cached minimum to the true successor through the
+	 * outlined walk, so every pop verifies once. Zero means unknown or
+	 * empty and reads fail closed in callers. */
 	{
 		u32 owner = READ_ONCE(least->owner);
-		u64 next_min = 0;
-		if (right) {
-			struct flow_rb_entry __arena *rc = (void __arena *)(u64)right;
-			next_min = READ_ONCE(rc->key);
-		} else if (parent) {
-			struct flow_rb_entry __arena *pp = (void __arena *)(u64)parent;
-			next_min = READ_ONCE(pp->key);
-		}
+		u64 next_min = flow_rb_next_min(right, parent);
 		if (flow_cpu_ok(owner))
 			WRITE_ONCE(flow_cpu_min_key[owner], next_min);
 	}
@@ -477,6 +527,23 @@ static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 l
 /* Tail gate outlined so both pre-win and post-win checks verify once.
  * Returns true when the tail passes. Expired slice with zero raw passes
  * so an overrun at the tick still preempts. Integer only. */
+/* Far win bypasses wall gates. Win holds the gapped new due time and run
+ * holds the running due time. Far means four gaps below the run, so a
+ * distant win still preempts past the wall gates. Four reuses the gap
+ * only with no new knob. Integer only with saturation guards. The token
+ * still spends, so each run still kicks at most once. Outlined so both
+ * pre-win and post-win checks verify once. */
+static __noinline bool flow_kick_far_win(s64 win, s64 run_vd)
+{
+	const s64 vmax = (s64)0x7fffffffffffffffLL;
+	s64 ov = (s64)FLOW_KICK_GAP_NS * 4;
+
+	if (win >= vmax - ov)
+		return false;
+	if (win + ov >= run_vd)
+		return false;
+	return true;
+}
 static __noinline bool flow_kick_tail_ok(u64 raw_rem, u64 ran)
 {
 	u64 rem = (raw_rem > ran) ? (raw_rem - ran) : 0;
@@ -577,8 +644,7 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	now = bpf_ktime_get_ns();
 	ran = flow_lag_clamp(now > start ? now - start : 0);
 	{
-		s64 ov = (s64)FLOW_KICK_GAP_NS * 4;
-		bool over = win < vmax - ov && win + ov < run_vd;
+		bool over = flow_kick_far_win(win, run_vd);
 
 		if (!over && ran < (u64)FLOW_KICK_GRAN_NS) {
 			flow_stat_inc(llc, 8);
@@ -626,9 +692,10 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	}
 	fresh_raw_rem = READ_ONCE(rs->slice_rem);
 	{
-		s64 ov2 = (s64)FLOW_KICK_GAP_NS * 4;
-		bool over2 = win < vmax - ov2 && win + ov2 < fresh_vd;
+		bool over2 = flow_kick_far_win(win, fresh_vd);
 
+		now = bpf_ktime_get_ns();
+		ran = flow_lag_clamp(now > start ? now - start : 0);
 		if (!over2 && !flow_kick_tail_ok(fresh_raw_rem, ran)) {
 			(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 			flow_stat_inc(llc, 8);

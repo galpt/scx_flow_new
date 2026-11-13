@@ -47,9 +47,10 @@ struct {
 volatile u64 flow_ccx_prefer;
 volatile u64 flow_smt_enabled = 1;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
-/* Cached minimum queue key per CPU. Zero means unknown (empty or stale
- * after a remove hit). Continuation treats zero as non-blocking and the
- * drain tie-break treats zero as plus INF, so stale reads fail open. */
+/* Cached minimum queue key per CPU. Zero means empty or unknown on a
+ * walk cap. Remove recomputes to the true leftmost, so a stale key
+ * never stays. Continuation treats zero as blocking and the drain
+ * tie-break treats zero as plus INF, so stale reads fail closed. */
 u64 flow_cpu_min_key[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];
 struct flow_rb_root __arena *flow_rb_roots;
