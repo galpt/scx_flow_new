@@ -239,6 +239,18 @@ static __always_inline bool flow_rb_remove(struct flow_rb_root __arena *r, u64 k
 					succ_parent = succ;
 					succ = sleft;
 				}
+				/* Bounded walk hit the step cap with a live left
+				 * child still linked. Splicing now would orphan the
+				 * deep successor chain, so drop the lock and fail
+				 * closed with no gauge move. */
+				{
+					struct flow_rb_entry __arena *chk =
+						(void __arena *)(u64)succ;
+					if (READ_ONCE(chk->node.rb_left)) {
+						flow_rb_unlock(r);
+						return false;
+					}
+				}
 				if (succ == right) {
 					struct flow_rb_entry __arena *s = (void __arena *)(u64)succ;
 					s->node.rb_left = left;
@@ -385,7 +397,22 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
 /* Idle wakes go only to an idle target. Each miss counts a skip
  * with no wake. Misses split by cause with no new counter. A bad
  * target skips. A masked target skips. An offline target skips.
- * A busy target skips. */
+ * A busy target skips. An idle wake ramps the target to max frequency
+ * at once so the P-state ramp overlaps the IPI. */
+static __always_inline void flow_kick_cpuperf_max(s32 tgt)
+{
+	u32 perf;
+
+	if (tgt < 0 || !flow_cpu_ok((u32)tgt) || !flow_cpu_live((u32)tgt))
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	perf = (u32)SCX_CPUPERF_ONE;
+	if (!perf)
+		return;
+	scx_bpf_cpuperf_set(tgt, perf);
+}
+
 static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
 	if (tgt < 0) {
@@ -404,6 +431,7 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 		flow_stat_inc(llc, 8);
 		return;
 	}
+	flow_kick_cpuperf_max(tgt);
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 }
@@ -411,15 +439,18 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
  * target then idle then run then token then gap then wall then win. Each
  * miss counts a skip with no wake. Misses split by cause with no new
  * counter. A bad or masked or offline target skips. An idle target takes
- * an idle wake. A stale run skips. An already kicked run skips. A late due
- * time past the gap skips. A fresh run under granularity skips. A short
- * tail skips. A lost race skips. A changed run after the win skips, so a
+ * an idle wake at max frequency. A stale run skips. An already kicked run
+ * skips. A late due time past the gap skips. A fresh run under granularity
+ * skips. A short tail skips unless the slice already expired at the tick.
+ * A lost race skips. A changed run after the win skips, so a
  * stale kick never wakes a fresh run. The token keeps the low thirty two
  * bits of the run count, so a repeat needs four billion runs on one CPU.
  * Gates run gap then granularity then tail with no reorder. Each run kicks
  * at most once to prevent storms, so a later even earlier Virtual deadline
  * in the same run misses with no second kick. The post win tail recheck
- * keeps the same tail bound with the token already spent. */
+ * keeps the same tail bound with the token already spent. An abort after
+ * winning the token on the same generation restores the token, so a
+ * later Virtual deadline can still preempt. */
 static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
@@ -432,10 +463,12 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	u64 start;
 	u64 now;
 	u64 ran;
+	u64 raw_rem;
 	u64 rem;
 	u32 c;
 	u64 fresh_gen;
 	s64 fresh_vd;
+	u64 fresh_raw_rem;
 	u64 fresh_rem;
 	/* Step one of seven keeps the target gate. A bad or masked or
 	 * offline target skips with no wake. */
@@ -445,8 +478,9 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		return;
 	}
 	/* Step two of seven keeps the idle fast path. An idle target takes
-	 * an idle wake with no preempt. */
+	 * an idle wake at max frequency with no preempt. */
 	if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
+		flow_kick_cpuperf_max(tgt);
 		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 		flow_stat_inc(llc, 7);
 		return;
@@ -490,8 +524,9 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	}
 	/* Step six of seven keeps the wall gates. A fresh run under
 	 * granularity skips on a tear free heuristic read, then a short
-	 * tail skips on a tear free heuristic read. A heuristic skip can
-	 * miss a preempt with dispatch still correct. Wraparound reads zero. */
+	 * tail skips on a tear free heuristic read unless the slice already
+	 * expired at the tick. A heuristic skip can miss a preempt with
+	 * dispatch still correct. Wraparound reads zero. */
 	start = READ_ONCE(rs->start_ts);
 	now = bpf_ktime_get_ns();
 	ran = flow_lag_clamp(now > start ? now - start : 0);
@@ -499,8 +534,12 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	rem = READ_ONCE(rs->slice_rem);
-	if (rem < (u64)FLOW_KICK_TAIL_NS) {
+	raw_rem = READ_ONCE(rs->slice_rem);
+	rem = (raw_rem > ran) ? (raw_rem - ran) : 0;
+	/* Only skip when raw_rem > 0 (not already expired at tick) and
+	 * the tail is short. When raw_rem == 0 the task already overran
+	 * its slice at the tick, so bypass the tail gate. */
+	if (raw_rem > 0 && rem < (u64)FLOW_KICK_TAIL_NS) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -515,8 +554,10 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	 * the mask may have moved while winning the token. A changed
 	 * run skips with the token spent, so each run still kicks at
 	 * most once. A short tail after the win skips with the token
-	 * spent to avoid a wasted preempt on a tail below the bound. */
+	 * restored on the same generation to avoid a wasted preempt on
+	 * a tail below the bound. */
 	if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {
+		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -527,11 +568,14 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	}
 	fresh_vd = READ_ONCE(rs->vd);
 	if (!(win < fresh_vd)) {
+		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	fresh_rem = READ_ONCE(rs->slice_rem);
-	if (fresh_rem < (u64)FLOW_KICK_TAIL_NS) {
+	fresh_raw_rem = READ_ONCE(rs->slice_rem);
+	fresh_rem = (fresh_raw_rem > ran) ? (fresh_raw_rem - ran) : 0;
+	if (fresh_raw_rem > 0 && fresh_rem < (u64)FLOW_KICK_TAIL_NS) {
+		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -732,10 +776,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
 		 * Trees hold without bound with pure deadline order
 		 * and a single kick. An insert miss keeps the newcomer in
-		 * FIFO with no evict. Steady tasks price by the smoothed
-		 * kept max with a single response due time and run in one slice
-		 * quanta, while unknown tasks keep the burst path with no
-		 * extra probe. Enqueue reads the smoothed reference from
+		 * FIFO with no evict. Unknown tasks price by the true EEVDF
+		 * quantum minus bounded virtual lag credit, while steady
+		 * tasks price by the smoothed kept max with a complementary
+		 * response due time. Enqueue reads the smoothed reference from
 		 * the cached flag with no clock and no scan. Wait comes
 		 * from the floor advance with no new clock and no scan.
 		 * The fallback prices the due time with the shared charge
@@ -745,24 +789,33 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
 		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
-		s64 vd = flow_vd_for(floored, READ_ONCE(t->burst_ns), w);
-		u64 slice_len = (u64)FLOW_SLICE_MIN_NS;
-		struct flow_rb_root __arena *rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
-		bool fell = true;
-		u64 sref = flow_smoothed_ref(t);
-		u64 eff = 0;
+		u64 W = (base > 0 && floored > base) ? (u64)(floored - base) : (u64)0;
+		s64 vd;
+		u64 slice_len;
+		struct flow_rb_root __arena *rb;
+		bool fell;
+		u64 sref;
+		u64 eff;
 		u64 S;
-		u64 W;
 		bool ready;
+		if (W > (u64)FLOW_RUN_WIN_NS)
+			W = (u64)FLOW_RUN_WIN_NS;
+		/* Stage 1: Unpredicted task (sref == 0) runs pure EEVDF with
+		 * 1ms quantum and bounded virtual lag credit. */
+		vd = flow_eevdf_vd(floored, W, w);
+		slice_len = (u64)FLOW_SLICE_MIN_NS;
+		rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
+		fell = true;
+		sref = flow_smoothed_ref(t);
+		eff = 0;
+		/* Stage 2: Predicted task (sref > 0) runs custom-quantum EEVDF
+		 * complemented by HRRN when wait W > 0. */
 		if (sref) {
 			eff = flow_smoothed_eff(sref, READ_ONCE(t->burst_ns));
 			vd = flow_run_vd(floored, eff, w);
 			slice_len = flow_run_slice(sref);
 		}
 		S = sref ? eff : b;
-		W = floored > base ? (u64)(floored - base) : (u64)0;
-		if (W > (u64)FLOW_RUN_WIN_NS)
-			W = (u64)FLOW_RUN_WIN_NS;
 		ready = hrrn_ready(t, sref, eff, W, S, w, no_cpu);
 		if (ready) {
 			vd = vd_HRRN(floored, W, S, w);

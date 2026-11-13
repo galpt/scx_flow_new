@@ -186,10 +186,25 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 		return false;
 	return cx == hint;
 }
+/* Empty BST probe for placement. Reads the owner tree root directly so
+ * select stays independent of the enqueue insert helper. A null table
+ * or out of range CPU reads empty so the scan still makes progress. */
+static __always_inline bool flow_select_rb_empty(u32 cpu)
+{
+	struct flow_rb_root __arena *r;
+
+	if (!flow_cpu_ok(cpu))
+		return true;
+	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
+		return true;
+	if (!flow_rb_roots)
+		return true;
+	r = &flow_rb_roots[cpu];
+	return READ_ONCE(r->root) == 0;
+}
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 hint = prev_cpu;
-	s32 tgt;
 	int hint_llc = -1;
 	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
 	bool have_hint_topo = false;
@@ -210,9 +225,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	scx_arena_subprog_init();
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
-	tgt = flow_constrained_target(hint, p);
-	if (tgt >= 0)
-		return tgt;
+
+	/* Fast path: if task is pinned, or prev_cpu is allowed, live, and idle,
+	 * return immediately. Otherwise run the CCX/LLC/cache-bucket scan. */
+	if (flow_is_pinned(p))
+		return flow_constrained_target(hint, p);
+	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint)) {
+		if (scx_bpf_test_and_clear_cpu_idle(hint))
+			return hint;
+	}
 	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
 	    topo_contains(topo_all, (u32)hint)) {
 		hint_llc = flow_hint_llc(hint);
@@ -238,6 +259,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (!flow_cpu_live(c))
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
+			continue;
+		/* Prefer cores whose BST is currently empty, so fresh tasks
+		 * land where no backlog waits. Busy cores stay reachable
+		 * through the first allowed fallback when no empty core wins. */
+		if (!flow_select_rb_empty(c))
 			continue;
 		vllc = topo_cpu_to_llc_id(c);
 		if (vllc < 0 || !flow_llc_ok((u32)vllc))

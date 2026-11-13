@@ -149,9 +149,15 @@ static __always_inline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
 		if (saw)
 			*saw = true;
 		flow_forward_from_peeked(p, llc, slot);
-		/* Keep the task alive through the fallback queue. The task
-		 * stays queued, so only the tree bit clears with no gauge
-		 * move and the fallback count grows. */
+		/* If stealing from a remote or peer CPU that IS allowed for p,
+		 * try to put the entry right back into the victim BST first
+		 * so p does not lose its deadline order. */
+		if (steal && flow_cpu_allowed((s32)READ_ONCE(got->owner), p) &&
+		    flow_rb_insert(rb, got)) {
+			bpf_task_release(p);
+			return 0;
+		}
+		/* Fallback if local unrunnable or re-insert contended or full. */
 		lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 		slice = (u64)FLOW_SLICE_MIN_NS;
 		if (lt) {
@@ -564,19 +570,14 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		used = 0;
 	else
 		used = have - cur;
-	/* Track the run length before the tail charge, so the next due
-	 * time prices what this run actually burnt. */
-	if (cur < (u64)FLOW_SLICE_MIN_NS)
-		total_used = (u64)FLOW_SLICE_MIN_NS - cur;
-	else
-		total_used = 0;
-	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
-	/* Recent run sum grows by the tail here. Ticks already added
-	 * their deltas, so this adds only the tail past the last tick.
-	 * Prune drops stamps past the window and freezes on a zero or
-	 * backward clock. Close pushes the sum on sleep only, so tasks
-	 * that never sleep stay unknown with no extra probe. */
+	/* Accumulate the tail burnt past the last tick first, so run_total
+	 * holds the exact runtime burnt across this activation even when
+	 * the initial slice was custom-sized below FLOW_SLICE_MIN_NS. */
 	flow_run_add(t, used);
+	total_used = READ_ONCE(t->run_total);
+	if (!total_used && used)
+		total_used = used;
+	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
 	{
 		u64 now = bpf_ktime_get_ns();
 		if (now) {
@@ -606,11 +607,11 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	}
 	rs->slice_rem = cur;
 	t->slice_rem = cur;
-	/* A sleeping task leaves the core idle at half. A runnable task
-	 * keeps its count with no frequency change. */
+	/* Intentional cpufreq policy: keep core at 100% if it still has a
+	 * task waiting in its local tree. Only drop to 50% when empty. */
 	if (runnable)
 		flow_stat_inc(rs->llc_id, 10);
-	else
+	else if (flow_rb_is_empty(flow_rb_for_cpu((s32)cpu)))
 		flow_cpuperf_mark(cpu, true);
 }
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
@@ -649,19 +650,20 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	}
 	if (cur && cur < have) {
 		u64 delta = have - cur;
-		u64 burnt = (cur < (u64)FLOW_SLICE_MIN_NS) ?
-			    ((u64)FLOW_SLICE_MIN_NS - cur) : (u64)FLOW_SLICE_MIN_NS;
-		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
-		u64 rem = (burnt < b) ? (b - burnt) : cur;
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
-		s64 nvd = flow_vd_for(nv, rem, w);
+		s64 nvd = flow_vd_for(nv, cur, w);
+		u64 tick_now = bpf_ktime_get_ns();
+
 		flow_run_add(t, delta);
 		t->vtime = nv;
 		t->vd = nvd;
 		t->slice_rem = cur;
 		rs->vtime = nv;
 		rs->vd = nvd;
+		rs->slice_rem = cur;
+		if (tick_now)
+			rs->start_ts = tick_now;
 		scx_bpf_task_set_dsq_vtime(p, nvd);
 	} else if (!cur && have) {
 		/* The slice ran out at the tick. Keep the stored slice so
