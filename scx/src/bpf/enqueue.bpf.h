@@ -380,9 +380,12 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
  * target skips. A masked target skips. An offline target skips.
  * A busy target skips. An idle wake ramps the target to max frequency
  * at once so the P-state ramp overlaps the IPI. Max path reuses the
- * shared mark helper with no duplicate set logic. */
+ * shared mark helper with no duplicate set logic. The target is
+ * checked again after the idle claim, so a stale claim skips with
+ * no kick and no perf set. */
 static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
+	u32 c;
 	if (tgt < 0) {
 		flow_stat_inc(llc, 8);
 		return;
@@ -399,7 +402,16 @@ static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 l
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	flow_cpuperf_mark((u32)tgt, false);
+	c = (u32)tgt;
+	if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	if ((u64)c >= scx_bpf_nr_cpu_ids()) {
+		flow_stat_inc(llc, 8);
+		return;
+	}
+	flow_cpuperf_mark(c, false);
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 }

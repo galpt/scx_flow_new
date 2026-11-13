@@ -113,14 +113,31 @@ static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 }
 /* A busy core runs at max and an idle core runs at half. The call
  * stays on one live core and never sends zero. Shared here so enqueue
- * and dispatch use one helper with no duplicate max path. */
+ * and dispatch use one helper with no duplicate max path. The gate
+ * also bounds the id by the live ids and skips a remote target while
+ * a queue lock is held, so the set never trips the invalid target
+ * exit. Kick stays allowed for a valid target while the set skips. */
 static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 {
 	u32 perf;
 	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
 		return;
+	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
+		return;
 	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
 		return;
+	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
+		struct rq *locked = scx_bpf_locked_rq();
+		if (locked) {
+			struct rq *target = scx_bpf_cpu_rq((s32)cpu);
+			if (!target || target != locked)
+				return;
+		}
+	} else {
+		struct rq *locked = scx_bpf_locked_rq();
+		if (locked && cpu != bpf_get_smp_processor_id())
+			return;
+	}
 	perf = (u32)SCX_CPUPERF_ONE;
 	if (idle)
 		perf = (u32)(SCX_CPUPERF_ONE / 2);
