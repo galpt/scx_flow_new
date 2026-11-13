@@ -466,9 +466,20 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 		return;
 	}
 	/* Step two of seven keeps the idle fast path. An idle target takes
-	 * an idle wake at max frequency with no preempt. */
+	 * an idle wake at max frequency with no preempt. The target is
+	 * checked again after the idle claim, so a stale claim skips with
+	 * no kick and no perf set. */
 	if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
-		flow_cpuperf_mark((u32)tgt, false);
+		c = (u32)tgt;
+		if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
+			flow_stat_inc(llc, 8);
+			return;
+		}
+		if ((u64)c >= scx_bpf_nr_cpu_ids()) {
+			flow_stat_inc(llc, 8);
+			return;
+		}
+		flow_cpuperf_mark(c, false);
 		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 		flow_stat_inc(llc, 7);
 		return;
@@ -543,7 +554,8 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	 * most once. A short tail after the win skips with the token
 	 * restored on the same generation to avoid a wasted preempt on
 	 * a tail below the bound. */
-	if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {
+	if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt) ||
+	    (u64)c >= scx_bpf_nr_cpu_ids()) {
 		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 		flow_stat_inc(llc, 8);
 		return;

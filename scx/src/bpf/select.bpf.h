@@ -116,7 +116,8 @@ static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
  * and dispatch use one helper with no duplicate max path. The gate
  * also bounds the id by the live ids and skips a remote target while
  * a queue lock is held, so the set never trips the invalid target
- * exit. Kick stays allowed for a valid target while the set skips. */
+ * exit. Kick stays allowed for a valid target while the set skips.
+ * Caller must hold the target runqueue lock for a remote set, else the call skips. */
 static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 {
 	u32 perf;
