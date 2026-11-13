@@ -97,6 +97,14 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 		r->cnt++;
 		done_depth = 1;
 		flow_rb_unlock(r);
+		{
+			u32 owner = READ_ONCE(e->owner);
+			if (flow_cpu_ok(owner)) {
+				u64 cur_min = READ_ONCE(flow_cpu_min_key[owner]);
+				if (!cur_min || key < cur_min)
+					WRITE_ONCE(flow_cpu_min_key[owner], key);
+			}
+		}
 		WRITE_ONCE(m_rb_depth, 1ULL);
 		if (READ_ONCE(m_rb_depth_max) < 1ULL)
 			WRITE_ONCE(m_rb_depth_max, 1ULL);
@@ -130,6 +138,14 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 				done_depth = depth;
 				done_dup = saw_dup;
 				flow_rb_unlock(r);
+				{
+					u32 owner = READ_ONCE(e->owner);
+					if (flow_cpu_ok(owner)) {
+						u64 cur_min = READ_ONCE(flow_cpu_min_key[owner]);
+						if (!cur_min || key < cur_min)
+							WRITE_ONCE(flow_cpu_min_key[owner], key);
+					}
+				}
 				WRITE_ONCE(m_rb_depth, (u64)done_depth);
 				if ((u64)done_depth > READ_ONCE(m_rb_depth_max))
 					WRITE_ONCE(m_rb_depth_max, (u64)done_depth);
@@ -154,6 +170,14 @@ static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flo
 				done_depth = depth;
 				done_dup = saw_dup;
 				flow_rb_unlock(r);
+				{
+					u32 owner = READ_ONCE(e->owner);
+					if (flow_cpu_ok(owner)) {
+						u64 cur_min = READ_ONCE(flow_cpu_min_key[owner]);
+						if (!cur_min || key < cur_min)
+							WRITE_ONCE(flow_cpu_min_key[owner], key);
+					}
+				}
 				WRITE_ONCE(m_rb_depth, (u64)done_depth);
 				if ((u64)done_depth > READ_ONCE(m_rb_depth_max))
 					WRITE_ONCE(m_rb_depth_max, (u64)done_depth);
@@ -360,6 +384,19 @@ static __always_inline struct flow_rb_entry __arena *flow_rb_pop(struct flow_rb_
 	}
 	if (r->cnt)
 		r->cnt--;
+	{
+		u32 owner = READ_ONCE(least->owner);
+		u64 next_min = 0;
+		if (right) {
+			struct flow_rb_entry __arena *rc = (void __arena *)(u64)right;
+			next_min = READ_ONCE(rc->key);
+		} else if (parent) {
+			struct flow_rb_entry __arena *pp = (void __arena *)(u64)parent;
+			next_min = READ_ONCE(pp->key);
+		}
+		if (flow_cpu_ok(owner))
+			WRITE_ONCE(flow_cpu_min_key[owner], next_min);
+	}
 	flow_rb_unlock(r);
 	__sync_fetch_and_add(&m_leftmost_hit, 1ULL);
 	return least;
@@ -866,6 +903,34 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 * the same order with no gauge move. */
 	if (flow_enqueue_cold_pre(p, tgt, llc, enq_flags, pinned))
 		return;
+	/* Direct local dispatch fast path for idle cores with empty trees.
+	 * Avoids slab allocation, tree lock, and dispatch callback overhead.
+	 */
+	if (!no_cpu && tgt >= 0 && flow_cpu_allowed(tgt, p) &&
+	    flow_rb_empty(flow_rb_for_cpu(tgt)) &&
+	    scx_bpf_test_and_clear_cpu_idle(tgt)) {
+		s64 base = READ_ONCE(t->vtime);
+		u32 w = flow_task_weight(p, t);
+		s64 floored = flow_seq_floor(llc, base);
+		u64 lag = (base > 0 && floored > base) ? (u64)(floored - base) : 0ULL;
+		s64 vd = flow_eevdf_vd(t, floored, lag, w);
+		u64 slice_len = flow_calc_slice(t, true);
+		u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
+
+		t->vtime = floored;
+		t->vd = vd;
+		t->slice_rem = slice_len;
+		t->llc_id = llc;
+		t->run_pad = (u32)tgt;
+		scx_bpf_task_set_dsq_vtime(p, vd);
+		if (flow_cpu_ok((u32)tgt) && (u64)(u32)tgt < scx_bpf_nr_cpu_ids())
+			flow_cpuperf_mark((u32)tgt, false);
+		scx_bpf_dsq_insert(p, ldsq, slice_len, enq_flags);
+		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
+		flow_stat_inc(llc, 1);
+		flow_stat_inc(llc, 7);
+		return;
+	}
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
 		/* Single slot per task through the queued bit. A duplicate
@@ -904,30 +969,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * path first. The gated response replaces both the due time
 		 * and the slice only when every input proves usable. */
 		s64 base = READ_ONCE(t->vtime);
-		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
+		u32 w = flow_task_weight(p, t);
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-		u64 W = (base > 0 && floored > base) ? (u64)(floored - base) : (u64)0;
-		s64 vd;
-		u64 slice_len;
-		u64 sref;
-		if (W > (u64)FLOW_RUN_WIN_NS)
-			W = (u64)FLOW_RUN_WIN_NS;
-		sref = flow_smoothed_ref(t);
-		/* Single Virtual deadline branch with no overwrite. Unpredicted
-		 * tasks run pure EEVDF with 1ms quantum and lag credit. Predicted
-		 * tasks run custom-quantum EEVDF complemented by HRRN when the
-		 * gate holds, else the smoothed run value. One charge per path. */
-		if (!sref) {
-			vd = flow_eevdf_vd(floored, W, w);
-			slice_len = (u64)FLOW_SLICE_MIN_NS;
-		} else {
-			u64 eff = flow_smoothed_eff(sref, READ_ONCE(t->burst_ns));
-			slice_len = flow_run_slice(sref);
-			if (hrrn_ready(t, sref, eff, W, eff, w, no_cpu))
-				vd = vd_HRRN(floored, W, eff, w);
-			else
-				vd = flow_run_vd(floored, eff, w);
-		}
+		u64 lag = (base > 0 && floored > base) ? (u64)(floored - base) : (u64)0;
+		bool q_empty = !no_cpu && tgt >= 0 && flow_rb_empty(flow_rb_for_cpu(tgt));
+		s64 vd = flow_eevdf_vd(t, floored, lag, w);
+		u64 slice_len = flow_calc_slice(t, q_empty);
 		t->vtime = floored;
 		t->vd = vd;
 		t->slice_rem = slice_len;

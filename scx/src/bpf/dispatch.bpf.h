@@ -255,6 +255,73 @@ static __noinline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bo
 	}
 	return 0;
 }
+static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc,
+					      struct task_struct *prev)
+{
+	struct flow_task_ctx *t;
+	struct flow_running_state *rs;
+	struct flow_rb_root __arena *rb;
+	bool q_empty;
+	u64 have;
+	u64 slice;
+	u32 w;
+	s64 nv;
+	s64 floored;
+	s64 nvd;
+	u64 dl;
+	u64 min_k;
+	u64 now;
+
+	if (!flow_cpu_ok(cpu))
+		return false;
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return false;
+	if (!flow_cpu_allowed((s32)cpu, prev))
+		return false;
+	t = bpf_task_storage_get(&task_ctx_stor, prev, 0, 0);
+	if (!t)
+		return false;
+
+	rb = flow_rb_for_cpu((s32)cpu);
+	q_empty = flow_rb_is_empty(rb);
+	have = READ_ONCE(t->slice_rem);
+	if (!have)
+		have = (u64)FLOW_SLICE_MIN_NS;
+	w = flow_task_weight(prev, t);
+	nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
+	floored = flow_seq_floor(llc, nv);
+	nvd = flow_eevdf_vd(t, floored, 0, w);
+
+	if (!q_empty) {
+		dl = flow_rb_deadline(nvd);
+		min_k = READ_ONCE(flow_cpu_min_key[cpu]);
+		if (min_k && dl > min_k)
+			return false;
+	}
+
+	rs = &flow_running_state[cpu];
+	flow_run_add(t, have);
+	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns),
+					READ_ONCE(t->run_total), 0, true);
+	slice = flow_calc_slice(t, q_empty);
+	now = bpf_ktime_get_ns();
+
+	t->vtime = floored;
+	t->vd = nvd;
+	t->slice_rem = slice;
+	rs->vtime = floored;
+	rs->vd = nvd;
+	rs->slice_rem = slice;
+	if (now)
+		rs->start_ts = now;
+
+	scx_bpf_task_set_dsq_vtime(prev, nvd);
+	scx_bpf_task_set_slice(prev, slice);
+	flow_cpuperf_mark(cpu, false);
+	flow_stat_inc(llc, 9);
+	return true;
+}
+
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 c;
@@ -275,7 +342,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
-	(void)prev;
 	scx_arena_subprog_init();
 	if (cpu < 0)
 		return;
@@ -294,7 +360,11 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			}
 		}
 	}
+	if (flow_try_continue_prev(c, llc, prev))
+		return;
 	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
+		return;
+	if (flow_try_continue_prev(c, llc, prev))
 		return;
 	/* Same cache group victims drain first inside the same LLC, so
 	 * tasks stay near warm cache. Larger buckets first within tier
@@ -340,11 +410,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (!flow_ccx_match(use_ccx, vccx, my_ccx))
 			continue;
 		vb = vw.l2;
-		if (!have_first) {
+		if (!vb && !have_first) {
 			first_victim = victim;
 			have_first = true;
 		}
-		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
+			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
+			     READ_ONCE(flow_cpu_min_key[victim]) < READ_ONCE(flow_cpu_min_key[best_victim])))) {
 			if (have_best && best_victim != victim) {
 				best2_victim = best_victim;
 				best2_bkt = best_bkt;
@@ -404,11 +476,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		if (flow_ccx_match(use_ccx, vw.ccx, my_ccx))
 			continue;
 		vb = vw.l3;
-		if (!have_first) {
+		if (!vb && !have_first) {
 			first_victim = victim;
 			have_first = true;
 		}
-		if (vb && (!have_best || flow_cache_larger(vb, best_bkt))) {
+		if (vb && (!have_best || flow_cache_larger(vb, best_bkt) ||
+			    (have_best && vb == best_bkt && best_victim < (u32)FLOW_MAX_CPUS &&
+			     READ_ONCE(flow_cpu_min_key[victim]) < READ_ONCE(flow_cpu_min_key[best_victim])))) {
 			if (have_best && best_victim != victim) {
 				best2_victim = best_victim;
 				best2_bkt = best_bkt;
@@ -540,8 +614,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	sl = p->scx.slice;
 	if (!sl)
 		sl = (u64)FLOW_SLICE_MIN_NS;
-	else if (sl > (u64)FLOW_SLICE_MIN_NS)
-		sl = (u64)FLOW_SLICE_MIN_NS;
+	else if (sl > (u64)FLOW_SLICE_MAX_NS)
+		sl = (u64)FLOW_SLICE_MAX_NS;
 	rs = &flow_running_state[cpu];
 	ng = rs->gen + 1;
 	if (ng == 0)
@@ -566,7 +640,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	 * ownership with no gauge move. The core is busy now, so it runs
 	 * at max. */
 	__sync_fetch_and_and(&t->flags,
-			      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB));
+			      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB |
+				       (u32)FLOW_FLAG_URGENT));
 	flow_cpuperf_mark(cpu, false);
 }
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
@@ -623,8 +698,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	 * cannot hold the queue head. */
 	if (used) {
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
-					  flow_eff_w(flow_nice_weight(p),
-						    flow_share_live(p)));
+					  flow_task_weight(p, t));
 		t->vtime = nv;
 		scx_bpf_task_set_dsq_vtime(p, nv);
 		if (!cur)
@@ -636,12 +710,8 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	}
 	rs->slice_rem = cur;
 	t->slice_rem = cur;
-	/* Intentional cpufreq policy: keep core at 100% if it still has a
-	 * task waiting in its local tree. Only drop to 50% when empty. */
 	if (runnable)
 		flow_stat_inc(rs->llc_id, 10);
-	else if (flow_rb_is_empty(flow_rb_for_cpu((s32)cpu)))
-		flow_cpuperf_mark(cpu, true);
 }
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
@@ -677,9 +747,10 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		if (now)
 			flow_run_prune(t, now);
 	}
+	flow_cpuperf_mark(cpu, false);
 	if (cur && cur < have) {
 		u64 delta = have - cur;
-		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
+		u32 w = flow_task_weight(p, t);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
 		s64 nvd = flow_vd_for(nv, cur, w);
 		flow_run_add(t, delta);
@@ -695,7 +766,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 		 * out by one slice so a wake can land at once with the two
 		 * views diverged until stopping. Seed the burst to one slice
 		 * for the next run. */
-		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
+		u32 w = flow_task_weight(p, t);
 		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
 		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
 		rs->vtime = nv;

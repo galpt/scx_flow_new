@@ -47,6 +47,7 @@ struct {
 volatile u64 flow_ccx_prefer;
 volatile u64 flow_smt_enabled = 1;
 struct flow_running_state flow_running_state[FLOW_MAX_CPUS];
+u64 flow_cpu_min_key[FLOW_MAX_CPUS];
 s64 flow_llc_seq[FLOW_MAX_LLCS];
 struct flow_rb_root __arena *flow_rb_roots;
 u64 flow_fwd_pid[FLOW_MAX_LLCS + 1];

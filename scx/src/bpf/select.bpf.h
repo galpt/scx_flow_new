@@ -245,10 +245,14 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *idle_mask;
+	const struct cpumask *smt_mask;
+	struct flow_task_ctx *t;
 	s32 hint = prev_cpu;
+	s32 waker_cpu;
 	int hint_llc = -1;
 	u32 hint_ccx = (u32)FLOW_CCX_UNKNOWN;
 	bool have_hint_topo = false;
+	bool short_burst = false;
 	s32 best = -1;
 	int best_score = 99;
 	bool best_same = false;
@@ -260,24 +264,94 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
-	(void)wake_flags;
+
 	if (!p)
 		return hint;
 	scx_arena_subprog_init();
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
+	waker_cpu = (s32)bpf_get_smp_processor_id();
+
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (t) {
+		struct task_struct *waker = bpf_get_current_task_btf();
+		bool urgent = (wake_flags & SCX_WAKE_SYNC) != 0;
+
+		if (READ_ONCE(t->burst_ns) < (u64)FLOW_SMT_STAY_BURST_NS)
+			short_burst = true;
+		if (waker && waker != p) {
+			if (waker->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER)) {
+				urgent = true;
+			} else {
+				struct flow_task_ctx *wt;
+
+				wt = bpf_task_storage_get(&task_ctx_stor, waker, 0, 0);
+				if (wt) {
+					u32 wfl = READ_ONCE(wt->flags);
+					u32 pfl = READ_ONCE(t->flags);
+
+					if (wfl & ((u32)FLOW_FLAG_INTERACTIVE | (u32)FLOW_FLAG_URGENT))
+						urgent = true;
+					/* Active producer fan-out shield: when waker wakes an
+					 * interactive consumer asynchronously, boost waker and
+					 * shield waker_cpu from mid-loop preemption.
+					 */
+					if ((pfl & (u32)FLOW_FLAG_INTERACTIVE) &&
+					    !(wake_flags & SCX_WAKE_SYNC)) {
+						__sync_fetch_and_or(&wt->flags, (u32)FLOW_FLAG_URGENT);
+						if (waker_cpu >= 0 && flow_cpu_ok((u32)waker_cpu)) {
+							u32 wc = (u32)waker_cpu;
+							struct flow_running_state *wrs = &flow_running_state[wc];
+
+							WRITE_ONCE(wrs->pad, (u32)READ_ONCE(wrs->gen));
+						}
+					}
+				}
+			}
+		}
+		if (urgent)
+			__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_URGENT);
+		else
+			__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_URGENT);
+	}
+
 	if (flow_is_pinned(p))
 		return flow_constrained_target(hint, p);
+
 	idle_mask = scx_bpf_get_idle_cpumask();
 	if (!idle_mask)
 		return flow_constrained_target(hint, p);
-	/* Read-only idle check: keeps the idle bit intact for flow_enqueue to kick */
-	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint) &&
-	    bpf_cpumask_test_cpu((u32)hint, idle_mask) &&
-	    flow_rb_empty(flow_rb_for_cpu(hint))) {
+	smt_mask = scx_bpf_get_idle_smtmask();
+	if (!smt_mask) {
 		scx_bpf_put_cpumask(idle_mask);
-		return hint;
+		return flow_constrained_target(hint, p);
 	}
+
+	/* Fast path: if prev_cpu has an empty BST and is either a fully idle
+	 * physical core, or is an idle thread for a micro-burst task (< 250us),
+	 * keep prev_cpu immediately.
+	 */
+	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint) &&
+	    flow_rb_empty(flow_rb_for_cpu(hint))) {
+		if (bpf_cpumask_test_cpu((u32)hint, smt_on ? smt_mask : idle_mask) ||
+		    (short_burst && bpf_cpumask_test_cpu((u32)hint, idle_mask))) {
+			scx_bpf_put_cpumask(smt_mask);
+			scx_bpf_put_cpumask(idle_mask);
+			return hint;
+		}
+	}
+
+	/* On synchronous wakeup when prev_cpu is busy, anchor topology search
+	 * around waker_cpu if it shares the LLC or prev_cpu is disallowed.
+	 */
+	if ((wake_flags & SCX_WAKE_SYNC) && waker_cpu >= 0 &&
+	    flow_cpu_ok((u32)waker_cpu) && flow_cpu_allowed(waker_cpu, p) &&
+	    flow_cpu_live((u32)waker_cpu)) {
+		if (hint < 0 || !flow_cpu_allowed(hint, p) ||
+		    flow_hint_llc(waker_cpu) == flow_hint_llc(hint))
+			hint = waker_cpu;
+	}
+
 	if (hint >= 0 && flow_cpu_ok((u32)hint) && topo_all &&
 	    topo_contains(topo_all, (u32)hint)) {
 		hint_llc = flow_hint_llc(hint);
@@ -291,15 +365,17 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		if (hint_llc >= 0 || hint_node)
 			have_hint_topo = true;
 	}
+
 	bpf_for(c, 0, FLOW_MAX_CPUS) {
 		u32 l;
 		u32 cx;
 		u8 cb = 0;
 		int score;
-		int pre;
 		int vllc;
 		bool same_node = false;
+		bool full_core = false;
 		struct flow_cpu_view vw;
+
 		if (!flow_cpu_live(c))
 			continue;
 		if (!flow_cpu_allowed((s32)c, p))
@@ -308,38 +384,36 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			continue;
 		if (!flow_rb_empty(flow_rb_for_cpu((s32)c)))
 			continue;
+		full_core = !smt_on || bpf_cpumask_test_cpu(c, smt_mask);
 		vllc = topo_cpu_to_llc_id(c);
 		if (vllc < 0 || !flow_llc_ok((u32)vllc))
 			continue;
 		l = (u32)vllc;
 		if (hint_node && topo_contains(hint_node, c))
 			same_node = true;
-		pre = 3;
-		if (have_hint_topo) {
-			if (hint_llc >= 0 && l == (u32)hint_llc)
-				pre = 0;
-			else if (same_node)
-				pre = 1;
-			else
-				pre = 2;
-		} else if (flow_is_primary(0)) {
-			/* Intentional: no hint topo falls back to the node tier.
-			 * The zero arg is the single node default with no widening.
-			 * No core walk runs here by design; each CPU stands single. */
-			pre = 2;
-		}
-		if (pre > best_score)
-			continue;
 		vw = flow_cpu_view(c);
 		cx = vw.ccx;
-		score = pre;
-		if (have_hint_topo && !smt_on && hint_llc >= 0 &&
-		    l == (u32)hint_llc && flow_ccx_match(use_ccx, cx, hint_ccx))
-			score = -1;
-		if (score == -1)
+
+		if (have_hint_topo && hint_llc >= 0 && l == (u32)hint_llc) {
+			if (full_core && flow_ccx_match(use_ccx, cx, hint_ccx))
+				score = -2;
+			else if (full_core)
+				score = -1;
+			else
+				score = 0;
+		} else if (have_hint_topo && same_node) {
+			score = full_core ? 1 : 2;
+		} else {
+			score = 3;
+		}
+
+		if (score > best_score)
+			continue;
+		if (score == -2)
 			cb = vw.l2;
-		else if (score == 0)
+		else if (score <= 0)
 			cb = vw.l3;
+
 		if (score < best_score) {
 			best_score = score;
 			best = (s32)c;
@@ -347,14 +421,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			best_bkt = cb;
 			have_best_bkt = cb ? true : false;
 		} else if (score == best_score) {
-			/* Tie favor stays even with threads on; only the fast pick is gated.
-			 * Inside the cache tiers the tie then prefers larger buckets first
-			 * within tier with known priority matching the drain, else fixed
-			 * order keeps unknown sizes. A known bucket replaces an unknown
-			 * best and larger replaces smaller with equal keeping fixed order.
-			 * The full scan stays bounded with no early break
-			 * so the largest known bucket wins. */
 			bool cur_same = have_hint_topo && flow_ccx_match(use_ccx, cx, hint_ccx);
+
 			if (cur_same && !best_same) {
 				best = (s32)c;
 				best_same = true;
@@ -368,8 +436,9 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 			}
 		}
 	}
+	scx_bpf_put_cpumask(smt_mask);
 	scx_bpf_put_cpumask(idle_mask);
-	/* The mask can change while scanning, check the pick again. */
+
 	if (best >= 0 && flow_cpu_allowed(best, p))
 		return best;
 	return flow_constrained_target(hint, p);
