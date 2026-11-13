@@ -563,6 +563,30 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
 	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 	flow_stat_inc(llc, 6);
 }
+/* Request structs keep subprograms within five args with no logic change.
+ * Each struct packs scalars only with integer fields and no new loop. */
+struct flow_insert_req {
+	u64 dl;
+	u64 slice;
+	u64 enq_flags;
+	s32 tgt;
+	u32 llc;
+	bool no_cpu;
+	bool count_queued;
+};
+struct flow_noctx_req {
+	s64 raw_v;
+	u64 enq_flags;
+	bool no_cpu;
+};
+struct flow_post_req {
+	s64 raw_v;
+	u64 enq_flags;
+	s32 tgt;
+	u32 llc;
+	bool no_cpu;
+	bool pinned;
+};
 /* Shared insert folds three copies of trylock plus alloc plus init plus
  * insert plus fallback with no semantic change. The caller passes the
  * biased key plus the owner plus the fallback slice plus the enqueue flags
@@ -570,12 +594,27 @@ static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64
  * context skips the arena slot plus the tree bit plus the gauge. The
  * insert return stays as the sole test with depth bound kept short. The
  * gauge stays balanced with paired counts for telemetry only. */
-static __noinline bool flow_enqueue_insert_shared(struct task_struct *p, struct flow_task_ctx *t, s32 tgt, bool no_cpu, u64 dl, u64 slice, u64 enq_flags, u32 llc, bool count_queued)
+static __noinline bool flow_enqueue_insert_shared(struct task_struct *p, struct flow_task_ctx *t,
+						  const struct flow_insert_req *req)
 {
 	struct flow_rb_root __arena *rb;
 	bool fell = true;
-	if (!p)
+	s32 tgt;
+	bool no_cpu;
+	u64 dl;
+	u64 slice;
+	u64 enq_flags;
+	u32 llc;
+	bool count_queued;
+	if (!p || !req)
 		return false;
+	tgt = req->tgt;
+	no_cpu = req->no_cpu;
+	dl = req->dl;
+	slice = req->slice;
+	enq_flags = req->enq_flags;
+	llc = req->llc;
+	count_queued = req->count_queued;
 	if (t) {
 		t->llc_id = llc;
 		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
@@ -643,8 +682,17 @@ static __noinline bool flow_enqueue_insert_shared(struct task_struct *p, struct 
  * the fallback inserts after the queued bit with the gauge paired. Each
  * helper keeps the same order of exiting before pinned with the same
  * slices and the same kicks. */
-static __noinline void flow_enqueue_cold_noctx(struct task_struct *p, s32 tgt, u32 llc, bool no_cpu, s64 raw_v, u64 enq_flags)
+static __noinline void flow_enqueue_cold_noctx(struct task_struct *p, s32 tgt, u32 llc,
+					       const struct flow_noctx_req *req)
 {
+	bool no_cpu;
+	s64 raw_v;
+	u64 enq_flags;
+	if (!req)
+		return;
+	no_cpu = req->no_cpu;
+	raw_v = req->raw_v;
+	enq_flags = req->enq_flags;
 	if ((p->flags & PF_EXITING) && tgt >= 0 && flow_cpu_allowed(tgt, p)) {
 		u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
 		scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
@@ -653,9 +701,15 @@ static __noinline void flow_enqueue_cold_noctx(struct task_struct *p, s32 tgt, u
 	}
 	if (p->flags & PF_EXITING) {
 		u64 dl = flow_rb_deadline(raw_v);
-		(void)flow_enqueue_insert_shared(p, 0, tgt, no_cpu, dl,
-						 (u64)FLOW_EXIT_SLICE_NS,
-						 enq_flags, llc, false);
+		struct flow_insert_req ireq;
+		ireq.tgt = tgt;
+		ireq.no_cpu = no_cpu;
+		ireq.dl = dl;
+		ireq.slice = (u64)FLOW_EXIT_SLICE_NS;
+		ireq.enq_flags = enq_flags;
+		ireq.llc = llc;
+		ireq.count_queued = false;
+		(void)flow_enqueue_insert_shared(p, 0, &ireq);
 		flow_kick_idle_only(tgt, p, llc);
 		return;
 	}
@@ -697,13 +751,34 @@ static __noinline bool flow_enqueue_cold_pre(struct task_struct *p, s32 tgt, u32
 	}
 	return false;
 }
-static __noinline bool flow_enqueue_cold_post(struct task_struct *p, struct flow_task_ctx *t, s32 tgt, u32 llc, bool no_cpu, s64 raw_v, u64 enq_flags, bool pinned)
+static __noinline bool flow_enqueue_cold_post(struct task_struct *p, struct flow_task_ctx *t,
+					      const struct flow_post_req *req)
 {
+	s32 tgt;
+	u32 llc;
+	bool no_cpu;
+	s64 raw_v;
+	u64 enq_flags;
+	bool pinned;
+	if (!req)
+		return false;
+	tgt = req->tgt;
+	llc = req->llc;
+	no_cpu = req->no_cpu;
+	raw_v = req->raw_v;
+	enq_flags = req->enq_flags;
+	pinned = req->pinned;
 	if (p->flags & PF_EXITING) {
 		u64 dl = flow_rb_deadline(raw_v);
-		(void)flow_enqueue_insert_shared(p, t, tgt, no_cpu, dl,
-						 (u64)FLOW_EXIT_SLICE_NS,
-						 enq_flags, llc, true);
+		struct flow_insert_req ireq;
+		ireq.tgt = tgt;
+		ireq.no_cpu = no_cpu;
+		ireq.dl = dl;
+		ireq.slice = (u64)FLOW_EXIT_SLICE_NS;
+		ireq.enq_flags = enq_flags;
+		ireq.llc = llc;
+		ireq.count_queued = true;
+		(void)flow_enqueue_insert_shared(p, t, &ireq);
 		flow_kick_idle_only(tgt, p, llc);
 		return true;
 	}
@@ -753,7 +828,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	pinned = flow_is_pinned(p);
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t) {
-		flow_enqueue_cold_noctx(p, tgt, llc, no_cpu, raw_v, enq_flags);
+		struct flow_noctx_req nreq;
+		nreq.no_cpu = no_cpu;
+		nreq.raw_v = raw_v;
+		nreq.enq_flags = enq_flags;
+		flow_enqueue_cold_noctx(p, tgt, llc, &nreq);
 		return;
 	}
 	/* Local placements run before ownership is taken. A task on a
@@ -775,8 +854,17 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	/* Cold post keeps exiting before pinned with the same slices and
 	 * the same kicks as the open code. */
-	if (flow_enqueue_cold_post(p, t, tgt, llc, no_cpu, raw_v, enq_flags, pinned))
-		return;
+	{
+		struct flow_post_req preq;
+		preq.tgt = tgt;
+		preq.llc = llc;
+		preq.no_cpu = no_cpu;
+		preq.raw_v = raw_v;
+		preq.enq_flags = enq_flags;
+		preq.pinned = pinned;
+		if (flow_enqueue_cold_post(p, t, &preq))
+			return;
+	}
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
@@ -831,9 +919,15 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		 * on fallback members. Shared helper holds the sole test. */
 		{
 			u64 dl = flow_rb_deadline(vd);
-			(void)flow_enqueue_insert_shared(p, t, tgt, no_cpu, dl,
-							 slice_len, enq_flags,
-							 llc, true);
+			struct flow_insert_req ireq;
+			ireq.tgt = tgt;
+			ireq.no_cpu = no_cpu;
+			ireq.dl = dl;
+			ireq.slice = slice_len;
+			ireq.enq_flags = enq_flags;
+			ireq.llc = llc;
+			ireq.count_queued = true;
+			(void)flow_enqueue_insert_shared(p, t, &ireq);
 		}
 		if (no_cpu) {
 			/* No usable CPU. Kick self when idle so the

@@ -119,19 +119,40 @@ static __noinline bool flow_try_stealback(struct flow_rb_root __arena *rb,
 	bpf_task_release(p);
 	return true;
 }
-static __noinline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
-					     struct flow_rb_root __arena *rb,
-					     u32 slot, int steal, bool *saw)
+/* Move request packs the drain inputs into one struct plus the saw flag
+ * with no logic change. Caller builds the struct on stack then passes
+ * a pointer with no extra alloc and no new loop. */
+struct flow_move_req {
+	struct flow_rb_root __arena *rb;
+	u32 cpu;
+	u32 llc;
+	u32 vllc;
+	u32 slot;
+	int steal;
+};
+static __noinline int flow_try_move_rb(const struct flow_move_req *req, bool *saw)
 {
 	struct task_struct *p;
 	struct flow_task_ctx *lt;
 	u64 slice;
 	struct flow_rb_entry __arena *got;
 	s32 got_pid;
-	if (!rb)
+	u32 cpu;
+	u32 llc;
+	u32 vllc;
+	struct flow_rb_root __arena *rb;
+	u32 slot;
+	int steal;
+	if (!req || !req->rb)
 		return 0;
-	if (slot > (u32)FLOW_MAX_LLCS)
+	if (req->slot > (u32)FLOW_MAX_LLCS)
 		return 0;
+	cpu = req->cpu;
+	llc = req->llc;
+	vllc = req->vllc;
+	rb = req->rb;
+	slot = req->slot;
+	steal = req->steal;
 	/* Pop-first then validate. This avoids the peek then pop race. A
 	 * peeked dead head plus a raced pop could free the wrong entry. The
 	 * lossy peek-dead path is removed. The pop owns the head atomically
@@ -221,8 +242,17 @@ static __noinline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bo
 	 * range with no division. The fallback keeps the last slot. */
 	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
 	/* Deadline order drain with insertion ties from the tree. */
-	if (flow_try_move_rb(cpu, llc, vuse, rb, slot, steal, saw))
-		return 1;
+	{
+		struct flow_move_req mreq;
+		mreq.cpu = cpu;
+		mreq.llc = llc;
+		mreq.vllc = vuse;
+		mreq.rb = rb;
+		mreq.slot = slot;
+		mreq.steal = steal;
+		if (flow_try_move_rb(&mreq, saw))
+			return 1;
+	}
 	return 0;
 }
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
