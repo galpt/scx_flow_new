@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.23" ] || fail "version not at 5.2.23"
+[ "${want}" = "5.2.24" ] || fail "version not at 5.2.24"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -385,7 +385,11 @@ grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
 grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
 # Gated response keeps the fallback charge path beside the single use.
 # The fallback due time plus the run due time stay in enqueue only.
-grep -q "flow_vd_for" "${ENQ_HDR}" || fail "fallback vd use missing"
+# Unknown tasks price by lag credit, so the fallback accepts the lag
+# credit helper or the burst step helper with no BPF change here.
+if ! grep -q "flow_eevdf_vd" "${ENQ_HDR}" 2>/dev/null && ! grep -q "flow_vd_for" "${ENQ_HDR}" 2>/dev/null; then
+    fail "fallback vd use missing"
+fi
 grep -q "flow_run_vd" "${ENQ_HDR}" || fail "fallback run vd use missing"
 grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
 # Burst run length scales the vd step with shift only moves and a
@@ -499,7 +503,9 @@ grep -q "no reclaim" "${SRC_DIR}/src/bpf/intf.h" || fail "no reclaim prose missi
 grep -q "no reclaim" "${DISP_HDR}" || fail "no reclaim prose missing"
 grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
 grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
-grep -q "flow_vd_for(nv, rem, w)" "${DISP_HDR}" || fail "tick vd missing"
+# Tick prices by remaining slice cur, so the due time tracks the live
+# remaining slice at the tick.
+grep -q "flow_vd_for(nv, cur, w)" "${DISP_HDR}" || fail "tick vd missing"
 grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
 [ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
 # Effective weight from nice plus live share with clamp combine and no map.
@@ -1137,9 +1143,10 @@ fi
 # freeze on a zero or backward clock. Enqueue reads the cached flag
 # with no clock and no scan. Steady tasks price by the kept max with
 # the shared charge path and one slice quanta, unknown tasks keep the
-# burst path with no long hold.
+# burst path with no long hold. Span stays at four milliseconds so
+# 60-240Hz tasks fit inside the ring.
 grep -q "FLOW_RUN_WIN_NS = 30000000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run window missing"
-grep -q "FLOW_RUN_SPAN_NS = 4000000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run span missing"
+grep -q "FLOW_RUN_SPAN_NS = 4000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run span missing"
 grep -q "FLOW_RUN_NEED = 4ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run need missing"
 grep -q "run_dur\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run dur missing"
 grep -q "run_stamp\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run stamp missing"
@@ -1154,7 +1161,8 @@ grep -q "flow_run_ref" "${FAIR_HDR}" || fail "run ref missing"
 grep -q "flow_run_eff" "${FAIR_HDR}" || fail "run eff missing"
 grep -q "flow_run_vd" "${FAIR_HDR}" || fail "run vd missing"
 grep -q "flow_run_slice" "${FAIR_HDR}" || fail "run slice missing"
-grep -q "min_d >> 3" "${FAIR_HDR}" || fail "run band missing"
+# Stable range keeps 25 percent tolerance on EWMA-smoothed range with s_min_d >> 2.
+grep -q "s_min_d >> 2" "${FAIR_HDR}" || fail "run band missing"
 grep -q "& 7U" "${FAIR_HDR}" || fail "run mask missing"
 # Smoothed fold keeps one shared quarter gain with saturation plus freeze.
 # Stable tasks price by the smoothed kept max with the shared charge path,
@@ -1622,7 +1630,9 @@ fi
 grep -q "Every non duplicate ends in a" "${ENQ_HDR}" || fail "pairing prose missing"
 grep -q "telemetry only" "${ENQ_HDR}" || fail "telemetry prose missing"
 grep -q "Every non duplicate ends in a" "${SRC_DIR}/src/bpf/intf.h" || fail "intf pairing missing"
-grep -q "fresh_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail recheck missing"
+# Tail recheck reads the raw slice once then derives the remainder, so expiry clamps at zero.
+grep -q "fresh_raw_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail recheck missing"
+grep -q "fresh_rem = (fresh_raw_rem > ran)" "${ENQ_HDR}" || fail "tail recheck math missing"
 grep -q "fresh_rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail recheck gate missing"
 grep -q "short tail after the win" "${ENQ_HDR}" || fail "tail recheck prose missing"
 grep -q "post win tail recheck" "${ENQ_HDR}" || fail "tail header prose missing"
