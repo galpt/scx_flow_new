@@ -29,6 +29,27 @@
 #include "maps.bpf.h"
 #include "stats.bpf.h"
 #include <lib/sdt_alloc.h>
+/* Owner tree lookup plus empty probe shared with enqueue and dispatch.
+ * Lives here so select can reuse the same helper with no duplicate. */
+static __always_inline struct flow_rb_root __arena *flow_rb_for_cpu(s32 tgt)
+{
+	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
+		return 0;
+	if ((u64)(u32)tgt >= scx_bpf_nr_cpu_ids())
+		return 0;
+	/* No live gate here so offline roots still reap. Enqueue callers gate
+	 * live explicitly and fall back to FIFO for offline targets. No new
+	 * insert lands offline. */
+	if (!flow_rb_roots)
+		return 0;
+	return &flow_rb_roots[(u32)tgt];
+}
+static __always_inline bool flow_rb_empty(struct flow_rb_root __arena *r)
+{
+	if (!r)
+		return true;
+	return READ_ONCE(r->root) == 0;
+}
 static __always_inline bool flow_is_pinned(struct task_struct *p)
 {
 	if (!p)
@@ -60,7 +81,7 @@ static __always_inline bool flow_cpu_live(u32 cpu)
 /* Unknown cluster reads as all ones, so group zero stays a valid match.
  * The value never collides with a seeded group id, which stays small. */
 #define FLOW_CCX_UNKNOWN 0xFFFFFFFFU
-static __always_inline s32 flow_first_allowed(struct task_struct *p)
+static __noinline s32 flow_first_allowed(struct task_struct *p)
 {
 	u32 first;
 	u32 c;
@@ -82,13 +103,30 @@ static __always_inline s32 flow_first_allowed(struct task_struct *p)
 	}
 	return -1;
 }
-static __always_inline s32 flow_constrained_target(s32 hint, struct task_struct *p)
+static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 {
 	if (!p || !p->cpus_ptr)
 		return -1;
 	if (hint >= 0 && flow_cpu_allowed(hint, p) && flow_cpu_live((u32)hint))
 		return hint;
 	return flow_first_allowed(p);
+}
+/* A busy core runs at max and an idle core runs at half. The call
+ * stays on one live core and never sends zero. Shared here so enqueue
+ * and dispatch use one helper with no duplicate max path. */
+static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
+{
+	u32 perf;
+	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	perf = (u32)SCX_CPUPERF_ONE;
+	if (idle)
+		perf = (u32)(SCX_CPUPERF_ONE / 2);
+	if (!perf)
+		return;
+	scx_bpf_cpuperf_set((s32)cpu, perf);
 }
 static __always_inline bool flow_is_primary(u32 node)
 {
@@ -186,22 +224,6 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 		return false;
 	return cx == hint;
 }
-/* Empty BST probe for placement. Reads the owner tree root directly so
- * select stays independent of the enqueue insert helper. A null table
- * or out of range CPU reads empty so the scan still makes progress. */
-static __always_inline bool flow_select_rb_empty(u32 cpu)
-{
-	struct flow_rb_root __arena *r;
-
-	if (!flow_cpu_ok(cpu))
-		return true;
-	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
-		return true;
-	if (!flow_rb_roots)
-		return true;
-	r = &flow_rb_roots[cpu];
-	return READ_ONCE(r->root) == 0;
-}
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 hint = prev_cpu;
@@ -263,7 +285,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		/* Prefer cores whose BST is currently empty, so fresh tasks
 		 * land where no backlog waits. Busy cores stay reachable
 		 * through the first allowed fallback when no empty core wins. */
-		if (!flow_select_rb_empty(c))
+		if (!flow_rb_empty(flow_rb_for_cpu((s32)c)))
 			continue;
 		vllc = topo_cpu_to_llc_id(c);
 		if (vllc < 0 || !flow_llc_ok((u32)vllc))

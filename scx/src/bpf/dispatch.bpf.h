@@ -53,22 +53,9 @@
 #include <lib/topology.h>
 #include <lib/sdt_alloc.h>
 #include <lib/sdt_task.h>
-/* A busy core runs at max and an idle core runs at half. The call
- * stays on one live core and never sends zero. */
-static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
-{
-	u32 perf;
-	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
-		return;
-	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
-		return;
-	perf = (u32)SCX_CPUPERF_ONE;
-	if (idle)
-		perf = (u32)(SCX_CPUPERF_ONE / 2);
-	if (!perf)
-		return;
-	scx_bpf_cpuperf_set((s32)cpu, perf);
-}
+/* A busy core runs at max and an idle core runs at half. Shared mark
+ * lives in select.bpf.h so enqueue and dispatch use one helper. The call
+ * never sends zero with no steering. */
 /* Empty trees skip before any group lookup, so idle victims cost one
  * counter read with no topology walk. */
 static __always_inline bool flow_rb_is_empty(struct flow_rb_root __arena *rb)
@@ -77,7 +64,7 @@ static __always_inline bool flow_rb_is_empty(struct flow_rb_root __arena *rb)
 		return true;
 	return flow_rb_empty(rb);
 }
-static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
+static __noinline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
 {
 	s32 owner;
 	s64 hv;
@@ -109,7 +96,7 @@ static __always_inline void flow_forward_from_peeked(struct task_struct *ph, u32
 /* A dispatch that moved nothing but saw an unrunnable head wakes the
  * fallback head again without the dedup check, so an owner that
  * turned idle is not missed. The kick stays idle only with no pad check. */
-static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 llc)
+static __noinline void flow_rekick_unrunnable(struct task_struct *ph, u32 llc)
 {
 	s32 owner;
 	if (!ph)
@@ -117,7 +104,22 @@ static __always_inline void flow_rekick_unrunnable(struct task_struct *ph, u32 l
 	owner = flow_first_allowed(ph);
 	flow_kick_idle_only(owner, ph, llc);
 }
-static __always_inline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
+/* Steal-back path outlined so the victim insert verifies once as a
+ * subprogram instead of inline in every drain. */
+static __noinline bool flow_try_stealback(struct flow_rb_root __arena *rb,
+					  struct flow_rb_entry __arena *got,
+					  struct task_struct *p, int steal)
+{
+	if (!steal || !rb || !got || !p)
+		return false;
+	if (!flow_cpu_allowed((s32)READ_ONCE(got->owner), p))
+		return false;
+	if (!flow_rb_insert(rb, got))
+		return false;
+	bpf_task_release(p);
+	return true;
+}
+static __noinline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
 					     struct flow_rb_root __arena *rb,
 					     u32 slot, int steal, bool *saw)
 {
@@ -151,12 +153,9 @@ static __always_inline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
 		flow_forward_from_peeked(p, llc, slot);
 		/* If stealing from a remote or peer CPU that IS allowed for p,
 		 * try to put the entry right back into the victim BST first
-		 * so p does not lose its deadline order. */
-		if (steal && flow_cpu_allowed((s32)READ_ONCE(got->owner), p) &&
-		    flow_rb_insert(rb, got)) {
-			bpf_task_release(p);
+		 * so p does not lose its deadline order. Outlined above. */
+		if (flow_try_stealback(rb, got, p, steal))
 			return 0;
-		}
 		/* Fallback if local unrunnable or re-insert contended or full. */
 		lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 		slice = (u64)FLOW_SLICE_MIN_NS;
@@ -196,7 +195,7 @@ static __always_inline int flow_try_move_rb(u32 cpu, u32 llc, u32 vllc,
 	}
 	return 1;
 }
-static __always_inline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
+static __noinline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
 {
 	struct flow_rb_root __arena *rb;
 	int vllc;

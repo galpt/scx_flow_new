@@ -342,13 +342,15 @@ fi
 
 # Busy cores run at max with idle cores at half through one set call.
 # The call never sends zero and never steers placement, and no other
-# frequency call steers placement.
+# frequency call steers placement. Shared mark lives in select so the
+# set plus max plus half checks read select with use checks in dispatch.
 grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
 grep -q "never steers" "${DISP_HDR}" || fail "freq dispatch prose missing"
 grep -q "never sends zero" "${DISP_HDR}" || fail "freq never zero prose missing"
-grep -q "scx_bpf_cpuperf_set" "${DISP_HDR}" || fail "cpuperf set missing"
-grep -q "SCX_CPUPERF_ONE" "${DISP_HDR}" || fail "cpuperf max missing"
-grep -q "SCX_CPUPERF_ONE / 2" "${DISP_HDR}" || fail "cpuperf half missing"
+grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf set missing"
+grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf max missing"
+grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf half missing"
+grep -q "flow_cpuperf_mark" "${DISP_HDR}" || fail "cpuperf use missing"
 if grep -q "cpuperf" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
     if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
         fail "freq call not set only"
@@ -382,7 +384,7 @@ fi
 grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
 grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
 grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
-grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
+grep -q "vd_HRRN(floored, W, eff, w)" "${ENQ_HDR}" || fail "response use missing"
 # Gated response keeps the fallback charge path beside the single use.
 # The fallback due time plus the run due time stay in enqueue only.
 # Unknown tasks price by lag credit, so the fallback accepts the lag
@@ -406,8 +408,8 @@ if grep -q "b >> 1" "${FAIR_HDR}" 2>/dev/null; then
 fi
 # Burst keeps two quarter moves plus one shared fold line with the same gain.
 [ "$(grep -c ">> 2" "${FAIR_HDR}" | tr -d ' ')" = "3" ] || fail "burst quarter shift drifted"
-grep -q "flow_burst_clamp(READ_ONCE(t->burst_ns))" "${ENQ_HDR}" || fail "burst clamp use missing"
-grep -q "sref ? eff : b" "${ENQ_HDR}" || fail "service bind missing"
+grep -q "flow_smoothed_eff(sref, READ_ONCE(t->burst_ns))" "${ENQ_HDR}" || fail "burst clamp use missing"
+grep -q "if (!sref)" "${ENQ_HDR}" || fail "service bind missing"
 grep -q "FLOW_RUN_WIN_NS" "${ENQ_HDR}" || fail "wait cap missing"
 grep -q "flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS)" "${FAIR_HDR}" || fail "floor cap drifted"
 grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "vd floor missing"
@@ -433,7 +435,9 @@ if grep -q "nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" 2>/dev/null; then
     fail "room gate reappeared"
 fi
 grep -q "as the sole test" "${ENQ_HDR}" || fail "sole test prose missing"
-[ "$(grep -c "flow_rb_insert(rb, e)" "${ENQ_HDR}" | tr -d ' ')" = "3" ] || fail "insert sites drifted"
+[ "$(grep -c "flow_rb_insert(rb, e)" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "insert sites drifted"
+grep -q "flow_enqueue_insert_shared" "${ENQ_HDR}" || fail "shared insert missing"
+[ "$(grep -c "flow_enqueue_insert_shared(p," "${ENQ_HDR}" | tr -d ' ')" = "3" ] || fail "shared insert sites drifted"
 if grep -q "scx_edq_insert" "${ENQ_HDR}" 2>/dev/null; then
     fail "edq insert reappeared"
 fi
@@ -1047,7 +1051,7 @@ fi
 # The helper plus the short name appear only in fair plus the single
 # enqueue use with no other file naming either.
 grep -q "vd_HRRN" "${FAIR_HDR}" || fail "response helper missing"
-grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
+grep -q "vd_HRRN(floored, W, eff, w)" "${ENQ_HDR}" || fail "response use missing"
 [ "$(grep -c "vd_HRRN" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "response sites drifted"
 if grep -q "vd_HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
     fail "response helper outside fair plus enqueue reappeared"
@@ -1060,7 +1064,7 @@ fi
 # no other file naming it.
 grep -q "hrrn_ready" "${FAIR_HDR}" || fail "ready helper missing"
 [ "$(grep -c "hrrn_ready" "${FAIR_HDR}" | tr -d ' ')" = "1" ] || fail "ready helper drifted"
-grep -q "hrrn_ready(t, sref, eff, W, S, w, no_cpu)" "${ENQ_HDR}" || fail "ready use missing"
+grep -q "hrrn_ready(t, sref, eff, W, eff, w, no_cpu)" "${ENQ_HDR}" || fail "ready use missing"
 [ "$(grep -c "hrrn_ready" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "ready sites drifted"
 if grep -q "hrrn_ready" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
     fail "ready helper outside fair plus enqueue reappeared"
@@ -1157,8 +1161,8 @@ grep -q "flow_run_add" "${FAIR_HDR}" || fail "run add missing"
 grep -q "flow_run_prune" "${FAIR_HDR}" || fail "run prune missing"
 grep -q "flow_run_close" "${FAIR_HDR}" || fail "run close missing"
 grep -q "flow_run_recalc" "${FAIR_HDR}" || fail "run recalc missing"
-grep -q "flow_run_ref" "${FAIR_HDR}" || fail "run ref missing"
-grep -q "flow_run_eff" "${FAIR_HDR}" || fail "run eff missing"
+grep -q "flow_smoothed_ref" "${FAIR_HDR}" || fail "run ref missing"
+grep -q "flow_smoothed_eff" "${FAIR_HDR}" || fail "run eff missing"
 grep -q "flow_run_vd" "${FAIR_HDR}" || fail "run vd missing"
 grep -q "flow_run_slice" "${FAIR_HDR}" || fail "run slice missing"
 # Stable range keeps 25 percent tolerance on EWMA-smoothed range with s_min_d >> 2.
@@ -1182,10 +1186,10 @@ grep -q "flow_run_prune(t, now)" "${DISP_HDR}" || fail "run prune use missing"
 grep -q "flow_run_reset(t)" "${DISP_HDR}" || fail "run reset use missing"
 grep -q "flow_smoothed_ref(t)" "${ENQ_HDR}" || fail "smoothed ref use missing"
 grep -q "flow_smoothed_eff(" "${ENQ_HDR}" || fail "smoothed eff use missing"
-grep -q "vd_HRRN(floored, W, S, w)" "${ENQ_HDR}" || fail "response use missing"
+grep -q "vd_HRRN(floored, W, eff, w)" "${ENQ_HDR}" || fail "response use missing"
 grep -q "flow_run_slice(sref)" "${ENQ_HDR}" || fail "run slice use missing"
-grep -q "if (sref)" "${ENQ_HDR}" || fail "run gate use missing"
-grep -q "sref ? eff : b" "${ENQ_HDR}" || fail "service bind missing"
+grep -q "if (!sref)" "${ENQ_HDR}" || fail "run gate use missing"
+grep -q "if (!sref)" "${ENQ_HDR}" || fail "service bind missing"
 if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
     fail "float outside fair reappeared"
 fi
@@ -1266,10 +1270,10 @@ grep -q "rllc = READ_ONCE(rs->llc_id)" "${ENQ_HDR}" || fail "llc recheck missing
 # the one microsecond slice. Init fails closed on a missing tree or an
 # over bound CPU count.
 wake_block() {
-    awk '/^static __always_inline void flow_kick_idle_only\(/,/^}/' "${ENQ_HDR}"
-    awk '/^static __always_inline void flow_kick_vd\(/,/^}/' "${ENQ_HDR}"
-    awk '/^static __always_inline void flow_forward_from_peeked\(/,/^}/' "${DISP_HDR}"
-    awk '/^static __always_inline void flow_rekick_unrunnable\(/,/^}/' "${DISP_HDR}"
+    awk '/void flow_kick_idle_only\(/,/^}/' "${ENQ_HDR}"
+    awk '/void flow_kick_vd\(/,/^}/' "${ENQ_HDR}"
+    awk '/void flow_forward_from_peeked\(/,/^}/' "${DISP_HDR}"
+    awk '/void flow_rekick_unrunnable\(/,/^}/' "${DISP_HDR}"
 }
 if wake_block | grep -q "slice_rem *=\|->vd *=\|->vtime *=\|burst_ns *=\|run_dur\|run_total\|run_min\|run_max\|run_head\|run_known\|run_stamp\|run_pruned\|run_pad\|->llc_id *=\|->flags *=\|->gen *=" 2>/dev/null; then
     fail "wake path writes task state"
@@ -1572,21 +1576,23 @@ grep -q "start = READ_ONCE(rs->start_ts)" "${ENQ_HDR}" || fail "start stamp read
 # Kick gates stay locked in gap then granularity then tail order with
 # thirteen skips plus one idle plus one preempt. The asserts below read
 # source text only, so no kernel kick delivery behavior is assumed.
-# Delivery timing plus compat paths stay unasserted by design.
+# Delivery timing plus compat paths stay unasserted by design. Outlined
+# tail helper verifies once, so order reads gap plus gran in the win path
+# plus tail helper calls after.
 grep -q "Step seven of seven" "${ENQ_HDR}" || fail "kick seven step missing"
 grep -q "gap then granularity then tail" "${ENQ_HDR}" || fail "kick gate order prose missing"
-gap_at="$(grep -n "FLOW_KICK_GAP_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
+gap_at="$(grep -n "FLOW_KICK_GAP_NS" "${ENQ_HDR}" | grep -v "flow_kick_tail_ok" | head -n 1 | cut -d: -f1)"
 gran_at="$(grep -n "FLOW_KICK_GRAN_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
-tail_at="$(grep -n "FLOW_KICK_TAIL_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
+tail_at="$(grep -n "flow_kick_tail_ok" "${ENQ_HDR}" | tail -n 1 | cut -d: -f1)"
 [ "${gap_at}" -lt "${gran_at}" ] && [ "${gran_at}" -lt "${tail_at}" ] || fail "kick gate order drifted"
 grep -q "win >= vmax - (s64)FLOW_KICK_GAP_NS" "${ENQ_HDR}" || fail "gap saturate missing"
 grep -q "now > start ? now - start : 0" "${ENQ_HDR}" || fail "wraparound read missing"
 grep -q "ran < (u64)FLOW_KICK_GRAN_NS" "${ENQ_HDR}" || fail "granularity gate missing"
-grep -q "rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail read missing"
+grep -q "raw_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail read missing"
 grep -q "rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail gate missing"
 grep -q "__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen)" "${ENQ_HDR}" || fail "kick token missing"
 grep -q "if (!flow_cpu_allowed(tgt, p) || !flow_cpu_live((u32)tgt)) {" "${ENQ_HDR}" || fail "freshness mask live missing"
-kick_body="$(awk '/^static __always_inline void flow_kick_vd\(/,/^}/' "${ENQ_HDR}")"
+kick_body="$(awk '/void flow_kick_vd\(/,/^}/' "${ENQ_HDR}")"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_cpu_allowed(tgt, p)" | tr -d ' ')" = "2" ] || fail "mask checks drifted"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 8)" | tr -d ' ')" = "13" ] || fail "skip sites drifted"
 [ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 7)" | tr -d ' ')" = "1" ] || fail "idle count drifted"
@@ -1631,13 +1637,16 @@ grep -q "Every non duplicate ends in a" "${ENQ_HDR}" || fail "pairing prose miss
 grep -q "telemetry only" "${ENQ_HDR}" || fail "telemetry prose missing"
 grep -q "Every non duplicate ends in a" "${SRC_DIR}/src/bpf/intf.h" || fail "intf pairing missing"
 # Tail recheck reads the raw slice once then derives the remainder, so expiry clamps at zero.
+# Outlined helper verifies once with the same bound for both pre-win and post-win checks.
 grep -q "fresh_raw_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail recheck missing"
-grep -q "fresh_rem = (fresh_raw_rem > ran)" "${ENQ_HDR}" || fail "tail recheck math missing"
-grep -q "fresh_rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail recheck gate missing"
+grep -q "flow_kick_tail_ok" "${ENQ_HDR}" || fail "tail helper missing"
+grep -q "flow_kick_tail_ok(raw_rem, ran)" "${ENQ_HDR}" || fail "tail recheck math missing"
+grep -q "flow_kick_tail_ok(fresh_raw_rem, ran)" "${ENQ_HDR}" || fail "tail recheck gate missing"
 grep -q "short tail after the win" "${ENQ_HDR}" || fail "tail recheck prose missing"
 grep -q "post win tail recheck" "${ENQ_HDR}" || fail "tail header prose missing"
-# Alloc bound stays explicit with no new table.
-grep -q "scx_bpf_nr_cpu_ids" "${ENQ_HDR}" || fail "alloc bound missing"
+# Alloc bound stays explicit with no new table. Shared insert keeps the
+# bound through the shared lookup in select.
+grep -q "scx_bpf_nr_cpu_ids" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "alloc bound missing"
 grep -q "scx_bpf_nr_cpu_ids" "${DISP_HDR}" || fail "drain bound missing"
 grep -q "Bound the index by the live table size" "${DISP_HDR}" || fail "bound prose missing"
 # Start stamp plain store stays benign with fail closed skip plus generation cover.
@@ -1737,7 +1746,8 @@ grep -q "unbalanced BST" "${SRC_DIR}/src/bpf/intf.h" || fail "bst prose missing"
 grep -q "no full RB balancing" "${ENQ_HDR}" || fail "bst honesty missing"
 grep -q "No rotations run" "${FAIR_HDR}" || fail "no rotation prose missing"
 # Offline roots still reap with no new loop and no orphan slab leak.
-grep -q "No live gate here so offline roots still reap" "${ENQ_HDR}" || fail "offline reap prose missing"
+# Shared lookup lives in select with the same prose for enqueue reuse.
+grep -q "No live gate here so offline roots still reap" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "offline reap prose missing"
 grep -q "No live gate so offline roots still reap" "${DISP_HDR}" || fail "offline drain prose missing"
 # Fallback stays best effort with a split cause count and a probe count.
 grep -q "Each fallback cause has its own BSS counter" "${ENQ_HDR}" || fail "fallback split prose missing"

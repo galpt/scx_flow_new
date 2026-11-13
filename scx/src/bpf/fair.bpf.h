@@ -165,7 +165,7 @@ static __always_inline u64 flow_rb_deadline(s64 vd)
  * scaled sum stays at most twice the step with two hundred million as
  * the top at weight one. The general path keeps the hi guard plus the
  * saturating add with no wrap. */
-static __always_inline s64 flow_fair_charge(s64 base, u64 used, u32 w)
+static __noinline s64 flow_fair_charge(s64 base, u64 used, u32 w)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	u64 st = flow_fair_step(w);
@@ -226,7 +226,7 @@ static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
  * Grants the full 1ms slice quantum and deducts bounded virtual lag credit
  * (scaled across [FLOW_SLICE_FLOOR_NS, FLOW_SLICE_MIN_NS]) from the request
  * offset. A zero-lag CPU hog or brand-new task pays the full 1ms step. */
-static __always_inline s64 flow_eevdf_vd(s64 floored, u64 lag_ns, u32 w)
+static __noinline s64 flow_eevdf_vd(s64 floored, u64 lag_ns, u32 w)
 {
 	u64 clamped_lag = lag_ns > (u64)FLOW_LAG_MAX_NS ?
 			  (u64)FLOW_LAG_MAX_NS : lag_ns;
@@ -264,7 +264,7 @@ static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
  * Unknown tasks return zero with a freeze count, so the caller keeps
  * the burst path. Stable tasks price by this value with no clock and
  * no scan. */
-static __always_inline u64 flow_smoothed_ref(struct flow_task_ctx *t)
+static __noinline u64 flow_smoothed_ref(struct flow_task_ctx *t)
 {
 	u64 ref;
 	if (!t)
@@ -281,7 +281,7 @@ static __always_inline u64 flow_smoothed_ref(struct flow_task_ctx *t)
  * plus burst with max and slice cap. Larger input never yields an earlier
  * virtual deadline. Saturation at the slice cap counts in BSS. Enqueue
  * feeds this value to the shared charge path. */
-static __always_inline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
+static __noinline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
 {
 	u64 b = flow_burst_clamp(burst_ns);
 	u64 e = ref > b ? ref : b;
@@ -291,7 +291,7 @@ static __always_inline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
 	}
 	return e;
 }
-static __always_inline s64 flow_seq_floor(u32 llc, s64 v)
+static __noinline s64 flow_seq_floor(u32 llc, s64 v)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	int i;
@@ -368,7 +368,7 @@ static __always_inline void flow_run_add(struct flow_task_ctx *t, u64 delta)
 	else
 		t->run_total = cur + delta;
 }
-static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
+static __noinline void flow_run_recalc(struct flow_task_ctx *t)
 {
 	u64 min_d = 0;
 	u64 max_d = 0;
@@ -444,7 +444,7 @@ static __always_inline void flow_run_recalc(struct flow_task_ctx *t)
 	t->run_known = 1;
 	__sync_fetch_and_add(&m_ewma_sat, 1ULL);
 }
-static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
+static __noinline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 {
 	u64 win;
 	int i;
@@ -469,7 +469,7 @@ static __always_inline void flow_run_prune(struct flow_task_ctx *t, u64 now)
 	}
 	flow_run_recalc(t);
 }
-static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
+static __noinline void flow_run_close(struct flow_task_ctx *t, u64 now)
 {
 	u64 tot;
 	u64 win;
@@ -504,24 +504,9 @@ static __always_inline void flow_run_close(struct flow_task_ctx *t, u64 now)
 	flow_run_recalc(t);
 }
 /* Guard kept helper with no caller in tree. Reads the kept max when
- * stable else zero for later use. */
-static __always_inline u64 flow_run_ref(struct flow_task_ctx *t)
-{
-	if (!t)
-		return 0;
-	if (!READ_ONCE(t->run_known))
-		return 0;
-	return READ_ONCE(t->run_max);
-}
-static __always_inline u64 flow_run_eff(u64 ref, u64 burst_ns)
-{
-	u64 b = flow_burst_clamp(burst_ns);
-	u64 e = ref > b ? ref : b;
-	if (e > (u64)FLOW_SLICE_MIN_NS)
-		e = (u64)FLOW_SLICE_MIN_NS;
-	return e;
-}
-static __always_inline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
+ * stable else zero for later use. Removed as dead twin of the smoothed
+ * reference path. Enqueue uses flow_smoothed_ref only. */
+static __noinline s64 flow_run_vd(s64 floored, u64 eff, u32 w)
 {
 	s64 vd = flow_fair_charge(floored, eff, w);
 	if (vd <= floored)
@@ -546,7 +531,7 @@ static __always_inline bool hrrn_ready(struct flow_task_ctx *t, u64 sref, u64 ef
 /* Stage 2 Complementary EEVDF + HRRN Virtual deadline.
  * Computes the EEVDF custom-quantum offset base_off = charge(0, S, w) first,
  * then attenuates it by the inverse HRRN response ratio S / (W_clamped + S). */
-static __always_inline s64 vd_HRRN(s64 floored, u64 W, u64 S, u32 w)
+static __noinline s64 vd_HRRN(s64 floored, u64 W, u64 S, u32 w)
 {
 	u64 s = flow_burst_clamp(S);
 	u64 win = W > (u64)FLOW_LAG_MAX_NS ? (u64)FLOW_LAG_MAX_NS : W;

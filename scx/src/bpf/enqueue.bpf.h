@@ -47,25 +47,8 @@
 #include "select.bpf.h"
 #include <lib/sdt_task.h>
 #include <lib/sdt_alloc.h>
-static __always_inline struct flow_rb_root __arena *flow_rb_for_cpu(s32 tgt)
-{
-	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
-		return 0;
-	if ((u64)(u32)tgt >= scx_bpf_nr_cpu_ids())
-		return 0;
-	/* No live gate here so offline roots still reap. Enqueue callers gate
-	 * live explicitly and fall back to FIFO for offline targets. No new
-	 * insert lands offline. */
-	if (!flow_rb_roots)
-		return 0;
-	return &flow_rb_roots[(u32)tgt];
-}
-static __always_inline bool flow_rb_empty(struct flow_rb_root __arena *r)
-{
-	if (!r)
-		return true;
-	return READ_ONCE(r->root) == 0;
-}
+/* Tree lookup plus empty probe live in select.bpf.h so placement reuses
+ * the same helper with no duplicate. */
 static __always_inline bool flow_rb_trylock(struct flow_rb_root __arena *r)
 {
 	if (!r)
@@ -87,14 +70,14 @@ static __always_inline void flow_rb_unlock(struct flow_rb_root __arena *r)
  * sample plus max depth plus duplicate count stay BSS only with updates
  * outside the tree lock. The lock is a short try with no wait. Each walk
  * caps at thirty two steps independent of the insert bound. Lock hold
- * stays bound at depth steps. */
-static __always_inline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flow_rb_entry __arena *e)
+ * stays bound at depth steps. Outlined as a subprogram so enqueue plus
+ * dispatch verify the walk once with the same bound. */
+static __noinline bool flow_rb_insert(struct flow_rb_root __arena *r, struct flow_rb_entry __arena *e)
 {
 	u64 key;
 	u64 cur;
 	u64 parent = 0;
 	u32 depth = 1;
-	u32 steps = 0;
 	bool saw_dup = false;
 	u32 done_depth = 0;
 	bool done_dup = false;
@@ -119,20 +102,18 @@ static __always_inline bool flow_rb_insert(struct flow_rb_root __arena *r, struc
 			WRITE_ONCE(m_rb_depth_max, 1ULL);
 		return true;
 	}
-	while (cur && can_loop) {
+	while (cur) {
 		struct flow_rb_entry __arena *c = (void __arena *)(u64)cur;
 		u64 ck;
 		u64 left;
 		u64 right;
-		if (steps >= 32U)
+		if (depth > (u32)FLOW_RB_MAX_DEPTH)
 			break;
-		steps++;
 		ck = READ_ONCE(c->key);
 		parent = cur;
 		depth++;
-		if (ck == key && !saw_dup) {
+		if (ck == key)
 			saw_dup = true;
-		}
 		if (key < ck) {
 			left = READ_ONCE(c->node.rb_left);
 			if (!left) {
@@ -398,22 +379,9 @@ static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
  * with no wake. Misses split by cause with no new counter. A bad
  * target skips. A masked target skips. An offline target skips.
  * A busy target skips. An idle wake ramps the target to max frequency
- * at once so the P-state ramp overlaps the IPI. */
-static __always_inline void flow_kick_cpuperf_max(s32 tgt)
-{
-	u32 perf;
-
-	if (tgt < 0 || !flow_cpu_ok((u32)tgt) || !flow_cpu_live((u32)tgt))
-		return;
-	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
-		return;
-	perf = (u32)SCX_CPUPERF_ONE;
-	if (!perf)
-		return;
-	scx_bpf_cpuperf_set(tgt, perf);
-}
-
-static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
+ * at once so the P-state ramp overlaps the IPI. Max path reuses the
+ * shared mark helper with no duplicate set logic. */
+static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
 	if (tgt < 0) {
 		flow_stat_inc(llc, 8);
@@ -431,7 +399,7 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
 		flow_stat_inc(llc, 8);
 		return;
 	}
-	flow_kick_cpuperf_max(tgt);
+	flow_cpuperf_mark((u32)tgt, false);
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 }
@@ -451,7 +419,17 @@ static __always_inline void flow_kick_idle_only(s32 tgt, struct task_struct *p, 
  * keeps the same tail bound with the token already spent. An abort after
  * winning the token on the same generation restores the token, so a
  * later Virtual deadline can still preempt. */
-static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
+/* Tail gate outlined so both pre-win and post-win checks verify once.
+ * Returns true when the tail passes. Expired slice with zero raw passes
+ * so an overrun at the tick still preempts. Integer only. */
+static __noinline bool flow_kick_tail_ok(u64 raw_rem, u64 ran)
+{
+	u64 rem = (raw_rem > ran) ? (raw_rem - ran) : 0;
+	if (raw_rem > 0 && rem < (u64)FLOW_KICK_TAIL_NS)
+		return false;
+	return true;
+}
+static __noinline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc, s64 new_vd)
 {
 	const s64 vmax = (s64)0x7fffffffffffffffLL;
 	struct flow_running_state *rs;
@@ -464,12 +442,10 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	u64 now;
 	u64 ran;
 	u64 raw_rem;
-	u64 rem;
 	u32 c;
 	u64 fresh_gen;
 	s64 fresh_vd;
 	u64 fresh_raw_rem;
-	u64 fresh_rem;
 	/* Step one of seven keeps the target gate. A bad or masked or
 	 * offline target skips with no wake. */
 	if (tgt < 0 || !p || !flow_cpu_ok((u32)tgt) || !flow_cpu_allowed(tgt, p) ||
@@ -480,7 +456,7 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	/* Step two of seven keeps the idle fast path. An idle target takes
 	 * an idle wake at max frequency with no preempt. */
 	if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
-		flow_kick_cpuperf_max(tgt);
+		flow_cpuperf_mark((u32)tgt, false);
 		scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 		flow_stat_inc(llc, 7);
 		return;
@@ -535,11 +511,10 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		return;
 	}
 	raw_rem = READ_ONCE(rs->slice_rem);
-	rem = (raw_rem > ran) ? (raw_rem - ran) : 0;
 	/* Only skip when raw_rem > 0 (not already expired at tick) and
 	 * the tail is short. When raw_rem == 0 the task already overran
-	 * its slice at the tick, so bypass the tail gate. */
-	if (raw_rem > 0 && rem < (u64)FLOW_KICK_TAIL_NS) {
+	 * its slice at the tick, so bypass the tail gate. Outlined. */
+	if (!flow_kick_tail_ok(raw_rem, ran)) {
 		flow_stat_inc(llc, 8);
 		return;
 	}
@@ -573,8 +548,7 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 		return;
 	}
 	fresh_raw_rem = READ_ONCE(rs->slice_rem);
-	fresh_rem = (fresh_raw_rem > ran) ? (fresh_raw_rem - ran) : 0;
-	if (fresh_raw_rem > 0 && fresh_rem < (u64)FLOW_KICK_TAIL_NS) {
+	if (!flow_kick_tail_ok(fresh_raw_rem, ran)) {
 		(void)__sync_val_compare_and_swap(&rs->pad, (u32)rgen, last);
 		flow_stat_inc(llc, 8);
 		return;
@@ -588,6 +562,164 @@ static __always_inline void flow_kick_vd(s32 tgt, struct task_struct *p, u32 llc
 	}
 	scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT);
 	flow_stat_inc(llc, 6);
+}
+/* Shared insert folds three copies of trylock plus alloc plus init plus
+ * insert plus fallback with no semantic change. The caller passes the
+ * biased key plus the owner plus the fallback slice plus the enqueue flags
+ * plus the queue index plus whether the shared gauge counts. A null task
+ * context skips the arena slot plus the tree bit plus the gauge. The
+ * insert return stays as the sole test with depth bound kept short. The
+ * gauge stays balanced with paired counts for telemetry only. */
+static __noinline bool flow_enqueue_insert_shared(struct task_struct *p, struct flow_task_ctx *t, s32 tgt, bool no_cpu, u64 dl, u64 slice, u64 enq_flags, u32 llc, bool count_queued)
+{
+	struct flow_rb_root __arena *rb;
+	bool fell = true;
+	if (!p)
+		return false;
+	if (t) {
+		t->llc_id = llc;
+		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
+	}
+	rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
+	if (!rb) {
+		__sync_fetch_and_add(&m_fb_nocpu, 1ULL);
+	} else if (!flow_rb_trylock(rb)) {
+		__sync_fetch_and_add(&m_fb_contention, 1ULL);
+	} else {
+		flow_rb_unlock(rb);
+		{
+			struct flow_rb_entry __arena *e = scx_alloc(&flow_rb_alloc);
+			if (!e) {
+				__sync_fetch_and_add(&m_fb_alloc, 1ULL);
+			} else {
+				bool have_mem = true;
+				void __arena *mem = 0;
+				if (t) {
+					mem = __scx_task_data(p);
+					if (!mem) {
+						have_mem = false;
+					} else {
+						struct flow_arena_task __arena *at = mem;
+						WRITE_ONCE(at->storage[0], dl);
+					}
+				}
+				if (!have_mem) {
+					scx_free(&flow_rb_alloc, e);
+				} else {
+					WRITE_ONCE(e->node.__rb_parent_color, 0);
+					WRITE_ONCE(e->node.rb_left, 0);
+					WRITE_ONCE(e->node.rb_right, 0);
+					WRITE_ONCE(e->node.pid, p->pid);
+					WRITE_ONCE(e->node.pad, 0U);
+					WRITE_ONCE(e->key, dl);
+					WRITE_ONCE(e->owner, (u32)tgt);
+					WRITE_ONCE(e->pad2, 0U);
+					/* Depth bound keeps the walk short. The insert
+					 * return stays as the sole test. */
+					if (flow_rb_insert(rb, e)) {
+						fell = false;
+						if (t)
+							__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_IN_RB);
+					} else {
+						scx_free(&flow_rb_alloc, e);
+					}
+				}
+			}
+		}
+	}
+	if (fell)
+		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, enq_flags);
+	if (count_queued)
+		flow_stat_inc(llc, 0);
+	if (fell)
+		flow_stat_inc(llc, 2);
+	return !fell;
+}
+/* Cold exiting plus pinned paths run outside the hot shared path with no
+ * semantic change. The no context helper covers a missing task context
+ * with a local queue for an allowed exiting target else the shared insert
+ * else the fallback for an alloc miss. The pre helper covers the local
+ * queues before the queued bit with no gauge move. The post helper covers
+ * the fallback inserts after the queued bit with the gauge paired. Each
+ * helper keeps the same order of exiting before pinned with the same
+ * slices and the same kicks. */
+static __noinline void flow_enqueue_cold_noctx(struct task_struct *p, s32 tgt, u32 llc, bool no_cpu, s64 raw_v, u64 enq_flags)
+{
+	if ((p->flags & PF_EXITING) && tgt >= 0 && flow_cpu_allowed(tgt, p)) {
+		u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
+		scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
+		flow_kick_idle_only(tgt, p, llc);
+		return;
+	}
+	if (p->flags & PF_EXITING) {
+		u64 dl = flow_rb_deadline(raw_v);
+		(void)flow_enqueue_insert_shared(p, 0, tgt, no_cpu, dl,
+						 (u64)FLOW_EXIT_SLICE_NS,
+						 enq_flags, llc, false);
+		flow_kick_idle_only(tgt, p, llc);
+		return;
+	}
+	{
+		u64 sl = (u64)FLOW_SLICE_MIN_NS;
+		__sync_fetch_and_add(&m_fb_alloc, 1ULL);
+		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, sl, enq_flags);
+		flow_stat_inc(llc, 2);
+		flow_kick_idle_only(tgt, p, llc);
+		return;
+	}
+}
+static __noinline bool flow_enqueue_cold_pre(struct task_struct *p, s32 tgt, u32 llc, u64 enq_flags, bool pinned)
+{
+	if (p->flags & PF_EXITING) {
+		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
+			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
+			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
+			flow_kick_idle_only(tgt, p, llc);
+			return true;
+		}
+	}
+	if (pinned) {
+		s32 first = flow_first_allowed(p);
+		if (first < 0)
+			first = tgt;
+		if (first >= 0 && flow_cpu_allowed(first, p)) {
+			u32 pllc = llc;
+			u32 tmp = 0;
+			if (!flow_llc_for_cpu(first, &tmp))
+				pllc = tmp;
+			{
+				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)first;
+				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
+				flow_kick_idle_only(first, p, pllc);
+				return true;
+			}
+		}
+	}
+	return false;
+}
+static __noinline bool flow_enqueue_cold_post(struct task_struct *p, struct flow_task_ctx *t, s32 tgt, u32 llc, bool no_cpu, s64 raw_v, u64 enq_flags, bool pinned)
+{
+	if (p->flags & PF_EXITING) {
+		u64 dl = flow_rb_deadline(raw_v);
+		(void)flow_enqueue_insert_shared(p, t, tgt, no_cpu, dl,
+						 (u64)FLOW_EXIT_SLICE_NS,
+						 enq_flags, llc, true);
+		flow_kick_idle_only(tgt, p, llc);
+		return true;
+	}
+	if (pinned) {
+		t->llc_id = llc;
+		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
+		__sync_fetch_and_add(&m_fb_pinned, 1ULL);
+		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
+		flow_stat_inc(llc, 0);
+		flow_stat_inc(llc, 2);
+		/* No owner tree took the task. Kick self when idle so the
+		 * fallback head is peeked again soon. */
+		flow_kick_idle_only((s32)bpf_get_smp_processor_id(), p, llc);
+		return true;
+	}
+	return false;
 }
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
@@ -621,84 +753,16 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	pinned = flow_is_pinned(p);
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t) {
-		if (p->flags & PF_EXITING) {
-			if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
-				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
-				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-				flow_kick_idle_only(tgt, p, llc);
-				return;
-			}
-			{
-				struct flow_rb_root __arena *rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
-				bool fell = true;
-				if (!rb) {
-					__sync_fetch_and_add(&m_fb_nocpu, 1ULL);
-				} else if (!flow_rb_trylock(rb)) {
-					__sync_fetch_and_add(&m_fb_contention, 1ULL);
-				} else {
-					flow_rb_unlock(rb);
-					struct flow_rb_entry __arena *e =
-						scx_alloc(&flow_rb_alloc);
-					if (!e) {
-						__sync_fetch_and_add(&m_fb_alloc, 1ULL);
-					} else {
-						u64 dl = flow_rb_deadline(raw_v);
-						WRITE_ONCE(e->node.__rb_parent_color, 0);
-						WRITE_ONCE(e->node.rb_left, 0);
-						WRITE_ONCE(e->node.rb_right, 0);
-						WRITE_ONCE(e->node.pid, p->pid);
-						WRITE_ONCE(e->node.pad, 0U);
-						WRITE_ONCE(e->key, dl);
-						WRITE_ONCE(e->owner, (u32)tgt);
-						WRITE_ONCE(e->pad2, 0U);
-						/* Depth bound keeps the walk short. The insert
-						 * return stays as the sole test. */
-						if (flow_rb_insert(rb, e))
-							fell = false;
-						else
-							scx_free(&flow_rb_alloc, e);
-					}
-				}
-				if (fell) {
-					scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ,
-							   (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-					flow_stat_inc(llc, 2);
-				}
-				flow_kick_idle_only(tgt, p, llc);
-				return;
-			}
-		}
-		goto insert_only;
+		flow_enqueue_cold_noctx(p, tgt, llc, no_cpu, raw_v, enq_flags);
+		return;
 	}
 	/* Local placements run before ownership is taken. A task on a
 	 * local queue is not counted in the shared gauge, so it leaves
 	 * without the queued bit. Shared and fallback inserts take the
-	 * bit below and count the gauge together. */
-	if (p->flags & PF_EXITING) {
-		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
-			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
-			scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-			flow_kick_idle_only(tgt, p, llc);
-			return;
-		}
-	}
-	if (pinned) {
-		s32 first = flow_first_allowed(p);
-		if (first < 0)
-			first = tgt;
-		if (first >= 0 && flow_cpu_allowed(first, p)) {
-			u32 pllc = llc;
-			u32 tmp = 0;
-			if (!flow_llc_for_cpu(first, &tmp))
-				pllc = tmp;
-			{
-				u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)first;
-				scx_bpf_dsq_insert(p, ldsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-				flow_kick_idle_only(first, p, pllc);
-				return;
-			}
-		}
-	}
+	 * bit below and count the gauge together. Outlined cold pre keeps
+	 * the same order with no gauge move. */
+	if (flow_enqueue_cold_pre(p, tgt, llc, enq_flags, pinned))
+		return;
 	old_flags = __sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 	if (old_flags & (u32)FLOW_FLAG_QUEUED) {
 		/* Single slot per task through the queued bit. A duplicate
@@ -709,68 +773,10 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		flow_stat_inc(llc, 4);
 		return;
 	}
-	if (p->flags & PF_EXITING) {
-		struct flow_rb_root __arena *rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
-		bool fell = true;
-		t->llc_id = llc;
-		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
-		if (!rb) {
-			__sync_fetch_and_add(&m_fb_nocpu, 1ULL);
-		} else if (!flow_rb_trylock(rb)) {
-			__sync_fetch_and_add(&m_fb_contention, 1ULL);
-		} else {
-			flow_rb_unlock(rb);
-			struct flow_rb_entry __arena *e = scx_alloc(&flow_rb_alloc);
-			if (!e) {
-				__sync_fetch_and_add(&m_fb_alloc, 1ULL);
-			} else {
-				u64 dl = flow_rb_deadline(raw_v);
-				void __arena *mem = __scx_task_data(p);
-				if (!mem) {
-					scx_free(&flow_rb_alloc, e);
-				} else {
-					struct flow_arena_task __arena *at = mem;
-					WRITE_ONCE(at->storage[0], dl);
-					WRITE_ONCE(e->node.__rb_parent_color, 0);
-					WRITE_ONCE(e->node.rb_left, 0);
-					WRITE_ONCE(e->node.rb_right, 0);
-					WRITE_ONCE(e->node.pid, p->pid);
-					WRITE_ONCE(e->node.pad, 0U);
-					WRITE_ONCE(e->key, dl);
-					WRITE_ONCE(e->owner, (u32)tgt);
-					WRITE_ONCE(e->pad2, 0U);
-					/* Depth bound keeps the walk short. The insert
-					 * return is the admit test. */
-					if (flow_rb_insert(rb, e)) {
-						fell = false;
-						__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_IN_RB);
-					} else {
-						scx_free(&flow_rb_alloc, e);
-					}
-				}
-			}
-		}
-		if (fell)
-			scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ,
-					   (u64)FLOW_EXIT_SLICE_NS, enq_flags);
-		flow_stat_inc(llc, 0);
-		if (fell)
-			flow_stat_inc(llc, 2);
-		flow_kick_idle_only(tgt, p, llc);
+	/* Cold post keeps exiting before pinned with the same slices and
+	 * the same kicks as the open code. */
+	if (flow_enqueue_cold_post(p, t, tgt, llc, no_cpu, raw_v, enq_flags, pinned))
 		return;
-	}
-	if (pinned) {
-		t->llc_id = llc;
-		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
-		__sync_fetch_and_add(&m_fb_pinned, 1ULL);
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-		flow_stat_inc(llc, 0);
-		flow_stat_inc(llc, 2);
-		/* No owner tree took the task. Kick self when idle so the
-		 * fallback head is peeked again soon. */
-		flow_kick_idle_only((s32)bpf_get_smp_processor_id(), p, llc);
-		return;
-	}
 	{
 		/* Shared inserts join the order past the floor. Tasks with no
 		 * usable CPU skip the floor, and fallback inserts stay FIFO.
@@ -788,93 +794,47 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		s64 base = READ_ONCE(t->vtime);
 		u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 		s64 floored = no_cpu ? base : flow_seq_floor(llc, base);
-		u64 b = flow_burst_clamp(READ_ONCE(t->burst_ns));
 		u64 W = (base > 0 && floored > base) ? (u64)(floored - base) : (u64)0;
 		s64 vd;
 		u64 slice_len;
-		struct flow_rb_root __arena *rb;
-		bool fell;
 		u64 sref;
-		u64 eff;
-		u64 S;
-		bool ready;
 		if (W > (u64)FLOW_RUN_WIN_NS)
 			W = (u64)FLOW_RUN_WIN_NS;
-		/* Stage 1: Unpredicted task (sref == 0) runs pure EEVDF with
-		 * 1ms quantum and bounded virtual lag credit. */
-		vd = flow_eevdf_vd(floored, W, w);
-		slice_len = (u64)FLOW_SLICE_MIN_NS;
-		rb = (no_cpu || tgt < 0 || !flow_cpu_live((u32)tgt)) ? 0 : flow_rb_for_cpu(tgt);
-		fell = true;
 		sref = flow_smoothed_ref(t);
-		eff = 0;
-		/* Stage 2: Predicted task (sref > 0) runs custom-quantum EEVDF
-		 * complemented by HRRN when wait W > 0. */
-		if (sref) {
-			eff = flow_smoothed_eff(sref, READ_ONCE(t->burst_ns));
-			vd = flow_run_vd(floored, eff, w);
+		/* Single Virtual deadline branch with no overwrite. Unpredicted
+		 * tasks run pure EEVDF with 1ms quantum and lag credit. Predicted
+		 * tasks run custom-quantum EEVDF complemented by HRRN when the
+		 * gate holds, else the smoothed run value. One charge per path. */
+		if (!sref) {
+			vd = flow_eevdf_vd(floored, W, w);
+			slice_len = (u64)FLOW_SLICE_MIN_NS;
+		} else {
+			u64 eff = flow_smoothed_eff(sref, READ_ONCE(t->burst_ns));
 			slice_len = flow_run_slice(sref);
-		}
-		S = sref ? eff : b;
-		ready = hrrn_ready(t, sref, eff, W, S, w, no_cpu);
-		if (ready) {
-			vd = vd_HRRN(floored, W, S, w);
-			slice_len = flow_run_slice(sref);
+			if (hrrn_ready(t, sref, eff, W, eff, w, no_cpu))
+				vd = vd_HRRN(floored, W, eff, w);
+			else
+				vd = flow_run_vd(floored, eff, w);
 		}
 		t->vtime = floored;
 		t->vd = vd;
 		t->slice_rem = slice_len;
-		t->llc_id = llc;
-		t->run_pad = (u32)(tgt < 0 ? 0 : tgt);
 		/* Mirror the due time beside the stored time. Later reads see
-		 * the same due time for order checks. */
+		 * the same due time for order checks. The shared insert sets
+		 * the queue index plus the owner pad plus the stored key plus
+		 * the tree bit with the same values as the open code. */
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		/* An insert miss keeps the newcomer in FIFO. Contention is
 		 * probed before the alloc with no wasted slab on busy. Stored
 		 * key keeps remove stable past later due time moves. Tree bit
 		 * marks tree members for a direct remove with no wasted walk
-		 * on fallback members. */
-		if (!rb) {
-			__sync_fetch_and_add(&m_fb_nocpu, 1ULL);
-		} else if (!flow_rb_trylock(rb)) {
-			__sync_fetch_and_add(&m_fb_contention, 1ULL);
-		} else {
-			flow_rb_unlock(rb);
-			struct flow_rb_entry __arena *e = scx_alloc(&flow_rb_alloc);
-			if (!e) {
-				__sync_fetch_and_add(&m_fb_alloc, 1ULL);
-			} else {
-				u64 dl = flow_rb_deadline(vd);
-				void __arena *mem = __scx_task_data(p);
-				if (!mem) {
-					scx_free(&flow_rb_alloc, e);
-				} else {
-					struct flow_arena_task __arena *at = mem;
-					WRITE_ONCE(at->storage[0], dl);
-					WRITE_ONCE(e->node.__rb_parent_color, 0);
-					WRITE_ONCE(e->node.rb_left, 0);
-					WRITE_ONCE(e->node.rb_right, 0);
-					WRITE_ONCE(e->node.pid, p->pid);
-					WRITE_ONCE(e->node.pad, 0U);
-					WRITE_ONCE(e->key, dl);
-					WRITE_ONCE(e->owner, (u32)tgt);
-					WRITE_ONCE(e->pad2, 0U);
-					/* Depth bound keeps the walk short. The insert
-					 * return is the admit test. */
-					if (flow_rb_insert(rb, e)) {
-						fell = false;
-						__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_IN_RB);
-					} else {
-						scx_free(&flow_rb_alloc, e);
-					}
-				}
-			}
+		 * on fallback members. Shared helper holds the sole test. */
+		{
+			u64 dl = flow_rb_deadline(vd);
+			(void)flow_enqueue_insert_shared(p, t, tgt, no_cpu, dl,
+							 slice_len, enq_flags,
+							 llc, true);
 		}
-		if (fell)
-			scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice_len, enq_flags);
-		flow_stat_inc(llc, 0);
-		if (fell)
-			flow_stat_inc(llc, 2);
 		if (no_cpu) {
 			/* No usable CPU. Kick self when idle so the
 			 * fallback head is peeked again soon. */
@@ -882,18 +842,6 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			return;
 		}
 		flow_kick_vd(tgt, p, llc, vd);
-		return;
-	}
-insert_only:
-	/* Task state is missing. The queued bit stays clear with no gauge
-	 * count, so a cancel before the run stays balanced. This path only
-	 * runs when the state alloc fails. */
-	{
-		u64 sl = (u64)FLOW_SLICE_MIN_NS;
-		__sync_fetch_and_add(&m_fb_alloc, 1ULL);
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, sl, enq_flags);
-		flow_stat_inc(llc, 2);
-		flow_kick_idle_only(tgt, p, llc);
 		return;
 	}
 }
