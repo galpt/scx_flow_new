@@ -93,6 +93,17 @@ struct flow_victim_sel {
 	bool have_best2;
 	bool have_first;
 };
+/* Victim request packs the scan inputs into one struct with no logic
+ * change. The caller builds the struct on stack then passes a pointer
+ * with no extra alloc and no new loop. The pack keeps the shared scan
+ * within five args with integer fields only. */
+struct flow_victim_req {
+	u32 self;
+	u32 llc;
+	bool use_ccx;
+	u32 my_ccx;
+	bool use_l2;
+};
 /* Tie-break on the stale-aware minimum with unknown failing closed.
  * Inlined so the shared scan keeps one subprogram depth to the minimum
  * read. */
@@ -105,13 +116,26 @@ static __always_inline bool flow_min_key_less(u32 a, u32 b)
  * skip before any group lookup, same LLC gate, one seed view, group
  * gate per tier, unknown bucket covers fixed order, larger known
  * buckets first with the stale-aware minimum tie-break, second best
- * plus first fixed tracking with no new loop. */
-static __noinline void flow_scan_victims(u32 self, u32 llc, bool use_ccx,
-					 u32 my_ccx, bool use_l2,
+ * plus first fixed tracking with no new loop. Request plus selection
+ * keep two args with no logic change. Both pointers stay non NULL on
+ * the stack path with a fail closed guard. */
+static __noinline void flow_scan_victims(const struct flow_victim_req *req,
 					 struct flow_victim_sel *out)
 {
+	u32 self;
+	u32 llc;
+	bool use_ccx;
+	u32 my_ccx;
+	bool use_l2;
 	u32 victim;
 
+	if (!req || !out)
+		return;
+	self = req->self;
+	llc = req->llc;
+	use_ccx = req->use_ccx;
+	my_ccx = req->my_ccx;
+	use_l2 = req->use_l2;
 	out->best = (u32)FLOW_MAX_CPUS;
 	out->best2 = (u32)FLOW_MAX_CPUS;
 	out->first = (u32)FLOW_MAX_CPUS;
@@ -509,7 +533,16 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * the new head. One seed lookup returns cluster plus buckets. */
 	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
 	my_ccx = flow_cpu_ccx(c);
-	flow_scan_victims(c, llc, use_ccx, my_ccx, true, &sel);
+	{
+		struct flow_victim_req vreq;
+
+		vreq.self = c;
+		vreq.llc = llc;
+		vreq.use_ccx = use_ccx;
+		vreq.my_ccx = my_ccx;
+		vreq.use_l2 = true;
+		flow_scan_victims(&vreq, &sel);
+	}
 	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
 	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
@@ -528,7 +561,16 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	 * Empty queues skip before the dedup lookup. The empty check
 	 * can race a new enqueue, which stays safe since the next dispatch
 	 * covers the new head. One seed lookup returns cluster plus buckets. */
-	flow_scan_victims(c, llc, use_ccx, my_ccx, false, &sel);
+	{
+		struct flow_victim_req vreq;
+
+		vreq.self = c;
+		vreq.llc = llc;
+		vreq.use_ccx = use_ccx;
+		vreq.my_ccx = my_ccx;
+		vreq.use_l2 = false;
+		flow_scan_victims(&vreq, &sel);
+	}
 	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
 		return;
 	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
