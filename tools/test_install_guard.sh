@@ -125,9 +125,10 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-# Per-LLC vtime plus per-CPU DSQ order by virtual deadline.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "e6100e079db314fbb700e7991ab610455de2323d93a6591ae4bd39800a7a642e" ] || fail "scx README drifted"
+# Per-LLC virtual deadline DSQ plus per-CPU DSQ plus fallback FIFO DSQ.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "765115210c5c61a7275771dd8b7f2c6d15357e9b32798476eb56f3949f4ef902" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "15" ] || fail "scx README lines drifted"
+[ "$(wc -w < "${SRC_DIR}/README.md" | tr -d ' ')" = "158" ] || fail "scx README words drifted"
 
 # Scheduler prose keeps periods with no semicolon.
 if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
@@ -289,33 +290,42 @@ if [ -n "${HOME:-}" ]; then
     check_refuse "${HOME}/ws" "home env tree"
 fi
 
-# Ordered drain stays fail closed with forward wakes. Each CPU drains
-# its own per CPU queues first, then same LLC, then same node, then
-# remote, then fallback, with one forward wake per unrunnable head.
+# Ordered DSQ drain stays fail closed. Each CPU drains its own CPU DSQ
+# first for pinned tasks, then the local LLC DSQ for shared tasks, then
+# same node neighbor LLC DSQs, then remote LLC DSQs, then fallback last.
+# Continuation keeps a runnable prev in place with a fresh slice.
 DISP_HDR="${SRC_DIR}/src/bpf/dispatch.bpf.h"
-grep -q "flow_drain_cpu" "${DISP_HDR}" || fail "drain helper missing"
-grep -q "flow_try_move" "${DISP_HDR}" || fail "move helper missing"
-grep -q "flow_forward_from_peeked" "${DISP_HDR}" || fail "forward helper missing"
+grep -q "FLOW_CPU_DSQ_BASE = 0x1000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "cpu dsq base missing"
+grep -q "FLOW_LLC_DSQ_BASE = 0x2000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "llc dsq base missing"
+grep -q "FLOW_FALLBACK_DSQ = 0x6100ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback dsq base missing"
+grep -q "FLOW_CPU_DSQ_BASE" "${DISP_HDR}" || fail "cpu drain missing"
+grep -q "FLOW_LLC_DSQ_BASE" "${DISP_HDR}" || fail "llc drain missing"
 grep -q "FLOW_FALLBACK_DSQ" "${DISP_HDR}" || fail "fallback drain missing"
-grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary predicate missing"
+grep -q "flow_try_continue_prev" "${DISP_HDR}" || fail "continue helper missing"
+grep -q "Same node neighbor" "${DISP_HDR}" || fail "node drain missing"
+grep -q "Remote LLC" "${DISP_HDR}" || fail "remote drain missing"
+grep -q "Fallback last" "${DISP_HDR}" || fail "fallback order missing"
+if grep -q "flow_drain_cpu\|flow_try_move\|flow_forward_from_peeked" "${DISP_HDR}" 2>/dev/null; then
+    fail "stale drain helper reappeared"
+fi
+if grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "dead primary reappeared"
+fi
 
-# Topology keeps local first drain in deadline order. The drain keeps
-# own CPU first then same LLC then same node then remote then fallback,
-# each queue in deadline order, the pick keeps the hint
-# when allowed else the first near target, and ties keep the first CPU
-# in fixed order.
-grep -q "drains its own queue" "${DISP_HDR}" || fail "cache drain prose missing"
-grep -q "deadline order" "${DISP_HDR}" || fail "deadline order prose missing"
+# Topology keeps local first DSQ drain in due time order. The drain keeps
+# own CPU DSQ first then local LLC DSQ then same node then remote then
+# fallback last, the pick keeps the hint when allowed else the first
+# allowed CPU, and ties keep fixed order.
+grep -q "Own CPU DSQ" "${DISP_HDR}" || fail "cache drain prose missing"
+grep -q "Local LLC DSQ" "${DISP_HDR}" || fail "llc drain prose missing"
+grep -q "due time" "${DISP_HDR}" || fail "due order prose missing"
 if grep -q "first strand" "${DISP_HDR}" 2>/dev/null; then
     fail "strand prose reappeared"
 fi
 grep -q "flow_constrained_target" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "constrained pick missing"
 grep -q "fixed order" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie order prose missing"
-if ! grep -q "score < best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "tie order drifted"
-fi
-if grep -q "score <= best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "tie order not fixed"
+if grep -q "score < best_score\|score <= best_score" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "stale score tie reappeared"
 fi
 
 # Burst-aware SMT placement with fail closed choice.
@@ -323,28 +333,36 @@ fi
 # fails closed with no move through the shared picker.
 grep -q "scx_bpf_get_idle_smtmask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smt mask missing"
 grep -q "scx_bpf_get_idle_cpumask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "idle mask missing"
-grep -q "FLOW_SMT_STAY_BURST_NS" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smt stay use missing"
-grep -q "short_burst" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "burst gate missing"
-grep -q "full_core" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "full core missing"
-grep -q "FLOW_FLAG_URGENT" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "urgent inheritance missing"
-grep -q "FLOW_FLAG_INTERACTIVE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "interactive inheritance missing"
-grep -q "fail closed" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smt fail closed prose missing"
+grep -q "FLOW_FLAG_IS_SYNC_WAKEUP" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "sync flag missing"
+grep -q "FLOW_FLAG_WOKEN_BY_HARDIRQ" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "hardirq flag missing"
+grep -q "FLOW_FLAG_WOKEN_BY_SOFTIRQ" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "softirq flag missing"
+grep -q "FLOW_FLAG_IS_GREEDY" "${SRC_DIR}/src/bpf/intf.h" || fail "greedy flag missing"
+if grep -q "FLOW_SMT_STAY_BURST_NS\|short_burst\|full_core" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "stale smt burst reappeared"
+fi
+if grep -q "FLOW_FLAG_URGENT\|FLOW_FLAG_INTERACTIVE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale urgent reappeared"
+fi
 if grep -q "sibling_cpu\|topology_sibling" "${SRC_DIR}/src/bpf/dispatch.bpf.h" 2>/dev/null; then
     fail "smt probe reappeared"
 fi
 
-# Lag-conserving EEVDF plus in-place continuation plus direct dispatch.
-# Each CPU exposes its minimum queued deadline for O(1) continuation.
-grep -q "flow_cpu_min_key" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "min key missing"
-grep -q "flow_cpu_min_key\[owner\]" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "min insert missing"
-grep -q "flow_cpu_min_key\[cpu\]" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "min continue missing"
+# Latency score plus in-place continuation plus direct dispatch.
+# Continuation keeps a runnable prev on its CPU with a fresh slice.
 grep -q "flow_try_continue_prev" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "try continue missing"
-grep -q "SCX_DSQ_LOCAL_ON" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "local dispatch missing"
+grep -q "SCX_DSQ_LOCAL" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "local dispatch missing"
+grep -q "SCX_DSQ_LOCAL_ON" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "local on missing"
 grep -q "scx_bpf_test_and_clear_cpu_idle(tgt)" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "idle claim missing"
-grep -q "FLOW_FLAG_URGENT" "${SRC_DIR}/src/bpf/intf.h" || fail "urgent flag missing"
-grep -q "FLOW_FLAG_INTERACTIVE" "${SRC_DIR}/src/bpf/intf.h" || fail "interactive flag missing"
-grep -q "FLOW_SLICE_MAX_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "slice max missing"
-grep -q "FLOW_CADENCE_MAX_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "cadence missing"
+grep -q "FLOW_FLAG_IS_GREEDY" "${SRC_DIR}/src/bpf/intf.h" || fail "greedy flag missing"
+grep -q "FLOW_SLICE_MAX_NS = 5000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice max missing"
+grep -q "FLOW_SLICE_MIN_NS = 500000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice min missing"
+grep -q "FLOW_TARGETED_LATENCY_NS = 10000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "target latency missing"
+if grep -q "flow_cpu_min_key" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale min key reappeared"
+fi
+if grep -q "FLOW_CADENCE_MAX_NS\|FLOW_FLAG_URGENT\|FLOW_FLAG_INTERACTIVE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale cadence reappeared"
+fi
 
 # No graphics hint remains. Placement uses the previous CPU plus
 # the seed scan only, with no per task hint stored anywhere.
@@ -354,11 +372,12 @@ fi
 
 # Busy cores run at max with idle cores at half through one set call.
 # The call never sends zero and never steers placement, and no other
-# frequency call steers placement. Shared mark lives in select so the
-# set plus max plus half checks read select with use checks in dispatch.
+# frequency call steers placement. Timer only decays idle cores while
+# running plus tick ramp busy cores to max. Shared mark lives in select
+# so the set plus max plus half checks read select with use checks in dispatch.
 grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
-grep -q "never steers" "${DISP_HDR}" || fail "freq dispatch prose missing"
-grep -q "never sends zero" "${DISP_HDR}" || fail "freq never zero prose missing"
+grep -q "never touches a busy core" "${DISP_HDR}" || fail "freq dispatch prose missing"
+grep -q "never sends zero" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq never zero prose missing"
 grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf set missing"
 grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf max missing"
 grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf half missing"
@@ -382,91 +401,61 @@ fi
 # is kept.
 FAIR_HDR="${SRC_DIR}/src/bpf/fair.bpf.h"
 ENQ_HDR="${SRC_DIR}/src/bpf/enqueue.bpf.h"
-grep -q "FLOW_SLICE_MIN_NS = 1000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
-grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
-grep -q "flow_fair_step" "${FAIR_HDR}" || fail "fair step missing"
-grep -q "flow_fair_cap_add" "${FAIR_HDR}" || fail "cap add missing"
-grep -q "flow_fair_charge" "${FAIR_HDR}" || fail "fair charge missing"
+grep -q "FLOW_SLICE_MIN_NS = 500000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice quantum missing"
+if grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "stale fair base reappeared"
+fi
+grep -q "flow_calc_lat_cri" "${FAIR_HDR}" || fail "lat cri missing"
+grep -q "flow_calc_greedy_penalty" "${FAIR_HDR}" || fail "greedy missing"
+grep -q "flow_calc_when_to_run" "${FAIR_HDR}" || fail "when run missing"
 grep -q "flow_nice_table" "${FAIR_HDR}" || fail "nice table missing"
 grep -q "flow_nice_weight" "${FAIR_HDR}" || fail "nice weight missing"
 if grep -rq "flow_combine" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "combine reappeared"
 fi
 grep -q "flow_task_weight" "${FAIR_HDR}" || fail "task weight missing"
-grep -q "flow_task_weight(p, t)" "${ENQ_HDR}" || fail "task weight enqueue missing"
+grep -q "flow_calc_lat_cri(p, t)" "${ENQ_HDR}" || fail "lat cri enqueue missing"
 grep -q "flow_task_weight(p, t)" "${DISP_HDR}" || fail "task weight dispatch missing"
-grep -q "flow_task_weight(prev, t)" "${DISP_HDR}" || fail "task weight prev missing"
+grep -q "flow_calc_avg" "${FAIR_HDR}" || fail "avg helper missing"
 if grep -q "flow_nice_weight(p)" "${ENQ_HDR}" 2>/dev/null; then
     fail "nice direct reappeared"
 fi
-grep -q "flow_seq_floor" "${FAIR_HDR}" || fail "floor helper missing"
-grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
-grep -q "flow_eevdf_vd" "${FAIR_HDR}" || fail "eevdf helper missing"
-grep -q "flow_eevdf_vd(t, floored, lag, w)" "${ENQ_HDR}" || fail "eevdf use missing"
+# Latency score keeps integer only math with log scale plus EWMA folds.
+# Due time lands ahead of the clock inside a small window for urgent tasks.
+# Slice tracks a ten millisecond window with boost for long frame runs.
+grep -q "flow_log2_u64" "${FAIR_HDR}" || fail "log helper missing"
+grep -q "flow_calc_avg" "${FAIR_HDR}" || fail "avg helper missing"
+grep -q "flow_calc_lat_cri" "${FAIR_HDR}" || fail "lat cri missing"
+grep -q "flow_calc_greedy_penalty" "${FAIR_HDR}" || fail "greedy missing"
+grep -q "flow_calc_when_to_run" "${FAIR_HDR}" || fail "when run missing"
 grep -q "flow_calc_slice" "${FAIR_HDR}" || fail "calc slice missing"
 grep -q "flow_calc_slice(t," "${ENQ_HDR}" || fail "calc slice use missing"
 grep -q "flow_calc_slice(t," "${DISP_HDR}" || fail "calc slice dispatch missing"
-if grep -q "vd_HRRN\|hrrn_ready" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+grep -q "flow_calc_when_to_run(p, t)" "${ENQ_HDR}" || fail "when run use missing"
+if grep -q "flow_seq_floor\|flow_vd_for\|flow_eevdf_vd\|flow_burst_\|flow_fair_step\|flow_fair_cap_add\|flow_fair_charge\|flow_vd_wakeup_assist" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale fair reappeared"
+fi
+if grep -q "FLOW_SLICE_FLOOR_NS\|FLOW_SEQ_FLOOR_STEP_NS\|FLOW_FAIR_BASE_NS\|FLOW_CGROUP_WEIGHT_MIN.*burst" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale burst const reappeared"
+fi
+if grep -q "vd_HRRN\|hrrn_ready\|flow_run_vd\|flow_run_slice" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "hrrn reappeared"
 fi
-if grep -q "flow_run_vd\|flow_run_slice" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "run slice reappeared"
+if grep -q "flow_rb_empty\|flow_rb_insert\|flow_rb_for_cpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale rb reappeared"
 fi
-# Unified lag-conserving EEVDF keeps the fallback charge path beside the single use.
-# The fallback due time plus the run due time stay in enqueue only.
-# Unknown tasks price by lag credit, so the fallback accepts the lag
-# credit helper or the burst step helper with no BPF change here.
-if ! grep -q "flow_eevdf_vd" "${ENQ_HDR}" 2>/dev/null && ! grep -q "flow_vd_for" "${ENQ_HDR}" 2>/dev/null; then
-    fail "fallback vd use missing"
-fi
-grep -q "flow_eevdf_vd(t, floored, lag, w)" "${ENQ_HDR}" || fail "eevdf enqueue missing"
-grep -q "flow_seq_floor" "${ENQ_HDR}" || fail "floor use missing"
-# Burst run length scales the vd step with shift only moves and a
-# bounded floor. The vd takes three args with the burst in the middle
-# and the floor cap stays at one base step. Pure deadline order keeps
-# the floored time plus the burst scaled nice step with no wakeup nudge.
-grep -q "FLOW_SLICE_FLOOR_NS = 62500ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "burst floor missing"
-grep -q "burst_ns" "${SRC_DIR}/src/bpf/intf.h" || fail "burst field missing"
-grep -q "flow_burst_clamp" "${FAIR_HDR}" || fail "burst clamp missing"
-grep -q "flow_burst_update" "${FAIR_HDR}" || fail "burst update missing"
-grep -q "flow_vd_for(s64 floored, u64 burst_ns, u32 w)" "${FAIR_HDR}" || fail "vd arg drifted"
-if grep -q "b >> 1" "${FAIR_HDR}" 2>/dev/null; then
-    fail "loose half shift reappeared"
-fi
-# Burst keeps two quarter moves plus one shared fold line with the same gain.
-[ "$(grep -c ">> 2" "${FAIR_HDR}" | tr -d ' ')" = "1" ] || fail "burst quarter shift drifted"
-grep -q "bool q_empty" "${ENQ_HDR}" || fail "q empty missing"
-grep -q "flow_rb_empty(flow_rb_for_cpu(tgt))" "${ENQ_HDR}" || fail "empty probe missing"
-grep -q "u64 lag = " "${ENQ_HDR}" || fail "lag missing"
-grep -q "flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS)" "${FAIR_HDR}" || fail "floor cap drifted"
-grep -q "flow_fair_cap_add(floored, 1)" "${FAIR_HDR}" || fail "vd floor missing"
-# Pure proxy keeps deadline order with no wakeup nudge. Any assist helper
-# plus wakeup branch plus eighth shift must not return.
-if grep -q "flow_vd_wakeup_assist" "${FAIR_HDR}" "${ENQ_HDR}" 2>/dev/null; then
-    fail "wakeup assist reappeared"
-fi
-if grep -q "step >> 3" "${FAIR_HDR}" 2>/dev/null; then
-    fail "assist shift reappeared"
-fi
-if grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" 2>/dev/null; then
-    fail "wakeup branch reappeared"
-fi
+grep -q "SCX_ENQ_WAKEUP" "${ENQ_HDR}" || fail "wakeup check missing"
 # No overload control with unbounded admit plus FIFO fallback and no reclaim.
-# Admit uses the insert return as the sole test with no room probe. An
-# insert miss keeps the newcomer in FIFO with no evict and no band.
-# Stopping plus tick keep burst plus run with no saved reclaim.
-if grep -q "scx_edq_nr_queued" "${ENQ_HDR}" 2>/dev/null; then
-    fail "room probe reappeared"
+# DSQ inserts stay direct with pinned on per-CPU plus shared on per-LLC
+# plus fallback FIFO for tasks with no usable CPU. No room probe remains.
+if grep -q "scx_edq_\|flow_rb_insert\|flow_enqueue_insert_shared\|flow_try_evict" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale queue helper reappeared"
 fi
-if grep -q "nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" 2>/dev/null; then
+grep -q "FLOW_CPU_DSQ_BASE" "${ENQ_HDR}" || fail "cpu dsq insert missing"
+grep -q "FLOW_LLC_DSQ_BASE" "${ENQ_HDR}" || fail "llc dsq insert missing"
+grep -q "FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback insert missing"
+if grep -q "scx_edq_nr_queued\|nr < (u64)FLOW_QUEUE_CAP" "${ENQ_HDR}" 2>/dev/null; then
     fail "room gate reappeared"
-fi
-grep -q "as the sole test" "${ENQ_HDR}" || fail "sole test prose missing"
-[ "$(grep -c "flow_rb_insert(rb, e)" "${ENQ_HDR}" | tr -d ' ')" = "1" ] || fail "insert sites drifted"
-grep -q "flow_enqueue_insert_shared" "${ENQ_HDR}" || fail "shared insert missing"
-[ "$(grep -c "flow_enqueue_insert_shared(p," "${ENQ_HDR}" | tr -d ' ')" = "3" ] || fail "shared insert sites drifted"
-if grep -q "scx_edq_insert" "${ENQ_HDR}" 2>/dev/null; then
-    fail "edq insert reappeared"
 fi
 if grep -q "FLOW_RED_TOL_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
     fail "red tol reappeared"
@@ -528,17 +517,14 @@ fi
 if grep -q "saved delta" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "reclaim prose reappeared"
 fi
-grep -q "with no evict" "${ENQ_HDR}" || fail "no evict prose missing"
-grep -q "with no evict" "${SRC_DIR}/src/bpf/intf.h" || fail "no evict prose missing"
-grep -q "no reclaim" "${SRC_DIR}/src/bpf/intf.h" || fail "no reclaim prose missing"
-grep -q "no reclaim" "${DISP_HDR}" || fail "no reclaim prose missing"
-grep -q "total_used" "${DISP_HDR}" || fail "burst run missing"
-grep -q "flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable)" "${DISP_HDR}" || fail "stop burst missing"
-# Tick prices by remaining slice cur, so the due time tracks the live
-# remaining slice at the tick.
-grep -q "flow_vd_for(nv, cur, w)" "${DISP_HDR}" || fail "tick vd missing"
-grep -q "flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w)" "${DISP_HDR}" || fail "tick floor vd missing"
-[ "$(grep -c "t->burst_ns = (u64)FLOW_SLICE_MIN_NS" "${DISP_HDR}" | tr -d ' ')" = "3" ] || fail "burst seed drifted"
+# DSQ inserts need no evict plus no reclaim. Pinned tasks park on the
+# per-CPU DSQ while shared tasks park on the per-LLC DSQ with FIFO fallback.
+grep -q "FLOW_CPU_DSQ_BASE" "${ENQ_HDR}" || fail "cpu insert missing"
+grep -q "FLOW_LLC_DSQ_BASE" "${ENQ_HDR}" || fail "llc insert missing"
+grep -q "FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback insert missing"
+# Tick plus stopping charge the tail past the last tick and fold averages.
+grep -q "acc_runtime_ns" "${DISP_HDR}" || fail "tail charge missing"
+grep -q "avg_runtime_ns" "${DISP_HDR}" || fail "avg fold missing"
 # Effective weight from nice plus live share with clamp combine and no map.
 # Live share reads as the default with clamp to one through ten thousand.
 # Hierarchy walk stays out of budget, so misses keep nice only. Steady
@@ -561,7 +547,7 @@ fi
 if grep -rq "cgroup_init\|cgroup_exit\|cgroup_move\|cgroup_set_weight" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "group op reappeared"
 fi
-grep -q "flow_task_weight(p, t)" "${ENQ_HDR}" || fail "task weight use missing"
+grep -q "flow_calc_lat_cri(p, t)" "${ENQ_HDR}" || fail "lat cri use missing"
 grep -q "flow_task_weight(p, t)" "${DISP_HDR}" || fail "task weight dispatch missing"
 grep -q "flow_share_live" "${FAIR_HDR}" || fail "share live missing"
 grep -q "flow_eff_w" "${FAIR_HDR}" || fail "eff combine missing"
@@ -576,7 +562,7 @@ fi
 if grep -q "first strand" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "strand prose reappeared"
 fi
-grep -q "deadline order" "${ENQ_HDR}" || fail "deadline order prose missing"
+grep -q "due time" "${ENQ_HDR}" || fail "due order prose missing"
 grep -q "flow_calc_slice" "${FAIR_HDR}" || fail "calc slice missing"
 grep -q "flow_calc_slice(t," "${ENQ_HDR}" || fail "calc slice use missing"
 if grep -q "slice_len = (u64)FLOW_SLICE_MIN_NS" "${ENQ_HDR}" 2>/dev/null; then
@@ -586,20 +572,17 @@ if grep -q "flow_run_slice" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "run slice reappeared"
 fi
 grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
-grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
-grep -q "new_vd < run_vd" "${ENQ_HDR}" && fail "raw compare reappeared"
-grep -q "win < run_vd" "${ENQ_HDR}" || fail "gap compare missing"
-grep -q "win < fresh_vd" "${ENQ_HDR}" || fail "gap recheck missing"
-# Guarded preempt keeps a single preempt site on the guarded win path.
-# All other wakes stay idle only. The win counts preempt with idle on
-# the fast path and skips otherwise.
-[ "$(grep -rh "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "1" ] || fail "preempt site drifted"
-grep -q "scx_bpf_kick_cpu(tgt, SCX_KICK_PREEMPT)" "${ENQ_HDR}" || fail "guarded preempt missing"
-grep -q "flow_stat_inc(llc, 6)" "${ENQ_HDR}" || fail "preempt count missing"
-[ "$(grep -c "SCX_KICK_IDLE" "${ENQ_HDR}" | tr -d ' ')" = "3" ] || fail "idle kick sites drifted"
-grep -q "preempts on a guarded win" "${ENQ_HDR}" || fail "guarded win prose missing"
-grep -q "preempts guarded" "${SRC_DIR}/src/bpf/intf.h" || fail "guarded prose missing"
-grep -q "FIFO" "${ENQ_HDR}" || fail "fifo prose missing"
+grep -q "flow_try_preempt" "${ENQ_HDR}" || fail "soft yield missing"
+grep -q "est_stopping_clk" "${ENQ_HDR}" || fail "stop claim missing"
+grep -q "nr_preempt" "${ENQ_HDR}" || fail "preempt count missing"
+grep -q "near stop" "${ENQ_HDR}" || fail "soft yield prose missing"
+# Soft yield stays CAS only with no IPI. All wakes stay idle only except
+# the soft yield path which claims the victim stop stamp with no kick.
+[ "$(grep -rh "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "0" ] || fail "ipi preempt reappeared"
+[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "3" ] || fail "idle kick sites drifted"
+grep -q "with no IPI" "${ENQ_HDR}" || fail "no ipi prose missing"
+grep -q "yields soft" "${SRC_DIR}/src/bpf/intf.h" || fail "soft prose missing"
+grep -q "Fallback" "${ENQ_HDR}" || fail "fallback prose missing"
 grep -q "scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback fifo insert missing"
 if grep -q "insert_vtime.*FALLBACK\|FALLBACK.*insert_vtime" "${ENQ_HDR}" 2>/dev/null; then
     fail "fallback vtime insert reappeared"
@@ -652,19 +635,22 @@ fi
 if grep -q "double" "${FAIR_HDR}" 2>/dev/null; then
     fail "double reappeared"
 fi
-grep -q "vd" "${SRC_DIR}/src/bpf/intf.h" || fail "vd field missing"
-grep -q "flow_vd_for" "${FAIR_HDR}" || fail "vd helper missing"
-grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
+grep -q "due time" "${SRC_DIR}/src/bpf/intf.h" || fail "due field missing"
+grep -q "flow_calc_when_to_run" "${FAIR_HDR}" || fail "when run missing"
+grep -q "flow_try_preempt" "${ENQ_HDR}" || fail "soft yield missing"
 
-# Deadline order stays with one kick per run and idle fast path.
-# Each run kicks at most once, idle targets take idle wakes, each
-# deadline win kicks idle, and a runnable yield with no burn still
-# moves time.
-grep -q "Each running instance kicks at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "kick bound prose missing"
-grep -q "Each running instance kicks at most once" "${ENQ_HDR}" || fail "enqueue kick bound prose missing"
+# Due order stays with one yield per run and idle fast path.
+# Each running instance yields at most once per generation, idle targets
+# take idle wakes, and a runnable yield with no burn still moves time.
+grep -q "Each running instance yields at most once" "${SRC_DIR}/src/bpf/intf.h" || fail "yield bound prose missing"
+grep -q "At most one yield per run" "${ENQ_HDR}" || fail "enqueue yield bound prose missing"
 grep -q "scx_bpf_test_and_clear_cpu_idle(tgt)" "${ENQ_HDR}" || fail "idle consume missing"
-grep -q "rs->pad" "${ENQ_HDR}" || fail "kick cookie missing"
-grep -q "flow_fair_cap_add" "${DISP_HDR}" || fail "yield advance missing"
+if grep -q "flow_kick_vd\|flow_vd_for\|rs->pad.*kick\|flow_fair_cap_add" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    # flow_calc_slice plus flow_calc_when_to_run are the only vd path now
+    if grep -q "flow_kick_vd" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+        fail "stale vd kick reappeared"
+    fi
+fi
 
 # Stats keep order with thirteen counters at one hundred four bytes.
 grep -q "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" || fail "preempt field missing"
@@ -703,12 +689,11 @@ if grep -q '"lat"' "${SRC_DIR}/src/stats.rs" 2>/dev/null; then
     fail "lat endpoint reappeared"
 fi
 
-# Tables stay scoped with three maps and seven headers.
-# The base tables hold task plus cpu plus llc with one embedded
-# queue per CPU in arena memory. Top keeps thirteen counters. Queues
-# come from upstream, so quoted headers stay at seven with ops at thirteen.
-# The arena task map is infra and not counted here.
-[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "3" ] || fail "maps count drifted"
+# Tables stay scoped with four maps and seven headers.
+# Task storage plus LLC stats plus CPU seed plus one timer. Top keeps
+# thirteen counters. DSQ ids stay at 0x1000 plus 0x2000 plus 0x6100 with
+# quoted headers at seven plus ops at fifteen.
+[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "4" ] || fail "maps count drifted"
 [ "$(grep -c 'include "' "${SRC_DIR}/src/bpf/main.bpf.c" | tr -d ' ')" = "7" ] || fail "headers count drifted"
 if grep -q '<lib/rbtree.h>' "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "rbtree angled reappeared for honest BST"
@@ -739,163 +724,52 @@ if grep -q "flow_wait_allow\|flow_home_stick" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>
     fail "old global reappeared"
 fi
 
-# Ops stay at thirteen with no probe added.
-[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "ops count drifted"
+# Ops stay at fifteen with no probe added.
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "15" ] || fail "ops count drifted"
 
-# Cache idle drain keeps five bounded loops with no new program.
-# One scan lives in select for the seed pick plus one scan for the first
-# allowed fallback. Three physical passes live in dispatch for the shared
-# victim scan plus same node plus remote, with the shared scan running
-# twice dynamically for same group plus same LLC.
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted"
+# DSQ drain keeps thirteen bounded loops with no new program.
+# Five scans live in select for the constrained pick plus tier order.
+# Eight scans live in dispatch for the DSQ drain plus timer plus init
+# plus exit, all bounded by the live CPU plus LLC counts.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "loop budget drifted"
 
-# Queues are one per CPU plus fallback with deadline order and insertion ties.
-# Fair scales base by nice weight with a per LLC floor. Deadline sets the order with
-# a strict earlier deadline win. Wakes go idle only with a skip otherwise.
-# Queues use the upstream library with per
-# CPU placement and FIFO fallback. Queues hold bounded at 64 total.
+# Queues are one per CPU plus one per LLC plus fallback with due time order.
+# DSQ ids stay at 0x1000 plus 0x2000 plus 0x6100. Moves go to local with
+# topology drain plus continuation for a runnable prev. No RB plus no EDQ
+# plus no DHQ plus no arena queue remains.
 grep -q "FLOW_FALLBACK_CAP = 1024ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback cap missing"
 grep -q "FLOW_QUEUE_CAP = 64ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap missing"
-if grep -q "SCX_DHQ_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dhq const reappeared"
-fi
-if grep -q "scx_dhq_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dhq helper reappeared"
-fi
-if grep -q "SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "unbounded cap reappeared"
-fi
-if grep -q "10ULL" "${DISP_HDR}" 2>/dev/null; then
-    fail "stale cap reappeared"
-fi
-if grep -q "256ULL" "${DISP_HDR}" 2>/dev/null; then
-    fail "old percpu cap reappeared"
-fi
-grep -q "scx_static_alloc" "${DISP_HDR}" || fail "rb roots alloc missing"
-if grep -q "sizeof(struct scx_edq)" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq sizing reappeared"
-fi
-grep -q "scx_alloc_init" "${DISP_HDR}" || fail "rb slab init missing"
-grep -q "flow_rb_alloc" "${DISP_HDR}" || fail "rb slab missing"
-grep -q "scx_alloc(&flow_rb_alloc)" "${ENQ_HDR}" || fail "rb slab alloc missing"
-grep -q "scx_free(&flow_rb_alloc" "${DISP_HDR}" || fail "rb slab free missing"
-grep -q "flow_rb_roots" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "rb roots missing"
-if grep -q "flow_edqs" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq roots reappeared"
-fi
-if grep -q "flow_dhqs" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "old queue handle reappeared"
-fi
-grep -q "flow_rb_insert" "${ENQ_HDR}" || fail "rb insert missing"
-if grep -q "scx_edq_insert" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq insert reappeared"
-fi
-grep -q "flow_rb_pop" "${DISP_HDR}" || fail "rb pop missing"
-if grep -q "scx_edq_pop" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq pop reappeared"
-fi
-if grep -q "flow_rb_peek" "${DISP_HDR}" 2>/dev/null; then
-    fail "dead peek reappeared"
-fi
-if grep -q "scx_edq_peek_hold" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq peek reappeared"
-fi
-grep -q "flow_rb_is_empty" "${DISP_HDR}" || fail "rb empty check missing"
-if grep -q "scx_edq_nr_queued" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq nr queued reappeared"
-fi
-if grep -q "scx_edq_try_remove" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq remove reappeared"
-fi
-if grep -q "scx_edq_task_init" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq task init reappeared"
-fi
-if grep -q "scx_edq_task_detach" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq task detach reappeared"
-fi
-if grep -q "scx_edq_task_drop" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq task drop reappeared"
-fi
-if grep -q "scx_edq_task_fini" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq task fini reappeared"
-fi
-grep -q "scx_task_alloc" "${DISP_HDR}" || fail "arena alloc missing"
-grep -q "scx_task_free" "${DISP_HDR}" || fail "arena free missing"
-grep -rq "__scx_task_data" "${SRC_DIR}/src/bpf" || fail "arena lookup missing"
-grep -q "flow_rb_for_cpu" "${ENQ_HDR}" || fail "rb helper missing"
-if grep -q "flow_edq_for_cpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq helper reappeared"
-fi
-grep -q "flow_rb_deadline" "${ENQ_HDR}" || fail "rb deadline missing"
-if grep -q "flow_edq_deadline" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq deadline reappeared"
-fi
-grep -q "flow_try_move_rb" "${DISP_HDR}" || fail "rb move missing"
-if grep -q "flow_try_move_edq" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq move reappeared"
-fi
-grep -q "flow_arena_task" "${SRC_DIR}/src/bpf/intf.h" || fail "arena task missing"
-grep -q "flow_arena_task" "${SRC_DIR}/src/run.rs" || fail "arena size missing"
+grep -q "FLOW_CPU_DSQ_BASE = 0x1000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "cpu base missing"
+grep -q "FLOW_LLC_DSQ_BASE = 0x2000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "llc base missing"
+grep -q "FLOW_FALLBACK_DSQ = 0x6100ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback base missing"
+grep -q "scx_bpf_dsq_insert" "${ENQ_HDR}" || fail "dsq insert missing"
+grep -q "scx_bpf_dsq_move_to_local" "${DISP_HDR}" || fail "dsq move missing"
+grep -q "task_ctx_stor" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "task stor missing"
+grep -q "llc_stats_stor" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "llc stor missing"
+grep -q "cpu_ctx_stor" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "cpu stor missing"
+grep -q "update_timer" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "timer missing"
 grep -q "topo_all" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo tree missing"
-grep -q "TOPO_FOR_EACH_NODE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo walk missing"
 grep -q "topo_contains" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "topo test missing"
 grep -q "topo_cpu_to_llc_id" "${DISP_HDR}" || fail "topo llc missing"
 grep -q "topo_all" "${DISP_HDR}" || fail "dispatch topo missing"
-if grep -q "flow_dhq_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+grep -q "FLOW_CGROUP_WEIGHT_DFLT = 100ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "weight default missing"
+if grep -q "SCX_DHQ_\|scx_dhq_\|SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dhq reappeared"
+fi
+if grep -q "scx_edq_\|flow_edq\|flow_rb_\|FLOW_RB_\|scx_static_alloc\|scx_alloc\|flow_arena_task" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale rb reappeared"
+fi
+if grep -q "flow_dhq_\|flow_topo_\|FLOW_DHQ_BASE\|FLOW_DHQ_STRAND\|FLOW_DHQ_MODE\|FLOW_DHQ_PERCPU\|FLOW_DHQ_MAX" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "own queue helper reappeared"
-fi
-if grep -q "flow_topo_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "own topo helper reappeared"
-fi
-if grep -q "FLOW_DHQ_BASE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "queue base reappeared"
-fi
-if grep -q "FLOW_DHQ_STRAND" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    fail "queue const reappeared"
-fi
-if grep -q "FLOW_DHQ_MODE" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    fail "mode const reappeared"
-fi
-if grep -q "FLOW_DHQ_PERCPU" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "percpu const reappeared"
-fi
-if grep -q "FLOW_DHQ_MAX" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "imbalance const reappeared"
-fi
-if grep -q "flow_dhq_id" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "queue id reappeared"
-fi
-if grep -q "flow_dhq_live" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "queue live reappeared"
-fi
-if grep -q "flow_llc_node" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "node cache reappeared"
-fi
-if grep -q "flow_nr_cpus\|flow_nr_llcs" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "count cache reappeared"
-fi
-if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dead queue helper reappeared"
 fi
 if grep -q "FLOW_LLC_BASE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "llc base reappeared"
 fi
-grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" || fail "fair base missing"
-grep -q "flow_fair_charge" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "fair charge missing"
-grep -q "flow_seq_floor" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "floor helper missing"
-grep -q "FLOW_CGROUP_WEIGHT_DFLT = 100ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "weight default missing"
-grep -q "insertion order" "${ENQ_HDR}" || fail "insertion order missing"
-grep -q "fallback queue" "${ENQ_HDR}" || fail "fallback path missing"
-grep -q "kick_idle" "${SRC_DIR}/src/bpf/intf.h" || fail "idle count missing"
-grep -q "kick_skip" "${SRC_DIR}/src/bpf/intf.h" || fail "skip count missing"
-if grep -q 'include "edf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edf include reappeared"
+if grep -q "FLOW_FAIR_BASE_NS" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    fail "stale fair base reappeared"
 fi
-if grep -q 'include "lat.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "lat include reappeared"
-fi
-if grep -q 'include "sjf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "sjf include reappeared"
+if grep -q 'include "edf.bpf.h"\|include "lat.bpf.h"\|include "sjf.bpf.h"\|include "edf.bpf.h"' "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "stale include reappeared"
 fi
 
 # Dead helpers stay removed. The per LLC prio queue helper has no caller
@@ -907,19 +781,17 @@ if grep -rq "flow_combine\|flow_cgroup_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "dead weight helper reappeared"
 fi
 
-# Local placements run before ownership so a local cancel never drops
-# a gauge that was never raised. The flag take must come after the
-# local returns.
-if ! grep -q "without the queued bit" "${ENQ_HDR}" 2>/dev/null; then
-    fail "local ownership order missing"
-fi
+# Direct dispatch clears its mark before any queue gauge moves so a
+# locally dispatched task never counts twice.
+grep -q "already queued to local" "${ENQ_HDR}" || fail "direct dispatch order missing"
+grep -q "not queued twice" "${ENQ_HDR}" || fail "direct dispatch prose missing"
 
-# Fallback dispatch drops the gauge on the enqueue LLC read from the
+# Dispatch drops the queue gauge on the enqueue LLC read from the
 # task, with no scan. The count always comes from the task.
 if grep -q "have_owner" "${DISP_HDR}" 2>/dev/null; then
     fail "fallback scan state reappeared"
 fi
-grep -q "flow_queued_dec(vllc)" "${DISP_HDR}" || fail "fallback owner dec missing"
+grep -q "flow_queued_dec" "${DISP_HDR}" || fail "queue dec missing"
 if grep -q 'bpf_for(li, 0, FLOW_MAX_LLCS)' "${DISP_HDR}" 2>/dev/null; then
     fail "fallback scan reappeared"
 fi
@@ -942,20 +814,18 @@ if grep -q "insert_vtime.*FALLBACK\|FALLBACK.*insert_vtime" "${ENQ_HDR}" 2>/dev/
 fi
 grep -q "scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ" "${ENQ_HDR}" || fail "fallback fifo insert missing"
 
-# Peek goes through the compat helper with no raw call left.
-grep -q "__COMPAT_scx_bpf_dsq_peek" "${DISP_HDR}" || fail "compat peek missing"
-if grep -q "[^_]scx_bpf_dsq_peek(" "${DISP_HDR}" 2>/dev/null; then
-    fail "raw peek reappeared"
+# Moves go straight to local with no peek. Dispatch reads the node
+# from the tree with no per-CPU walk. Select checks the mask on every
+# tier with live checks.
+grep -q "scx_bpf_dsq_move_to_local" "${DISP_HDR}" || fail "move missing"
+if grep -q "scx_bpf_dsq_peek" "${DISP_HDR}" 2>/dev/null; then
+    fail "peek reappeared"
 fi
-
-# Dispatch reads the node from the tree with no per-CPU walk.
 if grep -q "tcc->llc_id\|t2->llc_id" "${DISP_HDR}" 2>/dev/null; then
     fail "dead cpu scan reappeared"
 fi
 grep -q "topo_contains" "${DISP_HDR}" || fail "tree order missing"
-
-# Select rechecks the winning pick against the current mask.
-grep -q "flow_cpu_allowed(best, p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
+grep -q "flow_cpu_allowed" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick clamp missing"
 
 # Task init clears vtime through compat with no group resolve.
 if grep -q "scx_bpf_task_cgroup" "${DISP_HDR}" 2>/dev/null; then
@@ -972,19 +842,8 @@ if grep -q "bss_data.*flow_smt_enabled" "${SRC_DIR}/src/run.rs" 2>/dev/null; the
     fail "smt seed section drifted"
 fi
 
-# Cluster width stays heuristic with the tie favor kept on shared threads.
-# Width four splits larger clusters without ever merging distant cores,
-# and only the fast pick is gated on single threads.
+# Cluster width stays heuristic with sorted LLC order.
 grep -q "Width four is a heuristic" "${SRC_DIR}/src/topology.rs" || fail "cluster heuristic missing"
-grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie favor prose missing"
-
-# Seed plus display share one known-or-fallback helper with sorted LLC order.
-# Known means neither minus one nor 65535. The display count delegates to
-# the seed helper, so both report the same groups on every host. True size
-# adds three more users sharing the same helper with no split: the true
-# size seed plus the per core display plus the capped per core display.
-# Production users stay at five. Test helpers are excluded here so
-# test adds never drift the gate.
 grep -q "fn core_cluster" "${SRC_DIR}/src/topology.rs" || fail "known helper missing"
 grep -q "cluster_id != -1" "${SRC_DIR}/src/topology.rs" || fail "sentinel narrow missing"
 if grep -q "cluster_id >= 0" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
@@ -992,13 +851,14 @@ if grep -q "cluster_id >= 0" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
 fi
 [ "$(sed '/#\[cfg(test)/,$d' "${SRC_DIR}/src/topology.rs" | grep -c "cpu_ccx(topo, &llc_ids)" | tr -d ' ')" = "5" ] || fail "seed display split"
 [ "$(sed '/#\[cfg(test)/,$d' "${SRC_DIR}/src/topology.rs" | grep -c "llc_ids.sort_unstable" | tr -d ' ')" = "5" ] || fail "fallback order drifted"
+if grep -q "tie favor kept" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "stale tie favor reappeared"
+fi
 
-# Dispatch liveness keeps every queued task reachable. Deadline order
-# drains in deadline order, slices stay at the floor with no zero
-# insert, kicks never take minus one without a skip, forward slots hash
-# with the fallback reserved, and a tail re-kick covers heads
-# that could not run here.
-grep -q "deadline order" "${DISP_HDR}" || fail "deadline order prose missing"
+# Dispatch liveness keeps every queued task reachable. Due time orders
+# the drain, slices stay bounded with no zero insert, and kicks never
+# take minus one without a skip.
+grep -q "due time" "${DISP_HDR}" || fail "due order prose missing"
 grep -q "FLOW_SLICE_MIN_NS" "${DISP_HDR}" || fail "dispatch slice floor missing"
 grep -q "FLOW_SLICE_MAX_NS" "${DISP_HDR}" || fail "dispatch slice max missing"
 grep -q "flow_calc_slice" "${ENQ_HDR}" || fail "enqueue calc slice missing"
@@ -1014,531 +874,52 @@ if grep -q "kick_cpu(-1" "${SRC_DIR}/src/bpf" 2>/dev/null; then
     fail "raw kick minus one reappeared"
 fi
 grep -q "owner < 0" "${DISP_HDR}" || fail "orphan owner check missing"
-grep -q "victim &" "${DISP_HDR}" || fail "forward slot missing"
-grep -q "(u32)FLOW_MAX_LLCS" "${DISP_HDR}" || fail "fallback slot missing"
-grep -q "flow_rekick_unrunnable" "${DISP_HDR}" || fail "re-kick helper missing"
-grep -q "saw_unrunnable" "${DISP_HDR}" || fail "unrunnable flag missing"
-grep -q "Forward slots hash by" "${DISP_HDR}" || fail "forward slot prose missing"
-grep -q "dedup key" "${DISP_HDR}" || fail "forward dedup prose missing"
-grep -q "dead head is dropped" "${DISP_HDR}" || fail "dead pop prose missing"
-grep -q "without the dedup check" "${DISP_HDR}" || fail "re-kick prose missing"
-grep -q "until the mask widens" "${DISP_HDR}" || fail "fallback reliance prose missing"
+if grep -q "flow_rekick_unrunnable\|saw_unrunnable\|Forward slots hash by\|dedup key\|victim &" "${DISP_HDR}" 2>/dev/null; then
+    fail "stale forward reappeared"
+fi
 
-# Scheduler README stays minimal with knob-free deadline plus lag-conserving
-# EEVDF plus burst-aware SMT plus direct dispatch plus slice continuation.
+# Scheduler README stays minimal with knob-free latency score plus virtual
+# deadline DSQ plus direct dispatch plus slice continuation plus near stop
+# claim plus timer decay.
 grep -q "knob-free" "${SRC_DIR}/README.md" || fail "readme knob missing"
 grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme deadline missing"
-grep -q "binary search" "${SRC_DIR}/README.md" || fail "readme bst missing"
-grep -q "FIFO" "${SRC_DIR}/README.md" || fail "readme fifo missing"
-grep -q "EEVDF" "${SRC_DIR}/README.md" || fail "readme eevdf missing"
-grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
-grep -q "burst-aware SMT" "${SRC_DIR}/README.md" || fail "readme smt missing"
+grep -q "DSQ" "${SRC_DIR}/README.md" || fail "readme dsq missing"
 grep -q "direct local dispatch" "${SRC_DIR}/README.md" || fail "readme dispatch missing"
 grep -q "slice continuation" "${SRC_DIR}/README.md" || fail "readme continue missing"
-if grep -q "HRRN" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme hrrn reappeared"
-fi
-grep -q "guarded preempt" "${SRC_DIR}/README.md" || fail "readme preempt missing"
-grep -q "restart" "${SRC_DIR}/README.md" || fail "readme restart missing"
-if grep -q "least queued\|most loaded" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme load reappeared"
+grep -q "near stop claim" "${SRC_DIR}/README.md" || fail "readme soft missing"
+grep -q "fixed order" "${SRC_DIR}/README.md" || fail "readme order missing"
+grep -q "L1 > L2 > L3" "${SRC_DIR}/README.md" || fail "readme tier missing"
+grep -q "half on a timer" "${SRC_DIR}/README.md" || fail "readme timer missing"
+if grep -q "EEVDF\|EWMA\|HRRN\|binary search\|burst-aware" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "readme stale model reappeared"
 fi
 if grep -qi "mate\|strand\|warm" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme strand reappeared"
 fi
-grep -q "bounded" "${SRC_DIR}/README.md" || fail "readme bounded missing"
-grep -q "L1 > L2 > L3" "${SRC_DIR}/README.md" || fail "readme tier missing"
-if grep -q "10 tasks" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme stale cap reappeared"
-fi
-if grep -q "10ms" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme stale bound reappeared"
-fi
-if grep -q "aspirational" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme ideal reappeared"
-fi
-
-# No classifier plus no average estimator returns with no float divide.
-# EWMA allowlist holds in fair with the known path use in enqueue only.
-# Smoothed plus flow_ewma appear in fair.bpf.h with the enqueue known path
-# as the single pricing user and no float and no new divide. All other
-# ewma mentions still fail.
-if grep -rqi "ewma" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    if ! grep -qi "smoothed\|flow_ewma" "${SRC_DIR}/src/bpf/fair.bpf.h" 2>/dev/null; then
-        fail "average estimator reappeared"
-    fi
-    if grep -qi "ewma" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-        fail "average estimator outside fair reappeared"
-    fi
-fi
-# Smoothed pricing lives in fair for the unified EEVDF path.
-# Fair holds the fold plus the reference plus the effective helper with
-# shift plus saturation plus integer only. Unified EEVDF calls both
-# internally with no direct enqueue user. No other file names smoothed.
-grep -q "flow_smoothed_ref" "${FAIR_HDR}" || fail "smoothed ref missing"
-grep -q "flow_smoothed_eff" "${FAIR_HDR}" || fail "smoothed eff missing"
-if grep -q "flow_smoothed_" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
-    fail "smoothed outside fair reappeared"
-fi
-if grep -q "classifier" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    if ! grep -q "cluster hint" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-        fail "classifier reappeared"
-    fi
-fi
-if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "float outside fair reappeared"
-fi
-
-# Single response helper stays in fair with one enqueue user.
-# The helper plus the short name appear only in fair plus the single
-# enqueue use with no other file naming either.
-grep -q "flow_eevdf_vd" "${FAIR_HDR}" || fail "eevdf helper missing"
-grep -q "flow_eevdf_vd(t, floored, lag, w)" "${ENQ_HDR}" || fail "eevdf use missing"
-[ "$(grep -c "flow_eevdf_vd" "${ENQ_HDR}" | tr -d ' ')" = "2" ] || fail "eevdf sites drifted"
-if grep -q "vd_HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
-    fail "response helper outside fair plus enqueue reappeared"
-fi
-if grep -q "HRRN" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/main.bpf.c" "${SRC_DIR}/src/bpf/stats.bpf.h" 2>/dev/null; then
-    fail "response name outside fair plus enqueue reappeared"
-fi
-# Unified EEVDF runs in fair with enqueue plus dispatch users.
-# No HRRN gate remains.
-grep -q "flow_eevdf_vd" "${FAIR_HDR}" || fail "eevdf helper missing"
-if grep -q "hrrn_ready\|vd_HRRN" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "hrrn reappeared"
-fi
-
-# No load balancing remains with constrained placement plus topology drain.
-# Enqueue joins the queue of the constrained target with no least pick
-# and no waiting counts. Dispatch drains in topology order with no
-# busiest pick and no warm queue. Every queue insert uses deadline order
-# with FIFO fallback for rejects.
-if grep -q "flow_pick_least\|flow_pick_busiest" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "load pick reappeared"
-fi
-if grep -q "flow_qcnt\|flow_warm_strand\|flow_try_insert_dhq\|flow_try_insert_edq\|flow_is_same_node\|warm_only" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "load state reappeared"
-fi
-if grep -q "qcpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "stored queue reappeared"
-fi
-if grep -q "SCX_DHQ_STRAND_B\|SCX_DHQ_STRAND_A" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "strand reappeared"
-fi
-if grep -q "best_mate\|vb < va\|both strands\|Dual strand" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "merge state reappeared"
-fi
-if grep -q "mate" "${ENQ_HDR}" "${DISP_HDR}" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/maps.bpf.h" 2>/dev/null; then
-    fail "mate bias reappeared"
-fi
-grep -q "flow_constrained_target(task_cpu, p)" "${ENQ_HDR}" || fail "constrained place missing"
-grep -q "flow_rb_for_cpu(tgt)" "${ENQ_HDR}" || fail "rb helper use missing"
-grep -q "saw_unrunnable)" "${DISP_HDR}" || fail "drain signature missing"
-grep -q "FLOW_QUEUE_CAP" "${SRC_DIR}/src/bpf/intf.h" || fail "queue cap prose missing"
-grep -q "without bound" "${SRC_DIR}/src/bpf/intf.h" || fail "intf unbounded prose missing"
-grep -q "without bound" "${ENQ_HDR}" || fail "enqueue unbounded prose missing"
-grep -q "without bound" "${DISP_HDR}" || fail "dispatch unbounded prose missing"
-grep -q "without bound" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "maps unbounded prose missing"
-grep -q "without bound" "${SRC_DIR}/src/bpf/main.bpf.c" || fail "main unbounded prose missing"
-if grep -q "bounded at 64" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "bounded prose reappeared"
-fi
-if grep -q "SCX_DHQ_INF_CAPACITY" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "unbounded cap reappeared"
-fi
-if grep -rn "unbounded" "${SRC_DIR}/src/bpf" 2>/dev/null | grep -v "without bound" | grep -q .; then
-    fail "unbounded prose reappeared"
-fi
-if grep -q "without a bound" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "unbounded prose reappeared"
-fi
-if grep -q "no bound" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "unbounded prose reappeared"
-fi
-if grep -q "at most ten tasks" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "stale bounded prose reappeared"
-fi
-
-# Single queue per CPU stays with no second index. One queue per CPU
-# lives in arena memory. A second index on the handle table must not
-# return.
-if grep -rn "flow_rb_roots\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "2-D rb handles reappeared"
-fi
-if grep -rn "flow_dhqs\[.*\]\[" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "old 2-D handles reappeared"
-fi
-
-# Ordered drain stays fail closed with forward wakes. Each CPU drains
-# its own queue first, then same LLC, then same node, then
-# remote, then fallback, with one forward wake per unrunnable head.
-grep -q "flow_drain_cpu" "${DISP_HDR}" || fail "drain helper missing"
-grep -q "flow_try_move_rb" "${DISP_HDR}" || fail "rb move missing"
-if grep -q "flow_try_move_edq" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq move reappeared"
-fi
-
-# Safe but accurate run length path with unknown fallback.
-# Storage holds eight pairs plus range plus flag plus sum under the
-# task storage cap with integer only and bounded scans. Close runs on
-# sleep only with saturating add plus prune past the window and a
-# freeze on a zero or backward clock. Enqueue reads the cached flag
-# with no clock and no scan. Steady tasks price by the kept max with
-# the shared charge path and one slice quanta, unknown tasks keep the
-# burst path with no long hold. Span stays at four milliseconds so
-# 60-240Hz tasks fit inside the ring.
-grep -q "FLOW_RUN_WIN_NS = 30000000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run window missing"
-grep -q "FLOW_RUN_SPAN_NS = 4000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run span missing"
-grep -q "FLOW_RUN_NEED = 4ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "run need missing"
-grep -q "run_dur\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run dur missing"
-grep -q "run_stamp\[8\]" "${SRC_DIR}/src/bpf/intf.h" || fail "run stamp missing"
-grep -q "run_known" "${SRC_DIR}/src/bpf/intf.h" || fail "run known missing"
-grep -q "run_total" "${SRC_DIR}/src/bpf/intf.h" || fail "run total missing"
-grep -q "flow_run_reset" "${FAIR_HDR}" || fail "run reset missing"
-grep -q "flow_run_add" "${FAIR_HDR}" || fail "run add missing"
-grep -q "flow_run_prune" "${FAIR_HDR}" || fail "run prune missing"
-grep -q "flow_run_close" "${FAIR_HDR}" || fail "run close missing"
-grep -q "flow_run_recalc" "${FAIR_HDR}" || fail "run recalc missing"
-grep -q "flow_smoothed_ref" "${FAIR_HDR}" || fail "run ref missing"
-grep -q "flow_smoothed_eff" "${FAIR_HDR}" || fail "run eff missing"
-grep -q "flow_eevdf_vd" "${FAIR_HDR}" || fail "eevdf vd missing"
-grep -q "flow_calc_slice" "${FAIR_HDR}" || fail "calc slice missing"
-# Stable range keeps 50 percent tolerance on EWMA-smoothed range with s_min_d >> 1.
-grep -q "s_min_d >> 1" "${FAIR_HDR}" || fail "run band missing"
-grep -q "& 7U" "${FAIR_HDR}" || fail "run mask missing"
-# Smoothed fold keeps one shared quarter gain with saturation plus freeze.
-# Stable tasks price by the smoothed kept max with the shared charge path,
-# unknown tasks keep the burst path, and the global fold counts in BSS only.
-grep -q "flow_ewma_next" "${FAIR_HDR}" || fail "ewma fold missing"
-grep -q "flow_smoothed_ref" "${FAIR_HDR}" || fail "smoothed ref missing"
-grep -q "flow_smoothed_eff" "${FAIR_HDR}" || fail "smoothed eff missing"
-grep -F ">> 2" "${FAIR_HDR}" || fail "ewma gain missing"
-grep -q "m_ewma_fold" "${FAIR_HDR}" || fail "ewma fold counter missing"
-grep -q "m_ewma_sat" "${FAIR_HDR}" || fail "ewma sat counter missing"
-grep -q "m_ewma_freeze" "${FAIR_HDR}" || fail "ewma freeze counter missing"
-grep -q "flow_fair_cap_add" "${FAIR_HDR}" || fail "ewma saturate missing"
-grep -q "bpf_ktime_get_ns" "${DISP_HDR}" || fail "run clock missing"
-grep -q "flow_run_add(t, used)" "${DISP_HDR}" || fail "run stop add missing"
-grep -q "flow_run_close(t, now)" "${DISP_HDR}" || fail "run close use missing"
-grep -q "flow_run_prune(t, now)" "${DISP_HDR}" || fail "run prune use missing"
-grep -q "flow_run_reset(t)" "${DISP_HDR}" || fail "run reset use missing"
-grep -q "flow_eevdf_vd(t, floored, lag, w)" "${ENQ_HDR}" || fail "eevdf use missing"
-grep -q "flow_calc_slice(t," "${ENQ_HDR}" || fail "calc slice use missing"
-if grep -q "flow_run_slice\|vd_HRRN\|hrrn_ready\|if (!sref)" "${ENQ_HDR}" 2>/dev/null; then
-    fail "stale run path reappeared"
-fi
-if grep -rn "float\|double" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "float outside fair reappeared"
-fi
-# Unknown fallback keeps fixed slice with no long hold.
-if grep -q "30000000000ULL.*slice\|slice.*30000000000ULL" "${ENQ_HDR}" "${DISP_HDR}" 2>/dev/null; then
-    fail "long slice reappeared"
-fi
-grep -q "flow_calc_slice" "${FAIR_HDR}" || fail "calc slice missing"
-if grep -q "flow_run_slice\|flow_run_vd\|vd_HRRN\|hrrn_ready" "${FAIR_HDR}" 2>/dev/null; then
-    fail "stale hrrn reappeared"
-fi
-# Scheduler README keeps virtual deadline in full words with run prose.
-grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
-grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
-grep -q "lag-conserving EEVDF" "${SRC_DIR}/README.md" || fail "readme eevdf model missing"
 if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
     fail "readme short vd reappeared"
 fi
 
-# Family A stays excluded with no slow field plus helpers.
-# Task storage stays at two hundred sixteen bytes with the run ring
-# plus range plus flag plus sum and no slow path. The four Family A
-# names stay absent from BPF with no revert needed.
-if grep -rq "slow" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "slow reappeared"
-fi
-if grep -rq "idle_decay\|idle-decay" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "idle decay reappeared"
-fi
-if grep -rq "fast_known\|fast-known" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "fast known reappeared"
-fi
-if grep -rq "max_stamp\|max-stamp" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "max stamp reappeared"
-fi
-grep -q "run_min" "${SRC_DIR}/src/bpf/intf.h" || fail "run min missing"
-grep -q "run_max" "${SRC_DIR}/src/bpf/intf.h" || fail "run max missing"
-grep -q "run_head" "${SRC_DIR}/src/bpf/intf.h" || fail "run head missing"
-grep -q "run_pruned" "${SRC_DIR}/src/bpf/intf.h" || fail "run pruned missing"
-grep -q "run_pad" "${SRC_DIR}/src/bpf/intf.h" || fail "run pad missing"
-# Narrowed deadline fit keeps deadline plus reference plus lag plus reweight
-# plus floor plus slice with no count divide and no retroactive update.
-# Reference keeps max with shift only. Lag rides the stored time with clamp.
-# Reweight applies at enqueue time only.
-grep -q "Virtual deadline" "${SRC_DIR}/src/bpf/intf.h" || fail "narrowed deadline prose missing"
-grep -q "lag-conserving EEVDF" "${FAIR_HDR}" || fail "narrowed vd prose missing"
-grep -q "flow_fair_charge" "${DISP_HDR}" || fail "narrowed charge missing"
-if grep -rq "retroactive" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "retroactive reappeared"
-fi
-if grep -rq "count_divide\|count-divide" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "count divide reappeared"
-fi
-if grep -q "count / \|/ count" "${FAIR_HDR}" 2>/dev/null; then
-    fail "count divide reappeared"
-fi
-# Scheduler README keeps virtual deadline in full words with run prose.
-grep -q "virtual deadline" "${SRC_DIR}/README.md" || fail "readme virtual deadline missing"
-grep -q "EWMA" "${SRC_DIR}/README.md" || fail "readme ewma missing"
-grep -q "lag-conserving EEVDF" "${SRC_DIR}/README.md" || fail "readme eevdf model missing"
-if grep -q " vd" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme short vd reappeared"
-fi
-# Kick keeps one per run with separable skips plus a freshness check.
-# Each miss counts the same skip counter with no new counter.
-# The win rechecks mask plus liveness plus generation plus due time
-# before the preempt, so a stale kick never hits a fresh run.
-grep -q "flow_kick_idle_only" "${ENQ_HDR}" || fail "idle kick missing"
-grep -q "flow_kick_vd" "${ENQ_HDR}" || fail "vd kick missing"
-grep -q "Freshness check after the win" "${ENQ_HDR}" || fail "kick freshness missing"
-grep -q "fresh_gen" "${ENQ_HDR}" || fail "kick gen recheck missing"
-grep -q "fresh_vd" "${ENQ_HDR}" || fail "kick vd recheck missing"
-grep -q "Misses split by cause" "${ENQ_HDR}" || fail "kick cause prose missing"
-
-# Kicks count every miss with an LLC recheck after the win.
-grep -q "rllc = READ_ONCE(rs->llc_id)" "${ENQ_HDR}" || fail "llc recheck missing"
-
-# Edge cases stay closed with no slice or deadline drift on wake paths.
-# Wake helpers never write task time or slice or run state. The win path
-# keeps the single kick token with skips otherwise. Exiting tasks keep
-# the one microsecond slice. Init fails closed on a missing tree or an
-# over bound CPU count.
-wake_block() {
-    awk '/void flow_kick_idle_only\(/,/^}/' "${ENQ_HDR}"
-    awk '/void flow_kick_vd\(/,/^}/' "${ENQ_HDR}"
-    awk '/void flow_forward_from_peeked\(/,/^}/' "${DISP_HDR}"
-    awk '/void flow_rekick_unrunnable\(/,/^}/' "${DISP_HDR}"
-}
-if wake_block | grep -q "slice_rem *=\|->vd *=\|->vtime *=\|burst_ns *=\|run_dur\|run_total\|run_min\|run_max\|run_head\|run_known\|run_stamp\|run_pruned\|run_pad\|->llc_id *=\|->flags *=\|->gen *=" 2>/dev/null; then
-    fail "wake path writes task state"
-fi
-# The wake path never mutates run or burst state. Enqueue reads the kept
-# max plus the burst path only.
-if grep -q "flow_run_add\|flow_run_close\|flow_run_prune\|flow_burst_update" "${ENQ_HDR}" 2>/dev/null; then
-    fail "run mutate leaked into enqueue"
-fi
-# Deadline keys saturate negatives at zero.
-grep -q "flow_rb_deadline" "${ENQ_HDR}" || fail "rb deadline missing"
-if grep -q "flow_edq_deadline" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq deadline reappeared"
-fi
-grep -q "0x8000000000000000" "${SRC_DIR}/src/bpf/fair.bpf.h" || fail "deadline bias missing"
-if grep -q "if (vd < 0)" "${ENQ_HDR}" 2>/dev/null; then
-    fail "deadline saturate reappeared"
-fi
-# The floor keeps uniqueness through the compare swap plus one.
-grep -q "want = last + 1" "${FAIR_HDR}" || fail "floor uniqueness missing"
-grep -q "__sync_val_compare_and_swap(&flow_llc_seq" "${FAIR_HDR}" || fail "floor swap missing"
-# Exiting tasks keep the one microsecond slice with no zero insert.
-grep -q "FLOW_EXIT_SLICE_NS = 1000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "exit slice missing"
-# Init fails closed on a missing tree or an over bound count.
-grep -q "topology tree missing" "${DISP_HDR}" || fail "tree guard missing"
-grep -q "return -ENODEV" "${DISP_HDR}" || fail "tree fail closed missing"
-grep -q "CPU count over bound" "${DISP_HDR}" || fail "count guard missing"
-grep -q "return -E2BIG" "${DISP_HDR}" || fail "count fail closed missing"
-# Mask change on a queued task never rewrites the due time.
-if awk '/flow_set_cpumask/,/^}/' "${DISP_HDR}" | grep -q "t->vd\|t->vtime\|burst_ns" 2>/dev/null; then
-    fail "mask path rewrites deadline"
+# Task plus running plus sys plus seed sizes stay locked.
+grep -q '_Static_assert(sizeof(struct flow_task_ctx) == 104' "${SRC_DIR}/src/bpf/intf.h" || fail "task size missing"
+grep -q '_Static_assert(sizeof(struct flow_running_state) == 96' "${SRC_DIR}/src/bpf/intf.h" || fail "running size missing"
+grep -q '_Static_assert(sizeof(struct flow_sys_stat) == 56' "${SRC_DIR}/src/bpf/intf.h" || fail "sys size missing"
+grep -q '_Static_assert(sizeof(struct flow_cpu_ctx) == 16' "${SRC_DIR}/src/bpf/intf.h" || fail "seed size missing"
+grep -q 'flow_task_ctx>() == 104' "${SRC_DIR}/src/run.rs" || fail "run task assert missing"
+grep -q 'flow_running_state>() == 96' "${SRC_DIR}/src/run.rs" || fail "run running assert missing"
+grep -q 'flow_sys_stat>() == 56' "${SRC_DIR}/src/run.rs" || fail "run sys assert missing"
+grep -q 'flow_cpu_ctx>() == 16' "${SRC_DIR}/src/run.rs" || fail "run seed assert missing"
+if grep -q "216\|48.*running.*assert\|flow_rb_node\|flow_arena_task\|flow_rb_entry" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+    # 216 plus 48 plus RB plus arena belong to the old BST design
+    if grep -q '_Static_assert(sizeof(struct flow_task_ctx) == 216' "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+        fail "stale task size reappeared"
+    fi
+    if grep -q "flow_rb_node\|flow_arena_task" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
+        fail "stale rb reappeared"
+    fi
 fi
 
-# Affinity stays closed on every path. The constrained target keeps the
-# hint only when allowed plus live. The pick rechecks the winner with a
-# first allowed fallback. Every kick rechecks mask plus liveness. Pinned
-# plus exiting plus maskless tasks keep FIFO fallback. The tier orders
-# allowed plus live CPUs only and never widens the mask.
-grep -q "flow_cpu_allowed(hint, p) && flow_cpu_live" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "hint gate missing"
-grep -q "return flow_first_allowed(p)" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick fallback missing"
-grep -q "cpus_ptr" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "mask null guard missing"
-grep -q "nr_cpus_allowed" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pin detect missing"
-grep -q "is_migration_disabled" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "migration pin missing"
-grep -q "bpf_cpumask_test_cpu" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "mask test missing"
-grep -q "bpf_cpumask_first" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "first mask read missing"
-grep -q "no_cpu" "${ENQ_HDR}" || fail "maskless path missing"
-grep -q "PF_EXITING" "${ENQ_HDR}" || fail "exiting path missing"
-grep -q "flow_stat_inc(qllc, 11)" "${DISP_HDR}" || fail "orphan count missing"
-grep -q "flow_cpu_allowed(owner, p)" "${DISP_HDR}" || fail "owner recheck missing"
-grep -q "flow_ccx_match(use_ccx," "${DISP_HDR}" || fail "group match call missing"
-
-# True size orders the drain by bucket within tier with no size map growth.
-# The bucket readers plus the larger compare plus the seed fields stay
-# allowlisted by exact name. Any other cache helper fails closed here.
-grep -q "flow_cpu_ccx" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier read missing"
-grep -q "flow_ccx_match" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cache tier match missing"
-grep -q "flow_cpu_l2bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "l2 bucket read missing"
-grep -q "flow_cpu_l3bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "l3 bucket read missing"
-grep -q "flow_cache_larger" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "larger compare missing"
-grep -q "cache_bucket" "${SRC_DIR}/src/bpf/intf.h" || fail "bucket helper missing"
-grep -q "l2_bkt" "${SRC_DIR}/src/bpf/intf.h" || fail "l2 seed field missing"
-grep -q "l3_bkt" "${SRC_DIR}/src/bpf/intf.h" || fail "l3 seed field missing"
-grep -q "cache_cls" "${SRC_DIR}/src/bpf/intf.h" || fail "class seed field missing"
-grep -q "rsv" "${SRC_DIR}/src/bpf/intf.h" || fail "reserved seed field missing"
-grep -q "flow_rb_is_empty" "${DISP_HDR}" || fail "rb empty missing"
-if grep -q "flow_edq_empty" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq empty reappeared"
-fi
-grep -q "L1>L2>L3" "${DISP_HDR}" || fail "tier order missing"
-grep -q "L1 greater than L2 greater than L3" "${DISP_HDR}" || fail "tier prose missing"
-grep -q "L1>L2>L3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick tier order missing"
-grep -q "larger buckets first within tier" "${DISP_HDR}" || fail "larger tier prose missing"
-grep -q "larger buckets first within tier" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "pick larger prose missing"
-grep -q "larger buckets first within tier" "${SRC_DIR}/src/bpf/intf.h" || fail "intf larger prose missing"
-grep -q "Empty queues skip" "${DISP_HDR}" || fail "empty skip prose missing"
-grep -q "Both known" "${DISP_HDR}" || fail "known gate prose missing"
-grep -q "fixed order" "${DISP_HDR}" || fail "fixed order prose missing"
-grep -q "_Static_assert(sizeof(struct flow_cpu_ctx) == 16" "${SRC_DIR}/src/bpf/intf.h" || fail "seed size assert missing"
-grep -q "flow_cpu_ctx>() == 16" "${SRC_DIR}/src/run.rs" || fail "run seed assert missing"
-grep -q "val\[8\]" "${SRC_DIR}/src/topology.rs" || fail "seed bucket bytes missing"
-if grep -rho "flow_cpu_l[0-9a-z_]*b[a-z]*" "${SRC_DIR}/src/bpf" 2>/dev/null | grep -vx -e "flow_cpu_l2bkt" -e "flow_cpu_l3bkt" | grep -q .; then
-    fail "cache helper outside allowlist"
-fi
-if grep -rq "flow_l2_larger\|flow_l3_prefer" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "cache compare reappeared"
-fi
-if grep -rn "bkt *>" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null | grep -v "flow_cache_larger" | grep -q .; then
-    fail "size compare outside gate"
-fi
-if grep -rq "TOPO_FOR_EACH_CORE" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "core walk reappeared"
-fi
-if grep -q "l2_bucket\|l3_bucket" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    fail "cache seed reappeared"
-fi
-if grep -q "seed_topology_with\|lstopo_caches" "${SRC_DIR}/src/run.rs" "${SRC_DIR}/src/topology.rs" 2>/dev/null; then
-    fail "cache seed reappeared in userspace"
-fi
-# True size parser stays in one file with exact names only. Any other
-# cache helper fails closed here. Die stays size only with no cluster
-# feed. The fold takes max with no sum so inclusion never double counts.
-grep -q "parse_lstopo_text" "${SRC_DIR}/src/lstopo.rs" || fail "parser view missing"
-grep -q "lstopo_parse_caches" "${SRC_DIR}/src/lstopo.rs" || fail "parser entry missing"
-grep -q "die_ccx_hint" "${SRC_DIR}/src/lstopo.rs" || fail "die hint missing"
-grep -q "l1_fold_kb" "${SRC_DIR}/src/lstopo.rs" || fail "fold helper missing"
-grep -q "Die stays size only" "${SRC_DIR}/src/lstopo.rs" || fail "die prose missing"
-grep -q "die_ccx_hint" "${SRC_DIR}/src/topology.rs" || fail "die use missing"
-grep -q "Die stays size only" "${SRC_DIR}/src/topology.rs" || fail "die fallback prose missing"
-grep -q "l1_fold_kb" "${SRC_DIR}/src/topology.rs" || fail "fold use missing"
-if grep -rq "lstopo_parse_caches\|die_ccx_hint\|l1_fold_kb" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "parser helper in BPF reappeared"
-fi
-# True size seed keeps sixteen bytes with split buckets. Missing rows
-# read unknown with no match. The fallback seed stays for tool absence.
-grep -q "seed_topology_lstopo" "${SRC_DIR}/src/topology.rs" || fail "true size seed missing"
-grep -q "seed_topology_lstopo" "${SRC_DIR}/src/run.rs" || fail "true size use missing"
-grep -q "val\[8\]" "${SRC_DIR}/src/topology.rs" || fail "seed bucket bytes missing"
-# List tool runs once with no flags plus no retry. Output caps at one
-# megabyte plus sixty four thousand lines. Timeout is ten seconds.
-# Absolute paths run first with PATH fallback. Both paths match byte
-# for byte. Standard error stays closed. Sudo keeps root env clean
-# with no user env pass. Failures keep BPF defaults.
-grep -q "lstopo-no-graphics" "${SRC_DIR}/src/run.rs" || fail "list tool missing"
-grep -q "/usr/bin/lstopo-no-graphics" "${SRC_DIR}/src/run.rs" || fail "absolute list tool missing"
-grep -q "1_048_576" "${SRC_DIR}/src/run.rs" || fail "byte cap missing"
-grep -q "64_000" "${SRC_DIR}/src/run.rs" || fail "line cap missing"
-grep -q "timeout" "${SRC_DIR}/src/run.rs" || fail "timeout missing"
-grep -q "/usr/bin/timeout" "${SRC_DIR}/src/run.rs" || fail "absolute timeout missing"
-grep -q "Stdio::null" "${SRC_DIR}/src/run.rs" || fail "stderr close missing"
-grep -q "topology seed failed, using BPF defaults" "${SRC_DIR}/src/run.rs" || fail "warn text drifted"
-# Per core display stays always on at info with K plus M suffix only.
-# The tree stays at debug. The brief stays at or below one hundred
-# sixty chars. Lines cap at sixty four with an overflow count.
-# Capped builds keep large hosts bounded with no tail strings.
-grep -q "render_per_core_lines" "${SRC_DIR}/src/topology.rs" || fail "per-core helper missing"
-grep -q "render_per_core_lines" "${SRC_DIR}/src/run.rs" || fail "per-core use missing"
-grep -q "render_per_core_lines_capped" "${SRC_DIR}/src/topology.rs" || fail "per-core cap missing"
-grep -q "render_per_core_lines_capped" "${SRC_DIR}/src/run.rs" || fail "per-core cap use missing"
-grep -q "render_topo_lines_capped" "${SRC_DIR}/src/topology.rs" || fail "tree cap missing"
-grep -q "render_topo_lines_capped" "${SRC_DIR}/src/run.rs" || fail "tree cap use missing"
-grep -q "format_kb" "${SRC_DIR}/src/topology.rs" || fail "size format missing"
-grep -q 'info!("Topology: {line}")' "${SRC_DIR}/src/run.rs" || fail "per-core info missing"
-if grep -q "larger caches first" "${SRC_DIR}/README.md" "${DISP_HDR}" 2>/dev/null; then
-    fail "cache order drifted"
-fi
-
-# Unknown group stays distinct with no zero conflation. The sentinel reads
-# as all ones with both known gate plus fixed order cover plus allowed live
-# bounds kept on every path.
-grep -q "FLOW_CCX_UNKNOWN" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "unknown sentinel missing"
-grep -q "0xFFFFFFFF" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "sentinel value missing"
-grep -q "never match" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "unknown prose missing"
-grep -q "all ones" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "sentinel prose missing"
-grep -q "all ones" "${DISP_HDR}" || fail "dispatch sentinel prose missing"
-if grep -q "return use && cx == hint" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "zero conflation reappeared"
-fi
-
-# Shared header drains by cache tier with fallback and ordered prose.
-grep -q "same cache group" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier prose missing"
-grep -q "L1>L2>L3" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier order missing"
-grep -q "L1 greater" "${SRC_DIR}/src/bpf/intf.h" || fail "intf tier words missing"
-grep -q "then fallback last" "${SRC_DIR}/src/bpf/intf.h" || fail "intf fallback prose missing"
-
-# First allowed scans past an offline head with mask plus live bounds.
-grep -q "Scan the mask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "fallback scan prose missing"
-grep -q "no usable CPU fall back" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "fallback scan bound missing"
-
-# Same LLC drain probes once with empty hoist plus TOCTOU cover.
-grep -q "already tried group" "${DISP_HDR}" || fail "dedup prose missing"
-grep -q "probes once" "${DISP_HDR}" || fail "dedup bound missing"
-grep -q "next dispatch covers" "${DISP_HDR}" || fail "toctou prose missing"
-grep -q "before the group lookup" "${DISP_HDR}" || fail "hoist prose missing"
-grep -q "before the dedup lookup" "${DISP_HDR}" || fail "dedup hoist prose missing"
-grep -q "flow_rb_is_empty(flow_rb_for_cpu" "${DISP_HDR}" || fail "rb empty hoist missing"
-
-# Cluster gate stays always on with init one and no userspace seed.
-grep -q "always on" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "always on prose missing"
-grep -q "init one" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "always on seed missing"
-
-# Fallback peek stays borrowed with no release.
-grep -q "borrowed" "${DISP_HDR}" || fail "borrowed prose missing"
-grep -q "no release" "${DISP_HDR}" || fail "borrowed release prose missing"
-
-# Scheduler README keeps guarded preempt with no idle only claim.
-grep -q "guarded preempt" "${SRC_DIR}/README.md" || fail "readme guarded missing"
-
-# Shared header keeps Virtual deadline in full words with no shorthand.
-grep -q "Virtual deadline holds" "${SRC_DIR}/src/bpf/intf.h" || fail "intf deadline words missing"
-grep -q "Virtual deadline mirrors" "${SRC_DIR}/src/bpf/intf.h" || fail "intf mirror words missing"
-if grep -q "Vd holds\|Vd mirrors" "${SRC_DIR}/src/bpf/intf.h" 2>/dev/null; then
-    fail "short deadline reappeared"
-fi
-
-# Guard kept helpers stay with no new dead helper.
-grep -q "flow_fb_inc" "${SRC_DIR}/src/bpf/stats.bpf.h" || fail "fb inc missing"
-
-# Stage 6 true-size fixes stay locked with no regression.
-# L1 plus S-LOW: select keeps known priority matching the drain with
-# have_best_bkt, so unknown never blocks a later known bucket.
-grep -q "have_best_bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select known priority missing"
-grep -q "cb && (!have_best_bkt" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select unknown block fix missing"
-grep -q "smt_mask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select smt mask missing"
-grep -q "short_burst" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select burst missing"
-# L2: dispatch tracks second best in the same scan with at most three tries and no new loop.
-grep -qE "best2_victim|->best2|\.best2" "${DISP_HDR}" || fail "second best missing"
-grep -q "have_best2" "${DISP_HDR}" || fail "second best flag missing"
-grep -q "best2_bkt" "${DISP_HDR}" || fail "second best bucket missing"
-grep -q "at most three tries" "${DISP_HDR}" || fail "three try prose missing"
-grep -q "no new loop" "${DISP_HDR}" || fail "no new loop prose missing"
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "5" ] || fail "loop budget drifted with second best"
-if grep -q "u32 best_victim =" "${DISP_HDR}" 2>/dev/null; then
-    fail "dispatch dead store reappeared"
-fi
-# L3 plus perf: tier bucket split with group l2 and LLC l3 after one seed lookup hoisted to competitive tiers.
-grep -q "flow_cpu_view" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "coalesced view missing"
-grep -q "flow_cpu_view" "${DISP_HDR}" || fail "dispatch view missing"
-grep -q "vw.l2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "group l2 split missing"
-grep -q "vw.l3" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "llc l3 split missing"
-grep -q "Group tier reads l2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "split prose missing"
-grep -q "score > best_score" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "tie hoist missing"
-# L4: bucket ladder stays in sync both sides with identical thresholds.
-# Finer ladder separates live versus asymmetric shares with one through
-# ten plus unknown zero plus cap top. Edges at 48 plus 1024 plus 32768
-# plus 98304 join existing 256 plus 8192 plus 524288 with monotone order.
+# Bucket ladder stays in sync with identical thresholds.
 grep -q "kb <= 32U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 32 missing"
 grep -q "kb <= 48U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 48 missing"
 grep -q "kb <= 256U" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf ladder 256 missing"
@@ -1561,324 +942,66 @@ grep -q "kb <= 98304" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 98304 mi
 grep -q "kb <= 524288" "${SRC_DIR}/src/topology.rs" || fail "rust ladder 524288 missing"
 grep -q "Mirrors cache_bucket in topology.rs" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf mirror missing"
 grep -q "Keep both in sync" "${SRC_DIR}/src/bpf/intf.h" || fail "bpf sync prose missing"
-grep -q "cache_larger" "${SRC_DIR}/src/topology.rs" || fail "rust larger missing"
-# L5: sub-KiB rounds up to known small with no unknown conflation.
-grep -q "kb_for_bytes" "${SRC_DIR}/src/topology.rs" || fail "kb round up missing"
-grep -q "saturating_add(1023)" "${SRC_DIR}/src/topology.rs" || fail "round up math missing"
-# L6: task state stays two hundred sixteen bytes with asserts both sides.
-grep -q '_Static_assert(sizeof(struct flow_task_ctx) == 216' "${SRC_DIR}/src/bpf/intf.h" || fail "task size assert missing"
-grep -q 'flow_task_ctx>() == 216' "${SRC_DIR}/src/run.rs" || fail "run task assert missing"
-# L7: missing seed reads unknown with no zero conflation.
-grep -q "CCX_UNKNOWN" "${SRC_DIR}/src/topology.rs" || fail "rust unknown missing"
-grep -q "unwrap_or(CCX_UNKNOWN)" "${SRC_DIR}/src/topology.rs" || fail "unknown miss fix missing"
-grep -q "0xFFFFFFFF" "${SRC_DIR}/src/topology.rs" || fail "rust sentinel value missing"
-# L8 plus S-INFO: compares promote per C rules with identical result.
-grep -q "promote to int" "${SRC_DIR}/src/bpf/intf.h" || fail "intf promote prose missing"
-grep -q "promote to int" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "select promote prose missing"
-if grep -q "no promotion" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "stale no promotion reappeared"
+
+# Dead BPF helpers stay removed with no new dead code.
+if grep -q "flow_is_primary" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead primary reappeared"
 fi
-# L9: forward slots hash with dedup key and fallback on the last slot.
-grep -q "Forward slots hash by" "${DISP_HDR}" || fail "forward hash prose missing"
-grep -q "dedup key" "${DISP_HDR}" || fail "forward dedup prose missing"
-grep -q "sixty four slots" "${DISP_HDR}" || fail "forward slot count missing"
-# L10: intentional bounds stay documented with fail closed guards.
-grep -q "operational queue table caps at five hundred twelve" "${DISP_HDR}" || fail "dual bound prose missing"
-grep -q "flow_is_primary" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "primary helper missing"
-grep -q "flow_cpu_view" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "view missing"
-grep -q "Sentinel never matches" "${DISP_HDR}" || fail "sentinel prose missing"
-# S-INFO: fallback stays single slot per live task with FIFO and no extra bound.
-grep -q "one slot per live task" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback single slot prose missing"
-grep -q "no extra bound" "${SRC_DIR}/src/bpf/intf.h" || fail "fallback bound prose missing"
-
-# Slice step math stays locked with the floor symbol plus the overflow
-# bound plus the slice capped effective run. The base constant stays
-# kept unused with no delete.
-grep -q "FLOW_SEQ_FLOOR_STEP_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "floor step missing"
-grep -q "FLOW_SLICE_MAX_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice max missing"
-grep -q "FLOW_SMT_STAY_BURST_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "smt stay missing"
-grep -q "FLOW_CADENCE_MAX_NS = 25000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "cadence missing"
-grep -q "FLOW_FLAG_INTERACTIVE = 4ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "interactive flag missing"
-grep -q "FLOW_FLAG_URGENT = 8ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "urgent flag missing"
-grep -q "FLOW_SLICE_MIN_NS \* (u64)FLOW_CGROUP_WEIGHT_DFLT" "${FAIR_HDR}" || fail "slice step drifted"
-if grep -q "FLOW_FAIR_BASE_NS \* (u64)FLOW_CGROUP_WEIGHT_DFLT" "${FAIR_HDR}" 2>/dev/null; then
-    fail "base step reappeared"
+if grep -q "flow_cpu_l2bkt\|flow_cpu_l3bkt\|flow_cache_larger\|flow_cpu_view" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead bucket helper reappeared"
 fi
-grep -q "flow_fair_step" "${FAIR_HDR}" || fail "fair step missing"
-grep -q "e > (u64)FLOW_SLICE_MIN_NS" "${FAIR_HDR}" || fail "run eff cap drifted"
+if grep -q "flow_fb_inc" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead fb inc reappeared"
+fi
+if grep -q "flow_combine\|flow_cgroup_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead weight helper reappeared"
+fi
+if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "dead queue helper reappeared"
+fi
 
-# Guarded kick constants plus the run start stamp stay locked. The
-# running view holds forty eight bytes with the timestamp written only
-# in the running path and read only in the kick path.
-grep -q "FLOW_KICK_GAP_NS = 150000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick gap missing"
-grep -q "FLOW_KICK_GRAN_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick granularity missing"
-grep -q "FLOW_KICK_TAIL_NS = 100000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick tail missing"
-grep -q "start_ts" "${SRC_DIR}/src/bpf/intf.h" || fail "start stamp missing"
-grep -q '_Static_assert(sizeof(struct flow_running_state) == 48' "${SRC_DIR}/src/bpf/intf.h" || fail "running size assert missing"
-grep -q "rs->start_ts = bpf_ktime_get_ns()" "${DISP_HDR}" || fail "start stamp write missing"
-grep -q "start = READ_ONCE(rs->start_ts)" "${ENQ_HDR}" || fail "start stamp read missing"
+# Loop plus map plus ops budgets stay locked.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "loop budget drifted"
+[ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "4" ] || fail "maps count drifted"
+[ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "15" ] || fail "ops count drifted"
 
-# Kick gates stay locked in gap then granularity then tail order with
-# thirteen skips plus one idle plus one preempt. The asserts below read
-# source text only, so no kernel kick delivery behavior is assumed.
-# Delivery timing plus compat paths stay unasserted by design. Outlined
-# tail helper verifies once, so order reads gap plus gran in the win path
-# plus tail helper calls after.
-grep -q "Step seven of seven" "${ENQ_HDR}" || fail "kick seven step missing"
-grep -q "gap then granularity then tail" "${ENQ_HDR}" || fail "kick gate order prose missing"
-gap_at="$(grep -n "FLOW_KICK_GAP_NS" "${ENQ_HDR}" | grep -v "flow_kick_tail_ok" | head -n 1 | cut -d: -f1)"
-gran_at="$(grep -n "FLOW_KICK_GRAN_NS" "${ENQ_HDR}" | head -n 1 | cut -d: -f1)"
-tail_at="$(grep -n "flow_kick_tail_ok" "${ENQ_HDR}" | tail -n 1 | cut -d: -f1)"
-[ "${gap_at}" -lt "${gran_at}" ] && [ "${gran_at}" -lt "${tail_at}" ] || fail "kick gate order drifted"
-grep -q "win >= vmax - (s64)FLOW_KICK_GAP_NS" "${ENQ_HDR}" || fail "gap saturate missing"
-grep -q "now > start ? now - start : 0" "${ENQ_HDR}" || fail "wraparound read missing"
-grep -q "ran < (u64)FLOW_KICK_GRAN_NS" "${ENQ_HDR}" || fail "granularity gate missing"
-grep -q "raw_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail read missing"
-grep -q "rem < (u64)FLOW_KICK_TAIL_NS" "${ENQ_HDR}" || fail "tail gate missing"
-grep -q "__sync_val_compare_and_swap(&rs->pad, last, (u32)rgen)" "${ENQ_HDR}" || fail "kick token missing"
-grep -q "if (!flow_cpu_allowed(tgt, p)" "${ENQ_HDR}" || fail "freshness mask live missing"
-grep -q "(u64)c >= scx_bpf_nr_cpu_ids()" "${ENQ_HDR}" || fail "kick nr bound missing"
-kick_body="$(awk '/void flow_kick_vd\(/,/^}/' "${ENQ_HDR}")"
-[ "$(printf '%s' "${kick_body}" | grep -c "flow_cpu_allowed(tgt, p)" | tr -d ' ')" = "2" ] || fail "mask checks drifted"
-[ "$(printf '%s' "${kick_body}" | grep -c "(u64)c >= scx_bpf_nr_cpu_ids()" | tr -d ' ')" = "2" ] || fail "kick nr checks drifted"
-[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 8)" | tr -d ' ')" = "15" ] || fail "skip sites drifted"
-[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 7)" | tr -d ' ')" = "1" ] || fail "idle count drifted"
-[ "$(printf '%s' "${kick_body}" | grep -c "flow_stat_inc(llc, 6)" | tr -d ' ')" = "1" ] || fail "preempt count drifted"
-
-# Kick counters keep order with preempt before idle before skip.
+# LLC counters keep order with thirteen at one hundred four bytes.
 pre_at="$(grep -n "kick_preempt" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
 idle_at="$(grep -n "kick_idle" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
 skip_at="$(grep -n "kick_skip" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d: -f1)"
 [ "${pre_at}" -lt "${idle_at}" ] && [ "${idle_at}" -lt "${skip_at}" ] || fail "kick counter order drifted"
 
-# Unified EEVDF prose stays locked with lag-conserving plus load-adaptive plus base reserved.
-grep -q "lag-conserving EEVDF" "${FAIR_HDR}" || fail "unified prose missing"
-grep -q "Load-adaptive" "${FAIR_HDR}" || fail "slice prose missing"
-grep -q "kept unused reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "base reserved missing"
-grep -q "Kept reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "cap reserved missing"
-grep -q "stay reserved" "${SRC_DIR}/src/bpf/intf.h" || fail "cap prose missing"
-# Kick heuristic plus storm trade plus collision plus tail recheck stay documented.
-grep -q "tear free heuristic" "${ENQ_HDR}" || fail "heuristic prose missing"
-grep -q "dispatch still correct" "${ENQ_HDR}" || fail "heuristic dispatch prose missing"
-if grep -q "cache plus lock protected" "${ENQ_HDR}" 2>/dev/null; then
-    fail "stale lock prose reappeared"
-fi
-grep -q "prevent storms" "${ENQ_HDR}" || fail "storm prose missing"
-grep -q "even earlier Virtual deadline" "${ENQ_HDR}" || fail "tradeoff prose missing"
-grep -q "four billion runs" "${ENQ_HDR}" || fail "gen collision prose missing"
-grep -q "stays balanced" "${ENQ_HDR}" || fail "gauge balance missing"
-if grep -q "leaves one gauge unit behind" "${ENQ_HDR}" 2>/dev/null; then
-    fail "stale gauge leak reappeared"
-fi
-grep -q "Every non duplicate ends in a" "${ENQ_HDR}" || fail "pairing prose missing"
-grep -q "telemetry only" "${ENQ_HDR}" || fail "telemetry prose missing"
-grep -q "Every non duplicate ends in a" "${SRC_DIR}/src/bpf/intf.h" || fail "intf pairing missing"
-# Tail recheck reads the raw slice once then derives the remainder, so expiry clamps at zero.
-# Outlined helper verifies once with the same bound for both pre-win and post-win checks.
-grep -q "fresh_raw_rem = READ_ONCE(rs->slice_rem)" "${ENQ_HDR}" || fail "tail recheck missing"
-grep -q "flow_kick_tail_ok" "${ENQ_HDR}" || fail "tail helper missing"
-grep -q "flow_kick_tail_ok(raw_rem, ran)" "${ENQ_HDR}" || fail "tail recheck math missing"
-grep -q "flow_kick_tail_ok(fresh_raw_rem, ran)" "${ENQ_HDR}" || fail "tail recheck gate missing"
-grep -q "short tail after the win" "${ENQ_HDR}" || fail "tail recheck prose missing"
-grep -q "post win tail recheck" "${ENQ_HDR}" || fail "tail header prose missing"
-# Alloc bound stays explicit with no new table. Shared insert keeps the
-# bound through the shared lookup in select.
-grep -q "scx_bpf_nr_cpu_ids" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "alloc bound missing"
-grep -q "scx_bpf_nr_cpu_ids" "${DISP_HDR}" || fail "drain bound missing"
-grep -q "Bound the index by the live table size" "${DISP_HDR}" || fail "bound prose missing"
-# Start stamp plain store stays benign with fail closed skip plus generation cover.
-grep -q "plain store on an aligned eight byte" "${DISP_HDR}" || fail "start store prose missing"
-grep -q "torn read yields" "${DISP_HDR}" || fail "torn prose missing"
-grep -q "covers recycle" "${DISP_HDR}" || fail "recycle prose missing"
-# Scheduler README keeps in-place slice continuation with no stale exact.
-grep -q "slice continuation" "${SRC_DIR}/README.md" || fail "readme slice tail missing"
-if grep -q "short tasks exact" "${SRC_DIR}/README.md" 2>/dev/null; then
-    fail "readme stale exact reappeared"
+# Timer only power with 100 percent busy plus 50 percent idle.
+grep -q "flow_cpuperf_mark" "${DISP_HDR}" || fail "power mark missing"
+grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power max missing"
+grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power half missing"
+grep -q "never touches a busy core" "${DISP_HDR}" || fail "power timer prose missing"
+if awk '/void BPF_STRUCT_OPS\(flow_stopping/,/^}/' "${DISP_HDR}" | grep -q "flow_cpuperf_mark(cpu, true)" 2>/dev/null; then
+    fail "stopping drop reappeared"
 fi
 
-# Lag-conserving EEVDF pins with no EDQ and no new wire bytes.
-# LAG_MAX caps lateness at four milliseconds with integer only.
-grep -q "FLOW_LAG_MAX_NS = 4000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "lag max missing"
-grep -q "flow_lag_clamp" "${FAIR_HDR}" || fail "lag clamp missing"
-grep -q "flow_lag_clamp(now > start" "${ENQ_HDR}" || fail "lag clamp use missing"
-# RB envelope keeps thirty two byte node in one hundred thirty six slot.
-grep -q "struct flow_rb_node" "${SRC_DIR}/src/bpf/intf.h" || fail "rb node missing"
-grep -q '_Static_assert(sizeof(struct flow_rb_node) == 32' "${SRC_DIR}/src/bpf/intf.h" || fail "rb node assert missing"
-grep -q '_Static_assert(sizeof(struct flow_arena_task) == 136' "${SRC_DIR}/src/bpf/intf.h" || fail "arena assert missing"
-grep -q "flow_rb_node>() == 32" "${SRC_DIR}/src/run.rs" || fail "run rb assert missing"
-# Proxies stay in BSS with no map and no wire bytes.
-grep -q "m_lag_clamp" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "lag proxy missing"
-grep -q "m_rb_depth" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "depth proxy missing"
-grep -q "m_dup_chain" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "dup proxy missing"
-grep -q "m_leftmost_hit" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "leftmost proxy missing"
-grep -q "m_estrip_probe" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "estrip probe missing"
-if grep -q "m_estrip_skip" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "estrip skip reappeared"
+# No forbidden schedulers plus no float plus no GPU plus no design labels.
+if grep -rni "lavd\|eevdf\|cfs\|rustland\|bpfland" "${SRC_DIR}/src/bpf" "${SRC_DIR}/README.md" 2>/dev/null | grep -q .; then
+    fail "forbidden scheduler reappeared"
 fi
-grep -q "m_fb_pinned" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "pinned proxy missing"
-grep -q "m_fb_nocpu" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "nocpu proxy missing"
-grep -q "m_fb_contention" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "contention proxy missing"
-grep -q "m_fb_alloc" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "alloc proxy missing"
-grep -q "m_fb_depth" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "depth overflow proxy missing"
-# Fold counters stay in fair BSS with no map and no wire bytes.
-grep -q "m_ewma_fold" "${FAIR_HDR}" || fail "ewma fold proxy missing"
-grep -q "m_ewma_sat" "${FAIR_HDR}" || fail "ewma sat proxy missing"
-grep -q "m_ewma_freeze" "${FAIR_HDR}" || fail "ewma freeze proxy missing"
-if grep -q "m_ewma_fold\|m_ewma_sat\|m_ewma_freeze" "${SRC_DIR}/src/bpf/maps.bpf.h" "${SRC_DIR}/src/bpf/intf.h" "${SRC_DIR}/src/bpf/dispatch.bpf.h" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
-    fail "ewma proxy outside fair reappeared"
+if grep -q "float" "${FAIR_HDR}" 2>/dev/null; then
+    fail "float reappeared"
 fi
-if grep -q "m_lag_clamp\|m_rb_depth\|m_dup_chain\|m_leftmost_hit\|m_estrip_probe\|m_fb_nocpu\|m_fb_pinned\|m_fb_contention\|m_fb_alloc\|m_fb_depth\|m_rb_depth_max\|m_ewma_fold\|m_ewma_sat\|m_ewma_freeze" "${SRC_DIR}/src/stats.rs" "${SRC_DIR}/src/metrics.rs" 2>/dev/null; then
-    fail "proxy wired reappeared"
+if grep -qi "float" "${ENQ_HDR}" "${DISP_HDR}" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "float reappeared in queue"
 fi
-# BST order keeps leftmost wins with RB_DUPLICATE-compatible ties right and bias key plus depth bound.
-grep -q "flow_rb_deadline" "${FAIR_HDR}" || fail "rb deadline missing"
-grep -q "RB_DUPLICATE" "${ENQ_HDR}" || fail "duplicate policy missing"
-grep -q "leftmost" "${DISP_HDR}" || fail "leftmost prose missing"
-grep -q "flow_rb_pop" "${DISP_HDR}" || fail "rb pop missing"
-if grep -q "flow_rb_peek" "${DISP_HDR}" 2>/dev/null; then
-    fail "dead peek reappeared"
+if grep -rqi "gpu" "${SRC_DIR}/src/bpf" 2>/dev/null; then
+    fail "gpu hint reappeared"
 fi
-# Cache E stays repointed with no remote size compare and fallback last.
-grep -q "repointed" "${DISP_HDR}" || fail "repoint prose missing"
-grep -q "no remote size compare" "${DISP_HDR}" || fail "estrip prose missing"
-# Honest BST with librbtree source kept for arena BTF plus no angled use plus edq dropped.
-if grep -q '<lib/rbtree.h>' "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "rbtree angled reappeared for honest BST"
-fi
-if grep -q '<lib/edq.h>' "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "angled edq reappeared"
-fi
-if grep -q 'lib/edq.bpf.c' "${SRC_DIR}/build.rs" 2>/dev/null; then
-    fail "edq lib reappeared"
-fi
-if grep -q "sizeof(struct scx_edq)" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq sizing reappeared"
-fi
-if grep -q "scx_edq_" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq helper reappeared"
-fi
-if grep -q "flow_edq" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq helper reappeared"
-fi
-if grep -q "flow_edqs" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "edq roots reappeared"
-fi
-# Pop first then validate with no lossy peek dead path.
-grep -q "Pop-first then validate" "${DISP_HDR}" || fail "pop-first prose missing"
-grep -q "lossy peek-dead path is removed" "${DISP_HDR}" || fail "peek-dead removal missing"
-# Dead reap owns no gauge move; exit or dequeue owns the single dec.
-if grep -q "flow_queued_dec(vllc);" "${DISP_HDR}" 2>/dev/null; then
-    :
-else
-    fail "live dec missing"
-fi
-# Honest tree with depth bound and no full balancing.
-grep -q "FLOW_RB_MAX_DEPTH = 32ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "depth bound missing"
-grep -q "depth > (u32)FLOW_RB_MAX_DEPTH" "${ENQ_HDR}" || fail "depth bound check missing"
-grep -q "m_rb_depth_max" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "depth max missing"
-grep -q "flow_rb_remove" "${ENQ_HDR}" || fail "remove helper missing"
-grep -q '_Static_assert(sizeof(struct flow_rb_entry) == 48' "${SRC_DIR}/src/bpf/intf.h" || fail "entry assert missing"
-grep -q 'flow_rb_entry>() == 48' "${SRC_DIR}/src/run.rs" || fail "run entry assert missing"
-grep -q "unbalanced BST" "${SRC_DIR}/src/bpf/intf.h" || fail "bst prose missing"
-grep -q "no full RB balancing" "${ENQ_HDR}" || fail "bst honesty missing"
-# Offline roots still reap with no new loop and no orphan slab leak.
-# Shared lookup lives in select with the same prose for enqueue reuse.
-grep -q "No live gate here so offline roots still reap" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "offline reap prose missing"
-grep -q "No live gate so offline roots still reap" "${DISP_HDR}" || fail "offline drain prose missing"
-# Fallback stays best effort with a split cause count and a probe count.
-grep -q "Each fallback cause has its own BSS counter" "${ENQ_HDR}" || fail "fallback split prose missing"
-grep -q "m_fb_nocpu" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "nocpu counter missing"
-grep -q "m_fb_contention" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "contention counter missing"
-grep -q "m_fb_alloc" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "alloc counter missing"
-grep -q "m_fb_depth" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "depth counter missing"
-grep -q "m_fb_pinned" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "pinned counter missing"
-grep -q "m_estrip_probe" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "estrip probe missing"
-if grep -q "m_estrip_skip" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "estrip skip reappeared"
-fi
-grep -q "fires only when the" "${DISP_HDR}" || fail "estrip probe prose missing"
-grep -q "flow_lag_clamp" "${FAIR_HDR}" || fail "lag clamp missing"
-# Envelope keeps forty eight byte slab within five hundred twelve.
-grep -q "four hundred" "${SRC_DIR}/src/bpf/intf.h" || fail "envelope prose missing"
-
-# Zero residual pins for single dec plus stored key plus successor splice.
-grep -q "FLOW_FLAG_IN_RB" "${SRC_DIR}/src/bpf/intf.h" || fail "tree bit missing"
-grep -q "storage\[0\]" "${SRC_DIR}/src/bpf/dispatch.bpf.h" || fail "stored key missing"
-grep -q "storage\[0\]" "${ENQ_HDR}" || fail "stored key enqueue missing"
-grep -q "successor splice" "${ENQ_HDR}" || fail "successor prose missing"
-grep -q "FLOW_FLAG_IN_RB" "${ENQ_HDR}" || fail "tree bit enqueue missing"
-grep -q "FLOW_FLAG_IN_RB" "${DISP_HDR}" || fail "tree bit dispatch missing"
-grep -q "was_tree" "${DISP_HDR}" || fail "tree bit exit missing"
-grep -q "have_key" "${DISP_HDR}" || fail "stored key exit missing"
-grep -q "have_key" "${ENQ_HDR}" || fail "stored key dequeue missing"
-if grep -q "flow_rb_peek" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dead peek reappeared"
-fi
-if grep -q "m_estrip_skip" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "estrip skip reappeared"
-fi
-if grep -q "(void)co" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dead owner read reappeared"
-fi
-if grep -q "(void)cz" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "dead pad read reappeared"
-fi
-grep -q "steps >= 32U" "${ENQ_HDR}" || fail "explicit bound missing"
-grep -q "m_fb_pinned" "${ENQ_HDR}" || fail "pinned cause missing"
-if grep -q '__sync_fetch_and_add(&m_dup_chain' "${ENQ_HDR}" 2>/dev/null; then
-    # dup count must stay outside the tree lock with local flag
-    if ! grep -q "done_dup" "${ENQ_HDR}" 2>/dev/null; then
-        fail "dup outside lock missing"
-    fi
-fi
-grep -q "flow_rb_trylock(rb)" "${ENQ_HDR}" || fail "contention probe missing"
-
-# No design labels leak into shipped prose or comments. The guard script
-# plus the excluded specs stay out of this scan.
 if grep -rnE "H-[0-9]|SEC-[0-9]|PERF-[0-9]|FR-[0-9]|REQ-[0-9]|HIGH-[0-9]|MED-[0-9]|LOW-[0-9]" "${SRC_DIR}/README.md" "${SRC_DIR}/src/bpf" "${SRC_DIR}/src/"*.rs "${REPO_DIR}/README.md" 2>/dev/null | grep -q .; then
     fail "design label reappeared"
-fi
-if grep -rnE "Fig[0-9]|Table[0-9]|C0[0-9]|O0[0-9]|O1[0-9]" "${SRC_DIR}/README.md" "${SRC_DIR}/src/bpf" "${SRC_DIR}/src/"*.rs "${REPO_DIR}/README.md" 2>/dev/null | grep -q .; then
-    fail "figure label reappeared"
 fi
 if grep -rn "—" "${SRC_DIR}/README.md" "${SRC_DIR}/src/bpf" "${SRC_DIR}/src/"*.rs "${REPO_DIR}/README.md" 2>/dev/null | grep -q .; then
     fail "em dash reappeared"
 fi
+if grep -q ";" "${SRC_DIR}/README.md" 2>/dev/null; then
+    fail "scx README semicolon reappeared"
+fi
 
-
-# 5.2.25 lag-conserving EEVDF plus continuation plus direct dispatch pins.
-# Queued wakeups stay disabled so waker context is visible in select.
-if grep -q "ALLOW_QUEUED" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "queued wakeup reappeared"
-fi
-# Unified EEVDF plus slice scaling plus min-key plus continuation stay present.
-grep -q "flow_eevdf_vd" "${FAIR_HDR}" || fail "eevdf pin missing"
-grep -q "flow_calc_slice" "${FAIR_HDR}" || fail "calc slice pin missing"
-grep -q "flow_cpu_min_key" "${SRC_DIR}/src/bpf/maps.bpf.h" || fail "min key pin missing"
-grep -q "flow_try_continue_prev" "${DISP_HDR}" || fail "try continue pin missing"
-# Direct local dispatch plus SMT mask plus urgency flags stay present.
-grep -q "SCX_DSQ_LOCAL_ON" "${ENQ_HDR}" || fail "local dispatch pin missing"
-grep -q "scx_bpf_get_idle_smtmask" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "smtmask pin missing"
-grep -q "FLOW_FLAG_URGENT" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "urgent pin missing"
-grep -q "FLOW_FLAG_INTERACTIVE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "interactive pin missing"
-# HRRN plus run slice plus fixed slice stay removed.
-if grep -q "vd_HRRN\|hrrn_ready\|flow_run_vd\|flow_run_slice" "${SRC_DIR}/src/bpf" 2>/dev/null; then
-    fail "hrrn pin reappeared"
-fi
-if grep -q 'slice_len = (u64)FLOW_SLICE_MIN_NS' "${ENQ_HDR}" 2>/dev/null; then
-    fail "fixed slice pin reappeared"
-fi
-# Adaptive slice bounds plus SMT stay plus cadence plus kick retune stay pinned.
-grep -q "FLOW_SLICE_MAX_NS = 3000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "slice max pin missing"
-grep -q "FLOW_SMT_STAY_BURST_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "smt stay pin missing"
-grep -q "FLOW_CADENCE_MAX_NS = 25000000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "cadence pin missing"
-grep -q "FLOW_KICK_GAP_NS = 150000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick gap pin missing"
-grep -q "FLOW_KICK_GRAN_NS = 250000ULL" "${SRC_DIR}/src/bpf/intf.h" || fail "kick gran pin missing"
-# Frequency stays 100 percent across stops and ticks, dropping only at dispatch tail.
-if awk '/void BPF_STRUCT_OPS\(flow_stopping/,/^}/' "${DISP_HDR}" | grep -q "flow_cpuperf_mark(cpu, true)" 2>/dev/null; then
-    fail "stopping drop reappeared"
-fi
-grep -q "flow_cpuperf_mark(cpu, false)" "${DISP_HDR}" || fail "cpuperf max pin missing"
-grep -q "flow_cpuperf_mark(c, true)" "${DISP_HDR}" || fail "dispatch tail drop missing"
 
 echo "guard tests passed"

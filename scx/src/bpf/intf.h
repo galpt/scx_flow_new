@@ -6,14 +6,13 @@
  * one DSQ for pinned tasks. One fallback DSQ holds tasks with no
  * usable CPU. Drain walks CPU then LLC then neighbor then remote
  * then fallback. Tiers stay L1 greater than L2 greater than L3. Short
- * form is L1>L2>L3. Idle starts claim at once. Size breaks ties only
- * inside one tier with larger buckets first within tier when both
- * buckets are known. Each enqueue prices the task by context with
+ * form is L1>L2>L3. Idle starts claim at once. Ties keep fixed order
+ * inside one tier. Each enqueue prices the task by context with
  * log scale. Virtual deadline adds a bounded step scaled by greedy
  * over latency score. Slices hold one base quantum with boost for
  * long frame tasks. A runnable yield with no burnt time still moves
  * stored state forward by one. Shared enqueue with a due time ahead
- * of the running due time yields soft with a one nanosecond slice.
+ * of the running due time yields soft with a near stop claim.
  * Each running instance yields at most once per generation. The wire
  * keeps one hundred four bytes with the same order as before.
  *

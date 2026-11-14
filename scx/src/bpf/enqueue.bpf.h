@@ -7,7 +7,7 @@
  * due time and parks pinned tasks on the CPU DSQ and shared tasks
  * on the LLC DSQ. An idle target is claimed and kicked at max. A
  * non greedy urgent task past the top tier threshold tries a soft
- * yield on a peer CPU with a one nanosecond slice and no IPI.
+ * yield on a peer CPU with a near stop claim and no IPI.
  * Dequeue drops the queue gauge on cancel. Every insert pairs with
  * one dec on move or cancel for telemetry only.
  *
@@ -95,8 +95,8 @@ static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 l
 /* Soft yield without IPI. Greedy tasks and tasks below the top tier
  * threshold never yield. Probes the hint plus two peers in the same
  * LLC and picks the lowest score with the farthest stop stamp. The
- * victim slice is cut to one nanosecond so it yields at the next
- * check with no pipeline stall. At most one yield per run. */
+ * victim stop is claimed near so it yields at its next check with no
+ * pipeline stall. At most one yield per run. */
 static __noinline void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t,
 					s32 tgt, u32 llc)
 {
@@ -295,6 +295,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!flow_llc_for_cpu(tgt, &tmp))
 			llc = tmp;
 	}
+	/* Fallback to LLC 0 keeps stats bounded. */
 	llc &= ((u32)FLOW_MAX_LLCS - 1U);
 	if (p->flags & PF_EXITING) {
 		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
@@ -323,12 +324,13 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!no_cpu && pinned) {
 			u64 dsq = (u64)FLOW_CPU_DSQ_BASE + (u64)(u32)tgt;
 			struct flow_running_state *rs = &flow_running_state[(u32)tgt];
+			u64 slice = flow_calc_slice(t, rs);
 
 			__sync_fetch_and_add(&rs->nr_pinned, 1ULL);
 			t->pinned_cpu = tgt;
-			t->slice_ns = (u64)FLOW_SLICE_MIN_NS;
+			t->slice_ns = slice;
 			__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
-			scx_bpf_dsq_insert(p, dsq, (u64)FLOW_SLICE_MIN_NS, enq_flags);
+			scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 			flow_queued_add(llc);
 			flow_kick_idle_only(tgt, p, llc);
 			return;

@@ -3,9 +3,9 @@
  * Placement for the flow scheduler.
  *
  * Tags mark sync plus hardirq plus softirq wakes on the task. Tiers
- * walk prev then same group then same LLC then same node then remote
- * with an atomic idle claim at each step. A won claim with a quiet
- * queue takes direct local dispatch at max frequency and skips the
+ * walk prev then same group then same LLC then same LLC thread then
+ * fixed order with an atomic idle claim at each step. A won claim takes
+ * direct local dispatch at max frequency and skips the
  * enqueue path through the dispatch flag. Masks are tested again
  * before each wake, so a task is never kicked toward a CPU outside
  * its current mask. Frequency follows core busyness and never steers
@@ -127,11 +127,6 @@ static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 	scx_bpf_cpuperf_set((s32)cpu, perf);
 }
 
-static __always_inline bool flow_is_primary(u32 node)
-{
-	return node == 0;
-}
-
 static __always_inline int flow_hint_llc(s32 hint)
 {
 	int v;
@@ -159,70 +154,6 @@ static __always_inline u32 flow_cpu_ccx(u32 cpu)
 	return READ_ONCE(cc->ccx_id);
 }
 
-/* Size buckets read as u8 with zero meaning unknown. A miss reads
- * unknown, so unknown sizes keep fixed order with no match. */
-static __always_inline u8 flow_cpu_l2bkt(u32 cpu)
-{
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-
-	if (!flow_cpu_ok(cpu))
-		return 0;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return 0;
-	return READ_ONCE(cc->l2_bkt);
-}
-
-static __always_inline u8 flow_cpu_l3bkt(u32 cpu)
-{
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-
-	if (!flow_cpu_ok(cpu))
-		return 0;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return 0;
-	return READ_ONCE(cc->l3_bkt);
-}
-
-/* Larger check with the both known gate. Unknown sizes never match,
- * so fixed order covers them. Compares promote to int per C rules with
- * identical result and no extra budget. */
-static __always_inline bool flow_cache_larger(u8 a, u8 b)
-{
-	if (!a || !b)
-		return false;
-	return a > b;
-}
-
-/* Coalesced seed view with one map lookup for cluster plus buckets.
- * Group tier picks l2 and LLC tier picks l3 after the score, so one
- * lookup covers both with no extra loop. A miss reads unknown. */
-struct flow_cpu_view {
-	u32 ccx;
-	u8 l2;
-	u8 l3;
-};
-
-static __always_inline struct flow_cpu_view flow_cpu_view(u32 cpu)
-{
-	struct flow_cpu_view v = { (u32)FLOW_CCX_UNKNOWN, 0, 0 };
-	u32 key = cpu;
-	struct flow_cpu_ctx *cc;
-
-	if (!flow_cpu_ok(cpu))
-		return v;
-	cc = bpf_map_lookup_elem(&cpu_ctx_stor, &key);
-	if (!cc)
-		return v;
-	v.ccx = READ_ONCE(cc->ccx_id);
-	v.l2 = READ_ONCE(cc->l2_bkt);
-	v.l3 = READ_ONCE(cc->l3_bkt);
-	return v;
-}
-
 static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 {
 	if (!use)
@@ -235,8 +166,8 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 /* Claim one idle CPU through the tier order. Each step uses an atomic
  * claim, so concurrent wakes never pick the same CPU. T0 is prev or
  * the waker on sync. T1 is the same group. T2 is the same LLC. T3 is
- * a partial SMT thread in the same LLC. T4 is the same node or a
- * remote idle CPU. Minus one means no idle CPU was won. */
+ * a partial SMT thread in the same LLC. T4 is any idle CPU in fixed
+ * order. Minus one means no idle CPU was won. */
 static __noinline s32 flow_claim_idle(s32 prev_cpu, s32 waker_cpu, struct task_struct *p,
 				      bool sync, int hint_llc, u32 hint_ccx, bool use_ccx)
 {
@@ -330,7 +261,7 @@ static __noinline s32 flow_claim_idle(s32 prev_cpu, s32 waker_cpu, struct task_s
 			}
 		}
 	}
-	/* T4: same node or remote idle CPU in fixed order. */
+	/* T4: any idle CPU in fixed order. */
 	bpf_for(c, 0, FLOW_MAX_CPUS) {
 		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, p))
 			continue;
@@ -405,7 +336,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (cpu_id < 0)
 		return flow_constrained_target(hint, p);
 
-	/* Direct dispatch when the won CPU queue is quiet. Compute the due
+	/* Direct dispatch on the won idle CPU. Compute the due
 	 * time, ramp to max, insert to local, and mark the flag so enqueue
 	 * is skipped for this activation. */
 	if (!t)

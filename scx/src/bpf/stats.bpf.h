@@ -60,13 +60,6 @@ static __always_inline void flow_stat_inc(u32 llc, u64 off)
 		return;
 	__sync_fetch_and_add(cell, 1ULL);
 }
-/* Guard kept helper with no caller in tree. Counts fallback plus
- * the given tail with no new counter. */
-static __always_inline void flow_fb_inc(u32 llc, u64 tail_off)
-{
-	flow_stat_inc(llc, 2);
-	flow_stat_inc(llc, tail_off);
-}
 static __always_inline void flow_queued_dec(u32 llc)
 {
 	struct flow_llc_stats *st = flow_stats_for(llc);

@@ -213,7 +213,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 
 		t->lat_cri = lc;
 		t->slice_ns = slice;
-		t->last_running_clk = now;
 		WRITE_ONCE(rs->lat_cri, lc);
 		WRITE_ONCE(rs->llc_id, llc);
 		WRITE_ONCE(rs->running_clk, now);
@@ -436,6 +435,8 @@ static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		rs = &flow_running_state[l];
 		idle = READ_ONCE(rs->idle_start_clk);
 		if (!idle) {
+			/* No non destructive idle test in this tree, so the timer
+			 * consumes one idle mark to start the decay window. */
 			if (scx_bpf_test_and_clear_cpu_idle((s32)l))
 				WRITE_ONCE(rs->idle_start_clk, bpf_ktime_get_ns());
 			else
@@ -520,6 +521,7 @@ void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 	t->lat_cri_waker = 0;
 	t->lat_cri_wakee = 0;
 	t->flags = 0;
+	/* Cold start uses LLC 0 until the first enqueue sets the owner. */
 	t->llc_id = 0;
 	t->pinned_cpu = -1;
 	t->slice_ns = (u64)FLOW_SLICE_MIN_NS;
