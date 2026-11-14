@@ -10,8 +10,9 @@
  * to max. Tick refreshes max so rate limits never drop the target.
  * Stopping folds run length into the average and tracks service.
  * Quiescent folds the wait rate on sleep. A ten millisecond timer
- * refreshes the score board and drops idle cores to half. The timer
- * never touches a busy core, so dispatch never lowers frequency.
+ * refreshes the score board and tracks idle cores to half. The timer
+ * never touches a busy core, and the half set is deferred to dispatch
+ * which holds the lock.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -32,12 +33,14 @@ enum flow_clock {
 
 static __always_inline void flow_after_move(u32 cpu, u32 llc)
 {
+	/* Holds the dispatch lock for this CPU. */
 	flow_stat_inc(llc, 1);
 	flow_cpuperf_mark(cpu, false);
 }
 
 /* Continue prev in place with a fresh slice. Runs only when no DSQ
- * moved, so a queued urgent task always wins over continuation. */
+ * moved, so a queued urgent task always wins over continuation. Holds
+ * the dispatch lock for this CPU. */
 static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc, struct task_struct *prev)
 {
 	struct flow_task_ctx *t;
@@ -164,7 +167,24 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 	/* Nothing queued and prev is still runnable: run prev on. */
-	flow_try_continue_prev(c, llc, prev);
+	if (flow_try_continue_prev(c, llc, prev))
+		return;
+	/* Idle with no work. Holds the lock here, so apply the deferred
+	 * half when the timer window elapsed. */
+	{
+		struct flow_running_state *rs = &flow_running_state[c];
+		u64 idle = READ_ONCE(rs->idle_start_clk);
+		u64 now = bpf_ktime_get_ns();
+
+		if (idle && now - idle >= (u64)FLOW_SYS_STAT_INTERVAL_NS &&
+		    flow_cpu_live(c)) {
+			if (READ_ONCE(rs->cpuperf_cur) != (u32)(SCX_CPUPERF_ONE / 2)) {
+				flow_cpuperf_mark(c, true);
+				WRITE_ONCE(rs->cpuperf_cur, (u32)(SCX_CPUPERF_ONE / 2));
+				WRITE_ONCE(rs->cpuperf_commit_clk, now);
+			}
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -248,7 +268,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 				__sync_fetch_and_sub(&rs->nr_pinned, 1U);
 		}
 	}
-	/* Busy cores ramp to max at once. */
+	/* Busy cores ramp to max at once. Holds the lock. */
 	if (READ_ONCE(rs->cpuperf_cur) != (u32)SCX_CPUPERF_ONE) {
 		flow_cpuperf_mark(cpu, false);
 		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
@@ -279,7 +299,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	/* Refresh max every millisecond so rate limits keep the target. */
+	/* Refresh max every millisecond so rate limits keep the target. Holds the lock. */
 	if (now - READ_ONCE(rs->cpuperf_commit_clk) >= 1000000ULL) {
 		flow_cpuperf_mark(cpu, false);
 		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
@@ -431,7 +451,9 @@ static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		WRITE_ONCE(sys_stat.avg_svc_time_iwgt,
 			   READ_ONCE(sys_stat.avg_svc_time_iwgt) -
 			   (READ_ONCE(sys_stat.avg_svc_time_iwgt) >> 3));
-	/* Idle cores decay to half. Busy cores are never touched here. */
+	/* Idle cores decay to half. Busy cores are never touched here. Timer
+	 * holds no rq lock, so it never sets freq. It tracks the idle
+	 * window and defers the half set to dispatch. */
 	bpf_for(l, 0, FLOW_MAX_CPUS) {
 		struct flow_running_state *rs;
 		u64 idle;
@@ -453,9 +475,7 @@ static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 			continue;
 		if (!flow_cpu_live(l))
 			continue;
-		flow_cpuperf_mark(l, true);
-		WRITE_ONCE(rs->cpuperf_cur, (u32)(SCX_CPUPERF_ONE / 2));
-		WRITE_ONCE(rs->cpuperf_commit_clk, bpf_ktime_get_ns());
+		/* Busy skip done. Defer the half set to dispatch. */
 		(void)k;
 	}
 	bpf_timer_start(timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);

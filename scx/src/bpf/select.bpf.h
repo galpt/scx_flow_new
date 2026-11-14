@@ -89,11 +89,9 @@ static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 }
 
 /* A busy core runs at max and an idle core runs at half. The call
- * stays on one live core and never sends zero. The gate also bounds
- * the id by the live ids and skips a remote target while a queue
- * lock is held, so the set never trips the invalid target exit. The
- * caller must hold the target runqueue lock for a remote set, else
- * the call skips. Frequency never steers placement. */
+ * stays on one live core and never sends zero. Frequency never steers
+ * placement. Caller must hold the target runqueue lock, so never call
+ * from select or the timer, which run without any lock. */
 static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 {
 	u32 perf;
@@ -104,21 +102,6 @@ static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 		return;
 	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
 		return;
-	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
-		struct rq *locked = scx_bpf_locked_rq();
-
-		if (locked) {
-			struct rq *target = scx_bpf_cpu_rq((s32)cpu);
-
-			if (!target || target != locked)
-				return;
-		}
-	} else {
-		struct rq *locked = scx_bpf_locked_rq();
-
-		if (locked && cpu != bpf_get_smp_processor_id())
-			return;
-	}
 	perf = (u32)SCX_CPUPERF_ONE;
 	if (idle)
 		perf = (u32)(SCX_CPUPERF_ONE / 2);
@@ -427,9 +410,11 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (cpu_id < 0)
 		return flow_constrained_target(hint, p);
 
-	/* Direct dispatch on the won idle CPU. Compute the due
-	 * time, ramp to max, insert to local, and mark the flag so enqueue
-	 * is skipped for this activation. */
+	/* Direct dispatch on the won idle CPU. Compute the due time,
+	 * insert to local, and mark the flag so enqueue is skipped for
+	 * this activation. No freq touch and no kick here. Select holds
+	 * no rq lock, and a LOCAL insert already wakes. Max rides on
+	 * running plus tick plus dispatch. */
 	if (!t)
 		return cpu_id;
 	vl = topo_cpu_to_llc_id((u32)cpu_id);
@@ -447,12 +432,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		t->slice_ns = slice;
 		WRITE_ONCE(t->flags, READ_ONCE(t->flags) | (u32)FLOW_FLAG_DIRECT_DISPATCH);
 		scx_bpf_task_set_dsq_vtime(p, vd);
-		if (flow_cpu_ok((u32)cpu_id) && (u64)(u32)cpu_id < scx_bpf_nr_cpu_ids())
-			flow_cpuperf_mark((u32)cpu_id, false);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
-		scx_bpf_kick_cpu(cpu_id, SCX_KICK_IDLE);
 		flow_stat_inc(llc, 1);
-		flow_stat_inc(llc, 7);
 	}
 	return cpu_id;
 }

@@ -57,39 +57,41 @@ static __always_inline void flow_queued_drop(u32 llc)
 
 /* Idle wake only. Misses count a skip with no wake. A bad or masked
  * or offline or busy target skips. A won idle claim ramps to max and
- * fires one idle kick. */
-static __noinline void flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
+ * fires one idle kick. Caller holds the target runqueue lock. Never
+ * call from select or the timer. True means kicked. */
+static __noinline bool flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
 {
 	u32 c;
 
 	if (tgt < 0) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	if (!flow_cpu_allowed(tgt, p)) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	if (!flow_cpu_live((u32)tgt)) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	if (!scx_bpf_test_and_clear_cpu_idle(tgt)) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	c = (u32)tgt;
 	if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	if ((u64)c >= scx_bpf_nr_cpu_ids()) {
 		flow_stat_inc(llc, 8);
-		return;
+		return false;
 	}
 	flow_cpuperf_mark(c, false);
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
+	return true;
 }
 
 /* Soft yield without IPI. Greedy tasks and tasks below the top tier
@@ -346,14 +348,8 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 			__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
 			scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
 			flow_queued_add(llc);
-			if (scx_bpf_test_and_clear_cpu_idle(tgt)) {
-				if (flow_cpu_ok((u32)tgt) &&
-				    (u64)(u32)tgt < scx_bpf_nr_cpu_ids())
-					flow_cpuperf_mark((u32)tgt, false);
-				scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-				flow_stat_inc(llc, 7);
+			if (flow_kick_idle_only(tgt, p, llc))
 				return;
-			}
 			flow_try_preempt(p, t, tgt, llc);
 			return;
 		}
