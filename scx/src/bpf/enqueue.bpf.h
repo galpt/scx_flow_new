@@ -19,6 +19,7 @@
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
+#include "select.bpf.h"
 
 struct flow_victim {
 	s32	cpu;
@@ -50,14 +51,15 @@ static __always_inline void flow_clear_pinned(struct flow_task_ctx *t)
  * When ops.select_cpu() already looked for an idle CPU and found none,
  * there is no point in searching again.
  */
-static bool flow_kick_idle(struct task_struct *p, s32 cpu, bool pinned, u64 enq_flags)
+static bool flow_kick_idle(struct task_struct *p, const struct flow_task_ctx *t, s32 cpu,
+			   bool pinned, u64 enq_flags)
 {
 	s32 idle;
 
 	if (pinned)
 		idle = scx_bpf_test_and_clear_cpu_idle(cpu) ? cpu : -EBUSY;
 	else if (!__COMPAT_is_enq_cpu_selected(enq_flags))
-		idle = scx_bpf_select_cpu_and(p, cpu, 0, p->cpus_ptr, 0);
+		idle = flow_pick_idle_cpu(p, t, cpu, 0);
 	else
 		return false;
 
@@ -232,7 +234,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (enq_flags & SCX_ENQ_LAST)
 		return;
-	if (!flow_kick_idle(p, cpu, pinned, enq_flags))
+	if (!flow_kick_idle(p, t, cpu, pinned, enq_flags))
 		flow_try_preempt(p, t, cpu, llc);
 }
 

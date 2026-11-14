@@ -15,7 +15,7 @@ use scx_utils::Core;
 use scx_utils::Topology;
 
 use crate::bpf_intf;
-use crate::lstopo::LstopoView;
+use crate::cache::CpuCaches;
 
 /// Cores per group when the kernel reports no cluster ids. Cores are taken
 /// in id order within each LLC, so cores that are numbered close to each
@@ -82,7 +82,7 @@ fn nr_groups(groups: &BTreeMap<usize, u32>) -> usize {
 }
 
 /// Topology tables for the BPF program. LLCs are renumbered from zero in
-/// the order of their ids.
+/// the order of their ids. Cache sizes are in kibibytes, zero if unknown.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct BpfTopology {
     pub nr_llcs: u32,
@@ -92,10 +92,11 @@ pub struct BpfTopology {
     pub cpu_llc: BTreeMap<usize, u32>,
     pub cpu_group: BTreeMap<usize, u32>,
     pub llc_node: Vec<u32>,
+    pub llc_kb: Vec<u32>,
 }
 
 impl BpfTopology {
-    pub fn new(topo: &Topology) -> Result<Self> {
+    pub fn new(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) -> Result<Self> {
         let llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
         let max_llcs = bpf_intf::flow_consts_FLOW_MAX_LLCS as usize;
 
@@ -124,12 +125,24 @@ impl BpfTopology {
             groups = 0;
         }
 
+        let llc_kb = topo
+            .all_llcs
+            .values()
+            .map(|llc| {
+                llc.all_cpus
+                    .keys()
+                    .find_map(|cpu| caches.get(cpu))
+                    .map_or(0, |c| c.l3_kb)
+            })
+            .collect();
+
         Ok(Self {
             nr_llcs: llc_ids.len() as u32,
             nr_groups: groups as u32,
             cpu_llc,
             cpu_group,
             llc_node: topo.all_llcs.values().map(|l| l.node_id as u32).collect(),
+            llc_kb,
         })
     }
 }
@@ -169,8 +182,8 @@ pub fn format_kb(kb: u32) -> String {
     }
 }
 
-fn cache_sizes(core: &Core, view: Option<&LstopoView>) -> [String; 4] {
-    match view.and_then(|v| core.cpus.keys().find_map(|id| v.cpus.get(&(*id as u32)))) {
+fn cache_sizes(core: &Core, caches: &BTreeMap<usize, CpuCaches>) -> [String; 4] {
+    match core.cpus.keys().find_map(|id| caches.get(id)) {
         Some(row) => [
             format_kb(row.l1d_kb),
             format_kb(row.l1i_kb),
@@ -185,7 +198,7 @@ fn cache_sizes(core: &Core, view: Option<&LstopoView>) -> [String; 4] {
 /// at most @limit cores. Also returns the number of cores.
 pub fn render_per_core_lines(
     topo: &Topology,
-    view: Option<&LstopoView>,
+    caches: &BTreeMap<usize, CpuCaches>,
     limit: usize,
 ) -> (Vec<String>, usize) {
     let groups = cpu_groups(topo);
@@ -201,7 +214,7 @@ pub fn render_per_core_lines(
                 .next()
                 .and_then(|id| groups.get(id))
                 .map_or_else(|| String::from("unknown"), |g| g.to_string());
-            let [l1d, l1i, l2, l3] = cache_sizes(core, view);
+            let [l1d, l1i, l2, l3] = cache_sizes(core, caches);
 
             format!(
                 "Core L{} P{} cpus {} LLC {} node {} group {group} L1d {l1d} L1i {l1i} L2 {l2} L3 {l3}",
@@ -292,7 +305,6 @@ pub fn render_topo_lines(topo: &Topology, limit: usize) -> (Vec<String>, usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lstopo::LstopoCpu;
     use scx_utils::CoreType;
     use scx_utils::Cpu;
     use scx_utils::Cpumask;
@@ -469,20 +481,18 @@ mod tests {
         )])
     }
 
-    fn sized_view(cpus: &[u32]) -> LstopoView {
-        let mut view = LstopoView::default();
-        for cpu in cpus {
-            view.cpus.insert(
-                *cpu,
-                LstopoCpu {
+    fn caches(cpus: &[usize], l3_kb: u32) -> BTreeMap<usize, CpuCaches> {
+        cpus.iter()
+            .map(|cpu| {
+                let sizes = CpuCaches {
                     l1d_kb: 32,
                     l1i_kb: 32,
                     l2_kb: 512,
-                    l3_kb: 16384,
-                },
-            );
-        }
-        view
+                    l3_kb,
+                };
+                (*cpu, sizes)
+            })
+            .collect()
     }
 
     #[test]
@@ -513,8 +523,11 @@ mod tests {
 
     #[test]
     fn bpf_tables_renumber_llcs() {
-        let tables = BpfTopology::new(&multi_package_topo()).unwrap();
+        let mut sizes = caches(&[0, 1], 98304);
+        sizes.extend(caches(&[2, 3], 32768));
+        let tables = BpfTopology::new(&multi_package_topo(), &sizes).unwrap();
         assert_eq!(tables.nr_llcs, 2);
+        assert_eq!(tables.llc_kb, vec![98304, 32768]);
         assert_eq!(tables.nr_groups, 2);
         assert_eq!(tables.llc_node, vec![0, 1]);
         assert_eq!(
@@ -529,11 +542,12 @@ mod tests {
 
     #[test]
     fn bpf_tables_drop_groups_over_the_limit() {
-        let tables = BpfTopology::new(&large_topo()).unwrap();
+        let tables = BpfTopology::new(&large_topo(), &BTreeMap::new()).unwrap();
         assert_eq!(tables.nr_llcs, 1);
         assert_eq!(tables.nr_groups, 0);
         assert!(tables.cpu_group.is_empty());
         assert_eq!(tables.cpu_llc.len(), 542);
+        assert_eq!(tables.llc_kb, vec![0]);
     }
 
     #[test]
@@ -600,24 +614,22 @@ mod tests {
     fn per_core_lines_show_cache_sizes() {
         let topo = single_host_topo();
         let (lines, total) =
-            render_per_core_lines(&topo, Some(&sized_view(&[0, 1, 2, 3])), usize::MAX);
+            render_per_core_lines(&topo, &caches(&[0, 1, 2, 3], 16384), usize::MAX);
         assert_eq!(total, 2);
         assert_eq!(
             lines[0],
             "Core L0 P0 cpus 0+1 LLC 0 node 0 group 0 L1d 32K L1i 32K L2 512K L3 16M"
         );
 
-        let (missing, _) = render_per_core_lines(&topo, Some(&LstopoView::default()), usize::MAX);
+        let (missing, _) = render_per_core_lines(&topo, &BTreeMap::new(), usize::MAX);
         assert!(missing[0].ends_with("L1d unknown L1i unknown L2 unknown L3 unknown"));
-        let (no_view, _) = render_per_core_lines(&topo, None, usize::MAX);
-        assert_eq!(no_view, missing);
     }
 
     #[test]
     fn per_core_lines_are_capped() {
         let topo = large_topo();
         for limit in [0, 1, 64, 1000] {
-            let (lines, total) = render_per_core_lines(&topo, None, limit);
+            let (lines, total) = render_per_core_lines(&topo, &BTreeMap::new(), limit);
             assert_eq!(total, 542);
             assert_eq!(lines.len(), limit.min(542));
         }

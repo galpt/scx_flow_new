@@ -11,7 +11,7 @@ SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.2.26"
+VER="5.2.27"
 # The workspace commit is pinned and matches the one CI uses. CI fetches
 # it from sched-ext/scx, the installer from the galpt/scx mirror, and the
 # check after the fetch refuses any other commit.

@@ -4,8 +4,9 @@
  *
  * Userspace fills in the topology tables before the program is loaded, so
  * the hot paths look up the LLC, NUMA node and core group of a CPU with a
- * plain array access. Each CPU publishes what it is running in its own
- * cache line for the preemption and statistics code to read.
+ * plain array access. The tables also carry the L3 size of each LLC. Each
+ * CPU publishes what it is running in its own cache line for the
+ * preemption and statistics code to read.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -85,14 +86,22 @@ struct flow_cpu_state {
 	u32	cpuperf_cur;		/* last perf target sent */
 } __attribute__((aligned(64)));
 
+/*
+ * The system virtual time changes whenever a task that runs in short
+ * bursts starts, so it gets a cache line of its own instead of sharing one
+ * with the statistics every enqueue reads.
+ */
+struct flow_clock {
+	u64	vtime_now;		/* never moves backward */
+} __attribute__((aligned(64)));
+
 struct flow_sys_stat {
-	u64	vtime_now;		/* system virtual time, never moves backward */
 	u64	nr_queued;		/* tasks waiting in flow DSQs */
 	u64	slice_ns;		/* base slice for the current period */
 	u64	avg_lat_cri;		/* average lat_cri of running tasks */
 	u64	max_lat_cri;		/* average of the highest lat_cri per period */
 	u64	thr_lat_cri;		/* lat_cri needed to preempt another task */
-};
+} __attribute__((aligned(64)));
 
 const volatile u32 flow_nr_cpus = 1;
 const volatile u32 flow_nr_llcs = 1;
@@ -100,11 +109,17 @@ const volatile u32 flow_nr_groups;
 const volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_group[FLOW_MAX_CPUS];
 const volatile u32 flow_llc_node[FLOW_MAX_LLCS];
+const volatile u32 flow_llc_kb[FLOW_MAX_LLCS];
 
 private(FLOW) struct bpf_cpumask flow_llc_cpumask[FLOW_MAX_LLCS];
 private(FLOW) struct bpf_cpumask flow_group_cpumask[FLOW_MAX_GROUPS];
 
+/* CPUs of the LLCs with the largest L3, set when the LLC sizes differ. */
+private(FLOW) struct bpf_cpumask flow_big_cache_cpumask;
+bool flow_has_big_cache;
+
 struct flow_cpu_state flow_cpu_states[FLOW_MAX_CPUS];
+struct flow_clock flow_clock;
 struct flow_sys_stat flow_sys_stat;
 u64 flow_llc_nr_queued[FLOW_MAX_LLCS];
 

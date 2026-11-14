@@ -3,9 +3,8 @@
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
-use std::process::Command;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -32,44 +31,19 @@ use scx_utils::uei_report;
 use crate::BpfSkel;
 use crate::BpfSkelBuilder;
 use crate::bpf_intf;
+use crate::cache::CpuCaches;
 use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
-use crate::lstopo::LstopoView;
 use crate::stats::Metrics;
 use crate::topology::BpfTopology;
 
 /// Topology lines printed at startup before the rest is summarized.
 const TOPO_LOG_LINES: usize = 64;
 
-/// Largest lstopo output that is parsed.
-const LSTOPO_MAX_BYTES: usize = 1 << 20;
-
 pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-}
-
-fn run_lstopo(timeout: &str, lstopo: &str) -> Option<Vec<u8>> {
-    Command::new(timeout)
-        .args(["10s", lstopo])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| out.stdout)
-}
-
-/// Cache sizes from lstopo-no-graphics, used only for the startup log. The
-/// tool is optional, so any failure just leaves the sizes unknown. The
-/// scheduler runs as root, so the system binaries are tried before PATH.
-fn fetch_lstopo_view() -> Option<LstopoView> {
-    let out = run_lstopo("/usr/bin/timeout", "/usr/bin/lstopo-no-graphics")
-        .or_else(|| run_lstopo("timeout", "lstopo-no-graphics"))?;
-    let len = out.len().min(LSTOPO_MAX_BYTES);
-
-    crate::lstopo::parse_lstopo_text(&String::from_utf8_lossy(&out[..len])).ok()
 }
 
 fn log_lines(level: log::Level, (lines, total): (Vec<String>, usize)) {
@@ -83,17 +57,26 @@ fn log_lines(level: log::Level, (lines, total): (Vec<String>, usize)) {
     }
 }
 
-fn log_topology(topo: &Topology) {
+fn log_topology(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) {
     info!("Topology: {}", crate::topology::describe_topo_summary(topo));
     log_lines(
         log::Level::Info,
-        crate::topology::render_per_core_lines(topo, fetch_lstopo_view().as_ref(), TOPO_LOG_LINES),
+        crate::topology::render_per_core_lines(topo, caches, TOPO_LOG_LINES),
     );
     if log::log_enabled!(log::Level::Debug) {
         log_lines(
             log::Level::Debug,
             crate::topology::render_topo_lines(topo, TOPO_LOG_LINES),
         );
+    }
+}
+
+/// Copy per-CPU values into a BPF table indexed by CPU id.
+fn fill_per_cpu(slots: &mut [u32], values: &BTreeMap<usize, u32>) {
+    for (cpu, value) in values {
+        if let Some(slot) = slots.get_mut(*cpu) {
+            *slot = *value;
+        }
     }
 }
 
@@ -113,7 +96,14 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new()
             .inspect_err(|e| warn!("topology discovery failed, assuming a single LLC: {e:#}"))
             .ok();
-        let tables = topo.as_ref().map(BpfTopology::new).transpose()?;
+        let caches = topo
+            .as_ref()
+            .map(|t| crate::cache::read_cpu_caches(t.all_cpus.keys().copied()))
+            .unwrap_or_default();
+        let tables = topo
+            .as_ref()
+            .map(|t| BpfTopology::new(t, &caches))
+            .transpose()?;
 
         try_set_rlimit_infinity();
         let mut skel_builder = BpfSkelBuilder::default();
@@ -132,24 +122,19 @@ impl<'a> Scheduler<'a> {
         if let Some(t) = tables.as_ref() {
             rodata.flow_nr_llcs = t.nr_llcs;
             rodata.flow_nr_groups = t.nr_groups;
-            for (cpu, llc) in &t.cpu_llc {
-                if let Some(slot) = rodata.flow_cpu_llc.get_mut(*cpu) {
-                    *slot = *llc;
-                }
-            }
-            for (cpu, group) in &t.cpu_group {
-                if let Some(slot) = rodata.flow_cpu_group.get_mut(*cpu) {
-                    *slot = *group;
-                }
-            }
+            fill_per_cpu(&mut rodata.flow_cpu_llc, &t.cpu_llc);
+            fill_per_cpu(&mut rodata.flow_cpu_group, &t.cpu_group);
             for (slot, node) in rodata.flow_llc_node.iter_mut().zip(&t.llc_node) {
                 *slot = *node;
+            }
+            for (slot, kb) in rodata.flow_llc_kb.iter_mut().zip(&t.llc_kb) {
+                *slot = *kb;
             }
         }
 
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         if let Some(t) = topo.as_ref() {
-            log_topology(t);
+            log_topology(t, &caches);
         }
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;

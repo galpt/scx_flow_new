@@ -170,7 +170,7 @@ static __always_inline u64 flow_deadline(const struct flow_task_ctx *t, u64 vtim
  */
 static u64 flow_score_task(const struct task_struct *p, struct flow_task_ctx *t)
 {
-	u64 vtime_now = READ_ONCE(flow_sys_stat.vtime_now);
+	u64 vtime_now = READ_ONCE(flow_clock.vtime_now);
 
 	t->lat_cri = flow_calc_lat_cri(p, t);
 	t->lat_cri_waker = 0;

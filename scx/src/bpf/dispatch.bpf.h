@@ -61,15 +61,26 @@ static __always_inline u64 flow_ran(const struct flow_task_ctx *t, u64 now)
 	return time_after(now, t->last_running_clk) ? now - t->last_running_clk : 0;
 }
 
+/* True when the head of @dsq_id can run on @cpu and is due before @deadline. */
+static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
+{
+	struct task_struct *head = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	return head && time_before(head->scx.dsq_vtime, deadline) &&
+	       bpf_cpumask_test_cpu(cpu, head->cpus_ptr);
+}
+
 /*
- * The previous task keeps the CPU. Its run continues without passing
- * through ops.stopping(), so its deadline is refreshed here from the
- * virtual time it reached so far.
+ * Let @prev, which is still runnable, keep @cpu with a fresh slice. Its run
+ * continues without passing through ops.stopping(), so its deadline is
+ * refreshed from the virtual time it reached so far. Unless @always is
+ * set, @prev only keeps the CPU while nothing queued for @cpu is due
+ * before it, which spares a switch and a likely move to another core.
  */
-static bool flow_keep_prev(s32 cpu, struct task_struct *prev)
+static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool always)
 {
 	struct flow_task_ctx *t;
-	u64 now, ran, vtime, slice;
+	u64 now, ran, acc, vtime, deadline, slice;
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED) ||
 	    !bpf_cpumask_test_cpu(cpu, prev->cpus_ptr))
@@ -80,15 +91,19 @@ static bool flow_keep_prev(s32 cpu, struct task_struct *prev)
 
 	now = scx_bpf_now();
 	ran = flow_ran(t, now);
-	vtime = t->vtime + flow_charge(prev, ran, t->acc_runtime_ns + ran);
-	if (!flow_long_burst(t->acc_runtime_ns + ran))
-		flow_advance_vtime_now(vtime);
-	scx_bpf_task_set_dsq_vtime(prev, flow_deadline(t, vtime, t->acc_runtime_ns + ran));
+	acc = t->acc_runtime_ns + ran;
+	vtime = t->vtime + flow_charge(prev, ran, acc);
+	deadline = flow_deadline(t, vtime, acc);
+	if (!always && (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
+			flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu)))
+		return false;
 
+	if (!flow_long_burst(acc))
+		flow_advance_vtime_now(vtime);
+	scx_bpf_task_set_dsq_vtime(prev, deadline);
 	slice = flow_calc_slice(t, cpu);
 	scx_bpf_task_set_slice(prev, slice);
-	WRITE_ONCE(flow_cpu_states[cpu].est_stopping_clk,
-		   flow_est_stop(t, t->acc_runtime_ns + ran, slice, now));
+	WRITE_ONCE(flow_cpu_states[cpu].est_stopping_clk, flow_est_stop(t, acc, slice, now));
 	return true;
 }
 
@@ -101,6 +116,10 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	llc = flow_llc_of(cpu);
 
+	if (flow_keep_prev(cpu, llc, prev, false)) {
+		flow_stat_inc(FLOW_STAT_KEEP);
+		return;
+	}
 	if (scx_bpf_dsq_move_to_local(FLOW_CPU_DSQ_BASE + cpu, 0) ||
 	    scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + llc, 0)) {
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
@@ -115,7 +134,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
 		return;
 	}
-	if (flow_keep_prev(cpu, prev)) {
+	if (flow_keep_prev(cpu, llc, prev, true)) {
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
@@ -155,15 +174,6 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 
 	if (READ_ONCE(cs->cpuperf_cur) != SCX_CPUPERF_ONE)
 		flow_cpuperf_commit(cpu, cs, SCX_CPUPERF_ONE, now);
-}
-
-/* True when the head of @dsq_id can run on @cpu and is due before @deadline. */
-static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
-{
-	struct task_struct *head = __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	return head && time_before(head->scx.dsq_vtime, deadline) &&
-	       bpf_cpumask_test_cpu(cpu, head->cpus_ptr);
 }
 
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
@@ -224,16 +234,39 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p,
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return -ENOMEM;
-	t->vtime = READ_ONCE(flow_sys_stat.vtime_now);
+	t->vtime = READ_ONCE(flow_clock.vtime_now);
 	t->lat_cri = 1;
 	t->pinned_cpu = -1;
 	return 0;
 }
 
+/*
+ * Largest L3 among the LLCs if the LLCs differ in size, zero if they are
+ * all the same or any size is unknown.
+ */
+static u32 flow_big_cache_kb(void)
+{
+	u32 llc, kb, min_kb = 0, max_kb = 0;
+
+	bpf_for(llc, 0, flow_nr_llcs) {
+		if (llc >= FLOW_MAX_LLCS)
+			break;
+		kb = flow_llc_kb[llc];
+		if (!kb)
+			return 0;
+		if (!min_kb || kb < min_kb)
+			min_kb = kb;
+		if (kb > max_kb)
+			max_kb = kb;
+	}
+	return max_kb > min_kb ? max_kb : 0;
+}
+
 static s32 flow_init_cpus(void)
 {
-	u32 cpu;
+	u32 cpu, big_kb = flow_big_cache_kb();
 
+	flow_has_big_cache = big_kb;
 	bpf_for(cpu, 0, flow_nr_cpus) {
 		struct bpf_cpumask *mask;
 		s32 ret;
@@ -245,6 +278,9 @@ static s32 flow_init_cpus(void)
 			scx_bpf_error("failed to create the DSQ of CPU %u (%d)", cpu, ret);
 			return ret;
 		}
+
+		if (big_kb && flow_llc_kb[flow_llc_of(cpu)] == big_kb)
+			bpf_cpumask_set_cpu(cpu, &flow_big_cache_cpumask);
 
 		mask = MEMBER_VPTR(flow_llc_cpumask, [flow_llc_of(cpu)]);
 		if (mask)

@@ -5,8 +5,8 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+pub mod cache;
 pub mod cli;
-pub mod lstopo;
 pub mod metrics;
 pub mod run;
 pub mod stats;

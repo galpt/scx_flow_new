@@ -16,7 +16,7 @@
 #include "maps.bpf.h"
 #include "fair.bpf.h"
 
-enum flow_clock {
+enum flow_timer_clock {
 	FLOW_CLOCK_BOOTTIME	= 7,
 };
 
@@ -53,7 +53,7 @@ static __always_inline void flow_cpuperf_commit(s32 cpu, struct flow_cpu_state *
  */
 static void flow_advance_vtime_now(u64 vtime)
 {
-	u64 now = READ_ONCE(flow_sys_stat.vtime_now);
+	u64 now = READ_ONCE(flow_clock.vtime_now);
 	u32 i;
 
 	bpf_for(i, 0, FLOW_CLOCK_RETRIES) {
@@ -61,7 +61,7 @@ static void flow_advance_vtime_now(u64 vtime)
 
 		if (!time_after(vtime, now))
 			return;
-		seen = __sync_val_compare_and_swap(&flow_sys_stat.vtime_now, now, vtime);
+		seen = __sync_val_compare_and_swap(&flow_clock.vtime_now, now, vtime);
 		if (seen == now)
 			return;
 		now = seen;
