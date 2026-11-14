@@ -74,6 +74,7 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
 
+	flow_touch_arena();
 	if (cpu < 0)
 		return;
 	c = (u32)cpu;
@@ -177,6 +178,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	u64 now;
 	u64 vd;
 
+	flow_touch_arena();
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -265,6 +267,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	u64 have;
 	u64 now;
 
+	flow_touch_arena();
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
@@ -389,6 +392,9 @@ static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 
 	(void)map;
 	(void)key;
+	/* Timer runs as async callback. Touch the arena so the verifier
+	 * ties this path to the arena for the topology helpers below. */
+	flow_touch_arena();
 	/* Mean plus max score over online CPUs. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
 		u64 v;
@@ -461,6 +467,7 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 	struct flow_task_ctx *t;
 
 	(void)mask;
+	flow_touch_arena();
 	if (!p)
 		return;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -594,6 +601,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	struct flow_update_timer *ft;
 	int err;
 
+	flow_touch_arena();
 	n = scx_bpf_nr_cpu_ids();
 	if (n == 0) {
 		scx_bpf_error("no CPUs found");

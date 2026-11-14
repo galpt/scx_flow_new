@@ -371,6 +371,7 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	u32 llc = 0;
 	int vl;
 
+	flow_touch_arena();
 	if (!p)
 		return hint;
 	sync = (wake_flags & SCX_WAKE_SYNC) ? true : false;

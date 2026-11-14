@@ -17,6 +17,15 @@
 #ifndef __FLOW_MAPS_BPF_H
 #define __FLOW_MAPS_BPF_H
 #include "intf.h"
+#include <lib/arena_map.h>
+/* The verifier ties a program to the arena on address use. Keep one
+ * use in each program that reaches arena memory through the topology
+ * tree. The touch is an inline asm with no call and no new global, so
+ * void entry points keep their shape and scalar checks stay quiet. */
+static __always_inline void flow_touch_arena(void)
+{
+	asm volatile("" :: "r"(&arena));
+}
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);

@@ -263,6 +263,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	struct flow_task_ctx *t;
 	u32 fl;
 
+	flow_touch_arena();
 	if (!p)
 		return;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
