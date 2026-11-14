@@ -2,43 +2,16 @@
 /*
  * Dispatch and lifecycle for the flow scheduler.
  *
- * Each CPU drains its own queue first, then the same cache group, then
- * the rest of the same LLC, then the same node, then distant queues,
- * then fallback. Tiers stay L1 greater than L2 greater than L3. Closer
- * caches drain first with larger buckets first within tier when both
- * buckets are known. Fixed order covers the rest. Short form is
- * L1>L2>L3. Empty queues skip before any group lookup. Both known group
- * ids gate the group match. Unknown groups fall through to fixed order.
- * Each tree drains in deadline order with leftmost wins and ties right
- * in RB_DUPLICATE-compatible order. The tree is an unbalanced BST with
- * depth bound at RB_MAX_DEPTH. A head that cannot run here sends one
- * wake to its owner and stays queued. Forward slots hash by victim mask
- * with sixty four slots plus the fallback on the last slot. Sixteen
- * victims share one slot with dedup key of pid plus vtime plus owner.
- * A dead head is dropped with its count and the next queue is tried.
- * The fallback drops its count from the task and wakes the owner when
- * the move fails. A dispatch that moved nothing but saw such a head
- * wakes the fallback head again without the dedup check. Remote moves
- * count on the thief and drop the gauge on the source. Running records
- * the task snapshot and mirrors the due time beside it for gap checks.
- * Stopping charges burnt time into the stored time and mirrors the
- * stored time beside it. It tracks the run length for the next due time.
- * A runnable yield with no burnt time still moves the stored time
- * forward by one. The tick charges the burnt delta and moves the due
- * time. Stopping charges only the tail past the last tick. A busy core
- * runs at max and an idle core runs at half. The set call never sends
- * zero and never steers placement. A mask change on a queued task keeps
- * the queue and wakes the new owner. It counts the wake when the owner
- * is usable. A task with no usable CPU waits in the fallback queue until
- * the mask widens. Stopping plus tick keep the burst and run state with
- * guarded preempt and no reclaim. Init creates one tree per CPU with depth bound at
- * RB_MAX_DEPTH plus slab for entries and the fallback queue. Trees hold
- * without bound on live task count with per tree depth bound. Trees use
- * a plain unbalanced BST with always eligible tasks. Liveness comes from
- * the upstream tree. CPUs that arrive late need a restart to be seen.
- * Each entry carries its pid for lookup with the biased key for order.
- * Offline roots stay reaped through the same drain. No slab entry
- * strands offline.
+ * Each CPU drains its own DSQ first, then the local LLC DSQ, then
+ * same node neighbor LLC DSQs, then remote LLC DSQs, then fallback.
+ * Closer caches drain first. Fixed order covers the rest. If no DSQ
+ * moves and prev is still runnable, prev continues in place with a
+ * fresh slice. Running advances the logical clock and ramps the core
+ * to max. Tick refreshes max so rate limits never drop the target.
+ * Stopping folds run length into the average and tracks service.
+ * Quiescent folds the wait rate on sleep. A ten millisecond timer
+ * refreshes the score board and drops idle cores to half. The timer
+ * never touches a busy core, so dispatch never lowers frequency.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -51,356 +24,25 @@
 #include "enqueue.bpf.h"
 #include "fair.bpf.h"
 #include <lib/topology.h>
-#include <lib/sdt_alloc.h>
-#include <lib/sdt_task.h>
-/* A busy core runs at max and an idle core runs at half. Shared mark
- * lives in select.bpf.h so enqueue and dispatch use one helper. The call
- * never sends zero with no steering. */
-/* Empty trees skip before any group lookup, so idle victims cost one
- * counter read with no topology walk. */
-static __always_inline bool flow_rb_is_empty(struct flow_rb_root __arena *rb)
-{
-	if (!rb)
-		return true;
-	return flow_rb_empty(rb);
-}
-/* Stale-aware minimum key. Zero means unknown (empty or invalidated on
- * remove) and reads as plus INF so unknown never wins a tie-break.
- * Both drain tiers and the continuation read fail closed through this
- * helper. Outlined so both drain tiers verify the read once. */
-static __noinline u64 flow_min_key_inf(u32 cpu)
-{
-	u64 k;
 
-	if (!flow_cpu_ok(cpu))
-		return ~0ULL;
-	k = READ_ONCE(flow_cpu_min_key[cpu]);
-	if (!k)
-		return ~0ULL;
-	return k;
-}
-/* Victim selection for one LLC tier. Outlined so the two steep scans
- * verify once instead of twice in dispatch. The caller reuses one
- * struct for both tiers with use_l2 true reading l2 plus a group match
- * and use_l2 false reading l3 plus a group mismatch. */
-struct flow_victim_sel {
-	u32 best;
-	u32 best2;
-	u32 first;
-	u8 best_bkt;
-	u8 best2_bkt;
-	bool have_best;
-	bool have_best2;
-	bool have_first;
+/* Timer clock id for the board refresh. Matches the boot time base. */
+enum flow_clock {
+	FLOW_CLOCK_BOOTTIME = 7,
 };
-/* Victim request packs the scan inputs into one struct with no logic
- * change. The caller builds the struct on stack then passes a pointer
- * with no extra alloc and no new loop. The pack keeps the shared scan
- * within five args with integer fields only. */
-struct flow_victim_req {
-	u32 self;
-	u32 llc;
-	bool use_ccx;
-	u32 my_ccx;
-	bool use_l2;
-};
-/* Tie-break on the stale-aware minimum with unknown failing closed.
- * Inlined so the shared scan keeps one subprogram depth to the minimum
- * read. */
-static __always_inline bool flow_min_key_less(u32 a, u32 b)
-{
-	return flow_min_key_inf(a) < flow_min_key_inf(b);
-}
-/* Single LLC scan shared by the group tier and the LLC tier. The body
- * is the former inline pass verbatim: self skip, live bound, empty
- * skip before any group lookup, same LLC gate, one seed view, group
- * gate per tier, unknown bucket covers fixed order, larger known
- * buckets first with the stale-aware minimum tie-break, second best
- * plus first fixed tracking with no new loop. Request plus selection
- * keep two args with no logic change. Both pointers stay non NULL on
- * the stack path with a fail closed guard. */
-static __noinline void flow_scan_victims(const struct flow_victim_req *req,
-					 struct flow_victim_sel *out)
-{
-	u32 self;
-	u32 llc;
-	bool use_ccx;
-	u32 my_ccx;
-	bool use_l2;
-	u32 victim;
 
-	if (!req || !out)
-		return;
-	self = req->self;
-	llc = req->llc;
-	use_ccx = req->use_ccx;
-	my_ccx = req->my_ccx;
-	use_l2 = req->use_l2;
-	out->best = (u32)FLOW_MAX_CPUS;
-	out->best2 = (u32)FLOW_MAX_CPUS;
-	out->first = (u32)FLOW_MAX_CPUS;
-	out->best_bkt = 0;
-	out->best2_bkt = 0;
-	out->have_best = false;
-	out->have_best2 = false;
-	out->have_first = false;
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		struct flow_cpu_view vw;
-		u8 vb;
-
-		if (victim == self)
-			continue;
-		/* No live gate so offline roots still reap with no new loop. */
-		if ((u64)victim >= scx_bpf_nr_cpu_ids())
-			continue;
-		if (flow_rb_is_empty(flow_rb_for_cpu((s32)victim)))
-			continue;
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || (u32)vl != llc)
-			continue;
-		vw = flow_cpu_view(victim);
-		if (use_l2) {
-			if (!flow_ccx_match(use_ccx, vw.ccx, my_ccx))
-				continue;
-			vb = vw.l2;
-		} else {
-			if (flow_ccx_match(use_ccx, vw.ccx, my_ccx))
-				continue;
-			vb = vw.l3;
-		}
-		if (!vb && !out->have_first) {
-			out->first = victim;
-			out->have_first = true;
-		}
-		if (vb && (!out->have_best || flow_cache_larger(vb, out->best_bkt) ||
-			    (out->have_best && vb == out->best_bkt &&
-			     out->best < (u32)FLOW_MAX_CPUS &&
-			     flow_min_key_less(victim, out->best)))) {
-			if (out->have_best && out->best != victim) {
-				out->best2 = out->best;
-				out->best2_bkt = out->best_bkt;
-				out->have_best2 = true;
-			}
-			out->best = victim;
-			out->best_bkt = vb;
-			out->have_best = true;
-		} else if (vb && victim != out->best &&
-			   (!out->have_best2 || flow_cache_larger(vb, out->best2_bkt))) {
-			out->best2 = victim;
-			out->best2_bkt = vb;
-			out->have_best2 = true;
-		}
-	}
-}
-static __noinline void flow_forward_from_peeked(struct task_struct *ph, u32 llc, u32 slot)
+static __always_inline void flow_after_move(u32 cpu, u32 llc)
 {
-	s32 owner;
-	s64 hv;
-	u64 pid;
-	if (!ph)
-		return;
-	if (slot > (u32)FLOW_MAX_LLCS)
-		return;
-	pid = (u64)ph->pid;
-	hv = (s64)ph->scx.dsq_vtime;
-	owner = flow_first_allowed(ph);
-	{
-		u64 last_p = READ_ONCE(flow_fwd_pid[slot]);
-		s64 last_v = READ_ONCE(flow_fwd_vtime[slot]);
-		s32 last_o = READ_ONCE(flow_fwd_owner[slot]);
-		if (last_p == pid && last_v == hv && last_o == owner)
-			return;
-		flow_fwd_pid[slot] = pid;
-		flow_fwd_vtime[slot] = hv;
-		flow_fwd_owner[slot] = owner;
-	}
-	if (owner < 0) {
-		flow_kick_idle_only(owner, ph, llc);
-		return;
-	}
-	flow_stat_inc(llc, 12);
-	flow_kick_idle_only(owner, ph, llc);
-}
-/* A dispatch that moved nothing but saw an unrunnable head wakes the
- * fallback head again without the dedup check, so an owner that
- * turned idle is not missed. The kick stays idle only with no pad check. */
-static __noinline void flow_rekick_unrunnable(struct task_struct *ph, u32 llc)
-{
-	s32 owner;
-	if (!ph)
-		return;
-	owner = flow_first_allowed(ph);
-	flow_kick_idle_only(owner, ph, llc);
-}
-/* Steal-back path outlined so the victim insert verifies once as a
- * subprogram instead of inline in every drain. */
-static __noinline bool flow_try_stealback(struct flow_rb_root __arena *rb,
-					  struct flow_rb_entry __arena *got,
-					  struct task_struct *p, int steal)
-{
-	if (!steal || !rb || !got || !p)
-		return false;
-	if (!flow_cpu_allowed((s32)READ_ONCE(got->owner), p))
-		return false;
-	if (!flow_rb_insert(rb, got))
-		return false;
-	bpf_task_release(p);
-	return true;
-}
-/* Move request packs the drain inputs into one struct plus the saw flag
- * with no logic change. Caller builds the struct on stack then passes
- * a pointer with no extra alloc and no new loop. */
-struct flow_move_req {
-	struct flow_rb_root __arena *rb;
-	u32 cpu;
-	u32 llc;
-	u32 vllc;
-	u32 slot;
-	int steal;
-};
-static __noinline int flow_try_move_rb(const struct flow_move_req *req, bool *saw)
-{
-	struct task_struct *p;
-	struct flow_task_ctx *lt;
-	u64 slice;
-	struct flow_rb_entry __arena *got;
-	s32 got_pid;
-	u32 cpu;
-	u32 llc;
-	u32 vllc;
-	struct flow_rb_root __arena *rb;
-	u32 slot;
-	int steal;
-	if (!req || !req->rb)
-		return 0;
-	if (req->slot > (u32)FLOW_MAX_LLCS)
-		return 0;
-	cpu = req->cpu;
-	llc = req->llc;
-	vllc = req->vllc;
-	rb = req->rb;
-	slot = req->slot;
-	steal = req->steal;
-	/* Pop-first then validate. This avoids the peek then pop race. A
-	 * peeked dead head plus a raced pop could free the wrong entry. The
-	 * lossy peek-dead path is removed. The pop owns the head atomically
-	 * under the try lock. The pid below is always the popped entry. */
-	got = flow_rb_pop(rb);
-	if (!got)
-		return 0;
-	got_pid = READ_ONCE(got->node.pid);
-	p = bpf_task_from_pid(got_pid);
-	if (!p) {
-		/* Dead entry. Free with no gauge move. Exit or dequeue owns
-		 * the single dec through the queued bit. */
-		scx_free(&flow_rb_alloc, got);
-		return 0;
-	}
-	if (!flow_cpu_allowed((s32)cpu, p)) {
-		if (saw)
-			*saw = true;
-		flow_forward_from_peeked(p, llc, slot);
-		/* If stealing from a remote or peer CPU that IS allowed for p,
-		 * try to put the entry right back into the victim BST first
-		 * so p does not lose its deadline order. Outlined above. */
-		if (flow_try_stealback(rb, got, p, steal))
-			return 0;
-		/* Fallback if local unrunnable or re-insert contended or full. */
-		lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-		slice = (u64)FLOW_SLICE_MIN_NS;
-		if (lt) {
-			u64 s = READ_ONCE(lt->slice_rem);
-			if (s)
-				slice = s;
-			__sync_fetch_and_and(&lt->flags, (u32)~(u32)FLOW_FLAG_IN_RB);
-		}
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, slice, 0);
-		flow_stat_inc(llc, 2);
-		bpf_task_release(p);
-		scx_free(&flow_rb_alloc, got);
-		return 0;
-	}
-	lt = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	slice = (u64)FLOW_SLICE_MIN_NS;
-	if (lt) {
-		u64 s = READ_ONCE(lt->slice_rem);
-		if (s)
-			slice = s;
-	}
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
-	flow_cpuperf_mark(cpu, false);
 	flow_stat_inc(llc, 1);
-	if (lt) {
-		u32 old = __sync_fetch_and_and(&lt->flags,
-					      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB));
-		if (old & (u32)FLOW_FLAG_QUEUED)
-			flow_queued_dec(vllc);
-	}
-	bpf_task_release(p);
-	scx_free(&flow_rb_alloc, got);
-	if (steal) {
-		flow_stat_inc(llc, 3);
-		flow_stat_inc(llc, 5);
-	}
-	return 1;
+	flow_cpuperf_mark(cpu, false);
 }
-static __noinline int flow_drain_cpu(u32 cpu, u32 llc, u32 victim, int steal, bool *saw)
-{
-	struct flow_rb_root __arena *rb;
-	int vllc;
-	u32 vuse;
-	u32 slot;
-	if (!flow_cpu_ok(victim))
-		return 0;
-	/* No live gate here so offline roots still reap with no new loop.
-	 * Enqueue never inserts offline, so any offline entry here is a
-	 * stranded orphan that drains to local or fallback below. */
-	/* Bound the index by the live table size with no new table. */
-	if ((u64)victim >= scx_bpf_nr_cpu_ids())
-		return 0;
-	rb = flow_rb_for_cpu((s32)victim);
-	/* Empty trees skip before the LLC lookup below. */
-	if (flow_rb_is_empty(rb))
-		return 0;
-	vllc = topo_cpu_to_llc_id(victim);
-	if (vllc < 0 || !flow_llc_ok((u32)vllc))
-		return 0;
-	vuse = (u32)vllc;
-	/* The bound is a power of two, so a mask keeps the slot in
-	 * range with no division. The fallback keeps the last slot. */
-	slot = victim & ((u32)FLOW_MAX_LLCS - 1U);
-	/* Deadline order drain with insertion ties from the tree. */
-	{
-		struct flow_move_req mreq;
-		mreq.cpu = cpu;
-		mreq.llc = llc;
-		mreq.vllc = vuse;
-		mreq.rb = rb;
-		mreq.slot = slot;
-		mreq.steal = steal;
-		if (flow_try_move_rb(&mreq, saw))
-			return 1;
-	}
-	return 0;
-}
-static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc,
-					      struct task_struct *prev)
+
+/* Continue prev in place with a fresh slice. Runs only when no DSQ
+ * moved, so a queued urgent task always wins over continuation. */
+static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc, struct task_struct *prev)
 {
 	struct flow_task_ctx *t;
 	struct flow_running_state *rs;
-	struct flow_rb_root __arena *rb;
-	bool q_empty;
-	u64 have;
 	u64 slice;
-	u32 w;
-	s64 nv;
-	s64 floored;
-	s64 nvd;
-	u64 dl;
-	u64 min_k;
-	u64 now;
-	const s64 vmax = (s64)0x7fffffffffffffffLL;
 
 	if (!flow_cpu_ok(cpu))
 		return false;
@@ -411,66 +53,10 @@ static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc,
 	t = bpf_task_storage_get(&task_ctx_stor, prev, 0, 0);
 	if (!t)
 		return false;
-
-	rb = flow_rb_for_cpu((s32)cpu);
-	q_empty = flow_rb_is_empty(rb);
-	have = READ_ONCE(t->slice_rem);
-	if (!have)
-		have = (u64)FLOW_SLICE_MIN_NS;
-	w = flow_task_weight(prev, t);
-	nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
-	/* Provisional floor without install for the minimum check, so a
-	 * failed check never lifts the floor and a later retry with
-	 * unchanged inputs lifts once. Unknown minimum reads fail closed. */
-	{
-		s64 prov;
-
-		if (!flow_llc_ok(llc)) {
-			prov = nv;
-		} else {
-			s64 last = READ_ONCE(flow_llc_seq[llc]);
-
-			if (nv <= last) {
-				if (last == vmax)
-					prov = last;
-				else
-					prov = last + 1;
-			} else {
-				s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
-
-				prov = nv < cap ? nv : cap;
-			}
-		}
-		nvd = flow_eevdf_vd(t, prov, 0, w);
-		if (!q_empty) {
-			dl = flow_rb_deadline(nvd);
-			min_k = READ_ONCE(flow_cpu_min_key[cpu]);
-			if (!min_k)
-				return false;
-			if (dl > min_k)
-				return false;
-		}
-		(void)flow_seq_floor(llc, nv);
-		floored = prov;
-	}
-
 	rs = &flow_running_state[cpu];
-	flow_run_add(t, have);
-	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns),
-					READ_ONCE(t->run_total), 0, true);
-	slice = flow_calc_slice(t, q_empty);
-	now = bpf_ktime_get_ns();
-
-	t->vtime = floored;
-	t->vd = nvd;
-	t->slice_rem = slice;
-	rs->vtime = floored;
-	rs->vd = nvd;
-	rs->slice_rem = slice;
-	if (now)
-		rs->start_ts = now;
-
-	scx_bpf_task_set_dsq_vtime(prev, nvd);
+	slice = flow_calc_slice(t, rs);
+	t->slice_ns = slice;
+	WRITE_ONCE(rs->est_stopping_clk, bpf_ktime_get_ns() + slice);
 	scx_bpf_task_set_slice(prev, slice);
 	flow_cpuperf_mark(cpu, false);
 	flow_stat_inc(llc, 9);
@@ -481,16 +67,13 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 c;
 	u32 llc = 0;
-	u32 victim;
 	int v;
-	bool saw_unrunnable = false;
-	bool use_ccx;
-	u32 my_ccx;
-	struct flow_victim_sel sel;
+	u64 tried = 0;
+	u32 idx;
 	struct topo_iter hint_iter;
 	topo_ptr hint_node = 0;
 	topo_ptr walk = 0;
-	scx_arena_subprog_init();
+
 	if (cpu < 0)
 		return;
 	c = (u32)cpu;
@@ -508,284 +91,171 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 			}
 		}
 	}
-	if (flow_try_continue_prev(c, llc, prev))
+	/* Own CPU DSQ holds pinned tasks first. */
+	if (scx_bpf_dsq_move_to_local((u64)FLOW_CPU_DSQ_BASE + (u64)c, 0)) {
+		flow_after_move(c, llc);
 		return;
-	if (flow_drain_cpu(c, llc, c, 0, &saw_unrunnable))
-		return;
-	/* Second continuation retries after the own drain. A failed first call
-	 * never lifts the floor, so a retry with unchanged inputs lifts once.
-	 * Unknown minimum reads fail closed inside the helper. */
-	if (flow_try_continue_prev(c, llc, prev))
-		return;
-	/* Same cache group victims drain first inside the same LLC, so
-	 * tasks stay near warm cache. Larger buckets first within tier
-	 * orders the group victims with known priority, else the
-	 * first fixed victim covers unknown sizes. The pass tracks the best
-	 * plus second best known larger victims plus the first fixed victim
-	 * in one scan with no new loop, then drains best plus first plus
-	 * second best with at most three tries. The group
-	 * match needs the seed flag with both group ids known, so unknown
-	 * reads as all ones match nothing and the fixed victim covers them.
-	 * Sentinel never matches by design with fail closed fallthrough.
-	 * Empty queues skip before the group lookup, so idle victims cost
-	 * one counter read with no topology walk. The empty check can race
-	 * a new enqueue, which stays safe since the next dispatch covers
-	 * the new head. One seed lookup returns cluster plus buckets. */
-	use_ccx = READ_ONCE(flow_ccx_prefer) ? true : false;
-	my_ccx = flow_cpu_ccx(c);
-	{
-		struct flow_victim_req vreq;
-
-		vreq.self = c;
-		vreq.llc = llc;
-		vreq.use_ccx = use_ccx;
-		vreq.my_ccx = my_ccx;
-		vreq.use_l2 = true;
-		flow_scan_victims(&vreq, &sel);
 	}
-	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
+	/* Local LLC DSQ holds the earliest due time in this LLC. */
+	if (scx_bpf_dsq_move_to_local((u64)FLOW_LLC_DSQ_BASE + (u64)llc, 0)) {
+		flow_after_move(c, llc);
 		return;
-	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
-	    flow_drain_cpu(c, llc, sel.first, 1, &saw_unrunnable))
-		return;
-	if (sel.have_best2 && (!sel.have_best || sel.best2 != sel.best) &&
-	    (!sel.have_first || sel.best2 != sel.first) &&
-	    flow_drain_cpu(c, llc, sel.best2, 1, &saw_unrunnable))
-		return;
-	/* Same LLC victims drain next with larger buckets first within tier
-	 * with known priority and fixed order else, with already tried group
-	 * victims skipped, so each queue probes once per dispatch. The pass
-	 * tracks the best plus second best known larger victims plus the first
-	 * fixed victim in one scan with no new loop, then drains best plus
-	 * first plus second best with at most three tries.
-	 * Empty queues skip before the dedup lookup. The empty check
-	 * can race a new enqueue, which stays safe since the next dispatch
-	 * covers the new head. One seed lookup returns cluster plus buckets. */
-	{
-		struct flow_victim_req vreq;
-
-		vreq.self = c;
-		vreq.llc = llc;
-		vreq.use_ccx = use_ccx;
-		vreq.my_ccx = my_ccx;
-		vreq.use_l2 = false;
-		flow_scan_victims(&vreq, &sel);
 	}
-	if (sel.have_best && flow_drain_cpu(c, llc, sel.best, 1, &saw_unrunnable))
-		return;
-	if (sel.have_first && (!sel.have_best || sel.first != sel.best) &&
-	    flow_drain_cpu(c, llc, sel.first, 1, &saw_unrunnable))
-		return;
-	if (sel.have_best2 && (!sel.have_best || sel.best2 != sel.best) &&
-	    (!sel.have_first || sel.best2 != sel.first) &&
-	    flow_drain_cpu(c, llc, sel.best2, 1, &saw_unrunnable))
-		return;
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
+	if (llc < 64U)
+		tried |= (1ULL << llc);
+	/* Same node neighbor LLC DSQs next, one try per LLC. */
+	bpf_for(idx, 0, FLOW_MAX_CPUS) {
 		int vl;
-		if (victim == c)
+		u32 l;
+
+		if (idx == c)
 			continue;
-		/* No live gate so offline roots still reap with no new loop. */
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
+		if (!hint_node || !topo_contains(hint_node, idx))
 			continue;
-		/* Node identity comes from the tree with no per-CPU walk here. */
-		if (!hint_node || !topo_contains(hint_node, victim))
+		vl = topo_cpu_to_llc_id(idx);
+		if (vl < 0 || !flow_llc_ok((u32)vl))
 			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
+		l = (u32)vl;
+		if (l == llc)
+			continue;
+		if (l < 64U) {
+			if (tried & (1ULL << l))
+				continue;
+			tried |= (1ULL << l);
+		}
+		if (scx_bpf_dsq_move_to_local((u64)FLOW_LLC_DSQ_BASE + (u64)l, 0)) {
+			flow_after_move(c, llc);
+			flow_stat_inc(llc, 3);
+			flow_stat_inc(llc, 5);
 			return;
-	}
-	bpf_for(victim, 0, FLOW_MAX_CPUS) {
-		int vl;
-		if (victim == c)
-			continue;
-		/* No live gate so offline roots still reap with no new loop. */
-		vl = topo_cpu_to_llc_id(victim);
-		if (vl < 0 || !flow_llc_ok((u32)vl) || (u32)vl == llc)
-			continue;
-		if (hint_node && topo_contains(hint_node, victim))
-			continue;
-		if (flow_drain_cpu(c, llc, victim, 1, &saw_unrunnable))
-			return;
-	}
-	/* Distant aggregate stays repointed with no remote size compare. The
-	 * folded share feeds the seed only. Unknown stays zero with fixed
-	 * order covering unknown sizes. The distant pass above keeps fixed
-	 * order with no size lookup. The fallback peek below covers the
-	 * stripped share. The fallback probe counter fires only when the
-	 * fallback peek finds a head. It stays BSS only. */
-	/* The compat peek returns a borrowed reference with no release. The
-	 * task stays valid for the check below. The borrowed head is checked
-	 * for mask plus liveness before any move. A raced exit stays safe. */
-	{
-		struct task_struct *ph = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
-		if (ph) {
-			__sync_fetch_and_add(&m_estrip_probe, 1ULL);
-			if (!flow_cpu_allowed((s32)c, ph)) {
-				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
-				saw_unrunnable = true;
-			} else {
-				struct flow_task_ctx *pt;
-				u32 vllc = llc;
-				pt = bpf_task_storage_get(&task_ctx_stor, ph, 0, 0);
-				if (pt) {
-					u32 q = READ_ONCE(pt->llc_id);
-					if (flow_llc_ok(q))
-						vllc = q;
-				}
-				if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
-					flow_stat_inc(llc, 1);
-					flow_cpuperf_mark(c, false);
-					if (pt) {
-						u32 old = __sync_fetch_and_and(&pt->flags,
-								      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB));
-						if (old & (u32)FLOW_FLAG_QUEUED)
-							flow_queued_dec(vllc);
-					}
-					return;
-				}
-				/* The head can run here but the move failed.
-				 * Wake the owner so the task is not left idle. */
-				flow_forward_from_peeked(ph, llc, (u32)FLOW_MAX_LLCS);
-				saw_unrunnable = true;
-			}
 		}
 	}
-	if (saw_unrunnable) {
-		/* Borrowed reference as above with no release. The rekick stays
-		 * safe. */
-		struct task_struct *rh = __COMPAT_scx_bpf_dsq_peek((u64)FLOW_FALLBACK_DSQ);
-		if (rh)
-			flow_rekick_unrunnable(rh, llc);
+	/* Remote LLC DSQs after the node pass, one try per LLC. */
+	bpf_for(idx, 0, FLOW_MAX_CPUS) {
+		int vl;
+		u32 l;
+
+		if (idx == c)
+			continue;
+		if (hint_node && topo_contains(hint_node, idx))
+			continue;
+		vl = topo_cpu_to_llc_id(idx);
+		if (vl < 0 || !flow_llc_ok((u32)vl))
+			continue;
+		l = (u32)vl;
+		if (l == llc)
+			continue;
+		if (l < 64U) {
+			if (tried & (1ULL << l))
+				continue;
+			tried |= (1ULL << l);
+		}
+		if (scx_bpf_dsq_move_to_local((u64)FLOW_LLC_DSQ_BASE + (u64)l, 0)) {
+			flow_after_move(c, llc);
+			flow_stat_inc(llc, 3);
+			flow_stat_inc(llc, 5);
+			return;
+		}
 	}
-	/* No task moved, so the core stays idle at half. */
-	flow_cpuperf_mark(c, true);
+	/* Fallback last for tasks with no usable CPU. */
+	if (scx_bpf_dsq_move_to_local((u64)FLOW_FALLBACK_DSQ, 0)) {
+		flow_after_move(c, llc);
+		return;
+	}
+	/* Nothing queued and prev is still runnable: run prev on. */
+	flow_try_continue_prev(c, llc, prev);
 }
+
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 {
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u32 cpu;
 	struct flow_task_ctx *t;
-	u32 llc = 0;
 	struct flow_running_state *rs;
-	u64 sl;
-	u64 ng;
+	u32 llc = 0;
 	int v;
+	u64 now;
+	u64 vd;
+
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
-	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
 	v = topo_cpu_to_llc_id(cpu);
 	if (v >= 0 && flow_llc_ok((u32)v))
 		llc = (u32)v;
-	else if (flow_llc_ok(t->llc_id))
-		llc = t->llc_id;
-	sl = p->scx.slice;
-	if (!sl)
-		sl = (u64)FLOW_SLICE_MIN_NS;
-	else if (sl > (u64)FLOW_SLICE_MAX_NS)
-		sl = (u64)FLOW_SLICE_MAX_NS;
-	rs = &flow_running_state[cpu];
-	ng = rs->gen + 1;
-	if (ng == 0)
-		ng = 1;
-	rs->vtime = READ_ONCE(t->vtime);
-	rs->slice_rem = sl;
-	rs->gen = ng;
-	rs->llc_id = llc;
-	rs->vd = READ_ONCE(t->vd);
-	/* The start stamp uses a plain store on an aligned eight byte
-	 * word with a tear free read in the kick path. A torn read yields
-	 * zero ran with a fail closed skip and the generation recheck
-	 * covers recycle with no extra fence. */
-	rs->start_ts = bpf_ktime_get_ns();
-	t->gen = ng;
-	t->slice_rem = sl;
-	t->llc_id = llc;
-	/* Running keeps the stored time and mirrors the due time beside it for gap checks. */
-	scx_bpf_task_set_dsq_vtime(p, READ_ONCE(t->vd));
-	/* The gauge was already dropped when the task moved to the local
-	 * queue. Local inserts were never counted. Running only clears
-	 * ownership with no gauge move. The core is busy now, so it runs
-	 * at max. */
-	__sync_fetch_and_and(&t->flags,
-			      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB |
-				       (u32)FLOW_FLAG_URGENT));
-	flow_cpuperf_mark(cpu, false);
-}
-void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
-{
-	s32 task_cpu = scx_bpf_task_cpu(p);
-	u32 cpu;
-	struct flow_task_ctx *t;
-	struct flow_running_state *rs;
-	u64 cur;
-	u64 have;
-	u64 used;
-	u64 total_used;
-	if (task_cpu < 0)
-		return;
-	cpu = (u32)task_cpu;
-	if (!flow_cpu_ok(cpu))
-		return;
-	scx_arena_subprog_init();
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!t)
-		return;
-	rs = &flow_running_state[cpu];
-	cur = p->scx.slice;
-	have = READ_ONCE(t->slice_rem);
-	if (!have)
-		have = (u64)FLOW_SLICE_MIN_NS;
-	if (cur > have)
-		cur = have;
-	if (cur >= have)
-		used = 0;
-	else
-		used = have - cur;
-	/* Accumulate the tail burnt past the last tick first, so run_total
-	 * holds the exact runtime burnt across this activation even when
-	 * the initial slice was custom-sized below FLOW_SLICE_MIN_NS. */
-	flow_run_add(t, used);
-	total_used = READ_ONCE(t->run_total);
-	if (!total_used && used)
-		total_used = used;
-	t->burst_ns = flow_burst_update(READ_ONCE(t->burst_ns), total_used, cur, runnable);
+	else if (flow_llc_ok(READ_ONCE(t->llc_id)))
+		llc = READ_ONCE(t->llc_id);
+	now = bpf_ktime_get_ns();
+	vd = (u64)p->scx.dsq_vtime;
+	/* Advance the logical clock toward the running due time. */
 	{
-		u64 now = bpf_ktime_get_ns();
-		if (now) {
-			flow_run_prune(t, now);
-			if (!runnable)
-				flow_run_close(t, now);
+		u64 clc = READ_ONCE(sys_stat.cur_logical_clk);
+		u64 nq = READ_ONCE(sys_stat.nr_queued);
+
+		if (!nq)
+			nq = 1ULL;
+		if (vd > clc)
+			WRITE_ONCE(sys_stat.cur_logical_clk, clc + (vd - clc) / nq);
+	}
+	/* Fold this task service into the system mean. */
+	WRITE_ONCE(sys_stat.avg_svc_time_iwgt,
+		   flow_calc_avg(READ_ONCE(sys_stat.avg_svc_time_iwgt),
+				 READ_ONCE(t->svc_time_iwgt)));
+	rs = &flow_running_state[cpu];
+	{
+		u32 lc = flow_calc_lat_cri(p, t);
+		u64 slice = flow_calc_slice(t, rs);
+
+		t->lat_cri = lc;
+		t->slice_ns = slice;
+		t->last_running_clk = now;
+		WRITE_ONCE(rs->lat_cri, lc);
+		WRITE_ONCE(rs->llc_id, llc);
+		WRITE_ONCE(rs->running_clk, now);
+		WRITE_ONCE(rs->est_stopping_clk, now + slice);
+		WRITE_ONCE(rs->sum_lat_cri, READ_ONCE(rs->sum_lat_cri) + (u64)lc);
+		if (lc > READ_ONCE(rs->max_lat_cri))
+			WRITE_ONCE(rs->max_lat_cri, lc);
+		__sync_fetch_and_add(&rs->nr_sched, 1ULL);
+	}
+	t->last_running_clk = now;
+	/* Drop the queue gauge now that the task left the DSQ. */
+	{
+		u32 old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+
+		if (old & (u32)FLOW_FLAG_QUEUED) {
+			u32 q = READ_ONCE(t->llc_id);
+
+			if (!flow_llc_ok(q))
+				q = 0;
+			flow_queued_dec(q);
+			{
+				u64 nq = READ_ONCE(sys_stat.nr_queued);
+
+				if (nq)
+					__sync_val_compare_and_swap(&sys_stat.nr_queued, nq, nq - 1);
+			}
+		}
+		if (READ_ONCE(t->pinned_cpu) >= 0) {
+			t->pinned_cpu = -1;
+			if (READ_ONCE(rs->nr_pinned))
+				__sync_fetch_and_sub(&rs->nr_pinned, 1U);
 		}
 	}
-	/* Burnt time pays here into the stored time, scaled by the effective
-	 * weight with saturation and mirrored as the stored time beside it. The
-	 * tick already moved the left slice forward, so this charges only
-	 * the tail past the last tick. A runnable yield with no burnt time
-	 * still moves the stored time forward by one, so repeated yields
-	 * cannot hold the queue head. */
-	if (used) {
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), used,
-					  flow_task_weight(p, t));
-		t->vtime = nv;
-		scx_bpf_task_set_dsq_vtime(p, nv);
-		if (!cur)
-			flow_stat_inc(rs->llc_id, 9);
-	} else if (runnable) {
-		s64 nv = flow_fair_cap_add(READ_ONCE(t->vtime), 1);
-		t->vtime = nv;
-		scx_bpf_task_set_dsq_vtime(p, nv);
+	/* Busy cores ramp to max at once. */
+	if (READ_ONCE(rs->cpuperf_cur) != (u32)SCX_CPUPERF_ONE) {
+		flow_cpuperf_mark(cpu, false);
+		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
+		WRITE_ONCE(rs->cpuperf_commit_clk, now);
 	}
-	rs->slice_rem = cur;
-	t->slice_rem = cur;
-	if (runnable)
-		flow_stat_inc(rs->llc_id, 10);
+	WRITE_ONCE(rs->idle_start_clk, 0);
 }
+
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
 	s32 task_cpu = scx_bpf_task_cpu(p);
@@ -794,78 +264,214 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	struct flow_running_state *rs;
 	u64 cur;
 	u64 have;
+	u64 now;
+
 	if (task_cpu < 0)
 		return;
 	cpu = (u32)task_cpu;
 	if (!flow_cpu_ok(cpu))
 		return;
-	scx_arena_subprog_init();
 	rs = &flow_running_state[cpu];
 	cur = p->scx.slice;
+	now = bpf_ktime_get_ns();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!t) {
-		rs->slice_rem = cur;
+	if (!t)
 		return;
+	/* Refresh max every millisecond so rate limits keep the target. */
+	if (now - READ_ONCE(rs->cpuperf_commit_clk) >= 1000000ULL) {
+		flow_cpuperf_mark(cpu, false);
+		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
+		WRITE_ONCE(rs->cpuperf_commit_clk, now);
 	}
-	/* Charge the burnt delta, then move the due time with the burst
-	 * left while inside it and the left slice past it in both the
-	 * stored and running views, so the running horizon keeps the
-	 * burst bound. Stopping later charges only the tail past this tick.
-	 * The run sum grows by the delta here and freezes prune on a zero
-	 * or backward clock. The exhausted branch adds nothing here since
-	 * stopping charges that tail. */
-	have = READ_ONCE(t->slice_rem);
-	{
-		u64 now = bpf_ktime_get_ns();
-		if (now)
-			flow_run_prune(t, now);
-	}
-	flow_cpuperf_mark(cpu, false);
-	if (cur && cur < have) {
+	have = READ_ONCE(t->slice_ns);
+	if (have > cur) {
 		u64 delta = have - cur;
 		u32 w = flow_task_weight(p, t);
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), delta, w);
-		s64 nvd = flow_vd_for(nv, cur, w);
-		flow_run_add(t, delta);
-		t->vtime = nv;
-		t->vd = nvd;
-		t->slice_rem = cur;
-		rs->vtime = nv;
-		rs->vd = nvd;
-		scx_bpf_task_set_dsq_vtime(p, nvd);
-	} else if (!cur && have) {
-		/* The slice ran out at the tick. Keep the stored slice so
-		 * stopping still charges the tail, but move the running horizon
-		 * out by one slice so a wake can land at once with the two
-		 * views diverged until stopping. Seed the burst to one slice
-		 * for the next run. */
-		u32 w = flow_task_weight(p, t);
-		s64 nv = flow_fair_charge(READ_ONCE(t->vtime), have, w);
-		s64 nvd = flow_vd_for(nv, (u64)FLOW_SLICE_MIN_NS, w);
-		rs->vtime = nv;
-		rs->vd = nvd;
-		rs->slice_rem = 0;
-		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
+
+		t->acc_runtime_ns += delta;
+		if (w)
+			t->svc_time_iwgt += delta * 100ULL / (u64)w;
+		WRITE_ONCE(rs->tot_iwgt, READ_ONCE(rs->tot_iwgt) + delta);
+		t->slice_ns = cur;
+		/* Pinned tasks waiting here shorten the running slice. */
+		if (READ_ONCE(rs->nr_pinned)) {
+			u64 base = READ_ONCE(sys_stat.slice_ns);
+
+			if (!base)
+				base = (u64)FLOW_SLICE_MIN_NS;
+			if (cur > base)
+				scx_bpf_task_set_slice(p, base);
+		}
 	}
 }
+
+void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
+{
+	s32 task_cpu = scx_bpf_task_cpu(p);
+	u32 cpu;
+	struct flow_task_ctx *t;
+	struct flow_running_state *rs;
+	u64 cur;
+	u64 have;
+	u64 now;
+
+	if (task_cpu < 0)
+		return;
+	cpu = (u32)task_cpu;
+	if (!flow_cpu_ok(cpu))
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	rs = &flow_running_state[cpu];
+	cur = p->scx.slice;
+	have = READ_ONCE(t->slice_ns);
+	now = bpf_ktime_get_ns();
+	/* Charge the tail past the last tick, then fold the average. */
+	if (have > cur) {
+		u64 tail = have - cur;
+		u32 w = flow_task_weight(p, t);
+
+		t->acc_runtime_ns += tail;
+		if (w)
+			t->svc_time_iwgt += tail * 100ULL / (u64)w;
+		WRITE_ONCE(rs->tot_iwgt, READ_ONCE(rs->tot_iwgt) + tail);
+	}
+	t->avg_runtime_ns = flow_calc_avg(READ_ONCE(t->avg_runtime_ns),
+					  READ_ONCE(t->acc_runtime_ns));
+	{
+		u64 last = READ_ONCE(t->last_running_clk);
+		u64 gap = now > last ? now - last : 0;
+
+		t->run_freq = flow_calc_avg_freq(READ_ONCE(t->run_freq), gap);
+		t->last_running_clk = now;
+	}
+	t->slice_ns = cur;
+	if (runnable)
+		flow_stat_inc(READ_ONCE(rs->llc_id), 10);
+	else if (!cur)
+		flow_stat_inc(READ_ONCE(rs->llc_id), 9);
+}
+
+void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	struct flow_task_ctx *t;
+	u64 now;
+
+	(void)deq_flags;
+	if (!p)
+		return;
+	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!t)
+		return;
+	if (!(p->scx.flags & SCX_TASK_QUEUED))
+		return;
+	now = bpf_ktime_get_ns();
+	{
+		u64 last = READ_ONCE(t->last_quiescent_clk);
+		u64 gap = (last && now > last) ? now - last : 0;
+
+		if (gap)
+			t->wait_freq = flow_calc_avg_freq(READ_ONCE(t->wait_freq), gap);
+		t->last_quiescent_clk = now;
+	}
+}
+
+static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
+{
+	u32 k = 0;
+	u64 sum = 0;
+	u64 max = 0;
+	u32 cpu;
+	u32 l;
+	u64 ncpu;
+	u64 nq;
+	u64 slice;
+
+	(void)map;
+	(void)key;
+	/* Mean plus max score over online CPUs. */
+	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
+		u64 v;
+
+		if ((u64)cpu >= scx_bpf_nr_cpu_ids())
+			continue;
+		v = READ_ONCE(flow_running_state[cpu].sum_lat_cri);
+		sum += v;
+		WRITE_ONCE(flow_running_state[cpu].sum_lat_cri, 0);
+		v = READ_ONCE(flow_running_state[cpu].max_lat_cri);
+		if (v > max)
+			max = v;
+		WRITE_ONCE(flow_running_state[cpu].max_lat_cri, 0);
+	}
+	ncpu = scx_bpf_nr_cpu_ids();
+	if (!ncpu)
+		ncpu = 1ULL;
+	WRITE_ONCE(sys_stat.avg_lat_cri, sum / ncpu);
+	WRITE_ONCE(sys_stat.max_lat_cri, max);
+	WRITE_ONCE(sys_stat.thr_lat_cri, max >> (u32)FLOW_PREEMPT_SHIFT);
+	if (!READ_ONCE(sys_stat.thr_lat_cri) && max)
+		WRITE_ONCE(sys_stat.thr_lat_cri, 1ULL);
+	/* Base slice covers all queued tasks inside ten milliseconds. */
+	nq = READ_ONCE(sys_stat.nr_queued);
+	if (!nq)
+		nq = 1ULL;
+	slice = (u64)FLOW_TARGETED_LATENCY_NS * ncpu / nq;
+	if (slice < (u64)FLOW_SLICE_MIN_NS)
+		slice = (u64)FLOW_SLICE_MIN_NS;
+	if (slice > (u64)FLOW_SLICE_MAX_NS)
+		slice = (u64)FLOW_SLICE_MAX_NS;
+	WRITE_ONCE(sys_stat.slice_ns, slice);
+	if (!READ_ONCE(sys_stat.nr_queued) && READ_ONCE(sys_stat.avg_svc_time_iwgt))
+		WRITE_ONCE(sys_stat.avg_svc_time_iwgt,
+			   READ_ONCE(sys_stat.avg_svc_time_iwgt) -
+			   (READ_ONCE(sys_stat.avg_svc_time_iwgt) >> 3));
+	/* Idle cores decay to half. Busy cores are never touched here. */
+	bpf_for(l, 0, FLOW_MAX_CPUS) {
+		struct flow_running_state *rs;
+		u64 idle;
+
+		if ((u64)l >= scx_bpf_nr_cpu_ids())
+			continue;
+		rs = &flow_running_state[l];
+		idle = READ_ONCE(rs->idle_start_clk);
+		if (!idle) {
+			if (scx_bpf_test_and_clear_cpu_idle((s32)l))
+				WRITE_ONCE(rs->idle_start_clk, bpf_ktime_get_ns());
+			else
+				continue;
+		}
+		if (bpf_ktime_get_ns() - READ_ONCE(rs->idle_start_clk) <
+		    (u64)FLOW_SYS_STAT_INTERVAL_NS)
+			continue;
+		if (!flow_cpu_live(l))
+			continue;
+		flow_cpuperf_mark(l, true);
+		WRITE_ONCE(rs->cpuperf_cur, (u32)(SCX_CPUPERF_ONE / 2));
+		WRITE_ONCE(rs->cpuperf_commit_clk, bpf_ktime_get_ns());
+		(void)k;
+	}
+	bpf_timer_start(timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);
+	return 0;
+}
+
 void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumask *mask)
 {
 	struct flow_task_ctx *t;
+
 	(void)mask;
 	if (!p)
 		return;
-	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
 	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_QUEUED) {
 		s32 owner = flow_first_allowed(p);
 		u32 qllc = READ_ONCE(t->llc_id);
+
 		if (!flow_llc_ok(qllc))
 			qllc = 0;
 		if (owner < 0) {
-			/* No usable CPU. The task waits in fallback
-			 * until the mask widens, so count the skip. */
 			flow_stat_inc(qllc, 8);
 			return;
 		}
@@ -877,156 +483,116 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 		flow_stat_inc(qllc, 11);
 		return;
 	}
-	if (p->flags & PF_EXITING)
-		t->slice_rem = (u64)FLOW_EXIT_SLICE_NS;
 	{
 		s32 tgt = flow_first_allowed(p);
-		int v;
+		int vv;
+
 		if (tgt < 0)
 			return;
 		if (!flow_cpu_live((u32)tgt))
 			return;
-		v = topo_cpu_to_llc_id((u32)tgt);
-		if (v < 0 || !flow_llc_ok((u32)v))
+		vv = topo_cpu_to_llc_id((u32)tgt);
+		if (vv < 0 || !flow_llc_ok((u32)vv))
 			return;
-		t->llc_id = (u32)v;
+		t->llc_id = (u32)vv;
 	}
 }
+
 void BPF_STRUCT_OPS(flow_enable, struct task_struct *p)
 {
 	struct flow_task_ctx *t;
-	s64 v;
+
 	if (!p)
 		return;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!t)
 		return;
-	v = (s64)p->scx.dsq_vtime;
-	t->vtime = v;
-	t->vd = v;
-	t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
-	t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
-	t->gen = 0;
-	t->llc_id = 0;
+	t->acc_runtime_ns = 0;
+	t->avg_runtime_ns = 0;
+	t->svc_time_iwgt = 0;
+	t->last_running_clk = 0;
+	t->last_runnable_clk = 0;
+	t->last_quiescent_clk = 0;
+	t->run_freq = 0;
+	t->wait_freq = 0;
+	t->wake_freq = 0;
+	t->lat_cri = 1U;
+	t->lat_cri_waker = 0;
+	t->lat_cri_wakee = 0;
 	t->flags = 0;
-	flow_run_reset(t);
+	t->llc_id = 0;
+	t->pinned_cpu = -1;
+	t->slice_ns = (u64)FLOW_SLICE_MIN_NS;
+	scx_bpf_task_set_dsq_vtime(p, 0);
 }
-s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p, struct scx_init_task_args *args)
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
 {
 	struct flow_task_ctx *t;
-	void __arena *mem;
-	struct flow_arena_task __arena *at;
+
 	(void)args;
 	if (!p)
 		return 0;
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (t) {
-		t->vtime = 0;
-		t->vd = 0;
-		t->slice_rem = (u64)FLOW_SLICE_MIN_NS;
-		t->burst_ns = (u64)FLOW_SLICE_MIN_NS;
-		t->gen = 0;
-		t->llc_id = 0;
+		t->acc_runtime_ns = 0;
+		t->avg_runtime_ns = 0;
+		t->svc_time_iwgt = 0;
+		t->last_running_clk = 0;
+		t->last_runnable_clk = 0;
+		t->last_quiescent_clk = 0;
+		t->run_freq = 0;
+		t->wait_freq = 0;
+		t->wake_freq = 0;
+		t->lat_cri = 1U;
+		t->lat_cri_waker = 0;
+		t->lat_cri_wakee = 0;
 		t->flags = 0;
-		flow_run_reset(t);
+		t->llc_id = 0;
+		t->pinned_cpu = -1;
+		t->slice_ns = (u64)FLOW_SLICE_MIN_NS;
 		scx_bpf_task_set_dsq_vtime(p, 0);
 	}
-	/* One reserved arena slot per task. The slot sits at offset zero.
-	 * The slot stays at one hundred thirty six bytes. Tree entries live
-	 * in slab memory, not in this slot. The slab holds at most one forty
-	 * eight byte entry per queued task through the queued bit. The worst
-	 * stays at four hundred within five hundred twelve. Init keeps the
-	 * slot with no tree link. Slab entries are freed on pop plus dequeue
-	 * plus exit. Dead heads are reaped lazily by the next pop. Exit or
-	 * dequeue owns the gauge dec. */
-	mem = __scx_task_data(p);
-	if (mem) {
-		at = mem;
-		WRITE_ONCE(at->pid, p->pid);
-		WRITE_ONCE(at->pad, 0);
-		WRITE_ONCE(at->storage[0], 0ULL);
-		return 0;
-	}
-	mem = scx_task_alloc(p);
-	if (!mem)
-		return 0;
-	at = mem;
-	WRITE_ONCE(at->pid, p->pid);
-	WRITE_ONCE(at->pad, 0);
-	WRITE_ONCE(at->storage[0], 0ULL);
 	return 0;
 }
+
 void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
 {
 	struct flow_task_ctx *t;
-	void __arena *mem;
+	u32 old;
+
 	(void)args;
 	if (!p)
 		return;
-	scx_arena_subprog_init();
 	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	mem = __scx_task_data(p);
-	if (!mem) {
-		if (t) {
-			u32 old = __sync_fetch_and_and(&t->flags,
-						      (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB));
-			if (old & (u32)FLOW_FLAG_QUEUED) {
-				u32 dllc = READ_ONCE(t->llc_id);
-				if (!flow_llc_ok(dllc))
-					dllc = 0;
-				flow_queued_dec(dllc);
-			}
-		}
+	if (!t)
 		return;
-	}
-	{
-		u32 was_queued = 0;
-		u32 was_tree = 0;
-		u32 dllc = 0;
-		u32 owner = 0;
-		u64 key = 0;
-		bool have_key = false;
-		if (t) {
-			u32 old;
-			dllc = READ_ONCE(t->llc_id);
-			if (!flow_llc_ok(dllc))
-				dllc = 0;
-			owner = READ_ONCE(t->run_pad);
-			old = __sync_fetch_and_and(&t->flags,
-						  (u32)~((u32)FLOW_FLAG_QUEUED | (u32)FLOW_FLAG_IN_RB));
-			was_queued = old & (u32)FLOW_FLAG_QUEUED;
-			was_tree = old & (u32)FLOW_FLAG_IN_RB;
-			if (was_tree && mem) {
-				struct flow_arena_task __arena *at = mem;
-				u64 sk = READ_ONCE(at->storage[0]);
-				if (sk) {
-					key = sk;
-					have_key = true;
-				}
-			}
+	old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
+	if (old & (u32)FLOW_FLAG_QUEUED) {
+		u32 llc = READ_ONCE(t->llc_id);
+
+		if (!flow_llc_ok(llc))
+			llc = 0;
+		flow_queued_dec(llc);
+		{
+			u64 nq = READ_ONCE(sys_stat.nr_queued);
+
+			if (nq)
+				__sync_val_compare_and_swap(&sys_stat.nr_queued, nq, nq - 1);
 		}
-		/* Drop the reserved slot when still present. Dequeue already
-		 * dropped the gauge when it ran. Drop here only when the flag
-		 * shows dequeue had not run yet. Exit owns the single dec.
-		 * Then unlink the tree entry when the tree bit shows it is
-		 * still linked. Removal frees with no gauge move. Contention
-		 * leaves the entry for the next pop. Stored key keeps remove
-		 * stable past later due time moves. */
-		if (was_queued) {
-			flow_queued_dec(dllc);
-			if (was_tree && have_key && flow_cpu_ok(owner)) {
-				struct flow_rb_root __arena *rb = flow_rb_for_cpu((s32)owner);
-				flow_rb_remove(rb, key, p->pid, owner);
-			}
-		}
-		scx_task_free(p);
 	}
 }
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 {
 	u64 n;
+	u32 i;
+	u32 k = 0;
+	struct bpf_timer *timer;
+	int err;
+
 	n = scx_bpf_nr_cpu_ids();
-	scx_arena_subprog_init();
 	if (n == 0) {
 		scx_bpf_error("no CPUs found");
 		return -EINVAL;
@@ -1035,61 +601,86 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	/* The arena library must be ready before any queue is built.
-	 * Userspace sets up the arena and the topology tree before load,
-	 * so a missing tree fails closed here with no partial queues. */
+	/* The topology tree must be ready before any queue is built.
+	 * Userspace sets up the tree before load, so a missing tree
+	 * fails closed here with no partial queues. */
 	if (!topo_all) {
 		scx_bpf_error("topology tree missing");
 		return -ENODEV;
 	}
-	/* Thread shape keeps the userspace seed with the source default on miss. */
-	flow_ccx_prefer = 1;
-	/* Intentional: static cap is one thousand twenty four while the
-	 * operational queue table caps at five hundred twelve. The first
-	 * check guards the static area and the second guards the BST
-	 * table, so both stay fail closed with no silent truncation. */
+	/* Operational queue table caps at five hundred twelve. The first
+	 * check guards the static area and the second guards the DSQ
+	 * table, so both stay closed with no silent truncation. */
 	if (n > 512ULL) {
 		scx_bpf_error("CPU count over bound");
 		return -E2BIG;
 	}
-	/* One tree per live CPU in deadline order with depth bound at
-	 * RB_MAX_DEPTH. Leftmost wins with ties right. Roots live in arena
-	 * memory through static alloc. Fresh pages start zeroed, which is the
-	 * empty tree state. Slab entries live in arena memory. The fallback
-	 * queue stays as the only DSQ. Slab init runs before roots alloc.
-	 * Roots alloc failure leaves the slab live with no entries. Exit
-	 * stays safe. Lifetime starts here and ends in flow exit. Roots are
-	 * cleared on exit. Slab entries are freed by pop plus remove. */
-	if (scx_alloc_init(&flow_rb_alloc, sizeof(struct flow_rb_entry),
-			   __alignof__(struct flow_rb_entry))) {
-		scx_bpf_error("rb alloc init failed");
-		return -ENOMEM;
+	flow_ccx_prefer = 1;
+	WRITE_ONCE(sys_stat.cur_logical_clk, 0);
+	WRITE_ONCE(sys_stat.avg_svc_time_iwgt, 0);
+	WRITE_ONCE(sys_stat.avg_lat_cri, 0);
+	WRITE_ONCE(sys_stat.max_lat_cri, 0);
+	WRITE_ONCE(sys_stat.thr_lat_cri, 0);
+	WRITE_ONCE(sys_stat.slice_ns, (u64)FLOW_SLICE_MAX_NS);
+	WRITE_ONCE(sys_stat.nr_queued, 0);
+	/* One DSQ per CPU for pinned tasks. */
+	bpf_for(i, 0, FLOW_MAX_CPUS) {
+		s32 ret;
+
+		if ((u64)i >= n)
+			break;
+		ret = scx_bpf_create_dsq((u64)FLOW_CPU_DSQ_BASE + (u64)i, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("cpu dsq create failed");
+			return ret;
+		}
 	}
-	/* Roots live in arena memory with one entry per CPU id below the
-	 * observed count, so every live id stays in range. Fresh pages start
-	 * zeroed, which is the empty tree state with no static sizing of
-	 * queue nodes. */
-	flow_rb_roots = scx_static_alloc(sizeof(struct flow_rb_root) * (size_t)n,
-					 __alignof__(struct flow_rb_root));
-	if (!flow_rb_roots) {
-		scx_bpf_error("rb roots alloc failed");
-		return -ENOMEM;
+	/* One vtime DSQ per LLC for shared tasks. */
+	bpf_for(i, 0, FLOW_MAX_LLCS) {
+		s32 ret;
+
+		ret = scx_bpf_create_dsq((u64)FLOW_LLC_DSQ_BASE + (u64)i, -1);
+		if (ret < 0 && ret != -EEXIST) {
+			scx_bpf_error("llc dsq create failed");
+			return ret;
+		}
 	}
 	{
 		s32 ret = scx_bpf_create_dsq((u64)FLOW_FALLBACK_DSQ, -1);
+
 		if (ret < 0 && ret != -EEXIST) {
 			scx_bpf_error("fallback dsq create failed");
 			return ret;
 		}
 	}
+	/* Arm the ten millisecond board plus idle decay timer. */
+	timer = bpf_map_lookup_elem(&update_timer, &k);
+	if (!timer) {
+		scx_bpf_error("timer lookup failed");
+		return -ESRCH;
+	}
+	bpf_timer_init(timer, &update_timer, FLOW_CLOCK_BOOTTIME);
+	bpf_timer_set_callback(timer, flow_stat_timer_cb);
+	err = bpf_timer_start(timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);
+	if (err) {
+		scx_bpf_error("timer start failed");
+		return err;
+	}
 	return 0;
 }
+
 void BPF_STRUCT_OPS(flow_exit, struct scx_exit_info *info)
 {
+	u32 i;
+
 	UEI_RECORD(uei, info);
-	/* Lifetime ends here. Roots are cleared. The slab store is torn down
-	 * with the arena. No entry strands after this point. */
-	flow_rb_roots = 0;
+	bpf_for(i, 0, FLOW_MAX_CPUS) {
+		if ((u64)i >= scx_bpf_nr_cpu_ids())
+			break;
+		scx_bpf_destroy_dsq((u64)FLOW_CPU_DSQ_BASE + (u64)i);
+	}
+	bpf_for(i, 0, FLOW_MAX_LLCS)
+		scx_bpf_destroy_dsq((u64)FLOW_LLC_DSQ_BASE + (u64)i);
 	scx_bpf_destroy_dsq((u64)FLOW_FALLBACK_DSQ);
 }
 #endif

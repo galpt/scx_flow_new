@@ -2,43 +2,20 @@
 /*
  * Shared constants for the flow scheduler.
  *
- * Each CPU has one queue ordered by virtual deadline. Ties
- * leave in insertion order. One fallback queue holds tasks that have
- * no usable CPU in FIFO order. It is best effort overflow. Each task
- * holds at most one fallback slot through the queued bit. The backlog
- * stays within the live task count. Pinned tasks run on their local
- * queue. Placement keeps the constrained target. Drain walks local
- * first, then same cache group, then same LLC, then same node, then
- * distant remote, then fallback last. Tiers stay L1 greater than L2
- * greater than L3. Short form is L1>L2>L3. Idle starts at once. Size
- * breaks ties only inside one tier with larger buckets first within tier
- * when both buckets are known. Each per CPU queue holds without bound
- * with one millisecond slices. Each enqueue prices the task by its
- * effective weight from nice plus live share. A task pays for the time
- * it burns, scaled by that weight. Fresh times move past a per LLC
- * floor. Stored times stay best effort unique. A direct store of the
- * last observed value plus one runs when the loop loses too often.
- * A rare duplicate keeps insertion order. Virtual deadline adds an
- * effective based step scaled by the burst to the floored time. A
- * larger effective weight or a shorter run gives an earlier due time.
- * Slices hold one fixed quantum with a small floor. Burst holds the
- * last run length. An insert miss keeps the newcomer in the fallback
- * queue in FIFO order with no evict. Stopping plus tick keep the burst
- * and run state with guarded preempt and no reclaim. A shared enqueue
- * with a due time ahead of the
- * running due time preempts guarded. Each running instance kicks at most once. A runnable yield with no burnt time still moves the stored
- * time forward by one. Each per CPU queue holds with depth bound at
- * RB_MAX_DEPTH. The fallback holds at most one slot per live task in
- * FIFO order with no extra bound. Per CPU trees use an unbalanced BST
- * with always eligible tasks. Placement follows the upstream topology
- * library. Liveness comes from the same tree. Arena holds one BST node
- * per task beside the task state. The tree drains leftmost wins with
- * ties right in RB_DUPLICATE-compatible order. Per CPU drain runs
- * through LOCAL only with offline reap. The base constant stays
- * kept unused reserved with no reader. The queue caps stay reserved
- * with no reader for sizing only.
- * Every non duplicate ends in a queue insert with the gauge paired by
- * a saturating floor for telemetry only.
+ * Each LLC owns one kernel vtime DSQ for shared tasks. Each CPU owns
+ * one DSQ for pinned tasks. One fallback DSQ holds tasks with no
+ * usable CPU. Drain walks CPU then LLC then neighbor then remote
+ * then fallback. Tiers stay L1 greater than L2 greater than L3. Short
+ * form is L1>L2>L3. Idle starts claim at once. Size breaks ties only
+ * inside one tier with larger buckets first within tier when both
+ * buckets are known. Each enqueue prices the task by context with
+ * log scale. Virtual deadline adds a bounded step scaled by greedy
+ * over latency score. Slices hold one base quantum with boost for
+ * long frame tasks. A runnable yield with no burnt time still moves
+ * stored state forward by one. Shared enqueue with a due time ahead
+ * of the running due time yields soft with a one nanosecond slice.
+ * Each running instance yields at most once per generation. The wire
+ * keeps one hundred four bytes with the same order as before.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -68,149 +45,100 @@ enum flow_consts {
 	FLOW_MAX_NODES = 8ULL,
 	FLOW_QUEUE_CAP = 64ULL, /* Kept reserved. */
 	FLOW_FALLBACK_CAP = 1024ULL, /* Kept reserved. */
-	FLOW_SLICE_MIN_NS = 1000000ULL,
-	FLOW_SLICE_MAX_NS = 3000000ULL,
-	FLOW_SLICE_FLOOR_NS = 62500ULL,
-	FLOW_SMT_STAY_BURST_NS = 250000ULL,
-	FLOW_EXIT_SLICE_NS = 1000ULL,
-	FLOW_FAIR_BASE_NS = 20000ULL, /* Kept unused reserved. */
-	FLOW_FAIR_EXTRA_NS = 1000ULL, /* Kept unused reserved. */
-	FLOW_SEQ_FLOOR_STEP_NS = 250000ULL,
-	FLOW_LAG_MAX_NS = 4000000ULL,
-	FLOW_CADENCE_MAX_NS = 25000000ULL,
-	FLOW_RB_MAX_DEPTH = 32ULL,
-	FLOW_RUN_WIN_NS = 30000000000ULL,
-	FLOW_RUN_SPAN_NS = 4000000ULL,
-	FLOW_RUN_NEED = 4ULL,
-	FLOW_RUN_RING = 8ULL,
+	FLOW_SLICE_MIN_NS = 500000ULL,
+	FLOW_SLICE_MAX_NS = 5000000ULL,
+	FLOW_SLICE_BOOST_MAX = 20000000ULL,
+	FLOW_TARGETED_LATENCY_NS = 10000000ULL,
+	FLOW_TASK_LAG_MAX = 500000000ULL,
+	FLOW_DL_COMPETE_WINDOW = 4577ULL,
+	FLOW_SYS_STAT_INTERVAL_NS = 10000000ULL,
+	FLOW_PREEMPT_SHIFT = 6ULL,
+	FLOW_CPU_DSQ_BASE = 0x1000ULL,
+	FLOW_LLC_DSQ_BASE = 0x2000ULL,
+	FLOW_FALLBACK_DSQ = 0x6100ULL,
+	FLOW_FLAG_QUEUED = 1ULL,
+	FLOW_FLAG_DIRECT_DISPATCH = 2ULL,
+	FLOW_FLAG_IS_SYNC_WAKEUP = 4ULL,
+	FLOW_FLAG_WOKEN_BY_HARDIRQ = 8ULL,
+	FLOW_FLAG_WOKEN_BY_SOFTIRQ = 16ULL,
+	FLOW_FLAG_IS_GREEDY = 32ULL,
 	FLOW_CGROUP_WEIGHT_MIN = 1ULL,
 	FLOW_CGROUP_WEIGHT_DFLT = 100ULL,
 	FLOW_CGROUP_WEIGHT_MAX = 10000ULL,
 	FLOW_CGROUP_WEIGHT_INVALID = 0ULL,
 	FLOW_OPS_TIMEOUT_MS = 20000ULL,
-	FLOW_FALLBACK_DSQ = 0x6100ULL,
-	FLOW_FLAG_QUEUED = 1ULL,
-	FLOW_FLAG_IN_RB = 2ULL,
-	FLOW_FLAG_INTERACTIVE = 4ULL,
-	FLOW_FLAG_URGENT = 8ULL,
-	FLOW_KICK_GAP_NS = 150000ULL,
-	FLOW_KICK_GRAN_NS = 250000ULL,
-	FLOW_KICK_TAIL_NS = 100000ULL,
 };
-/* Per task state. Vtime is charged service. Slice holds the time
- * left in the current quantum. Gen identifies the running instance.
- * Llc records the last enqueue target. Flags holds the queued bit.
- * Virtual deadline holds the due time for queue order. Burst holds the
- * run length
- * used for the due time. Run holds eight recent run lengths with
- * close stamps for stable tasks. Head is the next slot masked with
- * seven. Pruned counts stale drops. Min plus max hold the kept range.
- * Known marks a stable range for the hard path. Total holds the
- * current run sum capped at thirty seconds. A stable range needs four
- * kept entries over a four millisecond span inside a thirty second window
- * with a tight range check. A zero or backward clock freezes with no
- * ring move. The state holds two
- * hundred sixteen bytes. */
+/* Per task state. Acc holds burnt time in the current activation.
+ * Avg holds the EWMA run length. Svc holds weighted service time.
+ * Clocks hold last running plus runnable plus quiescent stamps.
+ * Freq holds run plus wait plus wake rates in hertz. Lat holds the
+ * urgency score with waker plus wakee inherit parts. Flags holds
+ * queue plus dispatch plus sync plus irq bits plus greedy mark.
+ * Llc holds the last enqueue target. Pinned holds the fixed CPU or
+ * minus one. Slice holds the assigned quantum for this activation.
+ * The state holds one hundred four bytes. */
 struct flow_task_ctx {
-	s64 vtime;
-	u64 slice_rem;
-	u64 gen;
-	u32 llc_id;
+	u64 acc_runtime_ns;
+	u64 avg_runtime_ns;
+	u64 svc_time_iwgt;
+	u64 last_running_clk;
+	u64 last_runnable_clk;
+	u64 last_quiescent_clk;
+	u64 run_freq;
+	u64 wait_freq;
+	u64 wake_freq;
+	u32 lat_cri;
+	u32 lat_cri_waker;
+	u32 lat_cri_wakee;
 	u32 flags;
-	s64 vd;
-	u64 burst_ns;
-	u64 run_dur[8];
-	u64 run_stamp[8];
-	u64 run_min;
-	u64 run_max;
-	u64 run_total;
-	u32 run_head;
-	u32 run_pruned;
-	u32 run_known;
-	u32 run_pad;
-};
-/* Arena per task slot. Storage holds the reserved slot with the pid
- * beside it. The slot sits at offset zero. Slot storage zero holds the
- * insert key for remove stability. The slot holds one hundred thirty six
- * bytes. State plus slot stay within five hundred twelve bytes per task.
- * The tree node for enqueue lives in slab memory, not in this slot. The
- * red black entry slab adds up to forty eight bytes per queued task at
- * most. The queued bit plus the tree bit bound the slab count to the live
- * task count. Three hundred fifty two plus forty eight stays at four
- * hundred within five hundred twelve. The tree is an unbalanced BST with
- * ties right and depth bound at RB_MAX_DEPTH. Contention plus depth
- * overflow plus alloc miss fall back to FIFO. The tree drains leftmost
- * wins with ties chained right. Remove uses successor splice with no
- * orphan and no leak. Verifier keeps straight line order. Leftmost walks
- * use the bounded hold only. Sizes stay 216 plus 136 plus 352 plus 512
- * with 48 plus 16. Two level vruntime keeps vtime plus due time with lag
- * clamped at LAG_MAX with integer only. LAG_MAX caps lateness at eight
- * milliseconds with saturation on skew and on excess. Lag clamp runs in
- * the kick path. It does not change pricing. Pricing stays vruntime
- * only. */
-struct flow_arena_task {
-	u64 storage[16];
-	s32 pid;
-	u32 pad;
-};
-/* Per CPU tree node. Parent plus color pack into one u64. Right plus
- * left hold arena addresses. Pid plus pad close the node. Owner lookup
- * uses the pid. Node size stays at thirty two bytes inside the one
- * hundred thirty six byte arena slot. A null root means the CPU is
- * offline or its tree was never built. The rule fails closed as before.
- * The node is a plain BST link. Color is unused. Depth stays bound. */
-struct flow_rb_node {
-	u64 __rb_parent_color;
-	u64 rb_right;
-	u64 rb_left;
-	s32 pid;
-	u32 pad;
-};
-/* Per CPU tree root in arena memory. Root holds the tree address
- * as u64. Zero means empty. Count holds the tree occupancy. The queued
- * gauge in per LLC stats is the live bound. Lock guards insert plus pop.
- * The lock uses a short try. Contention falls back to FIFO with no wait.
- * Depth overflow plus contention plus alloc miss all fall back to FIFO. */
-struct flow_rb_root {
-	u64 root;
-	u32 cnt;
-	u32 lock;
-};
-/* Node stays at thirty two bytes inside the arena slot. */
-_Static_assert(sizeof(struct flow_rb_node) == 32, "flow_rb_node size drifted");
-/* Tree entry in slab memory. Node holds the link. Key holds the biased
- * deadline. Owner holds the target CPU. Pad2 stays reserved as zero. The
- * entry is the unit counted for the slab envelope. Owner is checked on
- * remove with key plus pid plus owner. */
-struct flow_rb_entry {
-	struct flow_rb_node node;
-	u64 key;
-	u32 owner;
-	u32 pad2;
-};
-/* Entry stays at forty eight bytes. State plus slot plus entry stay at
- * four hundred within five hundred twelve. */
-_Static_assert(sizeof(struct flow_rb_entry) == 48, "flow_rb_entry size drifted");
-/* Arena task stays at one hundred thirty six bytes with no growth, so
- * state plus node stay at three hundred fifty two within five hundred
- * twelve per task. */
-_Static_assert(sizeof(struct flow_arena_task) == 136, "flow_arena_task size drifted");
-/* Per CPU running view. Gen counts runs. Pad holds the last kicked
- * generation, so each run kicks at most once. Virtual deadline mirrors
- * the running task due time for gap checks. Start holds the run start
- * wall time for granularity checks. Slice holds the left slice for tail
- * checks. The view holds forty eight bytes. */
-struct flow_running_state {
-	s64 vtime;
-	u64 slice_rem;
-	u64 gen;
 	u32 llc_id;
-	u32 pad;
-	s64 vd;
-	u64 start_ts;
+	s32 pinned_cpu;
+	u64 slice_ns;
 };
-/* The running view holds forty eight bytes with no growth. */
-_Static_assert(sizeof(struct flow_running_state) == 48, "flow_running_state size drifted");
+/* The task state holds one hundred four bytes. */
+_Static_assert(sizeof(struct flow_task_ctx) == 104, "flow_task_ctx size drifted");
+/* Per CPU running view. Flags mirrors task bits for the run. Est
+ * holds the expected stop stamp. Running holds the start stamp.
+ * Lat holds the running task score for victim choice. Pinned counts
+ * affinitized tasks waiting on this CPU. Llc holds the CPU LLC.
+ * Perf holds the current target with commit stamp. Idle holds the
+ * stamp when the CPU went idle. Sched counts runs. Preempt counts
+ * soft yields. Tot holds weighted service. Sum plus max track score
+ * for the timer path. The view holds ninety six bytes. */
+struct flow_running_state {
+	u64 flags;
+	u64 est_stopping_clk;
+	u64 running_clk;
+	u32 lat_cri;
+	u32 nr_pinned;
+	u32 llc_id;
+	u32 cpuperf_cur;
+	u64 cpuperf_commit_clk;
+	u64 idle_start_clk;
+	u64 nr_sched;
+	u64 nr_preempt;
+	u64 tot_iwgt;
+	u64 sum_lat_cri;
+	u32 max_lat_cri;
+	u32 pad;
+};
+/* The running view holds ninety six bytes. */
+_Static_assert(sizeof(struct flow_running_state) == 96, "flow_running_state size drifted");
+/* System wide scoreboard. Clk is the logical clock. Svc is the mean
+ * weighted service. Avg plus max plus thr track urgency. Slice is
+ * the base quantum for the next window. Queued counts waiting tasks.
+ * The board holds fifty six bytes. */
+struct flow_sys_stat {
+	u64 cur_logical_clk;
+	u64 avg_svc_time_iwgt;
+	u64 avg_lat_cri;
+	u64 max_lat_cri;
+	u64 thr_lat_cri;
+	u64 slice_ns;
+	u64 nr_queued;
+};
+/* The board holds fifty six bytes. */
+_Static_assert(sizeof(struct flow_sys_stat) == 56, "flow_sys_stat size drifted");
 /* Per CPU seed from userspace. Holds the CPU id plus the cluster
  * index assigned at startup. Cache and node placement come from the
  * upstream topology tree, so no cached copy lives here. The cluster
@@ -231,9 +159,6 @@ struct flow_cpu_ctx {
 };
 /* The seed stays sixteen bytes with no growth. */
 _Static_assert(sizeof(struct flow_cpu_ctx) == 16, "flow_cpu_ctx size drifted");
-/* The task state stays two hundred sixteen bytes with no growth, so state
- * plus node stay within five hundred twelve bytes per task. */
-_Static_assert(sizeof(struct flow_task_ctx) == 216, "flow_task_ctx size drifted");
 /* Bucket ladder over kibibytes. Zero means unknown with no size.
  * Larger numbers mean larger caches. Values cap at the top with no
  * wrap. Mirrors cache_bucket in topology.rs with identical thresholds.

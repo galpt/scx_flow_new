@@ -3,15 +3,15 @@
  * Flow scheduler entry.
  *
  * Thin glue that pulls in area headers in order and declares the ops
- * table. Each CPU owns one tree in deadline order and there is one
- * fallback queue in FIFO order. Trees hold with depth bound at
- * RB_MAX_DEPTH. Trees hold without bound on live task count. Ties leave
- * in insertion order with ties right in RB_DUPLICATE-compatible order.
- * Deadline order sets the tree with idle wakes for shared tasks plus a
- * guarded preempt on a much earlier deadline. Trees use the plain BST
- * form. Placement follows the upstream topology library. Tables are
- * written once. A CPU that arrives late needs a restart to be seen.
- * Settings live in the shared header.
+ * table. Each LLC owns one kernel vtime DSQ and each CPU owns one DSQ
+ * for pinned tasks with one fallback DSQ in FIFO order. Placement
+ * tags sync plus irq wakes and claims idle cores atomically with
+ * direct local dispatch on quiet queues. Order follows due time with
+ * a soft yield for urgent tasks and in place continuation for the
+ * running task. Frequency stays at max on busy cores and drops to
+ * half on idle cores through the timer only. Tables are written once.
+ * A CPU that arrives late needs a restart to be seen. Settings live
+ * in the shared header.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -37,6 +37,8 @@ SCX_OPS_DEFINE(flow_ops,
 	       .running			= (void *)flow_running,
 	       .stopping		= (void *)flow_stopping,
 	       .tick			= (void *)flow_tick,
+	       .quiescent		= (void *)flow_quiescent,
+	       .runnable		= (void *)flow_runnable,
 	       .set_cpumask		= (void *)flow_set_cpumask,
 	       .enable			= (void *)flow_enable,
 	       .init_task		= (void *)flow_init_task,

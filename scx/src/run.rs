@@ -34,39 +34,25 @@ use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
 use crate::stats::Metrics;
 
-/// Arena node size lock. The BPF queue node holds one hundred thirty six
-/// bytes beside the two hundred sixteen byte task state, so per task memory
-/// stays within five hundred twelve bytes. A drift fails the build here.
-const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_arena_task>() == 136);
+/// Task state size lock. The state holds one hundred four bytes with
+/// burn plus averages plus clocks plus rates plus scores plus flags
+/// plus queue index plus pin plus slice. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() == 104);
 
-/// Task state size lock. The state holds two hundred sixteen bytes with the
-/// run ring plus range plus flag plus sum, so state plus node stay within
-/// five hundred twelve bytes per task. A drift fails the build here.
-const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_task_ctx>() == 216);
+/// Running view size lock. The view holds ninety six bytes with flags
+/// plus stamps plus score plus pin count plus LLC plus perf plus idle
+/// plus sched plus preempt plus totals. A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_running_state>() == 96);
+
+/// Score board size lock. The board holds fifty six bytes with the
+/// clock plus service mean plus score stats plus slice plus queued.
+/// A drift fails the build here.
+const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_sys_stat>() == 56);
 
 /// CPU seed size lock. The seed holds the CPU id plus the cluster hint
 /// plus three size buckets plus one reserved byte beside the pad, so the
 /// row stays sixteen bytes with no growth. A drift fails the build here.
 const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_cpu_ctx>() == 16);
-
-/// Red black node size lock. The per CPU tree node holds parent plus color
-/// plus right plus left plus pid plus pad at thirty two bytes inside the
-/// one hundred thirty six byte arena slot. A drift fails the build here.
-const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_rb_node>() == 32);
-
-/// Tree entry size lock. The slab entry holds the node plus key plus owner
-/// plus pad at forty eight bytes. The wire keeps one hundred four bytes.
-/// A drift fails the build here.
-const _: () = assert!(std::mem::size_of::<crate::bpf_intf::flow_rb_entry>() == 48);
-
-/// State plus node size lock. The two hundred sixteen byte state plus the
-/// one hundred thirty six byte slot stay at three hundred fifty two within
-/// five hundred twelve bytes per task. A drift fails the build here.
-const _: () = assert!(
-    std::mem::size_of::<crate::bpf_intf::flow_task_ctx>()
-        + std::mem::size_of::<crate::bpf_intf::flow_arena_task>()
-        == 352
-);
 
 /*
  * Scheduler holds the skeleton, the link, and the stats server.
@@ -201,10 +187,10 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         // Build the arena and the topology tree before any queue exists.
         // The BPF init fails closed when the tree is missing, so a setup
-        // failure here never reaches attach.
-        let task_size = std::mem::size_of::<crate::bpf_intf::flow_arena_task>();
-        let arenalib = ArenaLib::setup(skel.object_mut(), task_size, 0, *NR_CPU_IDS)
-            .context("arena setup failed")?;
+        // failure here never reaches attach. No per-task arena slot is
+        // used: queues live in kernel DSQs, so the task area stays zero.
+        let arenalib =
+            ArenaLib::setup(skel.object_mut(), 0, 0, *NR_CPU_IDS).context("arena setup failed")?;
         if let Some(t) = topo.as_ref() {
             // Summary plus brief at info.
             let seed_text: Result<String> = match lstopo_view.as_ref() {

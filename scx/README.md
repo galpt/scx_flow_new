@@ -2,7 +2,7 @@
 
 ## What
 
-scx_flow is a knob-free deadline scheduler built on sched_ext. Each CPU owns an arena binary search tree ordered by virtual deadline (bounded at depth 32 with right-chained ties in insertion order) plus one fallback FIFO DSQ. Running tasks pay for burnt time scaled by effective weight. Virtual deadlines use a lag-conserving EEVDF model with shift-only EWMA burst prediction, sleep-to-sleep frame cadence detection, and producer-consumer wakeup inheritance. Placement uses burst-aware SMT and cache-tier scoring (L1 > L2 > L3, breaking ties by larger cache size buckets) with direct local dispatch on empty idle queues, deadline-aware in-place slice continuation for running tasks, and guarded preemption. Active cores run at maximum frequency and drop to half frequency only when no runnable tasks remain.
+scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one kernel virtual deadline DSQ for shared tasks and each CPU owns one DSQ for pinned tasks plus one fallback FIFO DSQ. Wakeups inherit scores between wakers and workers with log scale runtime compression. Placement claims idle cores atomically across tiers (L1 > L2 > L3, breaking ties by larger cache buckets) with direct local dispatch on quiet idle queues and in place slice continuation. Slices stay bounded and track a ten millisecond window with boost for long frame runs, and urgent tasks yield peers with a one nanosecond slice and no interrupt. Active cores run at maximum frequency and idle cores decay to half on a timer.
 
 ## Typical Use Cases
 

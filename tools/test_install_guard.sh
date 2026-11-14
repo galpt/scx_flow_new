@@ -21,7 +21,7 @@ fail() {
 want="$(grep '^version' "${SRC_DIR}/Cargo.toml" | head -n 1 | cut -d '"' -f 2)"
 got="$(grep '^VER=' "${INST}" | head -n 1 | cut -d '"' -f 2)"
 [ "${want}" = "${got}" ] || fail "version mismatch got ${want} want ${got}"
-[ "${want}" = "5.2.25" ] || fail "version not at 5.2.25"
+[ "${want}" = "5.2.26" ] || fail "version not at 5.2.26"
 
 # Scheduler sources stay present with no empty scaffold.
 # A scaffold with matching version but no logic fails closed here.
@@ -125,9 +125,8 @@ if grep -rnE "[0-9]+\.[0-9]+\.[0-9]+" "${SRC_DIR}/src/bpf" "${SRC_DIR}/build.rs"
 fi
 
 # Scheduler README stays byte identical with no doc drift.
-# Per-CPU BST orders by virtual deadline with lag-conserving EEVDF
-# and guarded preempt.
-[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "c075d493afe66c3d34fd13fa139d3154c1415ac348a2871e95aae7c339648ea6" ] || fail "scx README drifted"
+# Per-LLC vtime plus per-CPU DSQ order by virtual deadline.
+[ "$(sha256sum "${SRC_DIR}/README.md" | cut -d ' ' -f 1)" = "e6100e079db314fbb700e7991ab610455de2323d93a6591ae4bd39800a7a642e" ] || fail "scx README drifted"
 [ "$(wc -l < "${SRC_DIR}/README.md" | tr -d ' ')" = "15" ] || fail "scx README lines drifted"
 
 # Scheduler prose keeps periods with no semicolon.

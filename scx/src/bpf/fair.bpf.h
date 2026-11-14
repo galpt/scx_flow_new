@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Fair charging and lag-conserving EEVDF virtual deadline pricing
- * for the flow scheduler.
+ * Scoring for the flow scheduler.
+ *
+ * Log scale keeps multi millisecond frame tasks near short wakeups.
+ * Avg folds samples with one eighth gain. Freq folds rate samples
+ * the same way. Lat scores wake rate plus wait rate plus runtime
+ * with sync plus irq plus pinned lifts. Greedy scales cost from one
+ * to two for tasks past the mean service. Due time lands ahead of
+ * the clock inside a small window for urgent tasks. Slice tracks a
+ * ten millisecond target with boost for long frame runs when the
+ * host is not loaded. All math stays integer only.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -10,12 +18,6 @@
 
 #include "intf.h"
 #include "maps.bpf.h"
-#include <lib/sdt_alloc.h>
-
-/* Slab for BST entries with one entry per queued task at most through
- * the queued bit, so the backlog stays within the live task count.
- */
-static struct scx_allocator flow_rb_alloc;
 
 /* Nice weight on the weight scale from minus twenty to nineteen.
  * Strictly falls from ten thousand to one with one hundred at zero.
@@ -72,481 +74,235 @@ static __always_inline u32 flow_eff_w(u32 nw, u32 sw)
 	return n < s ? n : s;
 }
 
-/* Context-aware effective task weight. Boosts kernel threads, interactive
- * frame/audio cadence threads, and urgent producer-consumer wakeups.
- */
 static __always_inline u32 flow_task_weight(const struct task_struct *p,
 					    struct flow_task_ctx *t)
 {
 	u32 w = flow_eff_w(flow_nice_weight(p), flow_share_live(p));
 
+	(void)t;
 	if (!p)
 		return w;
-	if (p->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER))
+	if (p->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER)) {
 		w += (w >> 1);
-	if (t) {
-		u32 fl = READ_ONCE(t->flags);
-
-		if (fl & (u32)FLOW_FLAG_INTERACTIVE)
-			w += (w >> 1);
-		if (fl & (u32)FLOW_FLAG_URGENT)
-			w += (w >> 1);
+		if (w > (u32)FLOW_CGROUP_WEIGHT_MAX)
+			w = (u32)FLOW_CGROUP_WEIGHT_MAX;
 	}
-	if (w > (u32)FLOW_CGROUP_WEIGHT_MAX)
-		w = (u32)FLOW_CGROUP_WEIGHT_MAX;
 	return w;
 }
 
-static __always_inline u64 flow_fair_step(u32 w)
+/* Floor binary log. Zero maps to zero with no branch on high bits. */
+static __always_inline u32 flow_log2_u64(u64 v)
 {
-	u32 cw = w;
+	u32 r = 0;
 
-	if (cw == (u32)FLOW_CGROUP_WEIGHT_INVALID || cw < (u32)FLOW_CGROUP_WEIGHT_MIN)
-		cw = (u32)FLOW_CGROUP_WEIGHT_DFLT;
-	if (cw > (u32)FLOW_CGROUP_WEIGHT_MAX)
-		cw = (u32)FLOW_CGROUP_WEIGHT_MAX;
-	if (!cw)
-		return (u64)FLOW_SLICE_MIN_NS;
-	return (u64)FLOW_SLICE_MIN_NS * (u64)FLOW_CGROUP_WEIGHT_DFLT / (u64)cw;
-}
-
-static __always_inline s64 flow_fair_cap_add(s64 base, u64 add)
-{
-	const s64 vmax = (s64)0x7fffffffffffffffLL;
-
-	if (add > (u64)vmax)
-		return vmax;
-	if (base >= vmax - (s64)add)
-		return vmax;
-	return base + (s64)add;
-}
-
-static __always_inline u64 flow_lag_clamp(u64 lag)
-{
-	if (lag > (u64)FLOW_LAG_MAX_NS) {
-		__sync_fetch_and_add(&m_lag_clamp, 1ULL);
-		return (u64)FLOW_LAG_MAX_NS;
+	if (v >= (1ULL << 32)) {
+		v >>= 32;
+		r += 32;
 	}
-	return lag;
+	if (v >= (1ULL << 16)) {
+		v >>= 16;
+		r += 16;
+	}
+	if (v >= (1ULL << 8)) {
+		v >>= 8;
+		r += 8;
+	}
+	if (v >= (1ULL << 4)) {
+		v >>= 4;
+		r += 4;
+	}
+	if (v >= (1ULL << 2)) {
+		v >>= 2;
+		r += 2;
+	}
+	if (v >= (1ULL << 1))
+		r += 1;
+	return r;
 }
 
-static __always_inline u64 flow_rb_deadline(s64 vd)
+/* Fold with one eighth gain. First sample seeds. Zero sample keeps. */
+static __always_inline u64 flow_calc_avg(u64 old, u64 now)
 {
-	return (u64)vd + 0x8000000000000000ULL;
-}
-
-static __noinline s64 flow_fair_charge(s64 base, u64 used, u32 w)
-{
-	const s64 vmax = (s64)0x7fffffffffffffffLL;
-	u64 st = flow_fair_step(w);
-	u64 slice = (u64)FLOW_SLICE_MIN_NS;
-	u64 hi;
-	u64 lo;
-	u64 scaled;
-
-	if (!st)
-		st = (u64)FLOW_SLICE_MIN_NS;
-	if (!slice)
-		slice = (u64)FLOW_SLICE_MIN_NS;
-	hi = used / slice;
-	lo = used % slice;
-	if (hi > (u64)vmax / st)
-		return vmax;
-	scaled = hi * st + lo * st / slice;
-	if (scaled > (u64)vmax)
-		return vmax;
-	return flow_fair_cap_add(base, scaled);
-}
-
-static __always_inline u64 flow_burst_clamp(u64 burst_ns)
-{
-	if (!burst_ns || burst_ns > (u64)FLOW_SLICE_MIN_NS)
-		return (u64)FLOW_SLICE_MIN_NS;
-	if (burst_ns < (u64)FLOW_SLICE_FLOOR_NS)
-		return (u64)FLOW_SLICE_FLOOR_NS;
-	return burst_ns;
-}
-
-u64 m_ewma_fold;
-u64 m_ewma_sat;
-u64 m_ewma_freeze;
-
-static __always_inline u64 flow_ewma_next(u64 old, u64 sample)
-{
-	if (!sample)
+	if (!now)
 		return old;
 	if (!old)
-		return sample;
-	return (old + 3ULL * sample) >> 2;
+		return now;
+	return old - (old >> 3) + (now >> 3);
 }
 
-static __always_inline s64 flow_vd_for(s64 floored, u64 burst_ns, u32 w)
+/* Fold a rate sample. Interval zero keeps the old rate. */
+static __always_inline u64 flow_calc_avg_freq(u64 old_freq, u64 interval_ns)
 {
-	u64 b = flow_burst_clamp(burst_ns);
-	s64 vd = flow_fair_charge(floored, b, w);
+	u64 inst;
 
-	if (vd <= floored)
-		return flow_fair_cap_add(floored, 1);
-	return vd;
+	if (!interval_ns)
+		return old_freq;
+	inst = 1000000000ULL / interval_ns;
+	if (!old_freq)
+		return inst;
+	return old_freq - (old_freq >> 3) + (inst >> 3);
 }
 
-static __noinline u64 flow_smoothed_ref(struct flow_task_ctx *t)
+/* Urgency score from wake plus wait rates plus runtime. Log scale
+ * keeps frame tasks near short helpers. Sync plus irq plus pinned
+ * lifts mark direct wake chains and bound drivers. Floor at one. */
+static __always_inline u32 flow_calc_lat_cri(struct task_struct *p,
+					      struct flow_task_ctx *t)
 {
-	u64 ref;
+	u64 wait_f;
+	u64 wake_f;
+	u64 avg;
+	u32 w;
+	u64 comm;
+	u64 rt;
+	u32 a;
+	u32 b;
+	u32 s;
 
 	if (!t)
-		return 0;
-	if (!READ_ONCE(t->run_known))
-		return 0;
-	ref = READ_ONCE(t->run_max);
-	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
-	if (!ref)
-		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
-	return ref;
+		return 1U;
+	wait_f = READ_ONCE(t->wait_freq);
+	wake_f = READ_ONCE(t->wake_freq);
+	avg = READ_ONCE(t->avg_runtime_ns);
+	w = flow_task_weight(p, t);
+	comm = (wait_f + 1ULL) * (wake_f + 1ULL);
+	if (comm < wait_f + 1ULL)
+		comm = ~0ULL;
+	if (comm > (1ULL << 32))
+		comm = (1ULL << 32);
+	rt = ((avg >> 10) + 1ULL) * (u64)w;
+	if (rt < ((avg >> 10) + 1ULL))
+		rt = ~0ULL;
+	if (rt > (1ULL << 32))
+		rt = (1ULL << 32);
+	a = flow_log2_u64(comm);
+	b = flow_log2_u64(rt);
+	s = a + b;
+	if (s > 64U)
+		s = 64U;
+	s = s * s;
+	if (!s)
+		s = 1U;
+	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_IS_SYNC_WAKEUP)
+		s += 2U;
+	if (READ_ONCE(t->flags) & (u32)(FLOW_FLAG_WOKEN_BY_HARDIRQ | FLOW_FLAG_WOKEN_BY_SOFTIRQ))
+		s += 2U;
+	if (READ_ONCE(t->pinned_cpu) >= 0)
+		s += 1U;
+	if (s > 8192U)
+		s = 8192U;
+	return s;
 }
 
-static __noinline u64 flow_smoothed_eff(u64 ref, u64 burst_ns)
+/* Cost scale from system lag. At or below the mean costs one. Past
+ * the mean scales toward two at the lag cap. Range is 1024 to 2048. */
+static __always_inline u64 flow_calc_greedy_penalty(struct task_struct *p,
+						    struct flow_task_ctx *t)
 {
-	u64 b = flow_burst_clamp(burst_ns);
-	u64 e = ref > b ? ref : b;
+	u64 avg;
+	u64 svc;
+	u64 over;
+	u64 cap;
 
-	if (e > (u64)FLOW_SLICE_MIN_NS) {
-		__sync_fetch_and_add(&m_ewma_sat, 1ULL);
-		e = (u64)FLOW_SLICE_MIN_NS;
-	}
-	return e;
-}
-
-/* Unified Lag-Conserving EEVDF Virtual Deadline.
- * Prices tasks by their smoothed burst estimate, adds a bounded penalty for
- * continuous non-sleeping CPU hogs, and deducts bounded virtual lag credit.
- * When no lag credit applies the due time stays bound above the floor by a
- * single fair step derived from existing bounds only, so a task
- * far ahead in service cannot hold a distant due time past a stall.
- * The single step reuses LAG_MAX divided by SLICE_MAX with integer math only.
- */
-static __noinline s64 flow_eevdf_vd(struct flow_task_ctx *t, s64 floored,
-				    u64 lag_ns, u32 w)
-{
-	u64 burst = t ? flow_burst_clamp(READ_ONCE(t->burst_ns)) :
-			(u64)FLOW_SLICE_MIN_NS;
-	u64 sref = flow_smoothed_ref(t);
-	u64 req_ns = sref ? flow_smoothed_eff(sref, burst) : burst;
-	u64 tot = t ? READ_ONCE(t->run_total) : 0;
-	u64 clamped_lag = lag_ns > (u64)FLOW_LAG_MAX_NS ?
-			  (u64)FLOW_LAG_MAX_NS : lag_ns;
-	u64 credit;
-	s64 vd;
-
-	if (tot > (u64)FLOW_SLICE_MIN_NS) {
-		u64 extra = tot - (u64)FLOW_SLICE_MIN_NS;
-
-		if (extra > (u64)FLOW_SLICE_MIN_NS)
-			extra = (u64)FLOW_SLICE_MIN_NS;
-		req_ns += extra;
-	}
-
-	credit = ((req_ns >> 1) * clamped_lag) / (u64)FLOW_LAG_MAX_NS;
-	if (req_ns > credit + (u64)FLOW_SLICE_FLOOR_NS)
-		req_ns -= credit;
-	else
-		req_ns = (u64)FLOW_SLICE_FLOOR_NS;
-
-	vd = flow_fair_charge(floored, req_ns, w);
-	if (vd <= floored)
-		return flow_fair_cap_add(floored, 1);
-	if (!clamped_lag) {
-		u64 k = (u64)FLOW_LAG_MAX_NS / (u64)FLOW_SLICE_MAX_NS;
-		u64 st = flow_fair_step(w);
-		u64 hi = st / (u64)FLOW_SLICE_MIN_NS;
-		u64 lo = st % (u64)FLOW_SLICE_MIN_NS;
-		u64 kstep = k * hi * (u64)FLOW_SLICE_MIN_NS + k * lo;
-		s64 bound = flow_fair_cap_add(floored, kstep);
-
-		if (vd > bound)
-			return bound;
-	}
-	return vd;
-}
-
-/* Load-adaptive time slice calculation.
- * Never truncates slices below FLOW_SLICE_MIN_NS (1ms). Expands slices up to
- * FLOW_SLICE_MAX_NS (3ms) when the target CPU's tree is empty.
- */
-static __always_inline u64 flow_calc_slice(struct flow_task_ctx *t, bool q_empty)
-{
-	if (!q_empty)
-		return (u64)FLOW_SLICE_MIN_NS;
+	(void)p;
 	if (!t)
-		return (u64)FLOW_SLICE_MAX_NS;
-	if (READ_ONCE(t->flags) & ((u32)FLOW_FLAG_INTERACTIVE | (u32)FLOW_FLAG_URGENT))
-		return (u64)FLOW_SLICE_MAX_NS;
-	if (READ_ONCE(t->burst_ns) >= ((u64)FLOW_SLICE_MIN_NS >> 1))
-		return (u64)FLOW_SLICE_MAX_NS;
-	return (u64)FLOW_SLICE_MIN_NS * 2ULL;
+		return 1024ULL;
+	avg = READ_ONCE(sys_stat.avg_svc_time_iwgt);
+	svc = READ_ONCE(t->svc_time_iwgt);
+	if (svc <= avg)
+		return 1024ULL;
+	over = svc - avg;
+	cap = (u64)FLOW_TASK_LAG_MAX * 100ULL / (u64)FLOW_CGROUP_WEIGHT_DFLT;
+	if (!cap)
+		cap = 1ULL;
+	if (over >= cap)
+		return 2048ULL;
+	return 1024ULL + (over * 1024ULL) / cap;
 }
 
-static __always_inline u64 flow_burst_update(u64 old_burst, u64 total_used,
-					     u64 cur, bool runnable)
+/* Due time for queue order. Anchor sits behind the clock by a small
+ * window scaled by load. Cost is bounded runtime times greedy over
+ * score. Urgent tasks land inside the window and run at once. */
+static __always_inline u64 flow_calc_when_to_run(struct task_struct *p,
+						 struct flow_task_ctx *t)
 {
-	u64 b = flow_burst_clamp(old_burst);
-	u64 u = total_used;
-
-	if (!cur && u < (u64)FLOW_SLICE_MIN_NS)
-		u = (u64)FLOW_SLICE_MIN_NS;
-	if (u > (u64)FLOW_SLICE_MIN_NS)
-		u = (u64)FLOW_SLICE_MIN_NS;
-	if (runnable) {
-		if (u > b)
-			b = flow_ewma_next(u, b);
-		return flow_burst_clamp(b);
-	}
-	b = flow_ewma_next(b, u);
-	return flow_burst_clamp(b);
-}
-
-/* Per LLC floor with bound catch-up. A stale base returns last plus one
- * for uniqueness. A fresh base advances at most one STEP past last, so a
- * single enqueue cannot lift the floor past a stall. Pricing uses the
- * capped value. Zero means unseeded and reads fail open in callers. */
-static __noinline s64 flow_seq_floor(u32 llc, s64 v)
-{
-	const s64 vmax = (s64)0x7fffffffffffffffLL;
-	int i;
-
-	if (!flow_llc_ok(llc))
-		return v;
-	for (i = 0; i < 4; i++) {
-		s64 last = READ_ONCE(flow_llc_seq[llc]);
-		s64 want = v;
-		s64 next;
-
-		if (want <= last) {
-			if (last == vmax)
-				want = last;
-			else
-				want = last + 1;
-			next = want;
-		} else {
-			s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
-
-			if (want < cap)
-				next = want;
-			else
-				next = cap;
-		}
-		if (__sync_val_compare_and_swap(&flow_llc_seq[llc], last, next) == last)
-			return next;
-	}
-	s64 last = READ_ONCE(flow_llc_seq[llc]);
-
-	if (v <= last) {
-		if (last >= vmax - 1)
-			return vmax;
-		return __sync_add_and_fetch(&flow_llc_seq[llc], 1LL);
-	}
-	{
-		s64 cap = flow_fair_cap_add(last, (u64)FLOW_SEQ_FLOOR_STEP_NS);
-		s64 ret = v < cap ? v : cap;
-
-		(void)__sync_val_compare_and_swap(&flow_llc_seq[llc], last, ret);
-		return ret;
-	}
-}
-
-static __always_inline void flow_run_reset(struct flow_task_ctx *t)
-{
-	int i;
-
-	if (!t)
-		return;
-	for (i = 0; i < 8; i++) {
-		t->run_dur[i] = 0;
-		t->run_stamp[i] = 0;
-	}
-	t->run_min = 0;
-	t->run_max = 0;
-	t->run_total = 0;
-	t->run_head = 0;
-	t->run_pruned = 0;
-	t->run_known = 0;
-	t->run_pad = 0;
-}
-
-static __always_inline void flow_run_add(struct flow_task_ctx *t, u64 delta)
-{
-	u64 cur;
+	u64 clc;
+	u64 queued;
 	u64 win;
-
-	if (!t || !delta)
-		return;
-	win = (u64)FLOW_RUN_WIN_NS;
-	if (delta > win)
-		delta = win;
-	cur = READ_ONCE(t->run_total);
-	if (cur >= win)
-		return;
-	if (delta >= win - cur)
-		t->run_total = win;
-	else
-		t->run_total = cur + delta;
-}
-
-static __noinline void flow_run_recalc(struct flow_task_ctx *t)
-{
-	u64 min_d = 0;
-	u64 max_d = 0;
-	u64 min_s = 0;
-	u64 max_s = 0;
-	u64 kept = 0;
-	u64 s_min_d;
-	u64 s_max_d;
-	bool have = false;
-	int i;
+	u64 acc;
+	u64 adj;
+	u64 pen;
+	u32 lc;
+	u64 step;
 
 	if (!t)
-		return;
-	__sync_fetch_and_add(&m_ewma_fold, 1ULL);
-	#pragma unroll
-	for (i = 0; i < 8; i++) {
-		u64 d = READ_ONCE(t->run_dur[i]);
-		u64 s = READ_ONCE(t->run_stamp[i]);
+		return READ_ONCE(sys_stat.cur_logical_clk);
+	clc = READ_ONCE(sys_stat.cur_logical_clk);
+	queued = READ_ONCE(sys_stat.nr_queued);
+	win = (u64)FLOW_DL_COMPETE_WINDOW;
+	if (queued > 1ULL) {
+		u64 ncpu = scx_bpf_nr_cpu_ids();
 
-		if (!d || !s)
-			continue;
-		if (!have) {
-			min_d = d;
-			max_d = d;
-			min_s = s;
-			max_s = s;
-			have = true;
-		} else {
-			if (d < min_d)
-				min_d = d;
-			if (d > max_d)
-				max_d = d;
-			if (s < min_s)
-				min_s = s;
-			if (s > max_s)
-				max_s = s;
-		}
-		kept++;
+		if (!ncpu)
+			ncpu = 1ULL;
+		if (queued > ncpu)
+			win = win * ncpu / queued;
 	}
-	if (!have) {
-		t->run_min = 0;
-		t->run_max = 0;
-		t->run_known = 0;
-		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
-		return;
-	}
-	s_min_d = flow_ewma_next(READ_ONCE(t->run_min), min_d);
-	s_max_d = flow_ewma_next(READ_ONCE(t->run_max), max_d);
-	if (s_max_d < s_min_d)
-		s_max_d = s_min_d;
-	t->run_min = s_min_d;
-	t->run_max = s_max_d;
-	if (s_max_d < (u64)FLOW_SLICE_FLOOR_NS) {
-		t->run_known = 1;
-		__sync_fetch_and_add(&m_ewma_sat, 1ULL);
-		return;
-	}
-	if (kept < (u64)FLOW_RUN_NEED) {
-		t->run_known = 0;
-		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
-		return;
-	}
-	if (max_s < min_s || max_s - min_s < (u64)FLOW_RUN_SPAN_NS) {
-		t->run_known = 0;
-		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
-		return;
-	}
-	if (s_max_d - s_min_d > (s_min_d >> 1)) {
-		t->run_known = 0;
-		__sync_fetch_and_add(&m_ewma_freeze, 1ULL);
-		return;
-	}
-	t->run_known = 1;
-	__sync_fetch_and_add(&m_ewma_sat, 1ULL);
+	acc = READ_ONCE(t->acc_runtime_ns);
+	if (acc > (u64)FLOW_SLICE_MAX_NS)
+		acc = (u64)FLOW_SLICE_MAX_NS;
+	adj = (u64)FLOW_SLICE_MAX_NS + acc;
+	pen = flow_calc_greedy_penalty(p, t);
+	lc = flow_calc_lat_cri(p, t);
+	if (!lc)
+		lc = 1U;
+	step = (adj * pen) / ((u64)lc * 1024ULL);
+	if (clc > win)
+		return clc - win + step;
+	return step;
 }
 
-static __noinline void flow_run_prune(struct flow_task_ctx *t, u64 now)
+/* Base slice from a ten millisecond window over online CPUs. Boost
+ * covers one full frame run when the host is not loaded. Bounds are
+ * five hundred microseconds to five milliseconds, boost to twenty. */
+static __always_inline u64 flow_calc_slice(struct flow_task_ctx *t,
+					    struct flow_running_state *rs)
 {
-	u64 win;
-	int i;
+	u64 ncpu;
+	u64 queued;
+	u64 base;
+	u64 avg;
 
-	if (!t || !now)
-		return;
-	win = (u64)FLOW_RUN_WIN_NS;
-	/* Keep each run-history access at a fixed offset for the verifier. */
-	#pragma unroll
-	for (i = 0; i < 8; i++) {
-		u64 s = READ_ONCE(t->run_stamp[i]);
+	ncpu = scx_bpf_nr_cpu_ids();
+	if (!ncpu)
+		ncpu = 1ULL;
+	queued = READ_ONCE(sys_stat.nr_queued);
+	if (!queued)
+		queued = 1ULL;
+	base = (u64)FLOW_TARGETED_LATENCY_NS * ncpu / queued;
+	if (base < (u64)FLOW_SLICE_MIN_NS)
+		base = (u64)FLOW_SLICE_MIN_NS;
+	if (base > (u64)FLOW_SLICE_MAX_NS)
+		base = (u64)FLOW_SLICE_MAX_NS;
+	if (!t)
+		return base;
+	avg = READ_ONCE(t->avg_runtime_ns);
+	if (avg >= READ_ONCE(sys_stat.slice_ns) && queued <= ncpu) {
+		u64 pinned = 0;
 
-		if (s && s > now)
-			return;
-	}
-	/* Keep each run-history access at a fixed offset for the verifier. */
-	#pragma unroll
-	for (i = 0; i < 8; i++) {
-		u64 s = READ_ONCE(t->run_stamp[i]);
-		u64 d = READ_ONCE(t->run_dur[i]);
+		if (rs)
+			pinned = READ_ONCE(rs->nr_pinned);
+		if (!pinned) {
+			u64 boost = avg + (u64)FLOW_SLICE_MIN_NS;
 
-		if (!s || !d)
-			continue;
-		if (now - s > win) {
-			t->run_dur[i] = 0;
-			t->run_stamp[i] = 0;
-			t->run_pruned++;
+			if (boost < (u64)FLOW_SLICE_MIN_NS)
+				boost = (u64)FLOW_SLICE_MIN_NS;
+			if (boost > (u64)FLOW_SLICE_BOOST_MAX)
+				boost = (u64)FLOW_SLICE_BOOST_MAX;
+			return boost;
 		}
 	}
-	flow_run_recalc(t);
-}
-
-static __noinline void flow_run_close(struct flow_task_ctx *t, u64 now)
-{
-	u64 tot;
-	u64 win;
-	u32 head;
-	u32 idx;
-	u32 prev_idx;
-	u64 prev_d;
-	u64 prev_s;
-	int i;
-
-	if (!t || !now)
-		return;
-	tot = READ_ONCE(t->run_total);
-	if (!tot)
-		return;
-	win = (u64)FLOW_RUN_WIN_NS;
-	if (tot > win)
-		tot = win;
-	/* Keep each run-history access at a fixed offset for the verifier. */
-	#pragma unroll
-	for (i = 0; i < 8; i++) {
-		u64 s = READ_ONCE(t->run_stamp[i]);
-
-		if (s && s > now)
-			return;
-	}
-	head = READ_ONCE(t->run_head);
-	idx = head & 7U;
-	prev_idx = (head - 1U) & 7U;
-	prev_d = READ_ONCE(t->run_dur[prev_idx]);
-	prev_s = READ_ONCE(t->run_stamp[prev_idx]);
-
-	if (prev_s && now > prev_s &&
-	    (now - prev_s) <= (u64)FLOW_CADENCE_MAX_NS &&
-	    tot <= ((u64)FLOW_SLICE_MIN_NS * 2ULL))
-		__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_INTERACTIVE);
-	else if (tot >= (u64)FLOW_SLICE_MAX_NS)
-		__sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_INTERACTIVE);
-
-	t->run_dur[idx] = flow_ewma_next(prev_d, tot);
-	t->run_stamp[idx] = now;
-	t->run_head = head + 1U;
-	t->run_total = 0;
-	flow_run_recalc(t);
+	return base;
 }
 
 #endif
