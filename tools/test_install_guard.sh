@@ -372,22 +372,37 @@ fi
 
 # Busy cores run at max with idle cores at half through one set call.
 # The call never sends zero and never steers placement, and no other
-# frequency call steers placement. Timer only decays idle cores while
-# running plus tick ramp busy cores to max. Shared commit lives in select
-# so the set plus max plus half checks read select with use checks in dispatch.
-grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
+# frequency call steers placement. Timer tracks the idle window with
+# no set while dispatch applies half plus running plus tick ramp busy
+# cores to max. Shared commit lives in enqueue so the set plus max plus
+# half checks read enqueue with use checks in dispatch and no commit in
+# select or the timer.
+grep -q "never steers" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "freq prose missing"
 grep -q "never touches a busy core" "${DISP_HDR}" || fail "freq dispatch prose missing"
-grep -q "never sends zero" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq never zero prose missing"
-grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf set missing"
-grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf max missing"
-grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf half missing"
+grep -q "never sends zero" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "freq never zero prose missing"
+grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "cpuperf set missing"
+grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "cpuperf max missing"
+grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "cpuperf half missing"
+grep -q "flow_cpuperf_commit" "${SRC_DIR}/src/bpf/enqueue.bpf.h" || fail "cpuperf commit missing"
 grep -q "flow_cpuperf_commit" "${DISP_HDR}" || fail "cpuperf use missing"
-if grep -q "cpuperf" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
-    if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+if grep -q "flow_cpuperf_commit" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "commit in select reappeared"
+fi
+if grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "set in select reappeared"
+fi
+if grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "power in select reappeared"
+fi
+if awk '/static int flow_stat_timer_cb/,/^}/' "${DISP_HDR}" | grep -q "cpuperf" 2>/dev/null; then
+    fail "timer freq reappeared"
+fi
+if grep -q "cpuperf" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${DISP_HDR}" 2>/dev/null; then
+    if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/enqueue.bpf.h" 2>/dev/null; then
         fail "freq call not set only"
     fi
 fi
-if grep "scx_bpf_cpufreq\|bpf_cpufreq\|freq_set\|perf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null | grep -v "scx_bpf_cpuperf_set" | grep -q .; then
+if grep "scx_bpf_cpufreq\|bpf_cpufreq\|freq_set\|perf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${SRC_DIR}/src/bpf/enqueue.bpf.h" "${DISP_HDR}" 2>/dev/null | grep -v "scx_bpf_cpuperf_set" | grep -q .; then
     fail "freq steer reappeared"
 fi
 
@@ -578,11 +593,21 @@ grep -q "nr_preempt" "${ENQ_HDR}" || fail "preempt count missing"
 grep -q "near stop" "${ENQ_HDR}" || fail "soft yield prose missing"
 # Soft yield stays CAS only with no IPI. All wakes stay idle only except
 # the soft yield path which claims the victim stop stamp with no kick.
-# Two idle kick sites stay in the shared helper plus select direct.
-# Select kicks the won idle CPU after a LOCAL insert and the shared
-# enqueue path reuses the helper.
+# Three idle kick sites stay with the locked helper plus the lockfree
+# helper plus select direct. Select kicks the won idle CPU after a LOCAL
+# insert and the shared enqueue paths reuse the helpers. The locked helper
+# ramps to max while the lockfree helper never touches freq.
 [ "$(grep -rh "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "0" ] || fail "ipi preempt reappeared"
-[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "2" ] || fail "idle kick sites drifted"
+[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "3" ] || fail "idle kick sites drifted"
+[ "$(grep -rh "SCX_KICK_IDLE" "${ENQ_HDR}" | wc -l | tr -d ' ')" = "2" ] || fail "enqueue kick count drifted"
+[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf/select.bpf.h" | wc -l | tr -d ' ')" = "1" ] || fail "select kick count drifted"
+grep -q "flow_kick_idle_lockfree" "${ENQ_HDR}" || fail "lockfree kick missing"
+if grep -q "SCX_KICK_IDLE" "${DISP_HDR}" 2>/dev/null; then
+    fail "dispatch kick reappeared"
+fi
+if awk '/static int flow_stat_timer_cb/,/^}/' "${DISP_HDR}" | grep -q "SCX_KICK_IDLE\|scx_bpf_kick_cpu" 2>/dev/null; then
+    fail "timer kick reappeared"
+fi
 grep -q "with no IPI" "${ENQ_HDR}" || fail "no ipi prose missing"
 grep -q "yields soft" "${SRC_DIR}/src/bpf/intf.h" || fail "soft prose missing"
 grep -q "Fallback" "${ENQ_HDR}" || fail "fallback prose missing"
@@ -730,11 +755,20 @@ fi
 # Ops stay at fifteen with no probe added.
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "15" ] || fail "ops count drifted"
 
-# DSQ drain keeps thirteen bounded loops with no new program.
+# DSQ drain keeps twelve bounded loops with no new program.
 # Five scans live in select for the constrained pick plus tier order.
-# Eight scans live in dispatch for the DSQ drain plus timer plus init
-# plus exit, all bounded by the live CPU plus LLC counts.
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "loop budget drifted"
+# Seven scans live in dispatch for the DSQ drain plus board timer plus
+# init plus exit, all bounded by the live CPU plus LLC counts. The timer
+# stays board only with no idle scan.
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "12" ] || fail "loop budget drifted"
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf/select.bpf.h" | wc -l | tr -d ' ')" = "5" ] || fail "select loop drifted"
+[ "$(grep -rh "bpf_for" "${DISP_HDR}" | wc -l | tr -d ' ')" = "7" ] || fail "dispatch loop drifted"
+if awk '/static int flow_stat_timer_cb/,/^}/' "${DISP_HDR}" | grep -q "scx_bpf_test_and_clear_cpu_idle" 2>/dev/null; then
+    fail "timer idle scan reappeared"
+fi
+if awk '/static int flow_stat_timer_cb/,/^}/' "${DISP_HDR}" | grep -q 'bpf_for(l,' 2>/dev/null; then
+    fail "timer idle loop reappeared"
+fi
 
 # Queues are one per CPU plus one per LLC plus fallback with due time order.
 # DSQ ids stay at 0x1000 plus 0x2000 plus 0x6100. Moves go to local with
@@ -964,7 +998,7 @@ if grep -q "flow_llc_dsq_prio" "${SRC_DIR}/src/bpf" 2>/dev/null; then
 fi
 
 # Loop plus map plus ops budgets stay locked.
-[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "13" ] || fail "loop budget drifted"
+[ "$(grep -rh "bpf_for" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "12" ] || fail "loop budget drifted"
 [ "$(grep -rh 'SEC(".maps")' "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "4" ] || fail "maps count drifted"
 [ "$(grep -rh "BPF_STRUCT_OPS" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "15" ] || fail "ops count drifted"
 
@@ -976,9 +1010,16 @@ skip_at="$(grep -n "kick_skip" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d:
 
 # Timer only power with 100 percent busy plus 50 percent idle.
 grep -q "flow_cpuperf_commit" "${DISP_HDR}" || fail "power mark missing"
-grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power max missing"
-grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power half missing"
+grep -q "flow_cpuperf_commit" "${ENQ_HDR}" || fail "power commit missing"
+grep -q "SCX_CPUPERF_ONE" "${ENQ_HDR}" || fail "power max missing"
+grep -q "SCX_CPUPERF_ONE / 2" "${ENQ_HDR}" || fail "power half missing"
 grep -q "never touches a busy core" "${DISP_HDR}" || fail "power timer prose missing"
+if grep -q "flow_cpuperf_commit\|scx_bpf_cpuperf_set\|SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" 2>/dev/null; then
+    fail "power in select reappeared"
+fi
+if awk '/static int flow_stat_timer_cb/,/^}/' "${DISP_HDR}" | grep -q "cpuperf\|SCX_CPUPERF" 2>/dev/null; then
+    fail "power in timer reappeared"
+fi
 if awk '/void BPF_STRUCT_OPS\(flow_stopping/,/^}/' "${DISP_HDR}" | grep -q "flow_cpuperf_commit" 2>/dev/null; then
     fail "stopping drop reappeared"
 fi

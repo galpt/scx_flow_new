@@ -169,14 +169,19 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	/* Nothing queued and prev is still runnable: run prev on. */
 	if (flow_try_continue_prev(c, llc, prev))
 		return;
-	/* Idle with no work. Holds the lock here, so apply the deferred
-	 * half when the timer window elapsed. */
+	/* Idle with no work. Starts the window here and applies half
+	 * once the window elapsed. Holds the lock. */
 	{
 		struct flow_running_state *rs = &flow_running_state[c];
 		u64 idle = READ_ONCE(rs->idle_start_clk);
 		u64 now = bpf_ktime_get_ns();
 
-		if (idle && now - idle >= (u64)FLOW_SYS_STAT_INTERVAL_NS &&
+		if (!idle) {
+			if (flow_cpu_live(c))
+				WRITE_ONCE(rs->idle_start_clk, now);
+			return;
+		}
+		if (now - idle >= (u64)FLOW_SYS_STAT_INTERVAL_NS &&
 		    flow_cpu_live(c)) {
 			if (READ_ONCE(rs->cpuperf_cur) != (u32)(SCX_CPUPERF_ONE / 2))
 				flow_cpuperf_commit(c, (u32)(SCX_CPUPERF_ONE / 2), now);
@@ -314,6 +319,9 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 				scx_bpf_task_set_slice(p, base);
 		}
 	}
+	/* A claimed stop yields at the next check with no interrupt. */
+	if (cur > 1ULL && READ_ONCE(rs->est_stopping_clk) <= now)
+		scx_bpf_task_set_slice(p, 1U);
 }
 
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
@@ -390,19 +398,15 @@ void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
 
 static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 {
-	u32 k = 0;
 	u64 sum = 0;
 	u64 max = 0;
 	u32 cpu;
-	u32 l;
 	u64 ncpu;
 	u64 nq;
 	u64 slice;
 
 	(void)map;
 	(void)key;
-	/* Timer runs as async callback. Touch the arena so the verifier
-	 * ties this path to the arena for the topology helpers below. */
 	flow_touch_arena();
 	/* Mean plus max score over online CPUs. */
 	bpf_for(cpu, 0, FLOW_MAX_CPUS) {
@@ -440,33 +444,6 @@ static int flow_stat_timer_cb(void *map, int *key, struct bpf_timer *timer)
 		WRITE_ONCE(sys_stat.avg_svc_time_iwgt,
 			   READ_ONCE(sys_stat.avg_svc_time_iwgt) -
 			   (READ_ONCE(sys_stat.avg_svc_time_iwgt) >> 3));
-	/* Idle cores decay to half. Busy cores are never touched here. Timer
-	 * holds no rq lock, so it never sets freq. It tracks the idle
-	 * window and defers the half set to dispatch. */
-	bpf_for(l, 0, FLOW_MAX_CPUS) {
-		struct flow_running_state *rs;
-		u64 idle;
-
-		if ((u64)l >= scx_bpf_nr_cpu_ids())
-			continue;
-		rs = &flow_running_state[l];
-		idle = READ_ONCE(rs->idle_start_clk);
-		if (!idle) {
-			/* No non destructive idle test in this tree, so the timer
-			 * consumes one idle mark to start the decay window. */
-			if (scx_bpf_test_and_clear_cpu_idle((s32)l))
-				WRITE_ONCE(rs->idle_start_clk, bpf_ktime_get_ns());
-			else
-				continue;
-		}
-		if (bpf_ktime_get_ns() - READ_ONCE(rs->idle_start_clk) <
-		    (u64)FLOW_SYS_STAT_INTERVAL_NS)
-			continue;
-		if (!flow_cpu_live(l))
-			continue;
-		/* Busy skip done. Defer the half set to dispatch. */
-		(void)k;
-	}
 	bpf_timer_start(timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);
 	return 0;
 }
@@ -496,7 +473,7 @@ void BPF_STRUCT_OPS(flow_set_cpumask, struct task_struct *p, const struct cpumas
 			flow_stat_inc(qllc, 8);
 			return;
 		}
-		flow_kick_idle_only(owner, p, qllc);
+		flow_kick_idle_lockfree(owner, p, qllc);
 		flow_stat_inc(qllc, 11);
 		return;
 	}
@@ -598,6 +575,17 @@ void BPF_STRUCT_OPS(flow_exit_task, struct task_struct *p, struct scx_exit_task_
 
 			if (nq)
 				__sync_val_compare_and_swap(&sys_stat.nr_queued, nq, nq - 1);
+		}
+	}
+	if (READ_ONCE(t->pinned_cpu) >= 0) {
+		s32 pc = READ_ONCE(t->pinned_cpu);
+
+		t->pinned_cpu = -1;
+		if (pc >= 0 && flow_cpu_ok((u32)pc)) {
+			struct flow_running_state *rs = &flow_running_state[(u32)pc];
+
+			if (READ_ONCE(rs->nr_pinned))
+				__sync_fetch_and_sub(&rs->nr_pinned, 1U);
 		}
 	}
 }

@@ -55,6 +55,47 @@ static __always_inline void flow_queued_drop(u32 llc)
 	}
 }
 
+/* A busy core runs at max and an idle core runs at half. The call
+ * stays on one live core and never sends zero. Half equals
+ * SCX_CPUPERF_ONE / 2. Frequency never steers placement. Caller must
+ * hold the target runqueue lock, so never call from select or the
+ * timer, which run without any lock. The set applies only when the
+ * level differs or one millisecond passed since the last commit, so
+ * rate limits keep the target. */
+static __always_inline void flow_cpuperf_commit(u32 cpu, u32 level, u64 now)
+{
+	struct flow_running_state *rs;
+	struct rq *locked;
+
+	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
+		return;
+	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
+		return;
+	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
+		return;
+	if (!level || level > (u32)SCX_CPUPERF_ONE)
+		return;
+	locked = scx_bpf_locked_rq();
+	if (!locked)
+		return;
+	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
+		struct rq *target = scx_bpf_cpu_rq((s32)cpu);
+
+		if (!target || target != locked)
+			return;
+	} else {
+		if (cpu != (u32)bpf_get_smp_processor_id())
+			return;
+	}
+	rs = &flow_running_state[cpu];
+	if (READ_ONCE(rs->cpuperf_cur) == level &&
+	    now - READ_ONCE(rs->cpuperf_commit_clk) < 1000000ULL)
+		return;
+	scx_bpf_cpuperf_set((s32)cpu, level);
+	WRITE_ONCE(rs->cpuperf_cur, level);
+	WRITE_ONCE(rs->cpuperf_commit_clk, now);
+}
+
 /* Idle wake only. Misses count a skip with no wake. A bad or masked
  * or offline or busy target skips. A won idle claim ramps to max and
  * fires one idle kick. Caller holds the target runqueue lock. Never
@@ -89,6 +130,42 @@ static __noinline bool flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 l
 		return false;
 	}
 	flow_cpuperf_commit(c, (u32)SCX_CPUPERF_ONE, bpf_ktime_get_ns());
+	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
+	flow_stat_inc(llc, 7);
+	return true;
+}
+
+/* Idle wake without freq touch. Runs without the runqueue lock,
+ * so it never sets freq. Misses count a skip. True means kicked. */
+static __noinline bool flow_kick_idle_lockfree(s32 tgt, struct task_struct *p, u32 llc)
+{
+	u32 c;
+
+	if (tgt < 0) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
+	if (!flow_cpu_allowed(tgt, p)) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
+	if (!flow_cpu_live((u32)tgt)) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
+	if (!scx_bpf_test_and_clear_cpu_idle(tgt)) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
+	c = (u32)tgt;
+	if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
+	if ((u64)c >= scx_bpf_nr_cpu_ids()) {
+		flow_stat_inc(llc, 8);
+		return false;
+	}
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 	return true;
@@ -376,6 +453,17 @@ void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
 		if (!flow_llc_ok(llc))
 			llc = 0;
 		flow_queued_drop(llc);
+	}
+	if (READ_ONCE(t->pinned_cpu) >= 0) {
+		s32 pc = READ_ONCE(t->pinned_cpu);
+
+		t->pinned_cpu = -1;
+		if (pc >= 0 && flow_cpu_ok((u32)pc)) {
+			struct flow_running_state *rs = &flow_running_state[(u32)pc];
+
+			if (READ_ONCE(rs->nr_pinned))
+				__sync_fetch_and_sub(&rs->nr_pinned, 1U);
+		}
 	}
 }
 #endif
