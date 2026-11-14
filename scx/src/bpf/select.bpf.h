@@ -163,20 +163,174 @@ static __always_inline bool flow_ccx_match(bool use, u32 cx, u32 hint)
 	return cx == hint;
 }
 
+/* Claim inputs ride one hint struct so the claim plus each tier stays
+ * within two args. The caller builds the hint on stack then passes a
+ * pointer with no extra alloc and no new loop. Integer fields only. */
+struct flow_claim_hint {
+	s32 prev_cpu;
+	s32 waker_cpu;
+	bool sync;
+	int hint_llc;
+	u32 hint_ccx;
+	bool use_ccx;
+};
+
+/* Claim view pairs the task plus the hint plus the idle masks, so each
+ * tier helper takes one arg with no logic change. Masks are borrowed
+ * from the claim and stay valid for the call only. */
+struct flow_claim_ctx {
+	struct task_struct *p;
+	const struct flow_claim_hint *hint;
+	const struct cpumask *idle_mask;
+	const struct cpumask *smt_mask;
+	bool smt_on;
+};
+
+/* T0 takes prev, or waker on sync, when fully idle. */
+static __always_inline s32 flow_claim_t0(const struct flow_claim_ctx *ctx)
+{
+	s32 prev_cpu;
+	s32 waker_cpu;
+	bool sync;
+
+	if (!ctx || !ctx->hint || !ctx->p)
+		return -1;
+	prev_cpu = ctx->hint->prev_cpu;
+	waker_cpu = ctx->hint->waker_cpu;
+	sync = ctx->hint->sync;
+	if (sync && waker_cpu >= 0 && flow_cpu_allowed(waker_cpu, ctx->p) &&
+	    flow_cpu_live((u32)waker_cpu)) {
+		if (bpf_cpumask_test_cpu((u32)waker_cpu, ctx->smt_on ? ctx->smt_mask : ctx->idle_mask)) {
+			if (scx_bpf_test_and_clear_cpu_idle(waker_cpu))
+				return waker_cpu;
+		}
+	}
+	if (prev_cpu >= 0 && flow_cpu_allowed(prev_cpu, ctx->p) && flow_cpu_live((u32)prev_cpu)) {
+		if (bpf_cpumask_test_cpu((u32)prev_cpu, ctx->smt_on ? ctx->smt_mask : ctx->idle_mask)) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+		}
+	}
+	return -1;
+}
+
+/* T1 takes a same group fully idle core. */
+static __always_inline s32 flow_claim_t1(const struct flow_claim_ctx *ctx)
+{
+	int hint_llc;
+	u32 hint_ccx;
+	u32 c;
+
+	if (!ctx || !ctx->hint || !ctx->p)
+		return -1;
+	hint_llc = ctx->hint->hint_llc;
+	hint_ccx = ctx->hint->hint_ccx;
+	if (hint_llc < 0 || !ctx->hint->use_ccx || hint_ccx == (u32)FLOW_CCX_UNKNOWN)
+		return -1;
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		int vl;
+
+		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, ctx->p))
+			continue;
+		if (!bpf_cpumask_test_cpu(c, ctx->smt_mask))
+			continue;
+		vl = topo_cpu_to_llc_id(c);
+		if (vl != hint_llc)
+			continue;
+		if (!flow_ccx_match(ctx->hint->use_ccx, flow_cpu_ccx(c), hint_ccx))
+			continue;
+		if (scx_bpf_test_and_clear_cpu_idle((s32)c))
+			return (s32)c;
+	}
+	return -1;
+}
+
+/* T2 takes a same LLC fully idle core. */
+static __always_inline s32 flow_claim_t2(const struct flow_claim_ctx *ctx)
+{
+	int hint_llc;
+	u32 c;
+
+	if (!ctx || !ctx->hint || !ctx->p)
+		return -1;
+	hint_llc = ctx->hint->hint_llc;
+	if (hint_llc < 0)
+		return -1;
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		int vl;
+
+		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, ctx->p))
+			continue;
+		if (!bpf_cpumask_test_cpu(c, ctx->smt_mask))
+			continue;
+		vl = topo_cpu_to_llc_id(c);
+		if (vl != hint_llc)
+			continue;
+		if (scx_bpf_test_and_clear_cpu_idle((s32)c))
+			return (s32)c;
+	}
+	return -1;
+}
+
+/* T3 takes a same LLC partial idle thread. */
+static __always_inline s32 flow_claim_t3(const struct flow_claim_ctx *ctx)
+{
+	int hint_llc;
+	u32 c;
+
+	if (!ctx || !ctx->hint || !ctx->p)
+		return -1;
+	hint_llc = ctx->hint->hint_llc;
+	if (hint_llc < 0)
+		return -1;
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		int vl;
+
+		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, ctx->p))
+			continue;
+		if (!bpf_cpumask_test_cpu(c, ctx->idle_mask))
+			continue;
+		vl = topo_cpu_to_llc_id(c);
+		if (vl != hint_llc)
+			continue;
+		if (scx_bpf_test_and_clear_cpu_idle((s32)c))
+			return (s32)c;
+	}
+	return -1;
+}
+
+/* T4 takes any idle CPU in fixed order. */
+static __always_inline s32 flow_claim_t4(const struct flow_claim_ctx *ctx)
+{
+	u32 c;
+
+	if (!ctx || !ctx->p)
+		return -1;
+	bpf_for(c, 0, FLOW_MAX_CPUS) {
+		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, ctx->p))
+			continue;
+		if (!bpf_cpumask_test_cpu(c, ctx->idle_mask))
+			continue;
+		if (scx_bpf_test_and_clear_cpu_idle((s32)c))
+			return (s32)c;
+	}
+	return -1;
+}
+
 /* Claim one idle CPU through the tier order. Each step uses an atomic
  * claim, so concurrent wakes never pick the same CPU. T0 is prev or
  * the waker on sync. T1 is the same group. T2 is the same LLC. T3 is
  * a partial SMT thread in the same LLC. T4 is any idle CPU in fixed
  * order. Minus one means no idle CPU was won. */
-static __noinline s32 flow_claim_idle(s32 prev_cpu, s32 waker_cpu, struct task_struct *p,
-				      bool sync, int hint_llc, u32 hint_ccx, bool use_ccx)
+static __noinline s32 flow_claim_idle(struct task_struct *p, const struct flow_claim_hint *hint)
 {
 	const struct cpumask *idle_mask;
 	const struct cpumask *smt_mask;
-	bool smt_on;
-	s32 best = -1;
-	u32 c;
+	struct flow_claim_ctx ctx;
+	s32 best;
 
+	if (!p || !hint)
+		return -1;
 	idle_mask = scx_bpf_get_idle_cpumask();
 	if (!idle_mask)
 		return -1;
@@ -185,94 +339,20 @@ static __noinline s32 flow_claim_idle(s32 prev_cpu, s32 waker_cpu, struct task_s
 		scx_bpf_put_cpumask(idle_mask);
 		return -1;
 	}
-	smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
-
-	/* T0: prev, or waker on sync, when fully idle. */
-	if (sync && waker_cpu >= 0 && flow_cpu_allowed(waker_cpu, p) &&
-	    flow_cpu_live((u32)waker_cpu)) {
-		if (bpf_cpumask_test_cpu((u32)waker_cpu, smt_on ? smt_mask : idle_mask)) {
-			if (scx_bpf_test_and_clear_cpu_idle(waker_cpu)) {
-				best = waker_cpu;
-				goto out;
-			}
-		}
-	}
-	if (prev_cpu >= 0 && flow_cpu_allowed(prev_cpu, p) && flow_cpu_live((u32)prev_cpu)) {
-		if (bpf_cpumask_test_cpu((u32)prev_cpu, smt_on ? smt_mask : idle_mask)) {
-			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-				best = prev_cpu;
-				goto out;
-			}
-		}
-	}
-	/* T1: same group fully idle core. */
-	if (hint_llc >= 0 && use_ccx && hint_ccx != (u32)FLOW_CCX_UNKNOWN) {
-		bpf_for(c, 0, FLOW_MAX_CPUS) {
-			int vl;
-
-			if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, p))
-				continue;
-			if (!bpf_cpumask_test_cpu(c, smt_mask))
-				continue;
-			vl = topo_cpu_to_llc_id(c);
-			if (vl != hint_llc)
-				continue;
-			if (!flow_ccx_match(use_ccx, flow_cpu_ccx(c), hint_ccx))
-				continue;
-			if (scx_bpf_test_and_clear_cpu_idle((s32)c)) {
-				best = (s32)c;
-				goto out;
-			}
-		}
-	}
-	/* T2: same LLC fully idle core. */
-	if (hint_llc >= 0) {
-		bpf_for(c, 0, FLOW_MAX_CPUS) {
-			int vl;
-
-			if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, p))
-				continue;
-			if (!bpf_cpumask_test_cpu(c, smt_mask))
-				continue;
-			vl = topo_cpu_to_llc_id(c);
-			if (vl != hint_llc)
-				continue;
-			if (scx_bpf_test_and_clear_cpu_idle((s32)c)) {
-				best = (s32)c;
-				goto out;
-			}
-		}
-	}
-	/* T3: same LLC partial idle thread. */
-	if (hint_llc >= 0) {
-		bpf_for(c, 0, FLOW_MAX_CPUS) {
-			int vl;
-
-			if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, p))
-				continue;
-			if (!bpf_cpumask_test_cpu(c, idle_mask))
-				continue;
-			vl = topo_cpu_to_llc_id(c);
-			if (vl != hint_llc)
-				continue;
-			if (scx_bpf_test_and_clear_cpu_idle((s32)c)) {
-				best = (s32)c;
-				goto out;
-			}
-		}
-	}
-	/* T4: any idle CPU in fixed order. */
-	bpf_for(c, 0, FLOW_MAX_CPUS) {
-		if (!flow_cpu_live(c) || !flow_cpu_allowed((s32)c, p))
-			continue;
-		if (!bpf_cpumask_test_cpu(c, idle_mask))
-			continue;
-		if (scx_bpf_test_and_clear_cpu_idle((s32)c)) {
-			best = (s32)c;
-			goto out;
-		}
-	}
-out:
+	ctx.p = p;
+	ctx.hint = hint;
+	ctx.idle_mask = idle_mask;
+	ctx.smt_mask = smt_mask;
+	ctx.smt_on = READ_ONCE(flow_smt_enabled) ? true : false;
+	best = flow_claim_t0(&ctx);
+	if (best < 0)
+		best = flow_claim_t1(&ctx);
+	if (best < 0)
+		best = flow_claim_t2(&ctx);
+	if (best < 0)
+		best = flow_claim_t3(&ctx);
+	if (best < 0)
+		best = flow_claim_t4(&ctx);
 	scx_bpf_put_cpumask(smt_mask);
 	scx_bpf_put_cpumask(idle_mask);
 	return best;
@@ -332,7 +412,17 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		hint_ccx = flow_cpu_ccx((u32)hint);
 	}
 
-	cpu_id = flow_claim_idle(hint, waker_cpu, p, sync, hint_llc, hint_ccx, use_ccx);
+	{
+		struct flow_claim_hint claim;
+
+		claim.prev_cpu = hint;
+		claim.waker_cpu = waker_cpu;
+		claim.sync = sync;
+		claim.hint_llc = hint_llc;
+		claim.hint_ccx = hint_ccx;
+		claim.use_ccx = use_ccx;
+		cpu_id = flow_claim_idle(p, &claim);
+	}
 	if (cpu_id < 0)
 		return flow_constrained_target(hint, p);
 
