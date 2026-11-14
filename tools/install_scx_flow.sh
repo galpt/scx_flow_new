@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# Install the flow scheduler by overlaying the scx dir into
-# a workspace checkout and building the binary.
+# Build and install scx_flow by copying the scx directory into a checkout
+# of the scx workspace.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
@@ -12,11 +12,9 @@ WS="${1:-/tmp/scx-workspace}"
 DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
 VER="5.2.26"
-# Pinned fork ref, same as repo CI.
-# The commit id matches the upstream sched-ext/scx main id used in CI.
-# The installer fetches from the galpt/scx mirror while CI fetches from
-# sched-ext/scx directly. Both check out the same commit id, and the
-# rev-parse check below refuses any other head.
+# The workspace commit is pinned and matches the one CI uses. CI fetches
+# it from sched-ext/scx, the installer from the galpt/scx mirror, and the
+# check after the fetch refuses any other commit.
 SCX_REF="e7b3a219617472cf78880ac424714e52c932db61"
 FORK="https://github.com/galpt/scx"
 
@@ -32,8 +30,7 @@ need clang
 need rsync
 need git
 
-# Kernels below 7.1 are refused. The peek path needs the fixed
-# kfunc there, and the compat shims used here target that floor.
+# The scheduler relies on kfuncs and compat helpers that need 7.1 or later.
 krel="$(uname -r)"
 kmaj="$(printf '%s' "${krel}" | cut -d . -f 1 | tr -cd '0-9')"
 kmin="$(printf '%s' "${krel}" | cut -d . -f 2 | tr -cd '0-9')"
@@ -42,14 +39,13 @@ if [ -z "${kmaj}" ] || [ -z "${kmin}" ]; then
     exit 1
 fi
 if [ "${kmaj}" -lt 7 ] || { [ "${kmaj}" -eq 7 ] && [ "${kmin}" -lt 1 ]; }; then
-    echo "refusing kernel ${krel}: need 7.1 plus for peek and compat kfuncs" >&2
+    echo "refusing kernel ${krel}: need 7.1 or later" >&2
     exit 1
 fi
 
-# Always start from a fresh workspace so no run reuses
-# an existing tree. Guard the remove against empty or root plus
-# whitespace plus glob plus relative paths, so only an absolute
-# workspace path without spaces is cleaned.
+# The workspace is removed and fetched again on every run, so only accept
+# an absolute path without whitespace or glob characters, and refuse
+# anything that could point at data outside of a scratch directory.
 if [ -z "${WS}" ] || [ "${WS}" = "/" ] || [ "${WS}" = "//" ]; then
     echo "refusing to clean an empty or root path" >&2
     exit 1
@@ -75,10 +71,9 @@ case "${WS}" in
         exit 1
         ;;
 esac
-# Canonicalize for symlink plus dotdot safety with no require-existing,
-# so /tmp/scx-foo/../opencode still refuses as /tmp/opencode. The -m
-# form canonicalizes by string only with no symlink resolve, so a
-# symlink at the workspace root still needs an explicit refuse below.
+# Resolve symlinks, "." and "..", so the checks below apply to the
+# directory that would really be removed: /tmp/scx-foo/../opencode is
+# checked as /tmp/opencode, and a link is checked as its target.
 if command -v realpath >/dev/null 2>&1; then
     WS="$(realpath -m "${WS}")"
 elif command -v readlink >/dev/null 2>&1; then
@@ -87,16 +82,12 @@ else
     echo "refusing without canonical tool" >&2
     exit 1
 fi
-# Refuse a symlink workspace root, since realpath -m plus readlink -m
-# never resolve symlinks and an allowlisted /tmp/scx-* link could point
-# outside the allowlist with no dotdot text.
+# The path is resolved now, so a symlink here or in a parent directory
+# means it was swapped after the check.
 if [ -L "${WS}" ]; then
     echo "refusing a symlinked workspace path" >&2
     exit 1
 fi
-# Refuse a symlinked parent, since a clean under a linked parent would
-# remove outside the allowlist with no dotdot text. Walks each parent
-# up to root with no command substitution on the path itself.
 _parent="${WS}"
 while [ "${_parent}" != "/" ] && [ "${_parent}" != "." ] && [ -n "${_parent}" ]; do
     if [ -L "${_parent}" ]; then
@@ -106,22 +97,18 @@ while [ "${_parent}" != "/" ] && [ "${_parent}" != "." ] && [ -n "${_parent}" ];
     _parent="$(dirname "${_parent}")"
 done
 DEST="${WS}/scheds/experimental/scx_flow"
-# Never clean the shared CI tree at /tmp/opencode, so local runs keep
-# the pinned workspace plus caches intact with no accidental remove.
+# /tmp/opencode holds the workspace and caches CI uses.
 case "${WS}" in
     /tmp/opencode | /tmp/opencode/*)
         echo "refusing to clean /tmp/opencode" >&2
         exit 1
         ;;
 esac
-# Never clean the bare /tmp dir, so only allowlisted workspaces may
-# live under /tmp with no accidental remove.
 if [ "${WS}" = "/tmp" ]; then
     echo "refusing to clean /tmp" >&2
     exit 1
 fi
-# Allowlist /tmp/scx-* workspaces only under /tmp, so stray /tmp trees
-# never clean with no accidental remove.
+# Under /tmp, only directories named scx-* are used.
 case "${WS}" in
     /tmp/*)
         case "${WS}" in
@@ -133,7 +120,6 @@ case "${WS}" in
         esac
         ;;
 esac
-# Never clean home plus system trees, so user data plus OS stays intact.
 if [ -n "${HOME:-}" ]; then
     if [ "${WS}" = "${HOME}" ]; then
         echo "refusing to clean HOME" >&2
@@ -160,8 +146,8 @@ case "${WS}" in
         exit 1
         ;;
 esac
-# Reverify just before the remove, so a swapped symlink plus a raced
-# path never cleans outside the allowlist with no stale check.
+# Check once more right before removing, in case the path was swapped
+# for a symlink in the meantime.
 if [ -L "${WS}" ]; then
     echo "refusing a symlinked workspace path" >&2
     exit 1
@@ -175,15 +161,13 @@ esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
 rm -rf -- "${WS}"
 mkdir -p -- "${WS}"
-# Fetch the pinned fork ref by SHA and checkout the result.
+
 git init -q "${WS}"
 git -C "${WS}" remote add origin "${FORK}"
 if ! git -C "${WS}" fetch origin "${SCX_REF}"; then
     echo "fetch failed, check network access to ${FORK}" >&2
     exit 1
 fi
-# Reverify the fetched head matches the pinned ref, so a moved ref
-# plus a short fetch never checks out unpinned code with no silent drift.
 got_ref="$(git -C "${WS}" rev-parse FETCH_HEAD)"
 if [ "${got_ref}" != "${SCX_REF}" ]; then
     echo "ref mismatch: got ${got_ref} want ${SCX_REF}" >&2
@@ -211,16 +195,7 @@ echo "overlaying ${SRC_DIR} to ${DEST}"
 mkdir -p "${DEST}"
 rsync -a --delete --exclude /target/ "${SRC_DIR}/" "${DEST}/"
 
-# Queues come from the upstream library with no vendored copy.
-# Both lib paths stay as upstream links for include parity.
-if [ "$(readlink "${DEST}/lib" 2>/dev/null)" != "../../../../../lib" ]; then
-    rm -rf -- "${DEST}/lib"
-    ln -s ../../../../../lib "${DEST}/lib"
-fi
-if [ "$(readlink "${DEST}/src/bpf/lib" 2>/dev/null)" != "../../../../../lib" ]; then
-    rm -rf -- "${DEST}/src/bpf/lib"
-    ln -s ../../../../../lib "${DEST}/src/bpf/lib"
-fi
+# The license is the one of the workspace.
 if [ "$(readlink "${DEST}/LICENSE" 2>/dev/null)" != "../../../LICENSE" ]; then
     rm -f -- "${DEST}/LICENSE"
     ln -s ../../../LICENSE "${DEST}/LICENSE"
@@ -236,12 +211,8 @@ install -m 0755 "${WS}/target/release/${BIN}" \
     cp "${WS}/target/release/${BIN}" "${REPO_DIR}/${BIN}"
 }
 
-# Opt in workspace clean only after install wins.
-# Set CLEAN to 1 to remove the workspace target dir
-# after a good install. Never runs on failure since
-# the script exits early on any fault. Rebuild after
-# a clean fetches plus builds from scratch and takes
-# a while on first run with a fresh download.
+# Set CLEAN=1 to remove the build directory of the workspace once the
+# binary is installed. The next run then builds everything from scratch.
 if [ "${CLEAN:-0}" = "1" ]; then
     echo "cleaning workspace target to save space"
     rm -rf -- "${WS}/target"

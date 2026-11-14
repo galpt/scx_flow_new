@@ -2,468 +2,261 @@
 /*
  * Queueing for the flow scheduler.
  *
- * Runnable resets the per activation burn and folds wake rates with
- * two way urgency inherit capped at one quarter. Enqueue prices the
- * due time and parks pinned tasks on the CPU DSQ and shared tasks
- * on the LLC DSQ. An idle target is claimed and kicked at max. A
- * non greedy urgent task past the top tier threshold tries a soft
- * yield on a peer CPU with a near stop claim and no IPI.
- * Dequeue drops the queue gauge on cancel. Every insert pairs with
- * one dec on move or cancel for telemetry only.
+ * Pinned tasks wait in the DSQ of their CPU and everything else waits in
+ * the DSQ of the LLC of its CPU, both ordered by virtual deadline. Every
+ * path through ops.enqueue() inserts the task exactly once.
+ *
+ * After the insert, flow looks for an idle CPU to wake up. If there is
+ * none and the task is urgent enough, it asks the running task with the
+ * lowest latency criticality in the LLC to give up its CPU. The request
+ * shortens the slice of that task instead of sending an IPI, so the CPU
+ * switches at its next scheduling point.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_ENQUEUE_BPF_H
 #define __FLOW_ENQUEUE_BPF_H
-#include "intf.h"
+
 #include "maps.bpf.h"
-#include "stats.bpf.h"
 #include "fair.bpf.h"
-#include "select.bpf.h"
 
-static __always_inline int flow_llc_for_cpu(s32 tgt, u32 *out)
+struct flow_victim {
+	s32	cpu;
+	u32	lat_cri;
+	u64	est_stop;
+};
+
+static __always_inline void flow_mark_pinned(struct flow_task_ctx *t, s32 cpu)
 {
-	int v;
-
-	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
-		return -1;
-	v = topo_cpu_to_llc_id((u32)tgt);
-	if (v < 0 || !flow_llc_ok((u32)v))
-		return -1;
-	*out = (u32)v;
-	return 0;
+	if (t->pinned_cpu >= 0)
+		return;
+	t->pinned_cpu = cpu;
+	__sync_fetch_and_add(&flow_cpu_states[cpu].nr_pinned, 1);
 }
 
-static __always_inline void flow_queued_add(u32 llc)
+static __always_inline void flow_clear_pinned(struct flow_task_ctx *t)
 {
-	flow_stat_inc(llc, 0);
-	__sync_fetch_and_add(&sys_stat.nr_queued, 1ULL);
+	s32 cpu = t->pinned_cpu;
+
+	if (cpu < 0)
+		return;
+	t->pinned_cpu = -1;
+	if (flow_cpu_valid(cpu))
+		__sync_fetch_and_sub(&flow_cpu_states[cpu].nr_pinned, 1);
 }
 
-static __always_inline void flow_queued_drop(u32 llc)
+/*
+ * Wake up an idle CPU that can run @p. A pinned task can only use @cpu.
+ * When ops.select_cpu() already looked for an idle CPU and found none,
+ * there is no point in searching again.
+ */
+static bool flow_kick_idle(struct task_struct *p, s32 cpu, bool pinned, u64 enq_flags)
 {
-	u32 q = llc;
+	s32 idle;
 
-	if (!flow_llc_ok(q))
-		q = 0;
-	flow_queued_dec(q);
-	{
-		u64 old = READ_ONCE(sys_stat.nr_queued);
-
-		if (old)
-			__sync_val_compare_and_swap(&sys_stat.nr_queued, old, old - 1);
-	}
-}
-
-/* A busy core runs at max and an idle core runs at half. The call
- * stays on one live core and never sends zero. Half equals
- * SCX_CPUPERF_ONE / 2. Frequency never steers placement. Caller must
- * hold the target runqueue lock, so never call from select or the
- * timer, which run without any lock. The set applies only when the
- * level differs or one millisecond passed since the last commit, so
- * rate limits keep the target. */
-static __always_inline void flow_cpuperf_commit(u32 cpu, u32 level, u64 now)
-{
-	struct flow_running_state *rs;
-	struct rq *locked;
-
-	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
-		return;
-	if ((u64)cpu >= scx_bpf_nr_cpu_ids())
-		return;
-	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
-		return;
-	if (!level || level > (u32)SCX_CPUPERF_ONE)
-		return;
-	locked = scx_bpf_locked_rq();
-	if (!locked)
-		return;
-	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
-		struct rq *target = scx_bpf_cpu_rq((s32)cpu);
-
-		if (!target || target != locked)
-			return;
-	} else {
-		if (cpu != (u32)bpf_get_smp_processor_id())
-			return;
-	}
-	rs = &flow_running_state[cpu];
-	if (READ_ONCE(rs->cpuperf_cur) == level &&
-	    now - READ_ONCE(rs->cpuperf_commit_clk) < 1000000ULL)
-		return;
-	scx_bpf_cpuperf_set((s32)cpu, level);
-	WRITE_ONCE(rs->cpuperf_cur, level);
-	WRITE_ONCE(rs->cpuperf_commit_clk, now);
-}
-
-/* Idle wake only. Misses count a skip with no wake. A bad or masked
- * or offline or busy target skips. A won idle claim ramps to max and
- * fires one idle kick. Caller holds the target runqueue lock. Never
- * call from select or the timer. True means kicked. */
-static __noinline bool flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 llc)
-{
-	u32 c;
-
-	if (tgt < 0) {
-		flow_stat_inc(llc, 8);
+	if (pinned)
+		idle = scx_bpf_test_and_clear_cpu_idle(cpu) ? cpu : -EBUSY;
+	else if (!__COMPAT_is_enq_cpu_selected(enq_flags))
+		idle = scx_bpf_select_cpu_and(p, cpu, 0, p->cpus_ptr, 0);
+	else
 		return false;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
+
+	if (idle < 0)
 		return false;
-	}
-	if (!flow_cpu_live((u32)tgt)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	if (!scx_bpf_test_and_clear_cpu_idle(tgt)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	c = (u32)tgt;
-	if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	if ((u64)c >= scx_bpf_nr_cpu_ids()) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	flow_cpuperf_commit(c, (u32)SCX_CPUPERF_ONE, bpf_ktime_get_ns());
-	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-	flow_stat_inc(llc, 7);
+	scx_bpf_kick_cpu(idle, SCX_KICK_IDLE);
+	flow_stat_inc(FLOW_STAT_KICK_IDLE);
 	return true;
 }
 
-/* Idle wake without freq touch. Runs without the runqueue lock,
- * so it never sets freq. Misses count a skip. True means kicked. */
-static __noinline bool flow_kick_idle_lockfree(s32 tgt, struct task_struct *p, u32 llc)
+/*
+ * A CPU is a victim candidate when its task is less latency critical than
+ * the enqueued one and is expected to keep the CPU for longer. A CPU with
+ * no stop stamp is idle or was already claimed by another enqueue.
+ */
+static bool flow_probe_victim(s32 cpu, u32 lat_cri, u64 est_stop, struct flow_victim *v)
 {
-	u32 c;
+	struct flow_cpu_state *cs;
+	u64 stop;
+	u32 victim_lat_cri;
 
-	if (tgt < 0) {
-		flow_stat_inc(llc, 8);
+	if (!flow_cpu_valid(cpu))
 		return false;
-	}
-	if (!flow_cpu_allowed(tgt, p)) {
-		flow_stat_inc(llc, 8);
+	cs = &flow_cpu_states[cpu];
+	stop = READ_ONCE(cs->est_stopping_clk);
+	victim_lat_cri = READ_ONCE(cs->lat_cri);
+	if (!stop || victim_lat_cri >= lat_cri || !time_after(stop, est_stop))
 		return false;
-	}
-	if (!flow_cpu_live((u32)tgt)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	if (!scx_bpf_test_and_clear_cpu_idle(tgt)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	c = (u32)tgt;
-	if (!flow_cpu_ok(c) || !flow_cpu_live(c)) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	if ((u64)c >= scx_bpf_nr_cpu_ids()) {
-		flow_stat_inc(llc, 8);
-		return false;
-	}
-	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
-	flow_stat_inc(llc, 7);
+
+	v->cpu = cpu;
+	v->lat_cri = victim_lat_cri;
+	v->est_stop = stop;
 	return true;
 }
 
-/* Soft yield without IPI. Greedy tasks and tasks below the top tier
- * threshold never yield. Probes the hint plus two peers in the same
- * LLC and picks the lowest score with the farthest stop stamp. The
- * victim stop is claimed near so it yields at its next check with no
- * pipeline stall. At most one yield per run. */
-static __noinline void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t,
-					s32 tgt, u32 llc)
+/*
+ * Claim the victim by clearing its stop stamp, so that concurrent
+ * enqueues pick someone else, then shorten the slice of its task. A slice
+ * of one nanosecond, rather than zero, keeps the kernel from refilling it
+ * with the default slice.
+ */
+static bool flow_ask_yield(const struct flow_victim *v)
 {
-	u32 self;
-	u32 thr;
-	u32 me;
-	u64 now;
-	s32 cand[3];
-	int i;
-	s32 best = -1;
-	u64 best_stop = 0;
-	u32 best_score = 0;
-	bool first = true;
+	struct task_struct *curr;
+	bool asked = false;
 
-	if (!p || !t)
-		return;
-	if (READ_ONCE(t->flags) & (u32)FLOW_FLAG_IS_GREEDY)
-		return;
-	me = flow_calc_lat_cri(p, t);
-	thr = (u32)READ_ONCE(sys_stat.thr_lat_cri);
-	if (thr && me < thr)
-		return;
-	if (tgt < 0 || !flow_cpu_ok((u32)tgt))
-		return;
-	self = (u32)bpf_get_smp_processor_id();
-	now = bpf_ktime_get_ns();
-	cand[0] = tgt;
-	cand[1] = -1;
-	cand[2] = -1;
-	{
-		u32 ncpu = (u32)scx_bpf_nr_cpu_ids();
-		u32 r1;
-		u32 r2;
+	if (!flow_cpu_valid(v->cpu))
+		return false;
+	if (!__sync_bool_compare_and_swap(&flow_cpu_states[v->cpu].est_stopping_clk,
+					  v->est_stop, 0))
+		return false;
 
-		if (!ncpu)
-			ncpu = 1U;
-		r1 = bpf_get_prandom_u32() % ncpu;
-		r2 = bpf_get_prandom_u32() % ncpu;
-		if (flow_cpu_ok(r1) && (s32)r1 != tgt)
-			cand[1] = (s32)r1;
-		if (flow_cpu_ok(r2) && (s32)r2 != tgt && (s32)r2 != cand[1])
-			cand[2] = (s32)r2;
-	}
-	for (i = 0; i < 3; i++) {
-		s32 c = cand[i];
-		struct flow_running_state *rs;
-		u32 cs;
-		u64 stop;
+	bpf_rcu_read_lock();
+	curr = __COMPAT_scx_bpf_cpu_curr(v->cpu);
+	if (curr && curr->pid)
+		asked = scx_bpf_task_set_slice(curr, 1);
+	bpf_rcu_read_unlock();
+	return asked;
+}
 
-		if (c < 0 || !flow_cpu_ok((u32)c))
-			continue;
-		if ((u64)(u32)c >= scx_bpf_nr_cpu_ids())
-			continue;
-		if (!flow_cpu_live((u32)c))
-			continue;
-		if (!flow_cpu_allowed(c, p))
-			continue;
-		rs = &flow_running_state[(u32)c];
-		if (READ_ONCE(rs->llc_id) != llc)
-			continue;
-		cs = READ_ONCE(rs->lat_cri);
-		if (cs >= me)
-			continue;
-		stop = READ_ONCE(rs->est_stopping_clk);
-		if (stop < now)
-			continue;
-		if (first || stop > best_stop) {
-			first = false;
-			best_stop = stop;
-			best_score = cs;
-			best = c;
-		}
-		(void)best_score;
-	}
-	if (best < 0)
+/*
+ * Look for a victim among the CPUs of the LLC that @p can use. @cpu is
+ * checked first, then a few random CPUs, and the better of the first two
+ * candidates wins. Random probes keep enqueues on different CPUs from
+ * all going after the same victim.
+ */
+static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc)
+{
+	struct flow_victim cand[2];
+	struct bpf_cpumask *llc_mask;
+	u64 thr = READ_ONCE(flow_sys_stat.thr_lat_cri);
+	u64 est_stop;
+	u32 nr = 0, i;
+
+	if (!thr || t->lat_cri < thr)
 		return;
-	if ((u32)best == self)
-		return;
-	/* Claim the victim stop stamp so the next check on that CPU sees a
-	 * near stop with no IPI. The victim yields at its next check. */
-	{
-		u32 b = (u32)best;
 
-		if ((u64)b >= scx_bpf_nr_cpu_ids())
-			return;
-		{
-			struct flow_running_state *rs = &flow_running_state[b];
-			u64 old = READ_ONCE(rs->est_stopping_clk);
-			u64 want = now + 1ULL;
+	est_stop = flow_est_stop(t, t->acc_runtime_ns, READ_ONCE(flow_sys_stat.slice_ns),
+				 scx_bpf_now());
+	if (flow_probe_victim(cpu, t->lat_cri, est_stop, &cand[0]))
+		nr = 1;
 
-			if (want < old)
-				__sync_val_compare_and_swap(&rs->est_stopping_clk, old, want);
-			__sync_fetch_and_add(&rs->nr_preempt, 1ULL);
+	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
+	if (llc_mask) {
+		bpf_for(i, 0, FLOW_VICTIM_PROBES) {
+			s32 probe;
+
+			if (nr >= 2)
+				break;
+			probe = bpf_cpumask_any_and_distribute(cast_mask(llc_mask), p->cpus_ptr);
+			if (probe == cpu || (nr && probe == cand[0].cpu))
+				continue;
+			if (flow_probe_victim(probe, t->lat_cri, est_stop,
+					      nr ? &cand[1] : &cand[0]))
+				nr++;
 		}
 	}
+
+	if (!nr)
+		return;
+	if (nr == 2 && (cand[1].lat_cri < cand[0].lat_cri ||
+			(cand[1].lat_cri == cand[0].lat_cri &&
+			 time_after(cand[1].est_stop, cand[0].est_stop))))
+		cand[0] = cand[1];
+	if (flow_ask_yield(&cand[0]))
+		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
 }
 
 void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 {
-	struct flow_task_ctx *t;
+	struct flow_task_ctx *t, *wt;
+	struct task_struct *waker;
 	u64 now;
 
-	if (!p)
-		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!t)
-		return;
-	now = bpf_ktime_get_ns();
-	t->acc_runtime_ns = 0;
-	t->last_runnable_clk = now;
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
-	{
-		struct task_struct *waker = bpf_get_current_task_btf();
-		struct flow_task_ctx *wt;
+	t = flow_task_ctx(p);
+	if (!t)
+		return;
+	t->acc_runtime_ns = 0;
 
-		if (!waker || waker == p)
-			return;
-		wt = bpf_task_storage_get(&task_ctx_stor, waker, 0, 0);
-		if (!wt)
-			return;
-		{
-			u64 last = READ_ONCE(wt->last_runnable_clk);
-			u64 gap = now > last ? now - last : 0;
+	waker = bpf_get_current_task_btf();
+	wt = flow_task_ctx(waker);
+	if (!wt)
+		return;
 
-			wt->wake_freq = flow_calc_avg_freq(READ_ONCE(wt->wake_freq), gap);
-			wt->last_runnable_clk = now;
-		}
-		{
-			u32 giver = READ_ONCE(wt->lat_cri);
-			u32 mine = READ_ONCE(t->lat_cri);
-			u32 add = giver >> 3;
-			u32 cap = mine >> 2;
+	now = scx_bpf_now();
+	if (wt->last_wake_clk && time_after(now, wt->last_wake_clk))
+		wt->wake_freq = flow_calc_avg_freq(wt->wake_freq, now - wt->last_wake_clk);
+	wt->last_wake_clk = now;
 
-			if (add > cap)
-				add = cap;
-			t->lat_cri_waker = giver;
-			if (mine + add > mine)
-				t->lat_cri = mine + add;
-		}
-		{
-			u32 giver = READ_ONCE(t->lat_cri);
-			u32 mine = READ_ONCE(wt->lat_cri);
-			u32 add = giver >> 3;
-			u32 cap = mine >> 2;
-
-			if (add > cap)
-				add = cap;
-			if (mine + add > mine) {
-				wt->lat_cri_wakee = giver;
-				WRITE_ONCE(wt->lat_cri, mine + add);
-			}
-		}
-	}
+	t->lat_cri_waker = wt->lat_cri;
+	wt->lat_cri_wakee = t->lat_cri;
 }
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 task_cpu;
-	s32 tgt;
-	u32 llc = 0;
-	bool pinned = false;
-	bool no_cpu = false;
-	struct flow_task_ctx *t;
-	u32 fl;
+	struct flow_task_ctx *t = flow_task_ctx(p);
+	s32 cpu = scx_bpf_task_cpu(p);
+	u64 deadline, slice, dsq_id;
+	bool pinned;
+	u32 llc;
 
-	flow_touch_arena();
-	if (!p)
-		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!t) {
-		s32 fb = flow_first_allowed(p);
+	/*
+	 * An affinity change re-enqueues the task before it is migrated, so
+	 * its current CPU can be outside of the new mask.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = bpf_cpumask_first(p->cpus_ptr);
 
-		if (fb < 0)
-			fb = (s32)bpf_get_smp_processor_id();
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-		flow_stat_inc(0, 2);
+	if (!t || !flow_cpu_valid(cpu)) {
+		scx_bpf_dsq_insert(p, FLOW_FALLBACK_DSQ, FLOW_SLICE_MIN_NS, enq_flags);
+		flow_stat_inc(FLOW_STAT_FALLBACK);
 		return;
 	}
-	fl = READ_ONCE(t->flags);
-	/* Direct dispatch from select already queued to local. Clear the
-	 * mark and leave so the task is not queued twice. */
-	if (fl & (u32)FLOW_FLAG_DIRECT_DISPATCH) {
-		WRITE_ONCE(t->flags, fl & (u32)~(u32)FLOW_FLAG_DIRECT_DISPATCH);
-		return;
-	}
-	task_cpu = scx_bpf_task_cpu(p);
-	if (task_cpu < 0)
-		task_cpu = (s32)bpf_get_smp_processor_id();
-	tgt = flow_constrained_target(task_cpu, p);
+
 	pinned = flow_is_pinned(p);
-	if (tgt < 0 || !flow_cpu_live((u32)tgt)) {
-		no_cpu = true;
+	llc = flow_llc_of(cpu);
+	deadline = flow_score_task(p, t);
+	slice = flow_calc_slice(t, cpu);
+	if (pinned) {
+		flow_mark_pinned(t, cpu);
+		dsq_id = FLOW_CPU_DSQ_BASE + cpu;
 	} else {
-		u32 tmp = 0;
-
-		if (!flow_llc_for_cpu(tgt, &tmp))
-			llc = tmp;
+		dsq_id = FLOW_LLC_DSQ_BASE + llc;
 	}
-	/* Fallback to LLC 0 keeps stats bounded. */
-	llc &= ((u32)FLOW_MAX_LLCS - 1U);
-	if (p->flags & PF_EXITING) {
-		if (tgt >= 0 && flow_cpu_allowed(tgt, p)) {
-			u64 ldsq = (u64)SCX_DSQ_LOCAL_ON | (u64)(u32)tgt;
+	scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
 
-			scx_bpf_dsq_insert(p, ldsq, 1000ULL, enq_flags);
-			flow_kick_idle_only(tgt, p, llc);
-			return;
-		}
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, 1000ULL, enq_flags);
-		flow_stat_inc(llc, 2);
+	/*
+	 * The last runnable task of a CPU whose slice ran out is picked up
+	 * again by that CPU, so waking another one would only migrate it.
+	 */
+	if (enq_flags & SCX_ENQ_LAST)
 		return;
-	}
-	{
-		u64 vd = flow_calc_when_to_run(p, t);
-		u64 greedy = flow_calc_greedy_penalty(p, t);
-		u32 lc = flow_calc_lat_cri(p, t);
-
-		if (greedy > 1024ULL)
-			WRITE_ONCE(t->flags, READ_ONCE(t->flags) | (u32)FLOW_FLAG_IS_GREEDY);
-		else
-			WRITE_ONCE(t->flags, READ_ONCE(t->flags) & (u32)~(u32)FLOW_FLAG_IS_GREEDY);
-		t->lat_cri = lc;
-		t->llc_id = llc;
-		scx_bpf_task_set_dsq_vtime(p, vd);
-		if (!no_cpu && pinned) {
-			u64 dsq = (u64)FLOW_CPU_DSQ_BASE + (u64)(u32)tgt;
-			struct flow_running_state *rs = &flow_running_state[(u32)tgt];
-			u64 slice = flow_calc_slice(t, rs);
-
-			__sync_fetch_and_add(&rs->nr_pinned, 1ULL);
-			t->pinned_cpu = tgt;
-			t->slice_ns = slice;
-			__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
-			scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
-			flow_queued_add(llc);
-			flow_kick_idle_only(tgt, p, llc);
-			return;
-		}
-		if (!no_cpu) {
-			u64 dsq = (u64)FLOW_LLC_DSQ_BASE + (u64)llc;
-			struct flow_running_state *rs = &flow_running_state[(u32)tgt];
-			u64 slice = flow_calc_slice(t, rs);
-
-			t->pinned_cpu = -1;
-			t->slice_ns = slice;
-			__sync_fetch_and_or(&t->flags, (u32)FLOW_FLAG_QUEUED);
-			scx_bpf_dsq_insert(p, dsq, slice, enq_flags);
-			flow_queued_add(llc);
-			if (flow_kick_idle_only(tgt, p, llc))
-				return;
-			flow_try_preempt(p, t, tgt, llc);
-			return;
-		}
-		scx_bpf_dsq_insert(p, (u64)FLOW_FALLBACK_DSQ, (u64)FLOW_SLICE_MIN_NS, enq_flags);
-		flow_stat_inc(llc, 2);
-	}
+	if (!flow_kick_idle(p, cpu, pinned, enq_flags))
+		flow_try_preempt(p, t, cpu, llc);
 }
 
-void BPF_STRUCT_OPS(flow_dequeue, struct task_struct *p, u64 deq_flags)
+void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	struct flow_task_ctx *t;
-	u32 old;
+	struct flow_task_ctx *t = flow_task_ctx(p);
+	u64 now;
 
-	(void)deq_flags;
-	if (!p)
-		return;
-	t = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!t)
 		return;
-	old = __sync_fetch_and_and(&t->flags, (u32)~(u32)FLOW_FLAG_QUEUED);
-	if (old & (u32)FLOW_FLAG_QUEUED) {
-		u32 llc = READ_ONCE(t->llc_id);
 
-		if (!flow_llc_ok(llc))
-			llc = 0;
-		flow_queued_drop(llc);
-	}
-	if (READ_ONCE(t->pinned_cpu) >= 0) {
-		s32 pc = READ_ONCE(t->pinned_cpu);
+	/* A pinned task can leave its DSQ without running, e.g. on an affinity change. */
+	flow_clear_pinned(t);
 
-		t->pinned_cpu = -1;
-		if (pc >= 0 && flow_cpu_ok((u32)pc)) {
-			struct flow_running_state *rs = &flow_running_state[(u32)pc];
+	if (!(deq_flags & SCX_DEQ_SLEEP))
+		return;
 
-			if (READ_ONCE(rs->nr_pinned))
-				__sync_fetch_and_sub(&rs->nr_pinned, 1U);
-		}
-	}
+	/* The burst ends here, so it can be folded in as a whole. */
+	t->avg_runtime_ns = flow_calc_avg(t->avg_runtime_ns, t->acc_runtime_ns);
+
+	now = scx_bpf_now();
+	if (t->last_quiescent_clk && time_after(now, t->last_quiescent_clk))
+		t->wait_freq = flow_calc_avg_freq(t->wait_freq, now - t->last_quiescent_clk);
+	t->last_quiescent_clk = now;
 }
-#endif
+
+#endif /* __FLOW_ENQUEUE_BPF_H */

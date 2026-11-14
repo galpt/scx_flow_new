@@ -8,20 +8,16 @@ workspace at `scheds/experimental/scx_flow` and builds there.
 
 - `scx/Cargo.toml` package manifest
 - `scx/build.rs` build helper
-- `scx/src/bpf/intf.h` shared constants and helpers
-- `scx/src/bpf/main.bpf.c` queues, placement, and dispatch
-- `scx/src/bpf/` nine area headers in one directory
-- `scx/lib` links to upstream headers for include parity
-- `scx/src/bpf/lib` links to upstream headers for include parity
-- `scx/src/main.rs` frontend and run loop
+- `scx/src/bpf/intf.h` definitions shared with userspace
+- `scx/src/bpf/main.bpf.c` entry point and ops table
+- `scx/src/bpf/` six area headers in one directory
+- `scx/src/main.rs`, `scx/src/run.rs` frontend and run loop
 - `scx/src/stats.rs` counters and server view
 - `scx/src/bpf_intf.rs`, `scx/src/bpf_skel.rs` generated bindings and skeleton
 - `scx/README.md` scheduler behavior
 - `tools/install_scx_flow.sh` overlay build installer
 - `tools/test_install_guard.sh` installer checks
 - `tools/edf_harness/` load probe with its own README
-
-Both links dangle in a standalone clone by design. After overlay the nested link resolves to workspace headers for the build while the top link stays broken for upstream parity.
 
 ## Build
 
