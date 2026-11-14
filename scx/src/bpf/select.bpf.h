@@ -89,12 +89,16 @@ static __noinline s32 flow_constrained_target(s32 hint, struct task_struct *p)
 }
 
 /* A busy core runs at max and an idle core runs at half. The call
- * stays on one live core and never sends zero. Frequency never steers
- * placement. Caller must hold the target runqueue lock, so never call
- * from select or the timer, which run without any lock. */
-static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
+ * stays on one live core and never sends zero. Half equals
+ * SCX_CPUPERF_ONE / 2. Frequency never steers placement. Caller must
+ * hold the target runqueue lock, so never call from select or the
+ * timer, which run without any lock. The set applies only when the
+ * level differs or one millisecond passed since the last commit, so
+ * rate limits keep the target. */
+static __always_inline void flow_cpuperf_commit(u32 cpu, u32 level, u64 now)
 {
-	u32 perf;
+	struct flow_running_state *rs;
+	struct rq *locked;
 
 	if (!flow_cpu_ok(cpu) || !flow_cpu_live(cpu))
 		return;
@@ -102,12 +106,27 @@ static __always_inline void flow_cpuperf_mark(u32 cpu, bool idle)
 		return;
 	if (!bpf_ksym_exists(scx_bpf_cpuperf_set))
 		return;
-	perf = (u32)SCX_CPUPERF_ONE;
-	if (idle)
-		perf = (u32)(SCX_CPUPERF_ONE / 2);
-	if (!perf)
+	if (!level || level > (u32)SCX_CPUPERF_ONE)
 		return;
-	scx_bpf_cpuperf_set((s32)cpu, perf);
+	locked = scx_bpf_locked_rq();
+	if (!locked)
+		return;
+	if (bpf_ksym_exists(scx_bpf_cpu_rq)) {
+		struct rq *target = scx_bpf_cpu_rq((s32)cpu);
+
+		if (!target || target != locked)
+			return;
+	} else {
+		if (cpu != (u32)bpf_get_smp_processor_id())
+			return;
+	}
+	rs = &flow_running_state[cpu];
+	if (READ_ONCE(rs->cpuperf_cur) == level &&
+	    now - READ_ONCE(rs->cpuperf_commit_clk) < 1000000ULL)
+		return;
+	scx_bpf_cpuperf_set((s32)cpu, level);
+	WRITE_ONCE(rs->cpuperf_cur, level);
+	WRITE_ONCE(rs->cpuperf_commit_clk, now);
 }
 
 static __always_inline int flow_hint_llc(s32 hint)

@@ -88,7 +88,7 @@ static __noinline bool flow_kick_idle_only(s32 tgt, struct task_struct *p, u32 l
 		flow_stat_inc(llc, 8);
 		return false;
 	}
-	flow_cpuperf_mark(c, false);
+	flow_cpuperf_commit(c, (u32)SCX_CPUPERF_ONE, bpf_ktime_get_ns());
 	scx_bpf_kick_cpu(tgt, SCX_KICK_IDLE);
 	flow_stat_inc(llc, 7);
 	return true;

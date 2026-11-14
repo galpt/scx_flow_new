@@ -373,7 +373,7 @@ fi
 # Busy cores run at max with idle cores at half through one set call.
 # The call never sends zero and never steers placement, and no other
 # frequency call steers placement. Timer only decays idle cores while
-# running plus tick ramp busy cores to max. Shared mark lives in select
+# running plus tick ramp busy cores to max. Shared commit lives in select
 # so the set plus max plus half checks read select with use checks in dispatch.
 grep -q "never steers" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq prose missing"
 grep -q "never touches a busy core" "${DISP_HDR}" || fail "freq dispatch prose missing"
@@ -381,7 +381,7 @@ grep -q "never sends zero" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "freq never
 grep -q "scx_bpf_cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf set missing"
 grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf max missing"
 grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "cpuperf half missing"
-grep -q "flow_cpuperf_mark" "${DISP_HDR}" || fail "cpuperf use missing"
+grep -q "flow_cpuperf_commit" "${DISP_HDR}" || fail "cpuperf use missing"
 if grep -q "cpuperf" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
     if ! grep -q "cpuperf_set" "${SRC_DIR}/src/bpf/select.bpf.h" "${DISP_HDR}" 2>/dev/null; then
         fail "freq call not set only"
@@ -975,11 +975,11 @@ skip_at="$(grep -n "kick_skip" "${SRC_DIR}/src/bpf/intf.h" | head -n 1 | cut -d:
 [ "${pre_at}" -lt "${idle_at}" ] && [ "${idle_at}" -lt "${skip_at}" ] || fail "kick counter order drifted"
 
 # Timer only power with 100 percent busy plus 50 percent idle.
-grep -q "flow_cpuperf_mark" "${DISP_HDR}" || fail "power mark missing"
+grep -q "flow_cpuperf_commit" "${DISP_HDR}" || fail "power mark missing"
 grep -q "SCX_CPUPERF_ONE" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power max missing"
 grep -q "SCX_CPUPERF_ONE / 2" "${SRC_DIR}/src/bpf/select.bpf.h" || fail "power half missing"
 grep -q "never touches a busy core" "${DISP_HDR}" || fail "power timer prose missing"
-if awk '/void BPF_STRUCT_OPS\(flow_stopping/,/^}/' "${DISP_HDR}" | grep -q "flow_cpuperf_mark(cpu, true)" 2>/dev/null; then
+if awk '/void BPF_STRUCT_OPS\(flow_stopping/,/^}/' "${DISP_HDR}" | grep -q "flow_cpuperf_commit" 2>/dev/null; then
     fail "stopping drop reappeared"
 fi
 

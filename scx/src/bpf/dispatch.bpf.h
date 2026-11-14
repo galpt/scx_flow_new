@@ -35,7 +35,7 @@ static __always_inline void flow_after_move(u32 cpu, u32 llc)
 {
 	/* Holds the dispatch lock for this CPU. */
 	flow_stat_inc(llc, 1);
-	flow_cpuperf_mark(cpu, false);
+	flow_cpuperf_commit(cpu, (u32)SCX_CPUPERF_ONE, bpf_ktime_get_ns());
 }
 
 /* Continue prev in place with a fresh slice. Runs only when no DSQ
@@ -61,7 +61,7 @@ static __noinline bool flow_try_continue_prev(u32 cpu, u32 llc, struct task_stru
 	t->slice_ns = slice;
 	WRITE_ONCE(rs->est_stopping_clk, bpf_ktime_get_ns() + slice);
 	scx_bpf_task_set_slice(prev, slice);
-	flow_cpuperf_mark(cpu, false);
+	flow_cpuperf_commit(cpu, (u32)SCX_CPUPERF_ONE, bpf_ktime_get_ns());
 	flow_stat_inc(llc, 9);
 	return true;
 }
@@ -178,11 +178,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 
 		if (idle && now - idle >= (u64)FLOW_SYS_STAT_INTERVAL_NS &&
 		    flow_cpu_live(c)) {
-			if (READ_ONCE(rs->cpuperf_cur) != (u32)(SCX_CPUPERF_ONE / 2)) {
-				flow_cpuperf_mark(c, true);
-				WRITE_ONCE(rs->cpuperf_cur, (u32)(SCX_CPUPERF_ONE / 2));
-				WRITE_ONCE(rs->cpuperf_commit_clk, now);
-			}
+			if (READ_ONCE(rs->cpuperf_cur) != (u32)(SCX_CPUPERF_ONE / 2))
+				flow_cpuperf_commit(c, (u32)(SCX_CPUPERF_ONE / 2), now);
 		}
 	}
 }
@@ -269,12 +266,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		}
 	}
 	/* Busy cores ramp to max at once. Holds the lock. */
-	if (READ_ONCE(rs->cpuperf_cur) != (u32)SCX_CPUPERF_ONE) {
-		flow_cpuperf_mark(cpu, false);
-		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
-		WRITE_ONCE(rs->cpuperf_commit_clk, now);
-	}
 	WRITE_ONCE(rs->idle_start_clk, 0);
+	flow_cpuperf_commit(cpu, (u32)SCX_CPUPERF_ONE, now);
 }
 
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
@@ -300,11 +293,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	if (!t)
 		return;
 	/* Refresh max every millisecond so rate limits keep the target. Holds the lock. */
-	if (now - READ_ONCE(rs->cpuperf_commit_clk) >= 1000000ULL) {
-		flow_cpuperf_mark(cpu, false);
-		WRITE_ONCE(rs->cpuperf_cur, (u32)SCX_CPUPERF_ONE);
-		WRITE_ONCE(rs->cpuperf_commit_clk, now);
-	}
+	flow_cpuperf_commit(cpu, (u32)SCX_CPUPERF_ONE, now);
 	have = READ_ONCE(t->slice_ns);
 	if (have > cur) {
 		u64 delta = have - cur;
