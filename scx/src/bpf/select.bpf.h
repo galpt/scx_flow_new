@@ -5,11 +5,11 @@
  * Tags mark sync plus hardirq plus softirq wakes on the task. Tiers
  * walk prev then same group then same LLC then same LLC thread then
  * fixed order with an atomic idle claim at each step. A won claim takes
- * direct local dispatch at max frequency and skips the
- * enqueue path through the dispatch flag. Masks are tested again
- * before each wake, so a task is never kicked toward a CPU outside
- * its current mask. Frequency follows core busyness and never steers
- * placement.
+ * direct local dispatch on the won idle CPU with an idle kick and
+ * no freq change and skips the enqueue path through the dispatch
+ * flag. Masks are tested again before each wake, so a task is never
+ * kicked toward a CPU outside its current mask. Frequency follows
+ * core busyness and never steers placement.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -410,11 +410,10 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (cpu_id < 0)
 		return flow_constrained_target(hint, p);
 
-	/* Direct dispatch on the won idle CPU. Compute the due time,
-	 * insert to local, and mark the flag so enqueue is skipped for
-	 * this activation. No freq touch and no kick here. Select holds
-	 * no rq lock, and a LOCAL insert already wakes. Max rides on
-	 * running plus tick plus dispatch. */
+	/* Direct dispatch on the won idle CPU. Compute the due time
+	 * and insert to local with the dispatch flag so enqueue is
+	 * skipped for this activation. No freq touch here and the won
+	 * idle CPU gets one idle kick under mask plus live checks. */
 	if (!t)
 		return cpu_id;
 	vl = topo_cpu_to_llc_id((u32)cpu_id);
@@ -434,6 +433,15 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		scx_bpf_task_set_dsq_vtime(p, vd);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, 0);
 		flow_stat_inc(llc, 1);
+		if (cpu_id >= 0 && flow_cpu_ok((u32)cpu_id) &&
+		    (u64)(u32)cpu_id < scx_bpf_nr_cpu_ids() &&
+		    flow_cpu_live((u32)cpu_id) &&
+		    flow_cpu_allowed(cpu_id, p)) {
+			scx_bpf_kick_cpu(cpu_id, SCX_KICK_IDLE);
+			flow_stat_inc(llc, 7);
+		} else {
+			flow_stat_inc(llc, 8);
+		}
 	}
 	return cpu_id;
 }

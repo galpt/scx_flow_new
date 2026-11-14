@@ -578,10 +578,11 @@ grep -q "nr_preempt" "${ENQ_HDR}" || fail "preempt count missing"
 grep -q "near stop" "${ENQ_HDR}" || fail "soft yield prose missing"
 # Soft yield stays CAS only with no IPI. All wakes stay idle only except
 # the soft yield path which claims the victim stop stamp with no kick.
-# One idle kick site stays in the shared helper. Select needs no kick
-# after a LOCAL insert and the shared enqueue path reuses the helper.
+# Two idle kick sites stay in the shared helper plus select direct.
+# Select kicks the won idle CPU after a LOCAL insert and the shared
+# enqueue path reuses the helper.
 [ "$(grep -rh "SCX_KICK_PREEMPT" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "0" ] || fail "ipi preempt reappeared"
-[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "1" ] || fail "idle kick sites drifted"
+[ "$(grep -rh "SCX_KICK_IDLE" "${SRC_DIR}/src/bpf" | wc -l | tr -d ' ')" = "2" ] || fail "idle kick sites drifted"
 grep -q "with no IPI" "${ENQ_HDR}" || fail "no ipi prose missing"
 grep -q "yields soft" "${SRC_DIR}/src/bpf/intf.h" || fail "soft prose missing"
 grep -q "Fallback" "${ENQ_HDR}" || fail "fallback prose missing"
