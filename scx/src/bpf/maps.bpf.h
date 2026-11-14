@@ -35,11 +35,14 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_cpu_ctx);
 } cpu_ctx_stor SEC(".maps");
+struct flow_update_timer {
+	struct bpf_timer timer;
+};
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, 1);
 	__type(key, u32);
-	__type(value, struct bpf_timer);
+	__type(value, struct flow_update_timer);
 } update_timer SEC(".maps");
 volatile u64 flow_ccx_prefer;
 volatile u64 flow_smt_enabled = 1;

@@ -591,7 +591,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	u64 n;
 	u32 i;
 	u32 k = 0;
-	struct bpf_timer *timer;
+	struct flow_update_timer *ft;
 	int err;
 
 	n = scx_bpf_nr_cpu_ids();
@@ -656,14 +656,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 		}
 	}
 	/* Arm the ten millisecond board plus idle decay timer. */
-	timer = bpf_map_lookup_elem(&update_timer, &k);
-	if (!timer) {
+	ft = bpf_map_lookup_elem(&update_timer, &k);
+	if (!ft) {
 		scx_bpf_error("timer lookup failed");
 		return -ESRCH;
 	}
-	bpf_timer_init(timer, &update_timer, FLOW_CLOCK_BOOTTIME);
-	bpf_timer_set_callback(timer, flow_stat_timer_cb);
-	err = bpf_timer_start(timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);
+	bpf_timer_init(&ft->timer, &update_timer, FLOW_CLOCK_BOOTTIME);
+	bpf_timer_set_callback(&ft->timer, flow_stat_timer_cb);
+	err = bpf_timer_start(&ft->timer, (u64)FLOW_SYS_STAT_INTERVAL_NS, 0);
 	if (err) {
 		scx_bpf_error("timer start failed");
 		return err;
