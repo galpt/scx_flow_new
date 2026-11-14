@@ -6,7 +6,7 @@
  * table. Each LLC owns one kernel vtime DSQ and each CPU owns one DSQ
  * for pinned tasks with one fallback DSQ in FIFO order. Placement
  * tags sync plus irq wakes and claims idle cores atomically with
- * direct local dispatch on quiet queues. Order follows due time with
+ * direct local dispatch on won idle CPUs. Order follows due time with
  * a soft yield for urgent tasks and in place continuation for the
  * running task. Frequency stays at max on busy cores and drops to
  * half on idle cores through the timer only. Tables are written once.
