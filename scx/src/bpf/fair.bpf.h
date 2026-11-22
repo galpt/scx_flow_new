@@ -120,6 +120,53 @@ static __always_inline u64 flow_burst(const struct flow_task_ctx *t)
 	return flow_max(t->avg_runtime_ns, t->acc_runtime_ns);
 }
 
+/* Charge @used of CPU time to @p, which continues its current burst. */
+static __always_inline void flow_charge_run(const struct task_struct *p, struct flow_task_ctx *t,
+					    u64 used)
+{
+	t->acc_runtime_ns += used;
+	t->vtime += flow_charge(p, used, t->acc_runtime_ns);
+}
+
+/*
+ * Charge the CPU time that @p used since it was last charged. The kernel
+ * accounts it exactly in sum_exec_runtime, so --helicoprion charges it
+ * when the task wakes up or is queued again instead of every time it
+ * stops running.
+ */
+static __always_inline void flow_charge_exec(const struct task_struct *p, struct flow_task_ctx *t)
+{
+	u64 sum = p->se.sum_exec_runtime;
+
+	flow_charge_run(p, t, sum - t->sum_exec_ns);
+	t->sum_exec_ns = sum;
+}
+
+/*
+ * @t went to sleep, which ends its burst. @now is when it went to sleep,
+ * or with --helicoprion when it woke up again. Either comes once per
+ * sleep, so the interval between two of them says how often it sleeps.
+ */
+static __always_inline void flow_end_burst(struct flow_task_ctx *t, u64 now)
+{
+	t->avg_runtime_ns = flow_calc_avg(t->avg_runtime_ns, t->acc_runtime_ns);
+	if (t->last_quiescent_clk && time_after(now, t->last_quiescent_clk))
+		t->wait_freq = flow_calc_avg_freq(t->wait_freq, now - t->last_quiescent_clk);
+	t->last_quiescent_clk = now;
+}
+
+/* The task of @wt woke up the task of @t at @now. */
+static __always_inline void flow_note_wakeup(struct flow_task_ctx *t, struct flow_task_ctx *wt,
+					     u64 now)
+{
+	if (wt->last_wake_clk && time_after(now, wt->last_wake_clk))
+		wt->wake_freq = flow_calc_avg_freq(wt->wake_freq, now - wt->last_wake_clk);
+	wt->last_wake_clk = now;
+
+	t->lat_cri_waker = wt->lat_cri;
+	wt->lat_cri_wakee = t->lat_cri;
+}
+
 static u32 flow_calc_lat_cri(const struct task_struct *p, const struct flow_task_ctx *t)
 {
 	u64 burst = flow_burst(t);
@@ -162,24 +209,51 @@ static __always_inline u64 flow_deadline(const struct flow_task_ctx *t, u64 vtim
 }
 
 /*
- * Refresh the latency criticality of @p, which uses up what it inherited
- * from its last wakeup, keep its virtual time within FLOW_VTIME_LAG_NS of
- * the system virtual time and return its deadline. The lower bound caps
- * the credit of a task that slept, the upper bound caps how far a task
- * that kept computing can fall behind the others.
+ * Keep the virtual time of @t within FLOW_VTIME_LAG_NS of the system
+ * virtual time. The lower bound caps the credit of a task that slept, the
+ * upper bound caps how far a task that kept computing can fall behind the
+ * others.
  */
-static u64 flow_score_task(const struct task_struct *p, struct flow_task_ctx *t)
+static __always_inline void flow_clamp_vtime(struct flow_task_ctx *t)
 {
 	u64 vtime_now = READ_ONCE(flow_clock.vtime_now);
 
-	t->lat_cri = flow_calc_lat_cri(p, t);
-	t->lat_cri_waker = 0;
-	t->lat_cri_wakee = 0;
 	if (time_before(t->vtime, vtime_now - FLOW_VTIME_LAG_NS))
 		t->vtime = vtime_now - FLOW_VTIME_LAG_NS;
 	else if (time_after(t->vtime, vtime_now + FLOW_VTIME_LAG_NS))
 		t->vtime = vtime_now + FLOW_VTIME_LAG_NS;
+}
+
+/*
+ * Refresh the latency criticality of @p, which uses up what it inherited
+ * from its last wakeup, keep its virtual time in range and return its
+ * deadline.
+ */
+static u64 flow_score_task(const struct task_struct *p, struct flow_task_ctx *t)
+{
+	t->lat_cri = flow_calc_lat_cri(p, t);
+	t->lat_cri_waker = 0;
+	t->lat_cri_wakee = 0;
+	flow_clamp_vtime(t);
 	return flow_deadline(t, t->vtime, t->acc_runtime_ns);
+}
+
+/*
+ * Deadline of @t when it takes over the CPU of the task it waits for at
+ * @now, which can happen hundreds of thousands of times a second. Its
+ * latency criticality moves slowly, so it is scored again at most every
+ * FLOW_RESCORE_NS. Its virtual time is kept in range every time.
+ */
+static __always_inline u64 flow_handoff_deadline(const struct task_struct *p,
+						 struct flow_task_ctx *t, u64 now)
+{
+	t->acc_runtime_ns = 0;
+	if (now - t->score_clk < FLOW_RESCORE_NS) {
+		flow_clamp_vtime(t);
+		return flow_deadline(t, t->vtime, 0);
+	}
+	t->score_clk = now;
+	return flow_score_task(p, t);
 }
 
 /*

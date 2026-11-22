@@ -41,5 +41,12 @@ fn main() -> Result<()> {
 
     cli::init_logging(opts.verbose)?;
     info!("{} {}", cli::SCHEDULER_NAME, cli::full_version());
+    if opts.helicoprion {
+        info!(
+            "The --helicoprion mode is for research into whether it benefits users more than \
+             running without it. User feedback may be shared with other developers to help \
+             improve other schedulers and, where possible, the helicoprion benchmark itself."
+        );
+    }
     run::drive(&opts)
 }

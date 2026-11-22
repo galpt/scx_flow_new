@@ -77,6 +77,23 @@ fn cpu_groups(topo: &Topology) -> BTreeMap<usize, u32> {
         .collect()
 }
 
+/// For every CPU of a core with several hardware threads, the next CPU of
+/// that core, wrapping around to the first one.
+fn cpu_siblings(topo: &Topology) -> BTreeMap<usize, u32> {
+    let mut siblings = BTreeMap::new();
+
+    for core in topo.all_cores.values() {
+        let cpus: Vec<usize> = core.cpus.keys().copied().collect();
+        if cpus.len() < 2 {
+            continue;
+        }
+        for (i, cpu) in cpus.iter().enumerate() {
+            siblings.insert(*cpu, cpus[(i + 1) % cpus.len()] as u32);
+        }
+    }
+    siblings
+}
+
 fn nr_groups(groups: &BTreeMap<usize, u32>) -> usize {
     groups.values().collect::<BTreeSet<_>>().len()
 }
@@ -91,6 +108,8 @@ pub struct BpfTopology {
     pub nr_groups: u32,
     pub cpu_llc: BTreeMap<usize, u32>,
     pub cpu_group: BTreeMap<usize, u32>,
+    /// Another hardware thread of the same core, for CPUs that have one.
+    pub cpu_sibling: BTreeMap<usize, u32>,
     pub llc_node: Vec<u32>,
     pub llc_kb: Vec<u32>,
 }
@@ -141,6 +160,7 @@ impl BpfTopology {
             nr_groups: groups as u32,
             cpu_llc,
             cpu_group,
+            cpu_sibling: cpu_siblings(topo),
             llc_node: topo.all_llcs.values().map(|l| l.node_id as u32).collect(),
             llc_kb,
         })

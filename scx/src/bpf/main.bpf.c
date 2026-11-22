@@ -35,6 +35,7 @@ SCX_OPS_DEFINE(flow_ops,
 	       .stopping		= (void *)flow_stopping,
 	       .quiescent		= (void *)flow_quiescent,
 	       .init_task		= (void *)flow_init_task,
+	       .disable			= (void *)flow_disable,
 	       .init			= (void *)flow_init,
 	       .exit			= (void *)flow_exit,
 	       .flags			= SCX_OPS_ENQ_LAST |

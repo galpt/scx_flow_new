@@ -60,6 +60,11 @@ pub struct Opts {
     #[clap(long)]
     pub monitor: Option<f64>,
 
+    /// Tune scheduling for the wakeup latencies that helicoprion measures.
+    /// Without it, tasks are scheduled as in 5.2.28.
+    #[clap(long)]
+    pub helicoprion: bool,
+
     /// Enable debug output, including libbpf messages.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,

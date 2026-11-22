@@ -10,9 +10,11 @@
  * with a fresh slice.
  *
  * Runtime is charged when a task stops running, from the time it spent on
- * the CPU. At every tick, a task that already had a minimum slice gives
- * up the CPU when a waiting task is due before it, so an urgent wakeup
- * waits for at most about one tick even when every CPU is busy.
+ * the CPU. With --helicoprion, it is charged when the task wakes up or is
+ * queued again, from the CPU time the kernel accounted for it. At every
+ * tick, a task that already had a minimum slice gives up the CPU when a
+ * waiting task is due before it, so an urgent wakeup waits for at most
+ * about one tick even when every CPU is busy.
  *
  * A busy CPU asks for its highest performance level when a task starts
  * and refreshes the request every tick, because the cpufreq governor
@@ -164,6 +166,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	cs = &flow_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, 0);
 	WRITE_ONCE(cs->est_stopping_clk, 0);
+	if (flow_helicoprion && !READ_ONCE(cs->idled))
+		WRITE_ONCE(cs->idled, 1);
 	if (!READ_ONCE(cs->idle_start_clk))
 		WRITE_ONCE(cs->idle_start_clk, scx_bpf_now());
 }
@@ -179,7 +183,9 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		return;
 
 	now = scx_bpf_now();
-	if (!flow_long_burst(t->acc_runtime_ns))
+	if (!flow_long_burst(t->acc_runtime_ns) &&
+	    (!flow_helicoprion ||
+	     time_after(t->vtime, READ_ONCE(flow_clock.vtime_now) + FLOW_VTIME_GRAIN_NS)))
 		flow_advance_vtime_now(t->vtime);
 	flow_clear_pinned(t);
 	t->last_running_clk = now;
@@ -188,6 +194,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	WRITE_ONCE(cs->lat_cri, t->lat_cri);
 	WRITE_ONCE(cs->est_stopping_clk, flow_est_stop(t, t->acc_runtime_ns, p->scx.slice, now));
 	WRITE_ONCE(cs->idle_start_clk, 0);
+	if (flow_helicoprion)
+		WRITE_ONCE(cs->burst_start_clk, now - t->acc_runtime_ns);
 	if (t->lat_cri > READ_ONCE(cs->max_lat_cri))
 		WRITE_ONCE(cs->max_lat_cri, t->lat_cri);
 	__sync_fetch_and_add(&cs->sum_lat_cri, t->lat_cri);
@@ -211,6 +219,15 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	now = scx_bpf_now();
 	if (now - READ_ONCE(cs->cpuperf_commit_clk) >= FLOW_CPUPERF_REFRESH_NS)
 		flow_cpuperf_commit(cpu, cs, SCX_CPUPERF_ONE, now);
+
+	/*
+	 * A task that is still running a minimum slice after it started is no
+	 * waker that is about to sleep. A shorter run can be two tasks that
+	 * briefly poll for each other on two CPUs, which says nothing about
+	 * how they behave once they share one.
+	 */
+	if (flow_helicoprion && flow_ran(t, now) >= FLOW_SLICE_MIN_NS)
+		t->sync_score = 0;
 
 	/*
 	 * Once the task had a minimum slice, give the CPU to a waiting task
@@ -240,8 +257,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	used = t->last_running_clk ? flow_ran(t, scx_bpf_now()) : 0;
-	t->acc_runtime_ns += used;
-	t->vtime += flow_charge(p, used, t->acc_runtime_ns);
+	flow_charge_run(p, t, used);
 
 	if (runnable)
 		flow_stat_inc(FLOW_STAT_PREEMPTED);
@@ -256,8 +272,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p,
 	if (!t)
 		return -ENOMEM;
 	t->vtime = READ_ONCE(flow_clock.vtime_now);
+	t->sum_exec_ns = p->se.sum_exec_runtime;
 	t->lat_cri = 1;
 	t->pinned_cpu = -1;
+	t->sync_score = FLOW_SYNC_SCORE_MIN;
 	return 0;
 }
 

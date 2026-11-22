@@ -113,17 +113,34 @@ impl<'a> Scheduler<'a> {
             .context("failed to open BPF object (check dmesg)")?;
         skel.struct_ops.flow_ops_mut().exit_dump_len = opts.exit_dump_len;
 
+        // With --helicoprion, the wakeup and enqueue paths do the work of
+        // these callbacks, see flow_wake_task().
+        if opts.helicoprion {
+            let ops = skel.struct_ops.flow_ops_mut();
+            ops.runnable = std::ptr::null_mut();
+            ops.stopping = std::ptr::null_mut();
+            ops.quiescent = std::ptr::null_mut();
+            skel.progs.flow_runnable.set_autoload(false);
+            skel.progs.flow_stopping.set_autoload(false);
+            skel.progs.flow_quiescent.set_autoload(false);
+        }
+
         let rodata = skel
             .maps
             .rodata_data
             .as_mut()
             .context("BPF read-only data is not mapped")?;
         rodata.flow_nr_cpus = nr_cpus as u32;
+        rodata.flow_helicoprion = opts.helicoprion;
+        for (cpu, slot) in rodata.flow_cpu_sibling.iter_mut().enumerate() {
+            *slot = cpu as u32;
+        }
         if let Some(t) = tables.as_ref() {
             rodata.flow_nr_llcs = t.nr_llcs;
             rodata.flow_nr_groups = t.nr_groups;
             fill_per_cpu(&mut rodata.flow_cpu_llc, &t.cpu_llc);
             fill_per_cpu(&mut rodata.flow_cpu_group, &t.cpu_group);
+            fill_per_cpu(&mut rodata.flow_cpu_sibling, &t.cpu_sibling);
             for (slot, node) in rodata.flow_llc_node.iter_mut().zip(&t.llc_node) {
                 *slot = *node;
             }

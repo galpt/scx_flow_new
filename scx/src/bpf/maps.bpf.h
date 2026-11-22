@@ -42,6 +42,23 @@ enum flow_tunables {
 	FLOW_WEIGHT_DFLT		= 100,
 	FLOW_WEIGHT_MAX			= 10000,
 	FLOW_OPS_TIMEOUT_MS		= 20000,
+
+	/*
+	 * A task that wakes up another one and goes to sleep before it has
+	 * run for FLOW_SYNC_WAKE_NS gains FLOW_SYNC_SCORE_MIN points, up to
+	 * FLOW_SYNC_SCORE_MAX, and loses half of its points when it runs for
+	 * longer. With at least FLOW_SYNC_SCORE_MIN points, which a new task
+	 * starts with, its wakees take over its CPU.
+	 */
+	FLOW_SYNC_WAKE_NS		= 50000,	/* 50 us */
+	FLOW_SYNC_SCORE_MIN		= 2,
+	FLOW_SYNC_SCORE_MAX		= 8,
+
+	/* How often a task that keeps taking over CPUs is scored again. */
+	FLOW_RESCORE_NS			= 1000000,	/* 1 ms */
+
+	/* How far a task must run ahead before it moves the system virtual time. */
+	FLOW_VTIME_GRAIN_NS		= 50000,	/* 50 us */
 };
 
 enum flow_dsq_ids {
@@ -54,6 +71,8 @@ enum flow_task_flags {
 	FLOW_FLAG_SYNC_WAKEUP		= 1 << 0,
 	FLOW_FLAG_HARDIRQ_WAKEUP	= 1 << 1,
 	FLOW_FLAG_SOFTIRQ_WAKEUP	= 1 << 2,
+	FLOW_FLAG_YIELDED		= 1 << 3,	/* preempted by its own wakee */
+	FLOW_FLAG_WOKE			= 1 << 4,	/* woke up a task since it woke up */
 };
 
 #define FLOW_CPUPERF_IDLE	(SCX_CPUPERF_ONE / 2)
@@ -65,6 +84,8 @@ struct flow_task_ctx {
 	u64	last_running_clk;	/* when the task last started running */
 	u64	last_wake_clk;		/* when the task last woke up another task */
 	u64	last_quiescent_clk;	/* when the task last went to sleep */
+	u64	score_clk;		/* when last scored at a CPU hand-off */
+	u64	sum_exec_ns;		/* sum_exec_runtime charged so far */
 	u64	wake_freq;		/* how often the task wakes others, in Hz */
 	u64	wait_freq;		/* how often the task sleeps, in Hz */
 	u32	lat_cri;		/* latency criticality */
@@ -72,6 +93,8 @@ struct flow_task_ctx {
 	u32	lat_cri_wakee;		/* lat_cri of the last wakee, until scored */
 	u32	flags;			/* FLOW_FLAG_* */
 	s32	pinned_cpu;		/* CPU whose nr_pinned counts this task */
+	u32	sync_score;		/* how reliably it sleeps after waking others */
+	s32	last_waker;		/* pid of the task that last woke it up */
 };
 
 struct flow_cpu_state {
@@ -79,11 +102,15 @@ struct flow_cpu_state {
 	u64	idle_start_clk;		/* when the CPU ran out of work, 0 if busy */
 	u64	cpuperf_commit_clk;	/* when the perf target was last sent */
 	u64	sum_lat_cri;		/* lat_cri of tasks started this period */
+	u64	burst_start_clk;	/* when curr would have woken up, had it run throughout */
 	u32	nr_sched;		/* tasks started this period */
 	u32	max_lat_cri;		/* highest lat_cri started this period */
 	u32	lat_cri;		/* lat_cri of curr */
 	u32	nr_pinned;		/* pinned tasks waiting for this CPU */
 	u32	cpuperf_cur;		/* last perf target sent */
+	u32	idled;			/* went idle this period */
+	u32	busy;			/* never went idle in the last period */
+	u64	handoff_clk;		/* when a wakee last took this CPU over */
 } __attribute__((aligned(64)));
 
 /*
@@ -101,13 +128,18 @@ struct flow_sys_stat {
 	u64	avg_lat_cri;		/* average lat_cri of running tasks */
 	u64	max_lat_cri;		/* average of the highest lat_cri per period */
 	u64	thr_lat_cri;		/* lat_cri needed to preempt another task */
+	u64	saturated;		/* no CPU was idle while tasks waited */
 } __attribute__((aligned(64)));
+
+/* Wakeup latency tuning, set by --helicoprion. */
+const volatile bool flow_helicoprion;
 
 const volatile u32 flow_nr_cpus = 1;
 const volatile u32 flow_nr_llcs = 1;
 const volatile u32 flow_nr_groups;
 const volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_group[FLOW_MAX_CPUS];
+const volatile u32 flow_cpu_sibling[FLOW_MAX_CPUS];	/* the CPU itself without SMT */
 const volatile u32 flow_llc_node[FLOW_MAX_LLCS];
 const volatile u32 flow_llc_kb[FLOW_MAX_LLCS];
 

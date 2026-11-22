@@ -10,7 +10,9 @@
  * none and the task is urgent enough, it asks the running task with the
  * lowest latency criticality in the LLC to give up its CPU. The request
  * shortens the slice of that task instead of sending an IPI, so the CPU
- * switches at its next scheduling point.
+ * switches at its next scheduling point. With --helicoprion, a CPU whose
+ * task has been computing for a long time is interrupted right away when
+ * the urgent task is waking up.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -121,24 +123,49 @@ static bool flow_ask_yield(const struct flow_victim *v)
 }
 
 /*
+ * A task that wakes up should not wait for the tick of a CPU whose task
+ * has been computing for longer than a boosted slice, so that CPU is
+ * interrupted right away. Threads of the process of @p are left to yield
+ * at the tick, because threads that share work suffer when one of them is
+ * cut off in the middle of it.
+ */
+static void flow_kick_hog(const struct task_struct *p, s32 cpu, u64 now)
+{
+	struct task_struct *curr;
+	bool kick;
+
+	if (!flow_cpu_valid(cpu) ||
+	    now - READ_ONCE(flow_cpu_states[cpu].burst_start_clk) < FLOW_SLICE_BOOST_MAX_NS)
+		return;
+
+	bpf_rcu_read_lock();
+	curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	kick = curr && curr->pid && curr->tgid != p->tgid;
+	bpf_rcu_read_unlock();
+	if (kick)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+}
+
+/*
  * Look for a victim among the CPUs of the LLC that @p can use. @cpu is
  * checked first, then a few random CPUs, and the better of the first two
  * candidates wins. Random probes keep enqueues on different CPUs from
  * all going after the same victim.
  */
-static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc)
+static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc,
+			     u64 enq_flags)
 {
 	struct flow_victim cand[2];
 	struct bpf_cpumask *llc_mask;
 	u64 thr = READ_ONCE(flow_sys_stat.thr_lat_cri);
-	u64 est_stop;
+	u64 now, est_stop;
 	u32 nr = 0, i;
 
 	if (!thr || t->lat_cri < thr)
 		return;
 
-	est_stop = flow_est_stop(t, t->acc_runtime_ns, READ_ONCE(flow_sys_stat.slice_ns),
-				 scx_bpf_now());
+	now = scx_bpf_now();
+	est_stop = flow_est_stop(t, t->acc_runtime_ns, READ_ONCE(flow_sys_stat.slice_ns), now);
 	if (flow_probe_victim(cpu, t->lat_cri, est_stop, &cand[0]))
 		nr = 1;
 
@@ -164,15 +191,17 @@ static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32
 			(cand[1].lat_cri == cand[0].lat_cri &&
 			 time_after(cand[1].est_stop, cand[0].est_stop))))
 		cand[0] = cand[1];
-	if (flow_ask_yield(&cand[0]))
-		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
+	if (!flow_ask_yield(&cand[0]))
+		return;
+	flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
+	if (flow_helicoprion && (enq_flags & SCX_ENQ_WAKEUP))
+		flow_kick_hog(p, cand[0].cpu, now);
 }
 
 void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct flow_task_ctx *t, *wt;
 	struct task_struct *waker;
-	u64 now;
 
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
@@ -183,16 +212,32 @@ void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 
 	waker = bpf_get_current_task_btf();
 	wt = flow_task_ctx(waker);
-	if (!wt)
+	if (wt)
+		flow_note_wakeup(t, wt, scx_bpf_now());
+}
+
+/*
+ * @p was preempted by the wakee it just handed its CPU to, see
+ * flow_sync_handoff(). It waits for the reply of the wakee as if it slept,
+ * so its burst ends here, and it resumes on the same CPU after the wakee.
+ * Pinned tasks waiting for the CPU get to run first if they are due
+ * before it.
+ */
+static void flow_requeue_yielded(struct task_struct *p, struct flow_task_ctx *t, s32 cpu,
+				 u64 enq_flags)
+{
+	u64 deadline;
+
+	t->flags &= ~FLOW_FLAG_YIELDED;
+	t->avg_runtime_ns = flow_calc_avg(t->avg_runtime_ns, t->acc_runtime_ns);
+	deadline = flow_handoff_deadline(p, t, scx_bpf_now());
+	if (READ_ONCE(flow_cpu_states[cpu].nr_pinned)) {
+		scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, FLOW_SLICE_MIN_NS, deadline,
+					 enq_flags);
 		return;
-
-	now = scx_bpf_now();
-	if (wt->last_wake_clk && time_after(now, wt->last_wake_clk))
-		wt->wake_freq = flow_calc_avg_freq(wt->wake_freq, now - wt->last_wake_clk);
-	wt->last_wake_clk = now;
-
-	t->lat_cri_waker = wt->lat_cri;
-	wt->lat_cri_wakee = t->lat_cri;
+	}
+	scx_bpf_task_set_dsq_vtime(p, deadline);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SLICE_MIN_NS, enq_flags);
 }
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
@@ -216,6 +261,26 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
+	/*
+	 * With --helicoprion, the work of ops.runnable() and ops.stopping() is
+	 * done here for tasks that did not go through ops.select_cpu(), see
+	 * flow_wake_task().
+	 */
+	if (flow_helicoprion) {
+		if (!(enq_flags & SCX_ENQ_WAKEUP)) {
+			flow_charge_exec(p, t);
+			flow_stat_inc(FLOW_STAT_PREEMPTED);
+			if (t->flags & FLOW_FLAG_YIELDED) {
+				flow_requeue_yielded(p, t, cpu, enq_flags);
+				return;
+			}
+		} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+			struct task_struct *waker = bpf_get_current_task_btf();
+
+			flow_wake_task(p, t, waker, flow_task_ctx(waker), scx_bpf_now());
+		}
+	}
+
 	pinned = flow_is_pinned(p);
 	llc = flow_llc_of(cpu);
 	deadline = flow_score_task(p, t);
@@ -235,13 +300,12 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	if (enq_flags & SCX_ENQ_LAST)
 		return;
 	if (!flow_kick_idle(p, t, cpu, pinned, enq_flags))
-		flow_try_preempt(p, t, cpu, llc);
+		flow_try_preempt(p, t, cpu, llc, enq_flags);
 }
 
 void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct flow_task_ctx *t = flow_task_ctx(p);
-	u64 now;
 
 	if (!t)
 		return;
@@ -249,16 +313,22 @@ void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
 	/* A pinned task can leave its DSQ without running, e.g. on an affinity change. */
 	flow_clear_pinned(t);
 
-	if (!(deq_flags & SCX_DEQ_SLEEP))
-		return;
-
 	/* The burst ends here, so it can be folded in as a whole. */
-	t->avg_runtime_ns = flow_calc_avg(t->avg_runtime_ns, t->acc_runtime_ns);
+	if (deq_flags & SCX_DEQ_SLEEP)
+		flow_end_burst(t, scx_bpf_now());
+}
 
-	now = scx_bpf_now();
-	if (t->last_quiescent_clk && time_after(now, t->last_quiescent_clk))
-		t->wait_freq = flow_calc_avg_freq(t->wait_freq, now - t->last_quiescent_clk);
-	t->last_quiescent_clk = now;
+/*
+ * A pinned task that moves to another scheduling class while it is queued
+ * never runs here again, so it stops counting as waiting for its CPU.
+ * ops.quiescent() already does this, but --helicoprion leaves it out.
+ */
+void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
+{
+	struct flow_task_ctx *t = flow_task_ctx(p);
+
+	if (t)
+		flow_clear_pinned(t);
 }
 
 #endif /* __FLOW_ENQUEUE_BPF_H */

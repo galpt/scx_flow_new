@@ -29,6 +29,7 @@ struct flow_period {
 	u64	nr_sched;
 	u64	max_lat_cri;
 	u64	nr_queued;
+	u64	idled;
 	u64	llc_nr_queued[FLOW_MAX_LLCS];
 };
 
@@ -126,6 +127,15 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	if (lat > flow_period.max_lat_cri)
 		flow_period.max_lat_cri = lat;
 
+	/* A CPU idle since an earlier period counts as idle, though it did not go idle again. */
+	if (flow_helicoprion) {
+		u32 idled = __atomic_exchange_n(&cs->idled, 0, __ATOMIC_RELAXED);
+		bool idle = READ_ONCE(cs->idle_start_clk);
+
+		flow_period.idled |= idled || idle;
+		WRITE_ONCE(cs->busy, !idled && !idle);
+	}
+
 	q = scx_bpf_dsq_nr_queued(FLOW_CPU_DSQ_BASE + cpu);
 	flow_period.llc_nr_queued[flow_llc_of(cpu)] += q;
 	flow_period.nr_queued += q;
@@ -162,6 +172,8 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		flow_update_lat_cri(flow_period.sum_lat_cri / flow_period.nr_sched,
 				    flow_period.max_lat_cri);
 	WRITE_ONCE(flow_sys_stat.nr_queued, flow_period.nr_queued);
+	if (flow_helicoprion)
+		WRITE_ONCE(flow_sys_stat.saturated, flow_period.nr_queued && !flow_period.idled);
 	WRITE_ONCE(flow_sys_stat.slice_ns, flow_calc_base_slice(flow_period.nr_queued));
 
 	bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, 0);

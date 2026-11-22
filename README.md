@@ -36,6 +36,14 @@ Expect the current version, state `enabled`, ops with `flow`.
 A reinstall from a prior release needs a restart. Queue ids, slice,
 dispatch order, and stats follow this scheduler, see `scx/README.md`.
 
+> [!TIP]
+> Start scx_flow with `--helicoprion` to try the helicoprion mode.
+> This mode is for research into whether it benefits users more than
+> running without it. User feedback may be shared with other developers
+> to help improve other schedulers and, where possible, the
+> [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark
+> itself.
+
 ## Checks
 
 ```

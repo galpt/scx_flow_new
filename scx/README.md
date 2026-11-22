@@ -10,6 +10,9 @@ scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one 
 - Desktop use, such as gaming with browser tabs open.
 - Batch work, such as compiling and rendering.
 
+> [!TIP]
+> Start scx_flow with `--helicoprion` to try the helicoprion mode. This mode is for research into whether it benefits users more than running without it. User feedback may be shared with other developers to help improve other schedulers and, where possible, the [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark itself.
+
 ## Limitations
 
 - Hotplug needs restart.
