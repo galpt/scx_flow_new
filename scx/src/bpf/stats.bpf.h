@@ -6,7 +6,9 @@
  * folds those samples every period into the values the policy reads: the
  * queue length, the base slice and the latency criticality a task needs to
  * preempt another one. The timer also lowers the performance target of
- * CPUs that stayed idle for a whole period.
+ * CPUs that stayed idle for a whole period. With --helicoprion, every tenth
+ * run it also closes the cgroup period that the busy tasks count into, and
+ * decides from it whether cgroups compete for the CPUs.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -34,6 +36,9 @@ struct flow_period {
 };
 
 static struct flow_period flow_period;
+
+/* Runs of the timer since the cgroup period began. */
+static u32 flow_stat_runs;
 
 /*
  * Send a performance target for @cpu. Callers either hold the rq lock of
@@ -147,6 +152,23 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	return 0;
 }
 
+/*
+ * Start a new cgroup period. The tasks scale their charges by the counts
+ * of the period that just ended, and the cgroups compete during the new
+ * period if busy tasks of at least two of them outnumbered the CPUs in it.
+ */
+static void flow_roll_cgrp_period(void)
+{
+	u32 nr_busy = __atomic_exchange_n(&flow_cgrp_stat.nr_busy, 0, __ATOMIC_RELAXED);
+	u32 nr_groups = __atomic_exchange_n(&flow_cgrp_stat.nr_groups, 0, __ATOMIC_RELAXED);
+
+	WRITE_ONCE(flow_cgrp_stat.nr_busy_prev, nr_busy);
+	WRITE_ONCE(flow_cgrp_stat.weight_sum_prev,
+		   __atomic_exchange_n(&flow_cgrp_stat.weight_sum, 0, __ATOMIC_RELAXED));
+	WRITE_ONCE(flow_cgrp_stat.active, nr_groups >= 2 && nr_busy > flow_nr_cpus);
+	WRITE_ONCE(flow_cgrp_stat.period, flow_cgrp_stat.period + 1);
+}
+
 static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
 	u64 now = scx_bpf_now();
@@ -172,8 +194,13 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		flow_update_lat_cri(flow_period.sum_lat_cri / flow_period.nr_sched,
 				    flow_period.max_lat_cri);
 	WRITE_ONCE(flow_sys_stat.nr_queued, flow_period.nr_queued);
-	if (flow_helicoprion)
+	if (flow_helicoprion) {
 		WRITE_ONCE(flow_sys_stat.saturated, flow_period.nr_queued && !flow_period.idled);
+		if (++flow_stat_runs >= FLOW_CGRP_PERIOD_RUNS) {
+			flow_stat_runs = 0;
+			flow_roll_cgrp_period();
+		}
+	}
 	WRITE_ONCE(flow_sys_stat.slice_ns, flow_calc_base_slice(flow_period.nr_queued));
 
 	bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, 0);

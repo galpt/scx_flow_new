@@ -14,7 +14,8 @@
  * queued again, from the CPU time the kernel accounted for it. At every
  * tick, a task that already had a minimum slice gives up the CPU when a
  * waiting task is due before it, so an urgent wakeup waits for at most
- * about one tick even when every CPU is busy.
+ * about one tick even when every CPU is busy. With --helicoprion, the
+ * cgroup callbacks keep the weight of each cgroup for that charge.
  *
  * A busy CPU asks for its highest performance level when a task starts
  * and refreshes the request every tick, because the cpufreq governor
@@ -52,7 +53,8 @@ static bool flow_steal(u32 llc, bool same_node)
 /*
  * A task that computed for longer than a boosted slice without sleeping
  * does not move the system virtual time, so it cannot drag the clock away
- * from the tasks that run in short bursts.
+ * from the tasks that run in short bursts. While cgroups compete it does,
+ * so that the cgroup factors can tell such tasks apart.
  */
 static __always_inline bool flow_long_burst(u64 acc)
 {
@@ -105,6 +107,7 @@ static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 {
 	struct flow_task_ctx *t;
 	u64 now, ran, acc, vtime, deadline, slice;
+	bool cgrp = flow_cgrp_active();
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED) ||
 	    !bpf_cpumask_test_cpu(cpu, prev->cpus_ptr))
@@ -116,13 +119,13 @@ static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 	now = scx_bpf_now();
 	ran = flow_ran(t, now);
 	acc = t->acc_runtime_ns + ran;
-	vtime = t->vtime + flow_charge(prev, ran, acc);
+	vtime = t->vtime + (cgrp ? flow_charge_cgrp(prev, t, ran) : flow_charge(prev, ran, acc));
 	deadline = flow_deadline(t, vtime, acc);
 	if (!always && (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
 			flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu)))
 		return false;
 
-	if (!flow_long_burst(acc))
+	if (cgrp || !flow_long_burst(acc))
 		flow_advance_vtime_now(vtime);
 	scx_bpf_task_set_dsq_vtime(prev, deadline);
 	slice = flow_calc_slice(t, cpu);
@@ -183,7 +186,7 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 		return;
 
 	now = scx_bpf_now();
-	if (!flow_long_burst(t->acc_runtime_ns) &&
+	if ((!flow_long_burst(t->acc_runtime_ns) || flow_cgrp_active()) &&
 	    (!flow_helicoprion ||
 	     time_after(t->vtime, READ_ONCE(flow_clock.vtime_now) + FLOW_VTIME_GRAIN_NS)))
 		flow_advance_vtime_now(t->vtime);
@@ -273,10 +276,33 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p,
 		return -ENOMEM;
 	t->vtime = READ_ONCE(flow_clock.vtime_now);
 	t->sum_exec_ns = p->se.sum_exec_runtime;
+	t->cgrp_factor = FLOW_FACTOR_ONE;
 	t->lat_cri = 1;
 	t->pinned_cpu = -1;
-	t->sync_score = FLOW_SYNC_SCORE_MIN;
 	return 0;
+}
+
+/* Keep the cpu.weight of @cgrp for flow_refresh_cgrp(). */
+static __always_inline s32 flow_set_cgrp_weight(struct cgroup *cgrp, u32 weight)
+{
+	struct flow_cgrp_ctx *cc;
+
+	cc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!cc)
+		return -ENOMEM;
+	WRITE_ONCE(cc->weight, weight);
+	return 0;
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
+			     struct scx_cgroup_init_args *args)
+{
+	return flow_set_cgrp_weight(cgrp, args->weight);
+}
+
+void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
+{
+	flow_set_cgrp_weight(cgrp, weight);
 }
 
 /*

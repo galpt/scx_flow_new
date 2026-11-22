@@ -6,7 +6,9 @@
  * the hot paths look up the LLC, NUMA node and core group of a CPU with a
  * plain array access. The tables also carry the L3 size of each LLC. Each
  * CPU publishes what it is running in its own cache line for the
- * preemption and statistics code to read.
+ * preemption and statistics code to read. With --helicoprion, each cgroup
+ * also keeps its weight and busy task counts here, and the system keeps
+ * the totals and whether the cgroups compete for the CPUs.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -24,6 +26,13 @@ enum flow_tunables {
 
 	/* How far the virtual time of a task may trail or lead the clock. */
 	FLOW_VTIME_LAG_NS		= FLOW_SLICE_MAX_NS,
+
+	/*
+	 * How far it may lead while cgroups compete, see flow_cgrp_stat. A
+	 * task of a cgroup that is over its share is charged for several
+	 * times its CPU time, and needs room for that.
+	 */
+	FLOW_VTIME_LEAD_NS		= FLOW_SLICE_BOOST_MAX_NS,
 
 	/* Burst length beyond which the deadline offset stops growing. */
 	FLOW_BURST_MAX_NS		= 500000000,	/* 500 ms */
@@ -45,13 +54,19 @@ enum flow_tunables {
 
 	/*
 	 * A task that wakes up another one and goes to sleep before it has
-	 * run for FLOW_SYNC_WAKE_NS gains FLOW_SYNC_SCORE_MIN points, up to
+	 * run for FLOW_SYNC_WAKE_NS gains FLOW_SYNC_SCORE_STEP points, up to
 	 * FLOW_SYNC_SCORE_MAX, and loses half of its points when it runs for
-	 * longer. With at least FLOW_SYNC_SCORE_MIN points, which a new task
-	 * starts with, its wakees take over its CPU.
+	 * longer. New tasks start with none. Once a task has
+	 * FLOW_SYNC_SCORE_MIN points, the task it keeps waking up takes over
+	 * its CPU. Only tasks whose bursts average under FLOW_SYNC_WAKE_NS
+	 * hand over a CPU. A task that takes over a CPU, and the partner it
+	 * preempted, get FLOW_SYNC_SLICE_NS, so a wrong guess costs no more
+	 * than that.
 	 */
 	FLOW_SYNC_WAKE_NS		= 50000,	/* 50 us */
-	FLOW_SYNC_SCORE_MIN		= 2,
+	FLOW_SYNC_SLICE_NS		= 100000,	/* 100 us */
+	FLOW_SYNC_SCORE_STEP		= 2,
+	FLOW_SYNC_SCORE_MIN		= 6,
 	FLOW_SYNC_SCORE_MAX		= 8,
 
 	/* How often a task that keeps taking over CPUs is scored again. */
@@ -59,6 +74,17 @@ enum flow_tunables {
 
 	/* How far a task must run ahead before it moves the system virtual time. */
 	FLOW_VTIME_GRAIN_NS		= 50000,	/* 50 us */
+
+	/*
+	 * A cgroup period is this many runs of the statistics timer. The
+	 * charge of a task is scaled by a factor in fixed point, where
+	 * FLOW_FACTOR_ONE is 1.
+	 */
+	FLOW_CGRP_PERIOD_RUNS		= 10,
+	FLOW_FACTOR_SHIFT		= 10,
+	FLOW_FACTOR_ONE			= 1 << FLOW_FACTOR_SHIFT,
+	FLOW_FACTOR_MIN			= FLOW_FACTOR_ONE / 16,
+	FLOW_FACTOR_MAX			= FLOW_FACTOR_ONE * 16,
 };
 
 enum flow_dsq_ids {
@@ -88,6 +114,9 @@ struct flow_task_ctx {
 	u64	sum_exec_ns;		/* sum_exec_runtime charged so far */
 	u64	wake_freq;		/* how often the task wakes others, in Hz */
 	u64	wait_freq;		/* how often the task sleeps, in Hz */
+	u64	busy_ns;		/* CPU time charged since the last busy count */
+	u32	cgrp_factor;		/* share of its cgroup, see flow_refresh_cgrp() */
+	u32	cgrp_period;		/* cgroup period of the last refresh */
 	u32	lat_cri;		/* latency criticality */
 	u32	lat_cri_waker;		/* lat_cri of the last waker, until scored */
 	u32	lat_cri_wakee;		/* lat_cri of the last wakee, until scored */
@@ -122,6 +151,31 @@ struct flow_clock {
 	u64	vtime_now;		/* never moves backward */
 } __attribute__((aligned(64)));
 
+/* Weight and busy task counts of a cgroup, kept in its cgroup storage. */
+struct flow_cgrp_ctx {
+	struct bpf_spin_lock	lock;
+	u32	weight;			/* cpu.weight */
+	u32	period;			/* cgroup period that nr_busy counts */
+	u32	nr_busy;		/* busy tasks counted in that period */
+	u32	nr_busy_prev;		/* busy tasks counted in the period before */
+};
+
+/*
+ * Busy tasks of all cgroups. The timer starts a new period every
+ * FLOW_CGRP_PERIOD_RUNS runs, and the tasks count themselves into it.
+ * The cgroups compete for the CPUs when the last finished period had busy
+ * tasks in at least two cgroups, and more of them than CPUs.
+ */
+struct flow_cgrp_stat {
+	u64	weight_sum;		/* weight of the cgroups with a busy task */
+	u64	weight_sum_prev;	/* the same for the period before */
+	u32	nr_busy;		/* busy tasks in this period */
+	u32	nr_busy_prev;		/* busy tasks in the period before */
+	u32	nr_groups;		/* cgroups with a busy task in this period */
+	u32	active;			/* the cgroups compete in this period */
+	u32	period;			/* number of the period being counted */
+} __attribute__((aligned(64)));
+
 struct flow_sys_stat {
 	u64	nr_queued;		/* tasks waiting in flow DSQs */
 	u64	slice_ns;		/* base slice for the current period */
@@ -131,7 +185,7 @@ struct flow_sys_stat {
 	u64	saturated;		/* no CPU was idle while tasks waited */
 } __attribute__((aligned(64)));
 
-/* Wakeup latency tuning, set by --helicoprion. */
+/* Wakeup latency tuning and cgroup weights, enabled by --helicoprion. */
 const volatile bool flow_helicoprion;
 
 const volatile u32 flow_nr_cpus = 1;
@@ -153,6 +207,7 @@ bool flow_has_big_cache;
 struct flow_cpu_state flow_cpu_states[FLOW_MAX_CPUS];
 struct flow_clock flow_clock;
 struct flow_sys_stat flow_sys_stat;
+struct flow_cgrp_stat flow_cgrp_stat;
 u64 flow_llc_nr_queued[FLOW_MAX_LLCS];
 
 struct {
@@ -161,6 +216,13 @@ struct {
 	__type(key, int);
 	__type(value, struct flow_task_ctx);
 } task_ctx_stor SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct flow_cgrp_ctx);
+} cgrp_ctx_stor SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -193,6 +255,12 @@ static __always_inline u64 flow_max(u64 a, u64 b)
 static __always_inline bool flow_cpu_valid(s32 cpu)
 {
 	return cpu >= 0 && (u32)cpu < flow_nr_cpus && (u32)cpu < FLOW_MAX_CPUS;
+}
+
+/* The cgroups compete for the CPUs, so their weights are followed. */
+static __always_inline bool flow_cgrp_active(void)
+{
+	return flow_helicoprion && READ_ONCE(flow_cgrp_stat.active);
 }
 
 /* @cpu must have passed flow_cpu_valid(). */

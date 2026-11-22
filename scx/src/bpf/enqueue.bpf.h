@@ -10,9 +10,9 @@
  * none and the task is urgent enough, it asks the running task with the
  * lowest latency criticality in the LLC to give up its CPU. The request
  * shortens the slice of that task instead of sending an IPI, so the CPU
- * switches at its next scheduling point. With --helicoprion, a CPU whose
- * task has been computing for a long time is interrupted right away when
- * the urgent task is waking up.
+ * switches at its next scheduling point. With --helicoprion, a short task
+ * that wakes up while every CPU computes also interrupts a CPU whose task
+ * has been computing for a long time, right away.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -123,49 +123,24 @@ static bool flow_ask_yield(const struct flow_victim *v)
 }
 
 /*
- * A task that wakes up should not wait for the tick of a CPU whose task
- * has been computing for longer than a boosted slice, so that CPU is
- * interrupted right away. Threads of the process of @p are left to yield
- * at the tick, because threads that share work suffer when one of them is
- * cut off in the middle of it.
- */
-static void flow_kick_hog(const struct task_struct *p, s32 cpu, u64 now)
-{
-	struct task_struct *curr;
-	bool kick;
-
-	if (!flow_cpu_valid(cpu) ||
-	    now - READ_ONCE(flow_cpu_states[cpu].burst_start_clk) < FLOW_SLICE_BOOST_MAX_NS)
-		return;
-
-	bpf_rcu_read_lock();
-	curr = __COMPAT_scx_bpf_cpu_curr(cpu);
-	kick = curr && curr->pid && curr->tgid != p->tgid;
-	bpf_rcu_read_unlock();
-	if (kick)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-}
-
-/*
  * Look for a victim among the CPUs of the LLC that @p can use. @cpu is
  * checked first, then a few random CPUs, and the better of the first two
  * candidates wins. Random probes keep enqueues on different CPUs from
  * all going after the same victim.
  */
-static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc,
-			     u64 enq_flags)
+static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc)
 {
 	struct flow_victim cand[2];
 	struct bpf_cpumask *llc_mask;
 	u64 thr = READ_ONCE(flow_sys_stat.thr_lat_cri);
-	u64 now, est_stop;
+	u64 est_stop;
 	u32 nr = 0, i;
 
 	if (!thr || t->lat_cri < thr)
 		return;
 
-	now = scx_bpf_now();
-	est_stop = flow_est_stop(t, t->acc_runtime_ns, READ_ONCE(flow_sys_stat.slice_ns), now);
+	est_stop = flow_est_stop(t, t->acc_runtime_ns, READ_ONCE(flow_sys_stat.slice_ns),
+				 scx_bpf_now());
 	if (flow_probe_victim(cpu, t->lat_cri, est_stop, &cand[0]))
 		nr = 1;
 
@@ -191,11 +166,59 @@ static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32
 			(cand[1].lat_cri == cand[0].lat_cri &&
 			 time_after(cand[1].est_stop, cand[0].est_stop))))
 		cand[0] = cand[1];
-	if (!flow_ask_yield(&cand[0]))
-		return;
-	flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
-	if (flow_helicoprion && (enq_flags & SCX_ENQ_WAKEUP))
-		flow_kick_hog(p, cand[0].cpu, now);
+	if (flow_ask_yield(&cand[0]))
+		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
+}
+
+/*
+ * The task on @cpu has been computing for longer than a boosted slice since
+ * it last woke up and is less latency critical than @t.
+ */
+static bool flow_is_hog(const struct flow_task_ctx *t, s32 cpu, u64 now)
+{
+	return flow_cpu_valid(cpu) &&
+	       now - READ_ONCE(flow_cpu_states[cpu].burst_start_clk) >= FLOW_SLICE_BOOST_MAX_NS &&
+	       READ_ONCE(flow_cpu_states[cpu].lat_cri) < t->lat_cri;
+}
+
+/*
+ * A task that runs in short bursts and wakes up while every CPU computes
+ * would wait up to a tick for a CPU. It would get that CPU time at the tick
+ * anyway, so the first hog among @cpu and a few random CPUs of the LLC is
+ * interrupted right away instead, which costs the hog no more than an IPI.
+ * Returns whether a CPU was interrupted, so that no other one is asked to
+ * give up its CPU as well.
+ */
+static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *t, s32 cpu,
+			     u32 llc, u64 enq_flags)
+{
+	struct bpf_cpumask *llc_mask;
+	u64 now;
+	u32 i;
+
+	if (!(enq_flags & SCX_ENQ_WAKEUP) || t->avg_runtime_ns >= FLOW_SLICE_MIN_NS)
+		return false;
+
+	now = scx_bpf_now();
+	if (flow_is_hog(t, cpu, now)) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
+		return true;
+	}
+
+	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
+	if (!llc_mask)
+		return false;
+	bpf_for(i, 0, FLOW_VICTIM_PROBES) {
+		s32 probe = bpf_cpumask_any_and_distribute(cast_mask(llc_mask), p->cpus_ptr);
+
+		if (probe == cpu || !flow_is_hog(t, probe, now))
+			continue;
+		scx_bpf_kick_cpu(probe, SCX_KICK_PREEMPT);
+		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
+		return true;
+	}
+	return false;
 }
 
 void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
@@ -232,12 +255,12 @@ static void flow_requeue_yielded(struct task_struct *p, struct flow_task_ctx *t,
 	t->avg_runtime_ns = flow_calc_avg(t->avg_runtime_ns, t->acc_runtime_ns);
 	deadline = flow_handoff_deadline(p, t, scx_bpf_now());
 	if (READ_ONCE(flow_cpu_states[cpu].nr_pinned)) {
-		scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, FLOW_SLICE_MIN_NS, deadline,
+		scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, FLOW_SYNC_SLICE_NS, deadline,
 					 enq_flags);
 		return;
 	}
 	scx_bpf_task_set_dsq_vtime(p, deadline);
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SLICE_MIN_NS, enq_flags);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SYNC_SLICE_NS, enq_flags);
 }
 
 void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
@@ -299,8 +322,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (enq_flags & SCX_ENQ_LAST)
 		return;
-	if (!flow_kick_idle(p, t, cpu, pinned, enq_flags))
-		flow_try_preempt(p, t, cpu, llc, enq_flags);
+	if (flow_kick_idle(p, t, cpu, pinned, enq_flags))
+		return;
+	if (flow_helicoprion && flow_preempt_hog(p, t, cpu, llc, enq_flags))
+		return;
+	flow_try_preempt(p, t, cpu, llc);
 }
 
 void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)

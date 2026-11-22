@@ -123,6 +123,14 @@ impl<'a> Scheduler<'a> {
             skel.progs.flow_runnable.set_autoload(false);
             skel.progs.flow_stopping.set_autoload(false);
             skel.progs.flow_quiescent.set_autoload(false);
+        } else {
+            // Only --helicoprion follows the cgroup weights, see
+            // flow_refresh_cgrp().
+            let ops = skel.struct_ops.flow_ops_mut();
+            ops.cgroup_init = std::ptr::null_mut();
+            ops.cgroup_set_weight = std::ptr::null_mut();
+            skel.progs.flow_cgroup_init.set_autoload(false);
+            skel.progs.flow_cgroup_set_weight.set_autoload(false);
         }
 
         let rodata = skel

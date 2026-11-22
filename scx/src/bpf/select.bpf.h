@@ -15,7 +15,10 @@
  * tried.
  *
  * A wakeup that wins an idle CPU goes straight to its local DSQ, and the
- * kernel then skips ops.enqueue() for that wakeup.
+ * kernel then skips ops.enqueue() for that wakeup. With --helicoprion, the
+ * partner of a waker with tiny bursts tries to take over the CPU of the
+ * waker first, see flow_sync_handoff(), and then the idle hardware thread
+ * next to it.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -117,28 +120,31 @@ static __always_inline bool flow_smt_contended(s32 cpu, u64 now)
  * as the two sides of a request and its reply do, is about to leave its
  * CPU, so the wakee takes that CPU over. It skips the IPI and the idle
  * exit of another CPU and finds what the waker just wrote still in the
- * cache. Apart from the task that last woke the waker up, a wakee only
- * qualifies while the local DSQ is empty, so a waker that wakes up a whole
- * group of tasks does not pile them up on its own CPU. While a whole core
- * is idle, a CPU whose other hardware thread is kept busy is not handed
- * over: the wakee goes to the idle core and its waker follows it there at
- * the next hand-off.
+ * cache. Only the partner of the waker qualifies, see flow_select_cpu(),
+ * so a waker that wakes up a whole group of tasks does not pile them up on
+ * its own CPU. Only tasks with tiny bursts take part. Threads that hand
+ * frames or work items to each other run far longer, and moving them onto
+ * one CPU makes them wait for each other. While a whole core is idle, a
+ * CPU whose other hardware thread is kept busy is not handed over: the
+ * wakee goes to the idle core and its waker follows it there at the next
+ * hand-off.
  *
  * While some CPU still goes idle, the waker goes to sleep on its own and
- * its slice is trimmed, so that a wrong guess delays the wakee by a
- * minimum slice at most. Once no CPU was idle at any time in a period while
- * tasks waited, every sleep and wakeup costs more because the CPUs are
- * shared, and a waker that does not sleep after all would wait for a CPU
- * anyway. The wakee then preempts the waker, which goes back to the local
- * DSQ and finds the reply when it resumes, instead of sleeping and being
- * woken up for it.
+ * its slice is trimmed, so that a wrong guess delays the wakee by
+ * FLOW_SYNC_SLICE_NS at most. Once no CPU was idle at any time in a period
+ * while tasks waited, every sleep and wakeup costs more because the CPUs
+ * are shared, and a waker that does not sleep after all would wait for a
+ * CPU anyway. The wakee then preempts the waker, which goes back to the
+ * local DSQ and finds the reply when it resumes, instead of sleeping and
+ * being woken up for it. Both get FLOW_SYNC_SLICE_NS, so neither holds the
+ * CPU for long if the guess was wrong.
  *
- * Tasks pinned to the CPU, or a task of the LLC that is due a maximum
- * slice before the wakee and has already waited for a tick, are not
- * skipped. The wakee then waits in the DSQ of the CPU, where
- * ops.dispatch() weighs it against them as it does for pinned tasks. A
- * task that has just woken up is left to the tick of a busy CPU, as it
- * would be without hand-offs, rather than delaying the hand-off.
+ * Tasks already queued on the CPU or pinned to it, or a task of the LLC that
+ * is due a maximum slice before the wakee and has already waited for a tick,
+ * are not skipped. The wakee then waits in the DSQ of the CPU, where
+ * ops.dispatch() weighs it against them as it does for pinned tasks. A task
+ * that has just woken up is left to the tick of a busy CPU, as it would be
+ * without hand-offs, rather than delaying the hand-off.
  */
 static bool flow_sync_handoff(struct task_struct *p, struct flow_task_ctx *t,
 			      struct task_struct *waker, struct flow_task_ctx *wt, u64 now)
@@ -150,18 +156,12 @@ static bool flow_sync_handoff(struct task_struct *p, struct flow_task_ctx *t,
 	u32 llc;
 
 	if (wt->sync_score < FLOW_SYNC_SCORE_MIN ||
+	    t->avg_runtime_ns >= FLOW_SYNC_WAKE_NS || wt->avg_runtime_ns >= FLOW_SYNC_WAKE_NS ||
 	    t->flags & (FLOW_FLAG_HARDIRQ_WAKEUP | FLOW_FLAG_SOFTIRQ_WAKEUP) ||
 	    !flow_cpu_valid(cpu) || !flow_may_run_on(p, cpu))
 		return false;
 
-	/*
-	 * Another task already waits in the local DSQ. Only the task that last
-	 * woke up the waker still takes the CPU over then, and it waits behind
-	 * that task in the DSQ of the CPU.
-	 */
 	queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL);
-	if (queued && wt->last_waker != p->pid)
-		return false;
 
 	/* The queue length is sampled, so only look at the DSQ when it was in use. */
 	llc = flow_llc_of(cpu);
@@ -177,19 +177,45 @@ static bool flow_sync_handoff(struct task_struct *p, struct flow_task_ctx *t,
 	    (head && time_before(head->scx.dsq_vtime, deadline - FLOW_SLICE_MAX_NS) &&
 	     time_after(bpf_jiffies64(), head->scx.runnable_at + 1) &&
 	     bpf_cpumask_test_cpu(cpu, head->cpus_ptr))) {
-		scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, FLOW_SLICE_MIN_NS, deadline, 0);
+		scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, FLOW_SYNC_SLICE_NS, deadline,
+					 0);
 	} else if (head && READ_ONCE(flow_sys_stat.saturated)) {
 		wt->flags |= FLOW_FLAG_YIELDED;
 		scx_bpf_task_set_dsq_vtime(p, deadline);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SLICE_MIN_NS, SCX_ENQ_PREEMPT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SYNC_SLICE_NS, SCX_ENQ_PREEMPT);
 		return true;
 	} else {
 		scx_bpf_task_set_dsq_vtime(p, deadline);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SLICE_MIN_NS, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, FLOW_SYNC_SLICE_NS, 0);
 	}
-	if (waker->scx.slice > FLOW_SLICE_MIN_NS)
-		scx_bpf_task_set_slice(waker, FLOW_SLICE_MIN_NS);
+	if (waker->scx.slice > FLOW_SYNC_SLICE_NS)
+		scx_bpf_task_set_slice(waker, FLOW_SYNC_SLICE_NS);
 	return true;
+}
+
+/*
+ * When @p, the partner of @waker, cannot take over the CPU of the waker, it
+ * can still run on the other hardware thread of that core if it is idle.
+ * The two share the L1 and L2 caches of the core, so what the waker wrote is
+ * close to the wakee, and a tiny wakee slows the core of its waker only for
+ * a moment. Returns the CPU claimed for @p, or a negative value if there is
+ * none.
+ */
+static s32 flow_claim_sibling(const struct task_struct *p, const struct flow_task_ctx *t,
+			      const struct flow_task_ctx *wt)
+{
+	s32 cpu = bpf_get_smp_processor_id();
+	u32 sib;
+
+	if (!flow_cpu_valid(cpu) || t->avg_runtime_ns >= FLOW_SYNC_WAKE_NS ||
+	    wt->avg_runtime_ns >= FLOW_SYNC_WAKE_NS)
+		return -EBUSY;
+
+	sib = flow_cpu_sibling[cpu];
+	if (sib == cpu || sib >= FLOW_MAX_CPUS || !flow_may_run_on(p, sib) ||
+	    !scx_bpf_test_and_clear_cpu_idle(sib))
+		return -EBUSY;
+	return sib;
 }
 
 /*
@@ -205,7 +231,7 @@ static __always_inline void flow_learn_sync(struct flow_task_ctx *t)
 	if (t->acc_runtime_ns >= FLOW_SYNC_WAKE_NS)
 		t->sync_score >>= 1;
 	else if (t->flags & FLOW_FLAG_WOKE)
-		t->sync_score = flow_min(t->sync_score + FLOW_SYNC_SCORE_MIN, FLOW_SYNC_SCORE_MAX);
+		t->sync_score = flow_min(t->sync_score + FLOW_SYNC_SCORE_STEP, FLOW_SYNC_SCORE_MAX);
 	t->flags &= ~(FLOW_FLAG_WOKE | FLOW_FLAG_YIELDED);
 }
 
@@ -237,7 +263,7 @@ static __always_inline void flow_wake_task(struct task_struct *p, struct flow_ta
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct flow_task_ctx *t = flow_task_ctx(p);
-	s32 cpu;
+	s32 cpu = -EBUSY;
 
 	if (!t)
 		return prev_cpu;
@@ -250,21 +276,23 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		bool related;
 
 		/*
-		 * The wakee is related to its waker when one of them last woke
-		 * up the other, or when the same task last woke up both of
-		 * them, as when a group of threads is released at once. Other
-		 * tasks that happen to run on a CPU taken over by a hand-off
-		 * then do not crowd it.
+		 * Only the task that last woke up the waker, and was last woken
+		 * up by it in turn, takes over the CPU of the waker. Threads
+		 * released by the same task, or passing work along a chain,
+		 * keep running on CPUs of their own.
 		 */
-		related = wt && (wt->last_waker == p->pid || t->last_waker == waker->pid ||
-				 (wt->last_waker && wt->last_waker == t->last_waker));
+		related = wt && wt->last_waker == p->pid && t->last_waker == waker->pid;
 
 		flow_wake_task(p, t, waker, wt, now);
-		if (related && flow_sync_handoff(p, t, waker, wt, now))
-			return bpf_get_smp_processor_id();
+		if (related) {
+			if (flow_sync_handoff(p, t, waker, wt, now))
+				return bpf_get_smp_processor_id();
+			cpu = flow_claim_sibling(p, t, wt);
+		}
 	}
 
-	cpu = flow_pick_idle_cpu(p, t, prev_cpu, wake_flags);
+	if (cpu < 0)
+		cpu = flow_pick_idle_cpu(p, t, prev_cpu, wake_flags);
 	if (cpu < 0)
 		return prev_cpu;
 

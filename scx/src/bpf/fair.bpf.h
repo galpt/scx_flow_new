@@ -20,6 +20,21 @@
  * logarithm so that no single one dominates. A waker and its wakee share
  * part of their score, which keeps a producer and its consumers close.
  *
+ * With --helicoprion, the CPUs are shared between cgroups by their
+ * cpu.weight while they compete, that is while busy tasks of at least two
+ * cgroups outnumber the CPUs. Every 100 ms, a task counts as busy in its
+ * cgroup if it was charged a maximum slice since it was last counted, so
+ * tasks that mostly sleep do not make their cgroup look big. The charge of
+ * a task is then scaled by a factor: a cgroup with more busy tasks than
+ * its weight earns charges each of them more, one with fewer charges each
+ * of them less, so that its busy tasks together get the share its weight
+ * asks for. The charge then no longer grows with the length of the burst,
+ * and tasks that compute for long move the system virtual time and may
+ * run further ahead of it, as the clamp would otherwise even out the
+ * factors. While the cgroups do not compete, the weights decide nothing
+ * and the penalty for computing without a break applies as it does
+ * without --helicoprion.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_FAIR_BPF_H
@@ -129,17 +144,100 @@ static __always_inline void flow_charge_run(const struct task_struct *p, struct 
 }
 
 /*
+ * Once per cgroup period, count @p as a busy task of its cgroup if it was
+ * charged at least FLOW_SLICE_MAX_NS since its last count, and work out by
+ * how much its charge is scaled. A cgroup with n of the b busy tasks gets
+ * n/b of the CPUs when every task is charged alike, but its weight w out
+ * of the s that all busy cgroups add up to asks for w/s. Charging each of
+ * its tasks n*s/(w*b) closes the gap. All the numbers come from the last
+ * finished period, and the factor is one when any of them is missing.
+ */
+static __noinline void flow_refresh_cgrp(struct task_struct *p, struct flow_task_ctx *t)
+{
+	u32 period = READ_ONCE(flow_cgrp_stat.period);
+	u64 b = READ_ONCE(flow_cgrp_stat.nr_busy_prev);
+	u64 s = READ_ONCE(flow_cgrp_stat.weight_sum_prev);
+	bool busy = t->busy_ns >= FLOW_SLICE_MAX_NS;
+	u64 n = 0, w = 0, factor;
+	struct flow_cgrp_ctx *cc;
+	struct cgroup *cgrp;
+	bool first = false;
+
+	if (t->cgrp_period == period)
+		return;
+	t->cgrp_period = period;
+	t->busy_ns = 0;
+	t->cgrp_factor = FLOW_FACTOR_ONE;
+
+	cgrp = scx_bpf_task_cgroup(p);
+	if (!cgrp)
+		return;
+	cc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, 0);
+	if (cc) {
+		bpf_spin_lock(&cc->lock);
+		if (cc->period != period) {
+			cc->nr_busy_prev = cc->period + 1 == period ? cc->nr_busy : 0;
+			cc->nr_busy = 0;
+			cc->period = period;
+		}
+		if (busy)
+			first = !cc->nr_busy++;
+		n = cc->nr_busy_prev;
+		w = cc->weight;
+		bpf_spin_unlock(&cc->lock);
+	}
+	bpf_cgroup_release(cgrp);
+
+	if (busy)
+		__sync_fetch_and_add(&flow_cgrp_stat.nr_busy, 1);
+	if (first) {
+		__sync_fetch_and_add(&flow_cgrp_stat.nr_groups, 1);
+		__sync_fetch_and_add(&flow_cgrp_stat.weight_sum, w);
+	}
+
+	if (!n || !w || !b || !s)
+		return;
+	factor = n * s * FLOW_FACTOR_ONE / (w * b);
+	t->cgrp_factor = flow_min(flow_max(factor, FLOW_FACTOR_MIN), FLOW_FACTOR_MAX);
+}
+
+/*
+ * Virtual time that @p is charged for @ran of CPU time while cgroups
+ * compete: the weight of the task and the factor of its cgroup. The charge
+ * does not grow with the length of the burst as flow_charge() does. That
+ * growth outruns the clamp of flow_clamp_vtime(), which would put every
+ * task that computes for a while at the upper end of it, whatever its
+ * cgroup.
+ */
+static __always_inline u64 flow_charge_cgrp(const struct task_struct *p,
+					    const struct flow_task_ctx *t, u64 ran)
+{
+	return (ran * FLOW_WEIGHT_DFLT / flow_task_weight(p) * t->cgrp_factor) >>
+	       FLOW_FACTOR_SHIFT;
+}
+
+/*
  * Charge the CPU time that @p used since it was last charged. The kernel
  * accounts it exactly in sum_exec_runtime, so --helicoprion charges it
  * when the task wakes up or is queued again instead of every time it
- * stops running.
+ * stops running. While cgroups compete, the charge follows the cgroup of
+ * the task, see flow_refresh_cgrp().
  */
-static __always_inline void flow_charge_exec(const struct task_struct *p, struct flow_task_ctx *t)
+static __always_inline void flow_charge_exec(struct task_struct *p, struct flow_task_ctx *t)
 {
 	u64 sum = p->se.sum_exec_runtime;
+	u64 used = sum - t->sum_exec_ns;
 
-	flow_charge_run(p, t, sum - t->sum_exec_ns);
 	t->sum_exec_ns = sum;
+	t->busy_ns += used;
+	flow_refresh_cgrp(p, t);
+
+	if (!flow_cgrp_active()) {
+		flow_charge_run(p, t, used);
+		return;
+	}
+	t->acc_runtime_ns += used;
+	t->vtime += flow_charge_cgrp(p, t, used);
 }
 
 /*
@@ -210,18 +308,20 @@ static __always_inline u64 flow_deadline(const struct flow_task_ctx *t, u64 vtim
 
 /*
  * Keep the virtual time of @t within FLOW_VTIME_LAG_NS of the system
- * virtual time. The lower bound caps the credit of a task that slept, the
+ * virtual time, or within FLOW_VTIME_LEAD_NS ahead of it while cgroups
+ * compete. The lower bound caps the credit of a task that slept, the
  * upper bound caps how far a task that kept computing can fall behind the
  * others.
  */
 static __always_inline void flow_clamp_vtime(struct flow_task_ctx *t)
 {
 	u64 vtime_now = READ_ONCE(flow_clock.vtime_now);
+	u64 lead = flow_cgrp_active() ? FLOW_VTIME_LEAD_NS : FLOW_VTIME_LAG_NS;
 
 	if (time_before(t->vtime, vtime_now - FLOW_VTIME_LAG_NS))
 		t->vtime = vtime_now - FLOW_VTIME_LAG_NS;
-	else if (time_after(t->vtime, vtime_now + FLOW_VTIME_LAG_NS))
-		t->vtime = vtime_now + FLOW_VTIME_LAG_NS;
+	else if (time_after(t->vtime, vtime_now + lead))
+		t->vtime = vtime_now + lead;
 }
 
 /*
