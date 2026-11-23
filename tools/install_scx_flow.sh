@@ -9,9 +9,8 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
-DEST="${WS}/scheds/experimental/scx_flow"
 BIN="scx_flow"
-VER="5.3.1"
+VER="5.3.2"
 # The workspace commit is pinned and matches the one CI uses. CI fetches
 # it from sched-ext/scx, the installer from the galpt/scx mirror, and the
 # check after the fetch refuses any other commit.
@@ -44,8 +43,7 @@ if [ "${kmaj}" -lt 7 ] || { [ "${kmaj}" -eq 7 ] && [ "${kmin}" -lt 1 ]; }; then
 fi
 
 # The workspace is removed and fetched again on every run, so only accept
-# an absolute path without whitespace or glob characters, and refuse
-# anything that could point at data outside of a scratch directory.
+# an absolute path without whitespace or glob characters.
 if [ -z "${WS}" ] || [ "${WS}" = "/" ] || [ "${WS}" = "//" ]; then
     echo "refusing to clean an empty or root path" >&2
     exit 1
@@ -72,16 +70,21 @@ case "${WS}" in
         ;;
 esac
 # Resolve symlinks, "." and "..", so the checks below apply to the
-# directory that would really be removed: /tmp/scx-foo/../opencode is
-# checked as /tmp/opencode, and a link is checked as its target.
-if command -v realpath >/dev/null 2>&1; then
-    WS="$(realpath -m "${WS}")"
-elif command -v readlink >/dev/null 2>&1; then
-    WS="$(readlink -m "${WS}")"
-else
+# directory that would really be removed: /tmp/scx-foo/../other is
+# checked as /tmp/other, and a link is checked as its target.
+canon() {
+    if command -v realpath >/dev/null 2>&1; then
+        realpath -m "$1"
+    elif command -v readlink >/dev/null 2>&1; then
+        readlink -m "$1"
+    else
+        return 1
+    fi
+}
+WS="$(canon "${WS}")" || {
     echo "refusing without canonical tool" >&2
     exit 1
-fi
+}
 # The path is resolved now, so a symlink here or in a parent directory
 # means it was swapped after the check.
 if [ -L "${WS}" ]; then
@@ -96,71 +99,50 @@ while [ "${_parent}" != "/" ] && [ "${_parent}" != "." ] && [ -n "${_parent}" ];
     fi
     _parent="$(dirname "${_parent}")"
 done
-DEST="${WS}/scheds/experimental/scx_flow"
-# /tmp/opencode holds the workspace and caches CI uses.
+# Only scratch places are cleaned: a /tmp/scx-* directory, the workspace in
+# the cache directory of the user, or a directory that this script set up
+# before and marked as its workspace. Anything else could hold data that
+# is not ours.
+MARKER=".scx_flow_workspace"
+CACHE_WS=""
+if [ -n "${XDG_CACHE_HOME:-}" ] || [ -n "${HOME:-}" ]; then
+    CACHE_WS="$(canon "${XDG_CACHE_HOME:-${HOME}/.cache}/scx-flow-ws")"
+fi
+allowed=0
 case "${WS}" in
-    /tmp/opencode | /tmp/opencode/*)
-        echo "refusing to clean /tmp/opencode" >&2
-        exit 1
-        ;;
+    /tmp/scx-?*) allowed=1 ;;
 esac
-if [ "${WS}" = "/tmp" ]; then
-    echo "refusing to clean /tmp" >&2
+if [ -n "${CACHE_WS}" ] && [ "${WS}" = "${CACHE_WS}" ]; then
+    allowed=1
+fi
+if [ -d "${WS}" ] && [ -f "${WS}/${MARKER}" ] && [ ! -L "${WS}/${MARKER}" ]; then
+    allowed=1
+fi
+if [ "${allowed}" != "1" ]; then
+    echo "refusing to clean ${WS}: use /tmp/scx-*${CACHE_WS:+ or ${CACHE_WS}}" >&2
     exit 1
 fi
-# Under /tmp, only directories named scx-* are used.
-case "${WS}" in
-    /tmp/*)
-        case "${WS}" in
-            /tmp/scx-*) ;;
-            *)
-                echo "refusing to clean non allowlisted /tmp path" >&2
-                exit 1
-                ;;
-        esac
-        ;;
-esac
-if [ -n "${HOME:-}" ]; then
-    if [ "${WS}" = "${HOME}" ]; then
-        echo "refusing to clean HOME" >&2
-        exit 1
-    fi
-    case "${WS}" in
-        "${HOME}"/*)
-            echo "refusing to clean HOME tree" >&2
-            exit 1
-            ;;
-    esac
+DEST="${WS}/scheds/experimental/scx_flow"
+
+# Fail before the slow part when the result could not be used or installed.
+if [ ! -d /sys/kernel/sched_ext ]; then
+    echo "this kernel has no sched_ext (/sys/kernel/sched_ext is missing)" >&2
+    exit 1
 fi
-case "${WS}" in
-    /home | /home/*)
-        echo "refusing to clean /home" >&2
-        exit 1
-        ;;
-    /usr | /usr/*)
-        echo "refusing to clean /usr" >&2
-        exit 1
-        ;;
-    /var | /var/*)
-        echo "refusing to clean /var" >&2
-        exit 1
-        ;;
-esac
+if [ ! -w /usr/local/bin ]; then
+    echo "cannot write to /usr/local/bin, run the installer as root" >&2
+    exit 1
+fi
 # Check once more right before removing, in case the path was swapped
 # for a symlink in the meantime.
 if [ -L "${WS}" ]; then
     echo "refusing a symlinked workspace path" >&2
     exit 1
 fi
-case "${WS}" in
-    /tmp/opencode | /tmp/opencode/*)
-        echo "refusing to clean /tmp/opencode" >&2
-        exit 1
-        ;;
-esac
 echo "cleaning workspace at ${WS} for a fresh rebuild"
 rm -rf -- "${WS}"
 mkdir -p -- "${WS}"
+: > "${WS}/${MARKER}"
 
 git init -q "${WS}"
 git -C "${WS}" remote add origin "${FORK}"
@@ -205,11 +187,10 @@ echo "building ${BIN} in workspace"
 cargo build --manifest-path "${DEST}/Cargo.toml" --release
 
 echo "installing binary"
-install -m 0755 "${WS}/target/release/${BIN}" \
-    "/usr/local/bin/${BIN}" 2>/dev/null || {
-    echo "copying binary to current dir"
-    cp "${WS}/target/release/${BIN}" "${REPO_DIR}/${BIN}"
-}
+if ! install -m 0755 "${WS}/target/release/${BIN}" "/usr/local/bin/${BIN}"; then
+    echo "failed to install /usr/local/bin/${BIN}" >&2
+    exit 1
+fi
 
 # Set CLEAN=1 to remove the build directory of the workspace once the
 # binary is installed. The next run then builds everything from scratch.

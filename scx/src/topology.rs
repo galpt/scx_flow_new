@@ -2,7 +2,9 @@
 //! CPU topology handling for scx_flow.
 //!
 //! Builds the topology tables the BPF program reads and the topology
-//! lines printed at startup.
+//! lines printed at startup. With --unslice, it also splits the CPUs into
+//! central domains and picks the fastest physical core of each, which
+//! makes every scheduling decision for the domain.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -11,7 +13,10 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use anyhow::bail;
+use log::warn;
 use scx_utils::Core;
+use scx_utils::CoreType;
+use scx_utils::Cpu;
 use scx_utils::Topology;
 
 use crate::bpf_intf;
@@ -40,22 +45,30 @@ fn core_cluster(core: &Core) -> Option<isize> {
         .find(|id| known(*id))
 }
 
+/// Package and cluster id of a core. Cluster ids are only unique within a
+/// package.
+fn cluster_key(core: &Core) -> Option<(usize, isize)> {
+    let package = core.cpus.values().next().map_or(0, |cpu| cpu.package_id);
+
+    core_cluster(core).map(|cluster| (package, cluster))
+}
+
 /// Core group of every CPU. Cores with a cluster id are grouped by it and
 /// the remaining cores of each LLC are split into groups of GROUP_WIDTH.
 /// Group ids start at zero and have no gaps.
 fn cpu_groups(topo: &Topology) -> BTreeMap<usize, u32> {
-    let clusters: BTreeSet<isize> = topo
+    let clusters: BTreeSet<(usize, isize)> = topo
         .all_cores
         .values()
-        .filter_map(|c| core_cluster(c))
+        .filter_map(|c| cluster_key(c))
         .collect();
-    let by_cluster: BTreeMap<isize, u32> = clusters.into_iter().zip(0u32..).collect();
+    let by_cluster: BTreeMap<(usize, isize), u32> = clusters.into_iter().zip(0u32..).collect();
     let mut next = by_cluster.len() as u32;
     let mut core_group: BTreeMap<usize, u32> = BTreeMap::new();
     let mut unclustered: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
     for (id, core) in &topo.all_cores {
-        match core_cluster(core).and_then(|c| by_cluster.get(&c)) {
+        match cluster_key(core).and_then(|c| by_cluster.get(&c)) {
             Some(group) => {
                 core_group.insert(*id, *group);
             }
@@ -117,24 +130,34 @@ pub struct BpfTopology {
 impl BpfTopology {
     pub fn new(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) -> Result<Self> {
         let llc_ids: Vec<usize> = topo.all_llcs.keys().copied().collect();
+        let node_ids: Vec<usize> = topo.nodes.keys().copied().collect();
         let max_llcs = bpf_intf::flow_consts_FLOW_MAX_LLCS as usize;
 
-        if llc_ids.is_empty() || llc_ids.len() > max_llcs {
-            bail!(
-                "found {} LLCs, between 1 and {max_llcs} are supported",
+        if llc_ids.is_empty() {
+            bail!("found no LLC");
+        }
+        let layout = if llc_ids.len() <= max_llcs {
+            LlcLayout::Llc(llc_ids)
+        } else if !node_ids.is_empty() && node_ids.len() <= max_llcs {
+            warn!(
+                "found {} LLCs, more than the {max_llcs} supported, so the CPUs of each \
+                 NUMA node share one",
                 llc_ids.len()
             );
-        }
-
+            LlcLayout::Node(node_ids)
+        } else {
+            warn!(
+                "found {} LLCs and {} NUMA nodes, more than the {max_llcs} supported, so all \
+                 CPUs share one LLC",
+                llc_ids.len(),
+                node_ids.len()
+            );
+            LlcLayout::Single
+        };
         let cpu_llc = topo
             .all_cpus
             .iter()
-            .filter_map(|(id, cpu)| {
-                llc_ids
-                    .binary_search(&cpu.llc_id)
-                    .ok()
-                    .map(|llc| (*id, llc as u32))
-            })
+            .filter_map(|(id, cpu)| layout.llc_of(cpu).map(|llc| (*id, llc)))
             .collect();
 
         let mut cpu_group = cpu_groups(topo);
@@ -144,27 +167,301 @@ impl BpfTopology {
             groups = 0;
         }
 
-        let llc_kb = topo
-            .all_llcs
-            .values()
-            .map(|llc| {
-                llc.all_cpus
-                    .keys()
-                    .find_map(|cpu| caches.get(cpu))
-                    .map_or(0, |c| c.l3_kb)
-            })
-            .collect();
+        // The cache sizes only say which LLC is the largest, which means
+        // nothing once LLCs are merged.
+        let (llc_node, llc_kb): (Vec<u32>, Vec<u32>) = match &layout {
+            LlcLayout::Llc(_) => topo
+                .all_llcs
+                .values()
+                .map(|llc| {
+                    let kb = llc
+                        .all_cpus
+                        .keys()
+                        .find_map(|cpu| caches.get(cpu))
+                        .map_or(0, |c| c.l3_kb);
+                    (llc.node_id as u32, kb)
+                })
+                .unzip(),
+            LlcLayout::Node(nodes) => nodes.iter().map(|node| (*node as u32, 0)).unzip(),
+            LlcLayout::Single => (vec![0], vec![0]),
+        };
 
         Ok(Self {
-            nr_llcs: llc_ids.len() as u32,
+            nr_llcs: llc_node.len() as u32,
             nr_groups: groups as u32,
             cpu_llc,
             cpu_group,
             cpu_sibling: cpu_siblings(topo),
-            llc_node: topo.all_llcs.values().map(|l| l.node_id as u32).collect(),
+            llc_node,
             llc_kb,
         })
     }
+}
+
+/// How CPUs are put into the LLCs of the BPF program: by their LLC, by
+/// their NUMA node when there are too many LLCs, or all into one when
+/// there are too many nodes as well. Llc and Node hold the sorted ids,
+/// whose positions are the LLC numbers seen by the BPF program.
+enum LlcLayout {
+    Llc(Vec<usize>),
+    Node(Vec<usize>),
+    Single,
+}
+
+impl LlcLayout {
+    fn llc_of(&self, cpu: &Cpu) -> Option<u32> {
+        let index = |ids: &[usize], id: usize| ids.binary_search(&id).ok().map(|i| i as u32);
+
+        match self {
+            LlcLayout::Llc(ids) => index(ids, cpu.llc_id),
+            LlcLayout::Node(ids) => index(ids, cpu.node_id),
+            LlcLayout::Single => Some(0),
+        }
+    }
+}
+
+/// What tells how fast a CPU is, from the most to the least trusted, with
+/// the file under /sys/devices/system/cpu/cpuN that reports it.
+const PERF_SOURCES: [(&str, Option<&str>); 4] = [
+    (
+        "amd_pstate prefcore ranking",
+        Some("cpufreq/amd_pstate_prefcore_ranking"),
+    ),
+    ("ACPI CPPC highest_perf", Some("acpi_cppc/highest_perf")),
+    ("cpuinfo_max_freq", Some("cpufreq/cpuinfo_max_freq")),
+    ("core type and capacity", None),
+];
+
+/// How fast each CPU of a core is, by every source of PERF_SOURCES.
+struct CoreSpeed {
+    /// The CPUs of the core in id order.
+    cpus: Vec<usize>,
+    /// One entry per CPU, None where a source reports nothing.
+    hints: Vec<[Option<u64>; PERF_SOURCES.len()]>,
+}
+
+fn read_hint(cpu: usize, file: &str) -> Option<u64> {
+    std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/{file}"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn cpu_hints(cpu: &Cpu) -> [Option<u64>; PERF_SOURCES.len()] {
+    PERF_SOURCES.map(|(_, file)| match file {
+        Some(file) => read_hint(cpu.id, file),
+        None => {
+            let big = matches!(cpu.core_type, CoreType::Big { .. });
+            Some(((big as u64) << 32) | cpu.cpu_capacity as u64)
+        }
+    })
+}
+
+/// Index of the fastest of @cores, which must not be empty, and the source
+/// that decided. The first source that reports every CPU and tells some
+/// cores apart decides, and a core is as fast as its fastest CPU. Ties go
+/// to the core with the lowest CPU id, and so does the choice when no
+/// source tells the cores apart.
+fn fastest_core(cores: &[CoreSpeed]) -> (usize, Option<usize>) {
+    let lowest = |candidates: Vec<usize>| {
+        candidates
+            .into_iter()
+            .min_by_key(|i| cores[*i].cpus.first().copied().unwrap_or(usize::MAX))
+            .unwrap_or(0)
+    };
+
+    for src in 0..PERF_SOURCES.len() {
+        if cores
+            .iter()
+            .any(|core| core.hints.iter().any(|h| h[src].is_none()))
+        {
+            continue;
+        }
+        let speeds: Vec<u64> = cores
+            .iter()
+            .map(|core| core.hints.iter().filter_map(|h| h[src]).max().unwrap_or(0))
+            .collect();
+        let best = speeds.iter().copied().max().unwrap_or(0);
+        if speeds.iter().all(|s| *s == best) {
+            continue;
+        }
+        let fastest = (0..cores.len()).filter(|i| speeds[*i] == best).collect();
+        return (lowest(fastest), Some(src));
+    }
+    (lowest((0..cores.len()).collect()), None)
+}
+
+/// A central domain gets this many cores, by merging LLCs that are
+/// smaller, so that small LLCs do not each give up a core to scheduling.
+const DOMAIN_MIN_CORES: usize = 6;
+
+/// An LLC with more cores than this is split into several domains, so that
+/// one central CPU does not have to place the tasks of too many workers.
+const DOMAIN_MAX_CORES: usize = 16;
+
+/// A set of whole LLCs of one NUMA node, or a part of a large LLC, whose
+/// workers one central core schedules for with --unslice.
+pub struct CentralDomain {
+    /// The CPUs of the domain in id order, those of the central core included.
+    pub cpus: Vec<usize>,
+    /// The CPUs of the central core in id order. The first one dispatches for
+    /// the workers.
+    pub central: Vec<usize>,
+    /// What showed the central core to be the fastest of the domain, None
+    /// when all its cores look equally fast.
+    pub source: Option<&'static str>,
+}
+
+impl CentralDomain {
+    /// The CPU that dispatches for the workers of the domain.
+    pub fn cpu(&self) -> usize {
+        self.central[0]
+    }
+
+    /// The CPU of the preemption timer: the second hardware thread of the
+    /// central core, or the central CPU itself without SMT.
+    pub fn timer_cpu(&self) -> usize {
+        self.central.get(1).copied().unwrap_or(self.central[0])
+    }
+}
+
+/// The cores of an LLC in core id order, and its NUMA node.
+struct LlcCores {
+    node: usize,
+    cores: Vec<CoreSpeed>,
+}
+
+/// @cores in near equal parts of at most DOMAIN_MAX_CORES each.
+fn split_llc(cores: Vec<CoreSpeed>) -> Vec<Vec<CoreSpeed>> {
+    let parts = cores.len().div_ceil(DOMAIN_MAX_CORES).max(1);
+    let (size, extra) = (cores.len() / parts, cores.len() % parts);
+    let mut cores = cores.into_iter();
+
+    (0..parts)
+        .map(|i| cores.by_ref().take(size + usize::from(i < extra)).collect())
+        .collect()
+}
+
+/// Add the cores left over at the end of a node to the last domain if it
+/// is in the same node, or make them a domain of their own.
+fn close_domain(domains: &mut Vec<(usize, Vec<CoreSpeed>)>, node: usize, cores: Vec<CoreSpeed>) {
+    match domains.last_mut() {
+        Some((last, prev)) if *last == node => prev.extend(cores),
+        _ => domains.push((node, cores)),
+    }
+}
+
+/// Split the cores of @llcs, which come in the order of their nodes and
+/// ids, into central domains. LLCs of a node are merged in turn until they
+/// have DOMAIN_MIN_CORES, and an LLC with more than DOMAIN_MAX_CORES is
+/// split first. A domain needs a worker next to its central core, so one
+/// with a single core joins its neighbour. Beyond FLOW_MAX_DOMAINS,
+/// neighbouring domains are merged.
+fn plan_domains(llcs: Vec<LlcCores>) -> Result<Vec<CentralDomain>> {
+    let nr_cores: usize = llcs.iter().map(|llc| llc.cores.len()).sum();
+    let max_domains = bpf_intf::flow_consts_FLOW_MAX_DOMAINS as usize;
+    let mut domains: Vec<(usize, Vec<CoreSpeed>)> = Vec::new();
+    let mut pending: Option<(usize, Vec<CoreSpeed>)> = None;
+
+    if nr_cores < 2 {
+        bail!(
+            "--unslice needs at least 2 physical cores, one to schedule and one to run tasks, \
+             but found {nr_cores}"
+        );
+    }
+    for llc in llcs {
+        for part in split_llc(llc.cores) {
+            if let Some((node, cores)) = pending.take_if(|(node, _)| *node != llc.node) {
+                close_domain(&mut domains, node, cores);
+            }
+            let (_, cores) = pending.get_or_insert_with(|| (llc.node, Vec::new()));
+            cores.extend(part);
+            if cores.len() >= DOMAIN_MIN_CORES {
+                domains.extend(pending.take());
+            }
+        }
+    }
+    if let Some((node, cores)) = pending {
+        close_domain(&mut domains, node, cores);
+    }
+
+    while let Some(i) = domains.iter().position(|(_, cores)| cores.len() < 2) {
+        let (_, cores) = domains.remove(i);
+        domains[i.saturating_sub(1)].1.extend(cores);
+    }
+    while domains.len() > max_domains {
+        let mut merged = Vec::with_capacity(domains.len().div_ceil(2));
+        let mut iter = domains.into_iter();
+        while let Some((node, mut cores)) = iter.next() {
+            if let Some((_, next)) = iter.next() {
+                cores.extend(next);
+            }
+            merged.push((node, cores));
+        }
+        domains = merged;
+    }
+
+    Ok(domains
+        .into_iter()
+        .map(|(_, cores)| {
+            let (idx, src) = fastest_core(&cores);
+            let mut cpus: Vec<usize> = cores.iter().flat_map(|c| c.cpus.clone()).collect();
+            cpus.sort_unstable();
+            CentralDomain {
+                cpus,
+                central: cores[idx].cpus.clone(),
+                source: src.map(|src| PERF_SOURCES[src].0),
+            }
+        })
+        .collect())
+}
+
+/// Split the online CPUs into central domains for --unslice and pick the
+/// fastest physical core of each.
+pub fn pick_central_domains(topo: &Topology) -> Result<Vec<CentralDomain>> {
+    let mut llcs: Vec<_> = topo.all_llcs.values().collect();
+    llcs.sort_by_key(|llc| (llc.node_id, llc.id));
+
+    plan_domains(
+        llcs.into_iter()
+            .map(|llc| LlcCores {
+                node: llc.node_id,
+                cores: llc
+                    .cores
+                    .values()
+                    .filter(|core| !core.cpus.is_empty())
+                    .map(|core| CoreSpeed {
+                        cpus: core.cpus.keys().copied().collect(),
+                        hints: core.cpus.values().map(|cpu| cpu_hints(cpu)).collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+/// CPU ids as a kernel CPU list, such as 1-5,8-15.
+pub fn cpu_list(cpus: &BTreeSet<usize>) -> String {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+
+    for cpu in cpus {
+        match ranges.last_mut() {
+            Some((_, end)) if *end + 1 == *cpu => *end = *cpu,
+            _ => ranges.push((*cpu, *cpu)),
+        }
+    }
+    ranges
+        .iter()
+        .map(|(start, end)| {
+            if start == end {
+                start.to_string()
+            } else {
+                format!("{start}-{end}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn count(n: usize, what: &str) -> String {
@@ -325,8 +622,6 @@ pub fn render_topo_lines(topo: &Topology, limit: usize) -> (Vec<String>, usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scx_utils::CoreType;
-    use scx_utils::Cpu;
     use scx_utils::Cpumask;
     use scx_utils::Llc;
     use std::sync::Arc;
@@ -530,6 +825,57 @@ mod tests {
     }
 
     #[test]
+    fn clusters_are_per_package() {
+        let topo = mk_topo(vec![
+            (
+                0,
+                vec![mk_llc(
+                    0,
+                    vec![mk_core(0, &[0], 0, 0, 0, 0), mk_core(1, &[1], 0, 0, 0, 1)],
+                    0,
+                )],
+            ),
+            (
+                1,
+                vec![mk_llc(
+                    1,
+                    vec![mk_core(2, &[2], 1, 1, 1, 0), mk_core(3, &[3], 1, 1, 1, 1)],
+                    1,
+                )],
+            ),
+        ]);
+        assert_eq!(nr_groups(&cpu_groups(&topo)), 4);
+    }
+
+    /// @nr_llcs single-CPU LLCs spread round robin over @nr_nodes nodes.
+    fn many_llc_topo(nr_llcs: usize, nr_nodes: usize) -> Topology {
+        mk_topo(
+            (0..nr_nodes)
+                .map(|node| {
+                    let llcs = (node..nr_llcs)
+                        .step_by(nr_nodes)
+                        .map(|id| mk_llc(id, vec![mk_core(id, &[id], id, node, 0, -1)], node))
+                        .collect();
+                    (node, llcs)
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn too_many_llcs_fall_back() {
+        let per_node = BpfTopology::new(&many_llc_topo(100, 2), &BTreeMap::new()).unwrap();
+        assert_eq!(per_node.nr_llcs, 2);
+        assert_eq!(per_node.llc_node, vec![0, 1]);
+        assert_eq!(per_node.cpu_llc.get(&3), Some(&1));
+
+        let single = BpfTopology::new(&many_llc_topo(100, 100), &BTreeMap::new()).unwrap();
+        assert_eq!(single.nr_llcs, 1);
+        assert_eq!(single.llc_kb, vec![0]);
+        assert!(single.cpu_llc.values().all(|llc| *llc == 0));
+    }
+
+    #[test]
     fn unclustered_cores_split_per_llc() {
         let groups = cpu_groups(&multi_package_topo());
         assert_eq!(groups.get(&1), Some(&0));
@@ -653,6 +999,155 @@ mod tests {
             assert_eq!(total, 542);
             assert_eq!(lines.len(), limit.min(542));
         }
+    }
+
+    fn speed(cpus: &[usize], hints: &[[Option<u64>; 4]]) -> CoreSpeed {
+        CoreSpeed {
+            cpus: cpus.to_vec(),
+            hints: hints.to_vec(),
+        }
+    }
+
+    /// The only domain planned for one LLC of @cores.
+    fn plan_one(cores: Vec<CoreSpeed>) -> CentralDomain {
+        let mut domains = plan_domains(vec![LlcCores { node: 0, cores }]).unwrap();
+        assert_eq!(domains.len(), 1);
+        domains.remove(0)
+    }
+
+    #[test]
+    fn fastest_core_follows_the_ranking() {
+        let rank = |r: u64| [Some(r), Some(186), Some(4787082), Some(1024)];
+        let cores = (0..8)
+            .map(|core| {
+                let r = if core == 3 || core == 5 { 196 } else { 186 };
+                speed(&[2 * core, 2 * core + 1], &[rank(r), rank(r)])
+            })
+            .collect();
+        let domain = plan_one(cores);
+        assert_eq!(domain.central, vec![6, 7]);
+        assert_eq!(domain.source, Some("amd_pstate prefcore ranking"));
+        assert_eq!((domain.cpu(), domain.timer_cpu()), (6, 7));
+        assert_eq!(domain.cpus, (0..16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fastest_core_skips_flat_and_partial_sources() {
+        let cores = vec![
+            speed(&[0], &[[None, Some(5), Some(3000), Some(1024)]]),
+            speed(&[1], &[[Some(9), Some(5), Some(3500), Some(1024)]]),
+        ];
+        let domain = plan_one(cores);
+        assert_eq!(domain.central, vec![1]);
+        assert_eq!(domain.source, Some("cpuinfo_max_freq"));
+        assert_eq!(domain.timer_cpu(), 1);
+
+        let big = [None, None, None, Some((1 << 32) | 1024)];
+        let little = [None, None, None, Some(512)];
+        let cores = vec![speed(&[0], &[little]), speed(&[4, 5], &[big, big])];
+        assert_eq!(plan_one(cores).central, vec![4, 5]);
+    }
+
+    #[test]
+    fn fastest_core_falls_back_to_the_lowest_cpu() {
+        let same = [None, None, Some(3000), Some(1024)];
+        let cores = vec![speed(&[2, 3], &[same, same]), speed(&[0, 1], &[same, same])];
+        let domain = plan_one(cores);
+        assert_eq!(domain.central, vec![0, 1]);
+        assert_eq!(domain.source, None);
+    }
+
+    /// LLCs of equally fast SMT cores, given as (node, cores) in order.
+    /// Cores and CPUs are numbered on from one LLC to the next.
+    fn llcs(shape: &[(usize, usize)]) -> Vec<LlcCores> {
+        let same = [None, None, Some(3000), Some(1024)];
+        let mut next = 0;
+
+        shape
+            .iter()
+            .map(|(node, nr_cores)| {
+                let cores = (next..next + nr_cores)
+                    .map(|core| speed(&[2 * core, 2 * core + 1], &[same, same]))
+                    .collect();
+                next += nr_cores;
+                LlcCores { node: *node, cores }
+            })
+            .collect()
+    }
+
+    /// Cores per domain planned for @shape.
+    fn domain_sizes(shape: &[(usize, usize)]) -> Vec<usize> {
+        plan_domains(llcs(shape))
+            .unwrap()
+            .iter()
+            .map(|domain| domain.cpus.len() / 2)
+            .collect()
+    }
+
+    #[test]
+    fn domains_merge_small_llcs() {
+        assert_eq!(domain_sizes(&[(0, 8)]), vec![8]);
+        assert_eq!(domain_sizes(&[(0, 8), (0, 8)]), vec![8, 8]);
+        assert_eq!(domain_sizes(&[(0, 8), (1, 8)]), vec![8, 8]);
+        assert_eq!(domain_sizes(&[(0, 6), (0, 6)]), vec![6, 6]);
+        assert_eq!(domain_sizes(&[(0, 4); 4]), vec![8, 8]);
+        assert_eq!(domain_sizes(&[(0, 3); 4]), vec![6, 6]);
+        assert_eq!(domain_sizes(&[(0, 4); 3]), vec![12]);
+        assert_eq!(domain_sizes(&[(0, 2)]), vec![2]);
+    }
+
+    #[test]
+    fn domains_split_large_llcs() {
+        assert_eq!(domain_sizes(&[(0, 32)]), vec![16, 16]);
+        assert_eq!(domain_sizes(&[(0, 60)]), vec![15; 4]);
+        assert_eq!(domain_sizes(&[(0, 17)]), vec![9, 8]);
+        assert_eq!(domain_sizes(&[(0, 16)]), vec![16]);
+    }
+
+    #[test]
+    fn domains_follow_nodes() {
+        assert_eq!(domain_sizes(&[(0, 4), (1, 4)]), vec![4, 4]);
+        assert_eq!(domain_sizes(&[(0, 8), (0, 2), (1, 8)]), vec![10, 8]);
+        assert_eq!(domain_sizes(&[(0, 1), (1, 8)]), vec![9]);
+        assert_eq!(domain_sizes(&[(0, 8), (1, 1)]), vec![9]);
+    }
+
+    #[test]
+    fn domains_are_capped() {
+        let max = bpf_intf::flow_consts_FLOW_MAX_DOMAINS as usize;
+        let sizes = domain_sizes(&vec![(0, 6); max + 2]);
+        assert_eq!(sizes.len(), max.div_ceil(2) + 1);
+        assert_eq!(sizes.iter().sum::<usize>(), 6 * (max + 2));
+    }
+
+    #[test]
+    fn each_domain_has_its_own_central_core() {
+        let domains = plan_domains(llcs(&[(0, 4), (1, 4)])).unwrap();
+        assert_eq!(domains[0].cpus, (0..8).collect::<Vec<_>>());
+        assert_eq!(domains[1].cpus, (8..16).collect::<Vec<_>>());
+        assert_eq!((domains[0].cpu(), domains[0].timer_cpu()), (0, 1));
+        assert_eq!((domains[1].cpu(), domains[1].timer_cpu()), (8, 9));
+    }
+
+    #[test]
+    fn central_domains_need_two_cores() {
+        assert!(plan_domains(llcs(&[(0, 1)])).is_err());
+        assert!(plan_domains(Vec::new()).is_err());
+        assert_eq!(pick_central_domains(&single_host_topo()).unwrap().len(), 1);
+        assert_eq!(
+            pick_central_domains(&multi_package_topo()).unwrap().len(),
+            2
+        );
+    }
+
+    #[test]
+    fn cpu_lists_use_ranges() {
+        assert_eq!(
+            cpu_list(&BTreeSet::from([1, 2, 3, 4, 5, 8, 9, 15])),
+            "1-5,8-9,15"
+        );
+        assert_eq!(cpu_list(&BTreeSet::from([7])), "7");
+        assert_eq!(cpu_list(&BTreeSet::new()), "");
     }
 
     #[test]

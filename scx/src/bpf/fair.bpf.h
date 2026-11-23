@@ -13,7 +13,9 @@
  * The deadline of a task is its virtual time plus an offset: a full slice
  * plus the length of the current burst, divided by the latency criticality.
  * It keeps growing while a task runs without sleeping and stays tiny for
- * tasks that only run briefly before blocking again.
+ * tasks that only run briefly before blocking again. With --unslice, the
+ * preemption timer works out the deadline that a task running without a
+ * slice has reached from the same charge.
  *
  * Latency criticality rewards tasks that sleep often, wake up other tasks
  * often and run briefly once awake. Each factor goes through a binary
@@ -133,6 +135,12 @@ static __always_inline u64 flow_charge(const struct task_struct *p, u64 ran, u64
 static __always_inline u64 flow_burst(const struct flow_task_ctx *t)
 {
 	return flow_max(t->avg_runtime_ns, t->acc_runtime_ns);
+}
+
+/* CPU time @t got in its current run, up to @now. */
+static __always_inline u64 flow_ran(const struct flow_task_ctx *t, u64 now)
+{
+	return time_after(now, t->last_running_clk) ? now - t->last_running_clk : 0;
 }
 
 /* Charge @used of CPU time to @p, which continues its current burst. */
@@ -370,7 +378,7 @@ static u64 flow_calc_slice(const struct flow_task_ctx *t, s32 cpu)
 	if (!flow_cpu_valid(cpu))
 		return base;
 	if (burst >= base && burst < FLOW_SLICE_BOOST_MAX_NS &&
-	    READ_ONCE(flow_sys_stat.nr_queued) <= flow_nr_cpus &&
+	    READ_ONCE(flow_sys_stat.nr_queued) <= flow_nr_usable &&
 	    !READ_ONCE(flow_cpu_states[cpu].nr_pinned))
 		return flow_min(burst + FLOW_SLICE_MIN_NS, FLOW_SLICE_BOOST_MAX_NS);
 	return base;

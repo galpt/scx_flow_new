@@ -20,6 +20,10 @@
  * waker first, see flow_sync_handoff(), and then the idle hardware thread
  * next to it.
  *
+ * With --unslice, the central CPUs place every task, so a wakeup is left on
+ * its previous CPU and goes through ops.enqueue(). Sending every wakeup to
+ * a central CPU instead would make all of them take its runqueue lock.
+ *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_SELECT_BPF_H
@@ -83,6 +87,15 @@ static __always_inline bool flow_may_run_on(const struct task_struct *p, s32 cpu
 }
 
 /*
+ * @p, waiting in a shared DSQ, may be moved to @cpu. The CPU mask of a task
+ * can lag behind a migration it has disabled, which is checked as well.
+ */
+static __always_inline bool flow_task_fits(const struct task_struct *p, s32 cpu)
+{
+	return flow_may_run_on(p, cpu) && !(is_migration_disabled(p) && scx_bpf_task_cpu(p) != cpu);
+}
+
+/*
  * The other hardware thread of @cpu is busy at @now while a whole core is
  * idle, so a task running on @cpu would be faster on that core. The
  * sibling only counts when it did not go idle during the whole last period
@@ -139,12 +152,15 @@ static __always_inline bool flow_smt_contended(s32 cpu, u64 now)
  * being woken up for it. Both get FLOW_SYNC_SLICE_NS, so neither holds the
  * CPU for long if the guess was wrong.
  *
- * Tasks already queued on the CPU or pinned to it, or a task of the LLC that
- * is due a maximum slice before the wakee and has already waited for a tick,
- * are not skipped. The wakee then waits in the DSQ of the CPU, where
- * ops.dispatch() weighs it against them as it does for pinned tasks. A task
- * that has just woken up is left to the tick of a busy CPU, as it would be
- * without hand-offs, rather than delaying the hand-off.
+ * Tasks already in the local DSQ of the CPU or in its own DSQ, or a task of
+ * the LLC that is due a maximum slice before the wakee and has already
+ * waited for a tick, are not skipped. The wakee then waits in the DSQ of
+ * the CPU, where ops.dispatch() weighs it against them as it does for
+ * pinned tasks. If it went to the local DSQ while the DSQ of the CPU holds
+ * tasks, hand-offs that go back and forth could keep ops.dispatch() from
+ * ever running, and those tasks would wait. A task that has just woken up
+ * is left to the tick of a busy CPU, as it would be without hand-offs,
+ * rather than delaying the hand-off.
  */
 static bool flow_sync_handoff(struct task_struct *p, struct flow_task_ctx *t,
 			      struct task_struct *waker, struct flow_task_ctx *wt, u64 now)
@@ -174,6 +190,7 @@ static bool flow_sync_handoff(struct task_struct *p, struct flow_task_ctx *t,
 	WRITE_ONCE(flow_cpu_states[cpu].handoff_clk, now);
 
 	if (queued || READ_ONCE(flow_cpu_states[cpu].nr_pinned) ||
+	    scx_bpf_dsq_nr_queued(FLOW_CPU_DSQ_BASE + cpu) > 0 ||
 	    (head && time_before(head->scx.dsq_vtime, deadline - FLOW_SLICE_MAX_NS) &&
 	     time_after(bpf_jiffies64(), head->scx.runnable_at + 1) &&
 	     bpf_cpumask_test_cpu(cpu, head->cpus_ptr))) {
@@ -269,19 +286,24 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		return prev_cpu;
 
 	flow_tag_wakeup(t, wake_flags);
+	if (flow_unslice)
+		return prev_cpu;
 	if (flow_helicoprion && (wake_flags & SCX_WAKE_TTWU)) {
 		struct task_struct *waker = bpf_get_current_task_btf();
 		struct flow_task_ctx *wt = flow_task_ctx(waker);
-		u64 now = scx_bpf_now();
+		u64 now = flow_now();
 		bool related;
 
 		/*
 		 * Only the task that last woke up the waker, and was last woken
 		 * up by it in turn, takes over the CPU of the waker. Threads
 		 * released by the same task, or passing work along a chain,
-		 * keep running on CPUs of their own.
+		 * keep running on CPUs of their own. A realtime waker, or one
+		 * boosted to a realtime priority, keeps its CPU, so the wakee
+		 * would only wait behind it.
 		 */
-		related = wt && wt->last_waker == p->pid && t->last_waker == waker->pid;
+		related = wt && wt->last_waker == p->pid && t->last_waker == waker->pid &&
+			  waker->prio >= FLOW_MAX_RT_PRIO;
 
 		flow_wake_task(p, t, waker, wt, now);
 		if (related) {

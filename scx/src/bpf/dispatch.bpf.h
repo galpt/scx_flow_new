@@ -2,12 +2,12 @@
 /*
  * Dispatch and task lifecycle for the flow scheduler.
  *
- * A CPU first serves the tasks pinned to it, then its own LLC, then the
- * other LLCs of its node, then remote LLCs and finally the fallback DSQ.
- * A task of its own LLC that is due well before the pinned tasks goes
- * first, so pinned tasks cannot starve the LLC. When nothing is queued
- * anywhere and the previous task still wants to run, it keeps the CPU
- * with a fresh slice.
+ * A CPU first serves the fallback DSQ, which only holds the rare tasks
+ * without a context, then the tasks pinned to it, then its own LLC, then
+ * the other LLCs of its node and finally remote LLCs. A task of its own
+ * LLC that is due well before the pinned tasks goes first, so pinned tasks
+ * cannot starve the LLC. When nothing is queued anywhere and the previous
+ * task still wants to run, it keeps the CPU with a fresh slice.
  *
  * Runtime is charged when a task stops running, from the time it spent on
  * the CPU. With --helicoprion, it is charged when the task wakes up or is
@@ -19,7 +19,19 @@
  *
  * A busy CPU asks for its highest performance level when a task starts
  * and refreshes the request every tick, because the cpufreq governor
- * drops requests that arrive within its rate limit.
+ * drops requests that arrive within its rate limit. With --unslice, the
+ * preemption timer refreshes the request of the workers instead.
+ *
+ * With --unslice, a worker only takes the tasks pinned to it. When it runs
+ * out of work, it marks itself as waiting and kicks the central CPU of its
+ * domain, whose dispatch hands out tasks to the workers, see central.bpf.h.
+ * A worker that is still runnable keeps its CPU without a slice unless a
+ * task that may run there is due first. The tick of a worker does nothing,
+ * as the preemption timer of its central core does that work. The CPUs of
+ * the central cores only run the tasks that no worker may run and the
+ * tasks of the fallback DSQ, with a finite slice. While the central CPU
+ * falls behind, the workers of its domain dispatch as they would without
+ * --unslice.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -30,21 +42,17 @@
 #include "fair.bpf.h"
 #include "stats.bpf.h"
 #include "enqueue.bpf.h"
+#include "central.bpf.h"
 
 /* Pull a task from another LLC, either in the node of @llc or outside of it. */
 static bool flow_steal(u32 llc, bool same_node)
 {
-	u32 node = flow_llc_node[llc];
 	u32 i;
 
 	bpf_for(i, 1, flow_nr_llcs) {
-		u32 other = (llc + i) % flow_nr_llcs;
+		s32 other = flow_peer_llc(llc, i, same_node);
 
-		if (other >= FLOW_MAX_LLCS)
-			break;
-		if ((flow_llc_node[other] == node) != same_node)
-			continue;
-		if (scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + other, 0))
+		if (other >= 0 && scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + other, 0))
 			return true;
 	}
 	return false;
@@ -61,49 +69,76 @@ static __always_inline bool flow_long_burst(u64 acc)
 	return acc >= FLOW_SLICE_BOOST_MAX_NS;
 }
 
-/* CPU time @t got in its current run, up to @now. */
-static __always_inline u64 flow_ran(const struct flow_task_ctx *t, u64 now)
-{
-	return time_after(now, t->last_running_clk) ? now - t->last_running_clk : 0;
-}
-
-/* True when the head of @dsq_id can run on @cpu and is due before @deadline. */
+/*
+ * True when a task of @dsq_id that can run on @cpu is due before @deadline.
+ * The first FLOW_AHEAD_DEPTH tasks are looked at, so that a head that may
+ * only run on other CPUs does not hide the tasks behind it.
+ */
 static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
 {
-	struct task_struct *head = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	struct task_struct *p;
+	u32 seen = 0;
 
-	return head && time_before(head->scx.dsq_vtime, deadline) &&
-	       bpf_cpumask_test_cpu(cpu, head->cpus_ptr);
+	if (scx_bpf_dsq_nr_queued(dsq_id) <= 0)
+		return false;
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		if (!time_before(p->scx.dsq_vtime, deadline) || seen++ >= FLOW_AHEAD_DEPTH)
+			return false;
+		if (flow_task_fits(p, cpu))
+			return true;
+	}
+	return false;
 }
 
 /*
- * Move a task pinned to @cpu or a task of @llc to the local DSQ of @cpu.
- * Pinned tasks cannot run anywhere else, so they go first unless the head
- * of @llc is due more than a maximum slice before them. Without that
- * limit, CPUs that always have a pinned task waiting would starve the rest
- * of the LLC, as when stress-ng pins two tasks to every CPU.
+ * Move a task pinned to @cpu or a task of @shared_dsq, the DSQ that @cpu
+ * shares with others, to the local DSQ of @cpu. Pinned tasks cannot run
+ * anywhere else, so they go first unless the head of @shared_dsq is due
+ * more than a maximum slice before them. Without that limit, CPUs that
+ * always have a pinned task waiting would starve the rest of the LLC, as
+ * when stress-ng pins two tasks to every CPU.
  */
-static bool flow_consume_local(s32 cpu, u32 llc)
+static bool flow_consume_local(s32 cpu, u64 shared_dsq)
 {
-	u64 cpu_dsq = FLOW_CPU_DSQ_BASE + cpu, llc_dsq = FLOW_LLC_DSQ_BASE + llc;
+	u64 cpu_dsq = FLOW_CPU_DSQ_BASE + cpu;
 	struct task_struct *pinned = __COMPAT_scx_bpf_dsq_peek(cpu_dsq);
 
 	if (pinned &&
-	    flow_queued_ahead(llc_dsq, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu) &&
-	    scx_bpf_dsq_move_to_local(llc_dsq, 0))
+	    flow_queued_ahead(shared_dsq, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu) &&
+	    scx_bpf_dsq_move_to_local(shared_dsq, 0))
 		return true;
 	return scx_bpf_dsq_move_to_local(cpu_dsq, 0) ||
-	       scx_bpf_dsq_move_to_local(llc_dsq, 0);
+	       scx_bpf_dsq_move_to_local(shared_dsq, 0);
+}
+
+/*
+ * With --unslice, @t starts a slice of @slice on worker @cpu at @now. The
+ * preemption timer ends it, so the task runs without a slice while the
+ * central CPU keeps up. Returns the slice to give the task.
+ */
+static __always_inline u64 flow_unslice_run(s32 cpu, struct flow_task_ctx *t, u64 slice,
+					    u64 now)
+{
+	struct flow_cpu_state *cs = &flow_cpu_states[cpu];
+
+	if (!flow_unslice || flow_cpu_central[cpu])
+		return slice;
+	t->slice_clk = now;
+	WRITE_ONCE(cs->slice_clk, now);
+	WRITE_ONCE(cs->slice_ns, slice);
+	return flow_central_relieved(flow_domain_of(cpu)) ? slice : SCX_SLICE_INF;
 }
 
 /*
  * Let @prev, which is still runnable, keep @cpu with a fresh slice. Its run
  * continues without passing through ops.stopping(), so its deadline is
  * refreshed from the virtual time it reached so far. Unless @always is
- * set, @prev only keeps the CPU while nothing queued for @cpu is due
- * before it, which spares a switch and a likely move to another core.
+ * set, @prev only keeps the CPU while nothing queued for @cpu, in its own
+ * DSQ or in @shared_dsq, is due before it, which spares a switch and a
+ * likely move to another core. With --unslice, a worker keeps @prev
+ * without a slice while the central CPU keeps up, see flow_unslice_run().
  */
-static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool always)
+static bool flow_keep_prev(s32 cpu, u64 shared_dsq, struct task_struct *prev, bool always)
 {
 	struct flow_task_ctx *t;
 	u64 now, ran, acc, vtime, deadline, slice;
@@ -116,63 +151,137 @@ static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 	if (!t)
 		return false;
 
-	now = scx_bpf_now();
+	now = flow_now();
 	ran = flow_ran(t, now);
 	acc = t->acc_runtime_ns + ran;
 	vtime = t->vtime + (cgrp ? flow_charge_cgrp(prev, t, ran) : flow_charge(prev, ran, acc));
 	deadline = flow_deadline(t, vtime, acc);
 	if (!always && (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
-			flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu)))
+			flow_queued_ahead(shared_dsq, deadline, cpu)))
 		return false;
 
 	if (cgrp || !flow_long_burst(acc))
 		flow_advance_vtime_now(vtime);
 	scx_bpf_task_set_dsq_vtime(prev, deadline);
 	slice = flow_calc_slice(t, cpu);
-	scx_bpf_task_set_slice(prev, slice);
+	scx_bpf_task_set_slice(prev, flow_unslice_run(cpu, t, slice, now));
 	WRITE_ONCE(flow_cpu_states[cpu].est_stopping_clk, flow_est_stop(t, acc, slice, now));
 	return true;
 }
 
-void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
+/*
+ * A realtime or deadline task holds @cpu. The kernel still lends the CPU to
+ * the tasks of the scheduler now and then, and dispatches for it then.
+ */
+static bool flow_rt_holds(s32 cpu)
 {
-	struct flow_cpu_state *cs;
-	u32 llc;
+	struct task_struct *curr;
+	bool rt;
 
-	if (!flow_cpu_valid(cpu))
-		return;
-	llc = flow_llc_of(cpu);
+	bpf_rcu_read_lock();
+	curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	rt = curr && curr->prio < FLOW_MAX_RT_PRIO;
+	bpf_rcu_read_unlock();
+	return rt;
+}
 
-	if (flow_keep_prev(cpu, llc, prev, false)) {
+/* Find the next task for @cpu, which must have passed flow_cpu_valid(). */
+static void flow_dispatch_cpu(s32 cpu, struct task_struct *prev)
+{
+	u64 shared = flow_shared_dsq(cpu);
+	bool central = flow_on_central_core(cpu);
+	struct flow_cpu_state *cs = &flow_cpu_states[cpu];
+	u32 llc = flow_llc_of(cpu), dom = flow_domain_of(cpu);
+
+	if (flow_keep_prev(cpu, shared, prev, false)) {
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
-	if (flow_consume_local(cpu, llc)) {
-		flow_stat_inc(FLOW_STAT_DISPATCHED);
-		return;
+	/*
+	 * A worker takes the tasks pinned to it itself, as they cannot run
+	 * anywhere else, and waits for the central CPU for the rest. While a
+	 * realtime task holds the worker, its time is only lent, and a task
+	 * that the central CPU sent there would wait for the next loan.
+	 */
+	if (flow_unslice && !central && !flow_central_relieved(dom)) {
+		if (scx_bpf_dsq_move_to_local(FLOW_CPU_DSQ_BASE + cpu, 0)) {
+			flow_stat_inc(FLOW_STAT_DISPATCHED);
+			return;
+		}
+		WRITE_ONCE(cs->resume_pid, 0);
+		if (!flow_rt_holds(cpu)) {
+			WRITE_ONCE(cs->want, 1);
+			flow_mark_idle_worker(dom);
+			flow_kick_central(dom);
+		}
+		goto idle;
 	}
-	if (flow_steal(llc, true) || flow_steal(llc, false)) {
-		flow_stat_inc(FLOW_STAT_DISPATCHED);
-		flow_stat_inc(FLOW_STAT_STEAL);
-		return;
-	}
+	/*
+	 * Tasks without a context are rare and would starve behind the rest.
+	 * The central cores take them too, as some may not run anywhere else.
+	 */
 	if (scx_bpf_dsq_move_to_local(FLOW_FALLBACK_DSQ, 0)) {
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
 		return;
 	}
-	if (flow_keep_prev(cpu, llc, prev, true)) {
+	if (flow_consume_local(cpu, shared)) {
+		flow_stat_inc(FLOW_STAT_DISPATCHED);
+		return;
+	}
+	if (!central && (flow_steal(llc, true) || flow_steal(llc, false))) {
+		flow_stat_inc(FLOW_STAT_DISPATCHED);
+		flow_stat_inc(FLOW_STAT_STEAL);
+		return;
+	}
+	if (flow_keep_prev(cpu, shared, prev, true)) {
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
+	if (flow_unslice && !central)
+		flow_mark_idle_worker(dom);
 
+idle:
 	/* The CPU is about to go idle: it is no preemption victim anymore. */
-	cs = &flow_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, 0);
 	WRITE_ONCE(cs->est_stopping_clk, 0);
 	if (flow_helicoprion && !READ_ONCE(cs->idled))
 		WRITE_ONCE(cs->idled, 1);
 	if (!READ_ONCE(cs->idle_start_clk))
-		WRITE_ONCE(cs->idle_start_clk, scx_bpf_now());
+		WRITE_ONCE(cs->idle_start_clk, flow_now());
+}
+
+void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
+{
+	struct flow_central *c;
+	u32 dom;
+
+	if (!flow_cpu_valid(cpu))
+		return;
+	if (!flow_unslice) {
+		flow_dispatch_cpu(cpu, prev);
+		return;
+	}
+	dom = flow_domain_of(cpu);
+	c = flow_central_of(dom);
+	if (cpu == flow_timer_cpu(dom) && !READ_ONCE(c->preempt_armed))
+		flow_arm_timer(bpf_map_lookup_elem(&preempt_timer, &dom), &c->preempt_armed,
+			       FLOW_PREEMPT_CHECK_NS);
+	if (cpu != flow_central_cpu(dom)) {
+		flow_dispatch_cpu(cpu, prev);
+		return;
+	}
+
+	flow_schedule_workers(dom);
+	flow_dispatch_cpu(cpu, prev);
+
+	/*
+	 * Moving tasks drops the runqueue lock of the central CPU. A kick that
+	 * lands meanwhile only flags the task this CPU is about to switch away
+	 * from, and is lost with the switch. A kick sent from here is
+	 * delivered after the switch, so the central CPU makes another pass.
+	 */
+	if (READ_ONCE(c->kick_clk))
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -180,12 +289,12 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	struct flow_task_ctx *t = flow_task_ctx(p);
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct flow_cpu_state *cs;
-	u64 now;
+	u64 now, slice;
 
 	if (!t || !flow_cpu_valid(cpu))
 		return;
 
-	now = scx_bpf_now();
+	now = flow_now();
 	if ((!flow_long_burst(t->acc_runtime_ns) || flow_cgrp_active()) &&
 	    (!flow_helicoprion ||
 	     time_after(t->vtime, READ_ONCE(flow_clock.vtime_now) + FLOW_VTIME_GRAIN_NS)))
@@ -194,8 +303,21 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	t->last_running_clk = now;
 
 	cs = &flow_cpu_states[cpu];
+	slice = p->scx.slice;
+	if (flow_unslice && !flow_cpu_central[cpu]) {
+		slice = flow_calc_slice(t, cpu);
+		/* A task that waited for a short task carries on with its slice. */
+		if (t->flags & FLOW_FLAG_RESUMED) {
+			WRITE_ONCE(cs->slice_clk, t->slice_clk);
+			WRITE_ONCE(cs->slice_ns, slice);
+		} else {
+			flow_unslice_run(cpu, t, slice, now);
+		}
+		t->flags &= ~FLOW_FLAG_RESUMED;
+		WRITE_ONCE(cs->want, 0);
+	}
 	WRITE_ONCE(cs->lat_cri, t->lat_cri);
-	WRITE_ONCE(cs->est_stopping_clk, flow_est_stop(t, t->acc_runtime_ns, p->scx.slice, now));
+	WRITE_ONCE(cs->est_stopping_clk, flow_est_stop(t, t->acc_runtime_ns, slice, now));
 	WRITE_ONCE(cs->idle_start_clk, 0);
 	if (flow_helicoprion)
 		WRITE_ONCE(cs->burst_start_clk, now - t->acc_runtime_ns);
@@ -215,11 +337,12 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	struct flow_cpu_state *cs;
 	u64 now, deadline, base;
 
-	if (!t || !flow_cpu_valid(cpu))
+	/* With --unslice, the preemption timer looks after the workers. */
+	if (!t || !flow_cpu_valid(cpu) || (flow_unslice && !flow_cpu_central[cpu]))
 		return;
 	cs = &flow_cpu_states[cpu];
 
-	now = scx_bpf_now();
+	now = flow_now();
 	if (now - READ_ONCE(cs->cpuperf_commit_clk) >= FLOW_CPUPERF_REFRESH_NS)
 		flow_cpuperf_commit(cpu, cs, SCX_CPUPERF_ONE, now);
 
@@ -240,7 +363,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	deadline = p->scx.dsq_vtime;
 	if (flow_ran(t, now) >= FLOW_SLICE_MIN_NS &&
 	    (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
-	     flow_queued_ahead(FLOW_LLC_DSQ_BASE + flow_llc_of(cpu), deadline, cpu))) {
+	     flow_queued_ahead(flow_shared_dsq(cpu), deadline, cpu))) {
 		scx_bpf_task_set_slice(p, 0);
 		return;
 	}
@@ -259,7 +382,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (!t)
 		return;
 
-	used = t->last_running_clk ? flow_ran(t, scx_bpf_now()) : 0;
+	used = t->last_running_clk ? flow_ran(t, flow_now()) : 0;
 	flow_charge_run(p, t, used);
 
 	if (runnable)
@@ -279,25 +402,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init_task, struct task_struct *p,
 	t->cgrp_factor = FLOW_FACTOR_ONE;
 	t->lat_cri = 1;
 	t->pinned_cpu = -1;
+	t->flags = FLOW_FLAG_NEW;
 	return 0;
 }
 
-/* Keep the cpu.weight of @cgrp for flow_refresh_cgrp(). */
-static __always_inline s32 flow_set_cgrp_weight(struct cgroup *cgrp, u32 weight)
+/*
+ * Keep the cpu.weight of @cgrp for flow_refresh_cgrp(). A cgroup whose
+ * storage cannot be allocated is charged with a factor of one, which is
+ * no reason to fail the load of the scheduler or the creation of the
+ * cgroup.
+ */
+static __always_inline void flow_set_cgrp_weight(struct cgroup *cgrp, u32 weight)
 {
 	struct flow_cgrp_ctx *cc;
 
 	cc = bpf_cgrp_storage_get(&cgrp_ctx_stor, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!cc)
-		return -ENOMEM;
-	WRITE_ONCE(cc->weight, weight);
-	return 0;
+	if (cc)
+		WRITE_ONCE(cc->weight, weight);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(flow_cgroup_init, struct cgroup *cgrp,
 			     struct scx_cgroup_init_args *args)
 {
-	return flow_set_cgrp_weight(cgrp, args->weight);
+	flow_set_cgrp_weight(cgrp, args->weight);
+	return 0;
 }
 
 void BPF_STRUCT_OPS(flow_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
@@ -347,14 +475,59 @@ static s32 flow_init_cpus(void)
 		if (big_kb && flow_llc_kb[flow_llc_of(cpu)] == big_kb)
 			bpf_cpumask_set_cpu(cpu, &flow_big_cache_cpumask);
 
+		/* With --unslice, victims are only looked for among the workers. */
 		mask = MEMBER_VPTR(flow_llc_cpumask, [flow_llc_of(cpu)]);
-		if (mask)
+		if (mask && !flow_on_central_core(cpu))
 			bpf_cpumask_set_cpu(cpu, mask);
+		if (flow_unslice && !flow_cpu_central[cpu])
+			bpf_cpumask_set_cpu(cpu, &flow_worker_cpumask);
 		if (flow_nr_groups > flow_nr_llcs) {
 			mask = MEMBER_VPTR(flow_group_cpumask, [flow_cpu_group[cpu]]);
 			if (mask)
 				bpf_cpumask_set_cpu(cpu, mask);
 		}
+	}
+	return 0;
+}
+
+/*
+ * With --unslice, the central cores share the DSQ of the tasks that no
+ * worker may run, and each domain gets a preemption timer. The central CPU
+ * of the first domain starts the stat timer and the timer CPU of each
+ * domain its preemption timer when they first dispatch, so that the timers
+ * are pinned to the central cores. Every worker is idle at first.
+ */
+static s32 flow_init_central(void)
+{
+	struct flow_timer *ft;
+	u32 dom;
+	s32 ret;
+
+	ret = scx_bpf_create_dsq(FLOW_CENTRAL_DSQ, -1);
+	if (ret) {
+		scx_bpf_error("failed to create the DSQ of the central cores (%d)", ret);
+		return ret;
+	}
+
+	bpf_for(dom, 0, flow_nr_domains) {
+		s32 cpu = flow_central_cpu(dom), timer_cpu = flow_timer_cpu(dom);
+
+		if (!flow_cpu_valid(cpu) || !flow_cpu_valid(timer_cpu) ||
+		    !flow_cpu_central[cpu] || !flow_cpu_central[timer_cpu] ||
+		    flow_domain_of(cpu) != dom || flow_domain_of(timer_cpu) != dom) {
+			scx_bpf_error("invalid central core of domain %u: CPU %d, timer CPU %d",
+				      dom, cpu, timer_cpu);
+			return -EINVAL;
+		}
+
+		ft = bpf_map_lookup_elem(&preempt_timer, &dom);
+		if (!ft) {
+			scx_bpf_error("failed to look up the preemption timer of domain %u", dom);
+			return -ESRCH;
+		}
+		bpf_timer_init(&ft->timer, &preempt_timer, FLOW_CLOCK_BOOTTIME);
+		bpf_timer_set_callback(&ft->timer, flow_preempt_timer_fn);
+		WRITE_ONCE(flow_central_of(dom)->has_idle, 1);
 	}
 	return 0;
 }
@@ -367,9 +540,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 
 	if (!flow_nr_cpus || flow_nr_cpus > FLOW_MAX_CPUS ||
 	    !flow_nr_llcs || flow_nr_llcs > FLOW_MAX_LLCS ||
-	    flow_nr_groups > FLOW_MAX_GROUPS) {
-		scx_bpf_error("invalid topology: %u CPUs, %u LLCs, %u groups",
-			      flow_nr_cpus, flow_nr_llcs, flow_nr_groups);
+	    flow_nr_groups > FLOW_MAX_GROUPS ||
+	    !flow_nr_domains || flow_nr_domains > FLOW_MAX_DOMAINS) {
+		scx_bpf_error("invalid topology: %u CPUs, %u LLCs, %u groups, %u domains",
+			      flow_nr_cpus, flow_nr_llcs, flow_nr_groups, flow_nr_domains);
 		return -EINVAL;
 	}
 
@@ -400,6 +574,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(flow_init)
 	}
 	bpf_timer_init(&ft->timer, &stat_timer, FLOW_CLOCK_BOOTTIME);
 	bpf_timer_set_callback(&ft->timer, flow_stat_timer_fn);
+	if (flow_unslice)
+		return flow_init_central();
 	ret = bpf_timer_start(&ft->timer, FLOW_STAT_INTERVAL_NS, 0);
 	if (ret)
 		scx_bpf_error("failed to start the stat timer (%d)", ret);

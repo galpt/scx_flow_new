@@ -6,9 +6,12 @@
  * folds those samples every period into the values the policy reads: the
  * queue length, the base slice and the latency criticality a task needs to
  * preempt another one. The timer also lowers the performance target of
- * CPUs that stayed idle for a whole period. With --helicoprion, every tenth
- * run it also closes the cgroup period that the busy tasks count into, and
- * decides from it whether cgroups compete for the CPUs.
+ * CPUs that stayed idle for a whole period, and moves the system virtual
+ * time on when nothing else does while tasks wait. With --helicoprion,
+ * every tenth run also closes the cgroup period that the busy tasks count
+ * into, and decides from it whether cgroups compete for the CPUs. With
+ * --unslice, the timer is pinned to the central CPU of the first domain and
+ * counts the tasks waiting for the central cores as queued.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -40,10 +43,13 @@ static struct flow_period flow_period;
 /* Runs of the timer since the cgroup period began. */
 static u32 flow_stat_runs;
 
+/* The system virtual time at the last run of the timer. */
+static u64 flow_stat_vtime;
+
 /*
  * Send a performance target for @cpu. Callers either hold the rq lock of
  * @cpu (ops.running() and ops.tick() on their own CPU) or hold no rq lock
- * at all (the timer), in which case the kernel takes the lock of @cpu.
+ * at all (the timers), in which case the kernel takes the lock of @cpu.
  */
 static __always_inline void flow_cpuperf_commit(s32 cpu, struct flow_cpu_state *cs,
 						u32 perf, u64 now)
@@ -88,7 +94,7 @@ static bool flow_cpu_runs_idle(s32 cpu)
 
 static u64 flow_calc_base_slice(u64 nr_queued)
 {
-	u64 slice = (u64)FLOW_TARGETED_LATENCY_NS * flow_nr_cpus / flow_max(nr_queued, 1);
+	u64 slice = (u64)FLOW_TARGETED_LATENCY_NS * flow_nr_usable / flow_max(nr_queued, 1);
 
 	if (slice < FLOW_SLICE_MIN_NS)
 		return FLOW_SLICE_MIN_NS;
@@ -165,13 +171,30 @@ static void flow_roll_cgrp_period(void)
 	WRITE_ONCE(flow_cgrp_stat.nr_busy_prev, nr_busy);
 	WRITE_ONCE(flow_cgrp_stat.weight_sum_prev,
 		   __atomic_exchange_n(&flow_cgrp_stat.weight_sum, 0, __ATOMIC_RELAXED));
-	WRITE_ONCE(flow_cgrp_stat.active, nr_groups >= 2 && nr_busy > flow_nr_cpus);
+	WRITE_ONCE(flow_cgrp_stat.active, nr_groups >= 2 && nr_busy > flow_nr_usable);
 	WRITE_ONCE(flow_cgrp_stat.period, flow_cgrp_stat.period + 1);
+}
+
+/*
+ * The system virtual time only follows the tasks that run in short bursts.
+ * When only tasks that compute without a break are left, it stops, and a
+ * task whose deadline lies far ahead of it, such as one at nice 19, never
+ * comes first. While tasks wait, a period in which it did not move pushes
+ * it forward by the length of the period.
+ */
+static void flow_unfreeze_vtime(u64 nr_queued)
+{
+	u64 vtime = READ_ONCE(flow_clock.vtime_now);
+
+	if (vtime == flow_stat_vtime && nr_queued)
+		flow_advance_vtime_now(vtime + FLOW_STAT_INTERVAL_NS);
+	flow_stat_vtime = READ_ONCE(flow_clock.vtime_now);
 }
 
 static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
-	u64 now = scx_bpf_now();
+	u64 now = flow_now();
+	s32 ret;
 	u32 i;
 
 	__builtin_memset(&flow_period, 0, sizeof(flow_period));
@@ -189,6 +212,8 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		flow_period.nr_queued += q;
 	}
 	flow_period.nr_queued += scx_bpf_dsq_nr_queued(FLOW_FALLBACK_DSQ);
+	if (flow_unslice)
+		flow_period.nr_queued += scx_bpf_dsq_nr_queued(FLOW_CENTRAL_DSQ);
 
 	if (flow_period.nr_sched)
 		flow_update_lat_cri(flow_period.sum_lat_cri / flow_period.nr_sched,
@@ -202,8 +227,11 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		}
 	}
 	WRITE_ONCE(flow_sys_stat.slice_ns, flow_calc_base_slice(flow_period.nr_queued));
+	flow_unfreeze_vtime(flow_period.nr_queued);
 
-	bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, 0);
+	ret = bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, flow_unslice ? BPF_F_TIMER_CPU_PIN : 0);
+	if (ret)
+		scx_bpf_error("failed to restart the stat timer (%d)", ret);
 	return 0;
 }
 
