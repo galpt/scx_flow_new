@@ -10,8 +10,7 @@
  * time on when nothing else does while tasks wait. With --helicoprion,
  * every tenth run also closes the cgroup period that the busy tasks count
  * into, and decides from it whether cgroups compete for the CPUs. With
- * --unslice, the timer is pinned to the central CPU of the first domain and
- * counts the tasks waiting for the central cores as queued.
+ * --performance, it also tells which CPUs have been busy lately.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -49,7 +48,7 @@ static u64 flow_stat_vtime;
 /*
  * Send a performance target for @cpu. Callers either hold the rq lock of
  * @cpu (ops.running() and ops.tick() on their own CPU) or hold no rq lock
- * at all (the timers), in which case the kernel takes the lock of @cpu.
+ * at all (the timer), in which case the kernel takes the lock of @cpu.
  */
 static __always_inline void flow_cpuperf_commit(s32 cpu, struct flow_cpu_state *cs,
 						u32 perf, u64 now)
@@ -106,17 +105,50 @@ static u64 flow_calc_base_slice(u64 nr_queued)
 /*
  * Only tasks close to the most latency critical ones may preempt. The bar
  * sits 1/2^FLOW_PREEMPT_SHIFT of the way down from the highest score of
- * recent periods toward the average score.
+ * recent periods toward the average score. With --performance, it sits
+ * halfway, so that the many threads a game wakes up for each frame can
+ * push aside the tasks that compute next to them.
  */
 static void flow_update_lat_cri(u64 avg_lat, u64 max_lat)
 {
 	u64 avg = flow_calc_avg(READ_ONCE(flow_sys_stat.avg_lat_cri), avg_lat);
 	u64 max = flow_calc_avg(READ_ONCE(flow_sys_stat.max_lat_cri), max_lat);
+	u32 shift = flow_performance ? FLOW_PERF_PREEMPT_SHIFT : FLOW_PREEMPT_SHIFT;
 
 	WRITE_ONCE(flow_sys_stat.avg_lat_cri, avg);
 	WRITE_ONCE(flow_sys_stat.max_lat_cri, max);
 	WRITE_ONCE(flow_sys_stat.thr_lat_cri,
-		   max > avg ? max - ((max - avg) >> FLOW_PREEMPT_SHIFT) : max);
+		   max > avg ? max - ((max - avg) >> shift) : max);
+}
+
+/*
+ * With --performance, keep a running average of the share of each period
+ * in which the CPU of @cs had a task to run, with a gain of 1/8, where
+ * FLOW_UTIL_ONE stands for the whole period. The CPU counts as busy once
+ * the average reaches FLOW_UTIL_BUSY and until it drops below
+ * FLOW_UTIL_IDLE, so that it does not flip between the two with every
+ * frame of a game. Userspace keeps the busy CPUs out of the idle states
+ * that take time to leave, see pmqos.rs. @idle_start is when the CPU last
+ * ran out of work, zero if it has a task now.
+ */
+static void flow_track_busy(struct flow_cpu_state *cs, u64 idle_start, u64 now)
+{
+	u64 idle = READ_ONCE(cs->idle_ns), idled, busy;
+	u32 util;
+
+	if (idle_start && time_after(now, idle_start))
+		idle += now - idle_start;
+	/* An ops.running() between the two reads above makes idle smaller than last time. */
+	idled = time_after(idle, cs->idle_seen) ? idle - cs->idle_seen : 0;
+	cs->idle_seen = idle;
+	busy = FLOW_STAT_INTERVAL_NS - flow_min(idled, FLOW_STAT_INTERVAL_NS);
+
+	util = cs->util - (cs->util >> 3) + ((busy * FLOW_UTIL_ONE / FLOW_STAT_INTERVAL_NS) >> 3);
+	cs->util = util;
+	if (util >= FLOW_UTIL_BUSY)
+		WRITE_ONCE(cs->shallow, 1);
+	else if (util < FLOW_UTIL_IDLE)
+		WRITE_ONCE(cs->shallow, 0);
 }
 
 /*
@@ -152,6 +184,8 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	flow_period.nr_queued += q;
 
 	idle_start = READ_ONCE(cs->idle_start_clk);
+	if (flow_performance)
+		flow_track_busy(cs, idle_start, now);
 	if (idle_start && now - idle_start >= FLOW_STAT_INTERVAL_NS &&
 	    READ_ONCE(cs->cpuperf_cur) != FLOW_CPUPERF_IDLE && flow_cpu_runs_idle(cpu))
 		flow_cpuperf_commit(cpu, cs, FLOW_CPUPERF_IDLE, now);
@@ -212,8 +246,6 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		flow_period.nr_queued += q;
 	}
 	flow_period.nr_queued += scx_bpf_dsq_nr_queued(FLOW_FALLBACK_DSQ);
-	if (flow_unslice)
-		flow_period.nr_queued += scx_bpf_dsq_nr_queued(FLOW_CENTRAL_DSQ);
 
 	if (flow_period.nr_sched)
 		flow_update_lat_cri(flow_period.sum_lat_cri / flow_period.nr_sched,
@@ -229,7 +261,7 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	WRITE_ONCE(flow_sys_stat.slice_ns, flow_calc_base_slice(flow_period.nr_queued));
 	flow_unfreeze_vtime(flow_period.nr_queued);
 
-	ret = bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, flow_unslice ? BPF_F_TIMER_CPU_PIN : 0);
+	ret = bpf_timer_start(timer, FLOW_STAT_INTERVAL_NS, 0);
 	if (ret)
 		scx_bpf_error("failed to restart the stat timer (%d)", ret);
 	return 0;

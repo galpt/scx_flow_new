@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 //! Loading and running the scx_flow BPF scheduler.
 //!
-//! With --unslice, the central domains and their central cores are picked
-//! before the program is loaded and handed to it, and the CPUs of the
-//! central cores are kept in shallow idle states until the scheduler stops
-//! or restarts.
+//! With --performance, the busy CPUs are kept out of idle states that take
+//! time to leave while the scheduler runs, see pmqos.rs.
 //!
 //! The scheduler is loaded again when the kernel asks for it, as after CPU
 //! hotplug, and after it fails, as on a stall, a few times with a growing
@@ -41,11 +39,14 @@ use crate::BpfSkel;
 use crate::BpfSkelBuilder;
 use crate::bpf_intf;
 use crate::cache::CpuCaches;
-use crate::central::ShallowIdle;
 use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
+use crate::pmqos::IdleLimits;
 use crate::stats::Metrics;
 use crate::topology::BpfTopology;
+
+/// How often the idle state limits of --performance follow the busy CPUs.
+const IDLE_LIMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Topology lines printed at startup before the rest is summarized.
 const TOPO_LOG_LINES: usize = 64;
@@ -78,7 +79,7 @@ pub(crate) struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
-    _shallow_idle: Option<ShallowIdle>,
+    idle_limits: Option<IdleLimits>,
 }
 
 fn log_lines(level: log::Level, (lines, total): (Vec<String>, usize)) {
@@ -139,18 +140,6 @@ impl<'a> Scheduler<'a> {
             .as_ref()
             .map(|t| BpfTopology::new(t, &caches))
             .transpose()?;
-        let domains = if opts.unslice {
-            let t = topo
-                .as_ref()
-                .context("--unslice needs the CPU topology to pick its central cores")?;
-            crate::topology::pick_central_domains(t)?
-        } else {
-            Vec::new()
-        };
-        let central_cpus: Vec<usize> = domains
-            .iter()
-            .flat_map(|domain| domain.central.iter().copied())
-            .collect();
 
         try_set_rlimit_infinity();
         let mut skel_builder = BpfSkelBuilder::default();
@@ -186,38 +175,11 @@ impl<'a> Scheduler<'a> {
             .as_mut()
             .context("BPF read-only data is not mapped")?;
         rodata.flow_nr_cpus = nr_cpus as u32;
-        // The slice and the boost spread the work over the CPUs that run
-        // tasks: the online ones, and with --unslice the workers only.
-        let nr_usable = match topo.as_ref() {
-            Some(t) => t.all_cpus.len().saturating_sub(central_cpus.len()),
-            None => nr_cpus,
-        };
+        // The slice and the boost spread the work over the online CPUs.
+        let nr_usable = topo.as_ref().map_or(nr_cpus, |t| t.all_cpus.len());
         rodata.flow_nr_usable = nr_usable.max(1) as u32;
         rodata.flow_helicoprion = opts.helicoprion;
-        rodata.flow_unslice = opts.unslice;
-        if !domains.is_empty() {
-            rodata.flow_nr_domains = domains.len() as u32;
-        }
-        for (i, domain) in domains.iter().enumerate() {
-            rodata.flow_domain_central_cpu[i] = domain.cpu() as i32;
-            rodata.flow_domain_timer_cpu[i] = domain.timer_cpu() as i32;
-            for cpu in &domain.cpus {
-                if let Some(slot) = rodata.flow_cpu_domain.get_mut(*cpu) {
-                    *slot = i as u32;
-                }
-                let llc = tables.as_ref().and_then(|t| t.cpu_llc.get(cpu));
-                if let Some(slot) =
-                    llc.and_then(|llc| rodata.flow_llc_domains.get_mut(*llc as usize))
-                {
-                    *slot |= 1 << i;
-                }
-            }
-            for cpu in &domain.central {
-                if let Some(slot) = rodata.flow_cpu_central.get_mut(*cpu) {
-                    *slot = true;
-                }
-            }
-        }
+        rodata.flow_performance = opts.performance;
         for (cpu, slot) in rodata.flow_cpu_sibling.iter_mut().enumerate() {
             *slot = cpu as u32;
         }
@@ -238,19 +200,52 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         if let Some(t) = topo.as_ref() {
             log_topology(t, &caches);
-            if !domains.is_empty() {
-                crate::central::log_central_cores(t, &domains);
-            }
         }
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
+
+        // A run that was killed may have left the idle state limits of
+        // --performance behind, whatever mode this run is in. The attach
+        // fails while another scheduler runs, which may be an scx_flow that
+        // still holds those limits, so they are only restored after it.
+        crate::pmqos::restore_saved_limits();
+
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
+
+        let idle_limits = opts.performance.then(|| {
+            let cpus = match topo.as_ref() {
+                Some(t) => t.all_cpus.keys().copied().collect(),
+                None => (0..nr_cpus).collect(),
+            };
+            IdleLimits::new(cpus)
+        });
+        if opts.performance {
+            info!(
+                "Performance mode: urgent wakeups interrupt their CPU right away, and busy CPUs \
+                 only poll while idle"
+            );
+        }
 
         Ok(Self {
             skel,
             struct_ops: Some(struct_ops),
             stats_server,
-            _shallow_idle: (!central_cpus.is_empty()).then(|| ShallowIdle::hold(&central_cpus)),
+            idle_limits,
         })
+    }
+
+    /// With --performance, keep the CPUs that the BPF side counts as busy
+    /// out of deep idle states, see flow_track_busy().
+    fn update_idle_limits(&mut self) {
+        let (Some(limits), Some(bss)) =
+            (self.idle_limits.as_mut(), self.skel.maps.bss_data.as_ref())
+        else {
+            return;
+        };
+        limits.update(|cpu| {
+            bss.flow_cpu_states
+                .get(cpu)
+                .is_some_and(|cs| cs.shallow != 0)
+        });
     }
 
     fn exited(&mut self) -> bool {
@@ -274,9 +269,15 @@ impl<'a> Scheduler<'a> {
 
     pub fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<RunEnd> {
         let (res_ch, req_ch) = self.stats_server.channels();
+        let wait = if self.idle_limits.is_some() {
+            IDLE_LIMIT_INTERVAL
+        } else {
+            Duration::from_secs(1)
+        };
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            match req_ch.recv_timeout(Duration::from_secs(1)) {
+            self.update_idle_limits();
+            match req_ch.recv_timeout(wait) {
                 Ok(()) => {
                     res_ch.send(crate::metrics::collect(&self.skel))?;
                     self.log_per_llc();
@@ -337,7 +338,6 @@ pub fn drive(opts: &Opts) -> Result<()> {
         }
     }
 
-    crate::central::restore_saved_limits();
     let mut open_object = MaybeUninit::<libbpf_rs::OpenObject>::uninit();
     let mut failures: Vec<Instant> = Vec::new();
     while !shutdown.load(Ordering::Relaxed) {

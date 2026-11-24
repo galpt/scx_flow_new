@@ -13,9 +13,7 @@
  * The deadline of a task is its virtual time plus an offset: a full slice
  * plus the length of the current burst, divided by the latency criticality.
  * It keeps growing while a task runs without sleeping and stays tiny for
- * tasks that only run briefly before blocking again. With --unslice, the
- * preemption timer works out the deadline that a task running without a
- * slice has reached from the same charge.
+ * tasks that only run briefly before blocking again.
  *
  * Latency criticality rewards tasks that sleep often, wake up other tasks
  * often and run briefly once awake. Each factor goes through a binary

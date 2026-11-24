@@ -15,7 +15,6 @@ enum flow_consts {
 	FLOW_MAX_CPUS		= 1024,
 	FLOW_MAX_LLCS		= 64,
 	FLOW_MAX_GROUPS		= 64,
-	FLOW_MAX_DOMAINS	= 64,	/* central domains of --unslice, one bit each */
 };
 
 /*

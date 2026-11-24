@@ -65,11 +65,10 @@ pub struct Opts {
     #[clap(long)]
     pub helicoprion: bool,
 
-    /// Run tasks without time slices and make every scheduling decision on
-    /// the fastest physical core, or on larger machines on the fastest core
-    /// of each set of LLCs, so the other CPUs only run tasks.
+    /// Schedule for the highest frame rates and the lowest input latency,
+    /// at the cost of higher power use.
     #[clap(long, conflicts_with = "helicoprion")]
-    pub unslice: bool,
+    pub performance: bool,
 
     /// Enable debug output, including libbpf messages.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
@@ -101,9 +100,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unslice_excludes_helicoprion() {
-        assert!(Opts::try_parse_from(["scx_flow", "--unslice"]).is_ok());
-        assert!(Opts::try_parse_from(["scx_flow", "--unslice", "--helicoprion"]).is_err());
+    fn performance_excludes_helicoprion() {
+        assert!(Opts::try_parse_from(["scx_flow", "--performance"]).is_ok());
+        assert!(Opts::try_parse_from(["scx_flow", "--performance", "--helicoprion"]).is_err());
     }
 
     #[test]

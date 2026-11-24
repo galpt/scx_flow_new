@@ -5,10 +5,7 @@
  * Tasks are scored by how much they behave like part of an interactive
  * pipeline and wait in per-LLC queues ordered by a virtual deadline derived
  * from that score. Pinned tasks wait in per-CPU queues. Wakeups that find
- * an idle CPU are dispatched to it directly. With --unslice, one CPU of the
- * fastest core of each central domain dispatches for the other CPUs of the
- * domain, which run their tasks without a slice until a timer on that core
- * preempts them.
+ * an idle CPU are dispatched to it directly.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

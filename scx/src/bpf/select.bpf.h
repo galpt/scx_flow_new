@@ -20,10 +20,6 @@
  * waker first, see flow_sync_handoff(), and then the idle hardware thread
  * next to it.
  *
- * With --unslice, the central CPUs place every task, so a wakeup is left on
- * its previous CPU and goes through ops.enqueue(). Sending every wakeup to
- * a central CPU instead would make all of them take its runqueue lock.
- *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #ifndef __FLOW_SELECT_BPF_H
@@ -286,8 +282,6 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		return prev_cpu;
 
 	flow_tag_wakeup(t, wake_flags);
-	if (flow_unslice)
-		return prev_cpu;
 	if (flow_helicoprion && (wake_flags & SCX_WAKE_TTWU)) {
 		struct task_struct *waker = bpf_get_current_task_btf();
 		struct flow_task_ctx *wt = flow_task_ctx(waker);
