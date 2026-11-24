@@ -11,7 +11,8 @@ scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one 
 - Batch work, such as compiling and rendering.
 
 > [!TIP]
-> Start scx_flow with `--helicoprion` to try the helicoprion mode. This mode is for research into whether it benefits users more than running without it. User feedback may be shared with other developers to help improve other schedulers and, where possible, the [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark itself.
+> 1. Start scx_flow with `--helicoprion` to try the helicoprion mode. This mode is for research into whether it benefits users more than running without it. User feedback may be shared with other developers to help improve other schedulers and, where possible, the [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark itself.
+> 2. Start scx_flow with `--performance` for the highest frame rates and the lowest input latency, at the cost of more power. An urgent task gets its CPU right away instead of at the next tick, more of a game's threads may push background work aside, and busy CPUs only poll while idle. It cannot be combined with `--helicoprion`.
 
 ## Limitations
 
