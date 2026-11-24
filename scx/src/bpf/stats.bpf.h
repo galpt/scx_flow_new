@@ -10,7 +10,8 @@
  * time on when nothing else does while tasks wait. With --helicoprion,
  * every tenth run also closes the cgroup period that the busy tasks count
  * into, and decides from it whether cgroups compete for the CPUs. With
- * --performance, it also tells which CPUs have been busy lately.
+ * --performance, it also tells which CPUs have been busy lately, and wakes
+ * up a CPU that has held a hog back for too long, see sibling.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -19,6 +20,7 @@
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
+#include "sibling.bpf.h"
 
 enum flow_timer_clock {
 	FLOW_CLOCK_BOOTTIME	= 7,
@@ -184,8 +186,10 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	flow_period.nr_queued += q;
 
 	idle_start = READ_ONCE(cs->idle_start_clk);
-	if (flow_performance)
+	if (flow_performance) {
 		flow_track_busy(cs, idle_start, now);
+		flow_guard_timer(cpu, cs, now);
+	}
 	if (idle_start && now - idle_start >= FLOW_STAT_INTERVAL_NS &&
 	    READ_ONCE(cs->cpuperf_cur) != FLOW_CPUPERF_IDLE && flow_cpu_runs_idle(cpu))
 		flow_cpuperf_commit(cpu, cs, FLOW_CPUPERF_IDLE, now);

@@ -13,9 +13,10 @@
  * switches at its next scheduling point. With --helicoprion and
  * --performance, a short task that wakes up while every CPU computes also
  * interrupts a CPU whose task has been computing for a long time, right
- * away. With --performance, the bar for urgent tasks is lower, and the
- * CPU of the victim is interrupted as well, since a whole tick can pass
- * before it looks at its slice again.
+ * away. With --performance, bursts of up to a maximum slice count as
+ * short for this, the bar for urgent tasks is lower, and the CPU of the
+ * victim is interrupted as well, since a whole tick can pass before it
+ * looks at its slice again.
  *
  * When a realtime or deadline task takes a CPU, the tasks waiting in its
  * local DSQ are queued again from ops.cpu_release(), like any other task.
@@ -28,6 +29,7 @@
 #include "maps.bpf.h"
 #include "fair.bpf.h"
 #include "select.bpf.h"
+#include "sibling.bpf.h"
 
 struct flow_victim {
 	s32	cpu;
@@ -72,10 +74,12 @@ static bool flow_kick_idle(struct task_struct *p, const struct flow_task_ctx *t,
 
 	if (pinned)
 		idle = scx_bpf_test_and_clear_cpu_idle(cpu) ? cpu : -EBUSY;
-	else if (!__COMPAT_is_enq_cpu_selected(enq_flags))
-		idle = flow_pick_idle_cpu(p, t, cpu, 0);
-	else
+	else if (__COMPAT_is_enq_cpu_selected(enq_flags))
 		return false;
+	else if (flow_performance && flow_long_runner(t, t->acc_runtime_ns))
+		idle = flow_pick_hog_cpu(p, t, cpu, 0, t->acc_runtime_ns);
+	else
+		idle = flow_pick_idle_cpu(p, t, cpu, 0);
 
 	if (idle < 0)
 		return false;
@@ -223,8 +227,10 @@ static bool flow_is_hog(const struct flow_task_ctx *t, s32 cpu, u64 now)
  * would wait up to a tick for a CPU. It would get that CPU time at the tick
  * anyway, so the first hog among @cpu and a few random CPUs of the LLC is
  * interrupted right away instead, which costs the hog no more than an IPI.
- * Returns whether a CPU was interrupted, so that no other one is asked to
- * give up its CPU as well.
+ * Bursts count as short below a minimum slice, and with --performance
+ * below a maximum slice, which covers the threads of a game that compute
+ * for a few milliseconds per frame. Returns whether a CPU was interrupted,
+ * so that no other one is asked to give up its CPU as well.
  */
 static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *t, s32 cpu,
 			     u32 llc, u64 enq_flags)
@@ -233,7 +239,8 @@ static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *
 	u64 now;
 	u32 i;
 
-	if (!(enq_flags & SCX_ENQ_WAKEUP) || t->avg_runtime_ns >= FLOW_SLICE_MIN_NS)
+	if (!(enq_flags & SCX_ENQ_WAKEUP) ||
+	    t->avg_runtime_ns >= (flow_performance ? FLOW_SLICE_MAX_NS : FLOW_SLICE_MIN_NS))
 		return false;
 
 	now = flow_now();
@@ -258,17 +265,46 @@ static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *
 	return false;
 }
 
+/*
+ * Whether the task running here woke up @p. With queued wakeups, the
+ * kernel skips ops.select_cpu() for a task that can only run on one CPU,
+ * and for one that it wakes up while it is still switching out, so
+ * ops.runnable() has to note the waker of such a task. A wakeup activated
+ * on a CPU other than that of @p was not queued and runs on the CPU of the
+ * waker. One activated on the CPU of @p may come from a waker on that CPU,
+ * but also from an IPI, the idle loop or a CPU stopper, where the running
+ * task is not the waker. The two cannot be told apart, so such a wakeup
+ * is not noted.
+ */
+static __always_inline bool flow_waker_is_current(const struct task_struct *p)
+{
+	return !flow_queued_wakeup || bpf_get_smp_processor_id() != scx_bpf_task_cpu(p);
+}
+
+/*
+ * Every activation clears the flag that ops.select_cpu() set for it,
+ * wakeup or not, so that the flag never carries over to a later wakeup.
+ */
 void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct flow_task_ctx *t, *wt;
 	struct task_struct *waker;
+	bool noted;
 
-	if (!(enq_flags & SCX_ENQ_WAKEUP))
+	if (!(enq_flags & SCX_ENQ_WAKEUP) && !flow_queued_wakeup)
 		return;
 	t = flow_task_ctx(p);
 	if (!t)
 		return;
+	noted = t->flags & FLOW_FLAG_NOTED;
+	t->flags &= ~FLOW_FLAG_NOTED;
+	if (!(enq_flags & SCX_ENQ_WAKEUP))
+		return;
 	t->acc_runtime_ns = 0;
+	if (flow_performance && flow_long_runner(t, 0))
+		t->ready_clk = flow_now();
+	if (noted || !flow_waker_is_current(p))
+		return;
 
 	waker = bpf_get_current_task_btf();
 	wt = flow_task_ctx(waker);
@@ -363,8 +399,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * The last runnable task of a CPU whose slice ran out is picked up
 	 * again by that CPU, so waking another one would only migrate it.
+	 * With --performance, a hog that the CPU holds back looks for another
+	 * CPU, see sibling.bpf.h.
 	 */
-	if (enq_flags & SCX_ENQ_LAST)
+	if ((enq_flags & SCX_ENQ_LAST) &&
+	    !(flow_performance && READ_ONCE(flow_cpu_states[cpu].hold_clk)))
 		return;
 	if (flow_kick_idle(p, t, cpu, pinned, enq_flags))
 		return;
@@ -393,7 +432,8 @@ void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
  * never runs here again, so it stops counting as waiting for its CPU.
  * ops.quiescent() already does this, but --helicoprion leaves it out. What
  * the task learned about its partner no longer holds once it runs in
- * another class either.
+ * another class either, and neither does a waker noted for a wakeup that
+ * the other class activated.
  */
 void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 {
@@ -404,6 +444,7 @@ void BPF_STRUCT_OPS(flow_disable, struct task_struct *p)
 	flow_clear_pinned(t);
 	t->sync_score = 0;
 	t->last_waker = 0;
+	t->flags &= ~FLOW_FLAG_NOTED;
 }
 
 /*
@@ -420,6 +461,8 @@ void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 		WRITE_ONCE(cs->lat_cri, 0);
 		WRITE_ONCE(cs->est_stopping_clk, 0);
 		WRITE_ONCE(cs->burst_start_clk, flow_now());
+		if (flow_performance)
+			flow_guard_idle(cpu, cs, 0);
 	}
 	scx_bpf_reenqueue_local();
 }

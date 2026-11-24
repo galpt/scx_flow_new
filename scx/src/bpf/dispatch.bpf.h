@@ -7,7 +7,9 @@
  * the other LLCs of its node and finally remote LLCs. A task of its own
  * LLC that is due well before the pinned tasks goes first, so pinned tasks
  * cannot starve the LLC. When nothing is queued anywhere and the previous
- * task still wants to run, it keeps the CPU with a fresh slice.
+ * task still wants to run, it keeps the CPU with a fresh slice. With
+ * --performance, a CPU whose SMT sibling runs an urgent task leaves hogs
+ * alone for a while, see sibling.bpf.h.
  *
  * Runtime is charged when a task stops running, from the time it spent on
  * the CPU. With --helicoprion, it is charged when the task wakes up or is
@@ -30,16 +32,51 @@
 #include "fair.bpf.h"
 #include "stats.bpf.h"
 #include "enqueue.bpf.h"
+#include "sibling.bpf.h"
 
-/* Pull a task from another LLC, either in the node of @llc or outside of it. */
-static bool flow_steal(u32 llc, bool same_node)
+/*
+ * Move the first task of @dsq_id that may run on @cpu and is not held back
+ * by @g to the local DSQ of @cpu, see sibling.bpf.h. Without an urgent task
+ * on the sibling, or when the head of @dsq_id may run on @cpu and is not
+ * held back, the kernel moves the first task that may run on @cpu. Only a
+ * head that cannot go makes the walk through @dsq_id, which takes the lock
+ * of the DSQ for every step, worth its cost.
+ */
+static bool flow_move_unheld(u64 dsq_id, s32 cpu, struct flow_guard *g)
+{
+	struct task_struct *p;
+	u32 seen = 0;
+
+	if (!g->tgid)
+		return scx_bpf_dsq_move_to_local(dsq_id, 0);
+	p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	if (!p)
+		return false;
+	if (flow_task_fits(p, cpu) && !flow_queued_held(p, g))
+		return scx_bpf_dsq_move_to_local(dsq_id, 0);
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		if (seen++ >= FLOW_HOLD_DEPTH)
+			break;
+		if (!flow_task_fits(p, cpu) || flow_queued_held(p, g))
+			continue;
+		if (scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL, 0))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Pull a task from another LLC for @cpu, either in the node of @llc or
+ * outside of it.
+ */
+static bool flow_steal(s32 cpu, u32 llc, bool same_node, struct flow_guard *g)
 {
 	u32 i;
 
 	bpf_for(i, 1, flow_nr_llcs) {
 		s32 other = flow_peer_llc(llc, i, same_node);
 
-		if (other >= 0 && scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + other, 0))
+		if (other >= 0 && flow_move_unheld(FLOW_LLC_DSQ_BASE + other, cpu, g))
 			return true;
 	}
 	return false;
@@ -59,9 +96,10 @@ static __always_inline bool flow_long_burst(u64 acc)
 /*
  * True when a task of @dsq_id that can run on @cpu is due before @deadline.
  * The first FLOW_AHEAD_DEPTH tasks are looked at, so that a head that may
- * only run on other CPUs does not hide the tasks behind it.
+ * only run on other CPUs does not hide the tasks behind it. A hog that @g
+ * holds back cannot run on @cpu either, see sibling.bpf.h.
  */
-static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
+static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu, struct flow_guard *g)
 {
 	struct task_struct *p;
 	u32 seen = 0;
@@ -71,7 +109,7 @@ static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		if (!time_before(p->scx.dsq_vtime, deadline) || seen++ >= FLOW_AHEAD_DEPTH)
 			return false;
-		if (flow_task_fits(p, cpu))
+		if (flow_task_fits(p, cpu) && !flow_queued_held(p, g))
 			return true;
 	}
 	return false;
@@ -84,17 +122,16 @@ static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
  * limit, CPUs that always have a pinned task waiting would starve the rest
  * of the LLC, as when stress-ng pins two tasks to every CPU.
  */
-static bool flow_consume_local(s32 cpu, u32 llc)
+static bool flow_consume_local(s32 cpu, u32 llc, struct flow_guard *g)
 {
 	u64 cpu_dsq = FLOW_CPU_DSQ_BASE + cpu, llc_dsq = FLOW_LLC_DSQ_BASE + llc;
 	struct task_struct *pinned = __COMPAT_scx_bpf_dsq_peek(cpu_dsq);
 
 	if (pinned &&
-	    flow_queued_ahead(llc_dsq, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu) &&
-	    scx_bpf_dsq_move_to_local(llc_dsq, 0))
+	    flow_queued_ahead(llc_dsq, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu, g) &&
+	    flow_move_unheld(llc_dsq, cpu, g))
 		return true;
-	return scx_bpf_dsq_move_to_local(cpu_dsq, 0) ||
-	       scx_bpf_dsq_move_to_local(llc_dsq, 0);
+	return flow_move_unheld(cpu_dsq, cpu, g) || flow_move_unheld(llc_dsq, cpu, g);
 }
 
 /*
@@ -103,9 +140,11 @@ static bool flow_consume_local(s32 cpu, u32 llc)
  * refreshed from the virtual time it reached so far. Unless @always is
  * set, @prev only keeps the CPU while nothing queued for @cpu, in its own
  * DSQ or in the DSQ of @llc, is due before it, which spares a switch and a
- * likely move to another core.
+ * likely move to another core. A hog that @g holds back does not keep the
+ * CPU, and starts to wait at @now.
  */
-static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool always)
+static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool always,
+			   struct flow_guard *g)
 {
 	struct flow_task_ctx *t;
 	u64 now, ran, acc, vtime, deadline, slice;
@@ -121,10 +160,16 @@ static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 	now = flow_now();
 	ran = flow_ran(t, now);
 	acc = t->acc_runtime_ns + ran;
+	if (flow_hog_held(prev, t, acc, g) &&
+	    !time_before(now, READ_ONCE(flow_cpu_states[cpu].hog_clk))) {
+		if (!g->held)
+			g->held = now;
+		return false;
+	}
 	vtime = t->vtime + (cgrp ? flow_charge_cgrp(prev, t, ran) : flow_charge(prev, ran, acc));
 	deadline = flow_deadline(t, vtime, acc);
-	if (!always && (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
-			flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu)))
+	if (!always && (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu, g) ||
+			flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu, g)))
 		return false;
 
 	if (cgrp || !flow_long_burst(acc))
@@ -138,28 +183,31 @@ static bool flow_keep_prev(s32 cpu, u32 llc, struct task_struct *prev, bool alwa
 
 void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct flow_guard g = {};
 	struct flow_cpu_state *cs;
 	u32 llc;
 
 	if (!flow_cpu_valid(cpu))
 		return;
 	llc = flow_llc_of(cpu);
+	if (flow_performance)
+		flow_read_guard(cpu, &g);
 
-	if (flow_keep_prev(cpu, llc, prev, false)) {
+	if (flow_keep_prev(cpu, llc, prev, false, &g)) {
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
 	/* Tasks without a context are rare and would starve behind the rest. */
-	if (scx_bpf_dsq_move_to_local(FLOW_FALLBACK_DSQ, 0) || flow_consume_local(cpu, llc)) {
+	if (scx_bpf_dsq_move_to_local(FLOW_FALLBACK_DSQ, 0) || flow_consume_local(cpu, llc, &g)) {
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
 		return;
 	}
-	if (flow_steal(llc, true) || flow_steal(llc, false)) {
+	if (flow_steal(cpu, llc, true, &g) || flow_steal(cpu, llc, false, &g)) {
 		flow_stat_inc(FLOW_STAT_DISPATCHED);
 		flow_stat_inc(FLOW_STAT_STEAL);
 		return;
 	}
-	if (flow_keep_prev(cpu, llc, prev, true)) {
+	if (flow_keep_prev(cpu, llc, prev, true, &g)) {
 		flow_stat_inc(FLOW_STAT_KEEP);
 		return;
 	}
@@ -172,6 +220,8 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		WRITE_ONCE(cs->idled, 1);
 	if (!READ_ONCE(cs->idle_start_clk))
 		WRITE_ONCE(cs->idle_start_clk, flow_now());
+	if (flow_performance)
+		flow_guard_idle(cpu, cs, g.held);
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
@@ -211,12 +261,15 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 
 	if (READ_ONCE(cs->cpuperf_cur) != SCX_CPUPERF_ONE)
 		flow_cpuperf_commit(cpu, cs, SCX_CPUPERF_ONE, now);
+	if (flow_performance)
+		flow_guard_running(p, t, cpu, cs, now);
 }
 
 void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 {
 	struct flow_task_ctx *t = flow_task_ctx(p);
 	s32 cpu = scx_bpf_task_cpu(p);
+	struct flow_guard g = {};
 	struct flow_cpu_state *cs;
 	u64 now, deadline, base;
 
@@ -227,6 +280,11 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	now = flow_now();
 	if (now - READ_ONCE(cs->cpuperf_commit_clk) >= FLOW_CPUPERF_REFRESH_NS)
 		flow_cpuperf_commit(cpu, cs, SCX_CPUPERF_ONE, now);
+	if (flow_performance) {
+		flow_read_guard(cpu, &g);
+		if (flow_guard_tick(p, t, t->acc_runtime_ns + flow_ran(t, now), cpu, cs, &g, now))
+			return;
+	}
 
 	/*
 	 * A task that is still running a minimum slice after it started is no
@@ -244,8 +302,8 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	 */
 	deadline = p->scx.dsq_vtime;
 	if (flow_ran(t, now) >= FLOW_SLICE_MIN_NS &&
-	    (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu) ||
-	     flow_queued_ahead(FLOW_LLC_DSQ_BASE + flow_llc_of(cpu), deadline, cpu))) {
+	    (flow_queued_ahead(FLOW_CPU_DSQ_BASE + cpu, deadline, cpu, &g) ||
+	     flow_queued_ahead(FLOW_LLC_DSQ_BASE + flow_llc_of(cpu), deadline, cpu, &g))) {
 		scx_bpf_task_set_slice(p, 0);
 		return;
 	}
@@ -259,13 +317,16 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 {
 	struct flow_task_ctx *t = flow_task_ctx(p);
-	u64 used;
+	u64 now, used;
 
 	if (!t)
 		return;
 
-	used = t->last_running_clk ? flow_ran(t, flow_now()) : 0;
+	now = flow_now();
+	used = t->last_running_clk ? flow_ran(t, now) : 0;
 	flow_charge_run(p, t, used);
+	if (flow_performance)
+		t->ready_clk = now;
 
 	if (runnable)
 		flow_stat_inc(FLOW_STAT_PREEMPTED);

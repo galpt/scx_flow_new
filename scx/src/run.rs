@@ -169,6 +169,16 @@ impl<'a> Scheduler<'a> {
             skel.progs.flow_cgroup_set_weight.set_autoload(false);
         }
 
+        // With --performance, the kernel may queue a wakeup to the CPU of
+        // the wakee and activate it there, which saves the waker the
+        // remote runqueue lock. Kernels without it read zero here.
+        let queued_wakeup = if opts.performance {
+            *scx_utils::compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+        } else {
+            0
+        };
+        skel.struct_ops.flow_ops_mut().flags |= queued_wakeup;
+
         let rodata = skel
             .maps
             .rodata_data
@@ -180,6 +190,7 @@ impl<'a> Scheduler<'a> {
         rodata.flow_nr_usable = nr_usable.max(1) as u32;
         rodata.flow_helicoprion = opts.helicoprion;
         rodata.flow_performance = opts.performance;
+        rodata.flow_queued_wakeup = queued_wakeup != 0;
         for (cpu, slot) in rodata.flow_cpu_sibling.iter_mut().enumerate() {
             *slot = cpu as u32;
         }

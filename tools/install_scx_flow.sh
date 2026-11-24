@@ -10,7 +10,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 BIN="scx_flow"
-VER="5.3.3"
+VER="5.3.4"
 # The workspace commit is pinned and matches the one CI uses. CI fetches
 # it from sched-ext/scx, the installer from the galpt/scx mirror, and the
 # check after the fetch refuses any other commit.

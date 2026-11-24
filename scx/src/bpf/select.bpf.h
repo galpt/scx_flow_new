@@ -18,7 +18,8 @@
  * kernel then skips ops.enqueue() for that wakeup. With --helicoprion, the
  * partner of a waker with tiny bursts tries to take over the CPU of the
  * waker first, see flow_sync_handoff(), and then the idle hardware thread
- * next to it.
+ * next to it. With --performance, a hog only takes an idle CPU next to no
+ * urgent task, see sibling.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -27,6 +28,7 @@
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
+#include "sibling.bpf.h"
 
 static __always_inline void flow_tag_wakeup(struct flow_task_ctx *t, u64 wake_flags)
 {
@@ -273,6 +275,25 @@ static __always_inline void flow_wake_task(struct task_struct *p, struct flow_ta
 	t->last_waker = waker->pid;
 }
 
+/*
+ * With queued wakeups, the kernel may activate @p on its new CPU from an
+ * IPI or from the idle loop, where the running task did not wake it up.
+ * ops.select_cpu() still runs on the CPU of the waker, so the waker is
+ * noted here, before @p is scored, and ops.runnable() leaves it alone. A
+ * waker without a context, such as the idle task, is not noted, but the
+ * wakeup still counts as noted, or ops.runnable() would pick an unrelated
+ * task.
+ */
+static __always_inline void flow_note_waker(struct task_struct *p, struct flow_task_ctx *t)
+{
+	struct task_struct *waker = bpf_get_current_task_btf();
+	struct flow_task_ctx *wt = flow_task_ctx(waker);
+
+	t->flags |= FLOW_FLAG_NOTED;
+	if (wt && waker != p)
+		flow_note_wakeup(t, wt, flow_now());
+}
+
 s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct flow_task_ctx *t = flow_task_ctx(p);
@@ -282,6 +303,8 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		return prev_cpu;
 
 	flow_tag_wakeup(t, wake_flags);
+	if (flow_queued_wakeup && (wake_flags & SCX_WAKE_TTWU))
+		flow_note_waker(p, t);
 	if (flow_helicoprion && (wake_flags & SCX_WAKE_TTWU)) {
 		struct task_struct *waker = bpf_get_current_task_btf();
 		struct flow_task_ctx *wt = flow_task_ctx(waker);
@@ -307,15 +330,26 @@ s32 BPF_STRUCT_OPS(flow_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 		}
 	}
 
-	if (cpu < 0)
+	if (cpu < 0 && flow_performance && flow_long_runner(t, 0))
+		cpu = flow_pick_hog_cpu(p, t, prev_cpu, wake_flags, 0);
+	else if (cpu < 0)
 		cpu = flow_pick_idle_cpu(p, t, prev_cpu, wake_flags);
 	if (cpu < 0)
 		return prev_cpu;
 
-	/* The task starts a new activation, so it has not run yet. */
+	/*
+	 * The task starts a new activation, so it has not run yet. With
+	 * --performance, an idle CPU picked for it may have left idle to run
+	 * another task by now, see sibling.bpf.h, and the task is queued
+	 * again rather than waiting behind that task. A sync wakeup that the
+	 * kernel hands to the CPU of the waker waits for the waker to sleep,
+	 * as it should.
+	 */
 	t->acc_runtime_ns = 0;
 	scx_bpf_task_set_dsq_vtime(p, flow_score_task(p, t));
-	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, flow_calc_slice(t, cpu), 0);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, flow_calc_slice(t, cpu),
+			   flow_performance && cpu != bpf_get_smp_processor_id() ?
+			   SCX_ENQ_IMMED : 0);
 	flow_stat_inc(FLOW_STAT_DIRECT);
 	return cpu;
 }

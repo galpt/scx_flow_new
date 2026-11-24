@@ -9,7 +9,8 @@
  * preemption and statistics code to read. With --helicoprion, each cgroup
  * also keeps its weight and busy task counts here, and the system keeps
  * the totals and whether the cgroups compete for the CPUs. With
- * --performance, each CPU also counts the time it had no task to run.
+ * --performance, each CPU also counts the time it had no task to run and
+ * tells its SMT sibling whether its task keeps hogs away from it.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -66,6 +67,14 @@ enum flow_tunables {
 	 */
 	FLOW_AHEAD_DEPTH		= 4,
 
+	/*
+	 * --performance: how long a hog may be kept off a CPU whose sibling
+	 * runs an urgent task, see sibling.bpf.h, and how many tasks of a
+	 * DSQ are looked at for one that is not held back.
+	 */
+	FLOW_HOLD_NS			= FLOW_SLICE_BOOST_MAX_NS,
+	FLOW_HOLD_DEPTH			= 32,
+
 	/* Priorities below this one belong to realtime and deadline tasks. */
 	FLOW_MAX_RT_PRIO		= 100,
 
@@ -117,6 +126,7 @@ enum flow_task_flags {
 	FLOW_FLAG_YIELDED		= 1 << 3,	/* preempted by its own wakee */
 	FLOW_FLAG_WOKE			= 1 << 4,	/* woke up a task since it woke up */
 	FLOW_FLAG_NEW			= 1 << 5,	/* not queued since it joined */
+	FLOW_FLAG_NOTED			= 1 << 6,	/* waker noted when it was placed */
 };
 
 #define FLOW_CPUPERF_IDLE	(SCX_CPUPERF_ONE / 2)
@@ -142,6 +152,7 @@ struct flow_task_ctx {
 	s32	pinned_cpu;		/* CPU whose nr_pinned counts this task */
 	u32	sync_score;		/* how reliably it sleeps after waking others */
 	s32	last_waker;		/* pid of the task that last woke it up */
+	u64	ready_clk;		/* --performance: when it last began to wait for a CPU */
 };
 
 struct flow_cpu_state {
@@ -162,6 +173,10 @@ struct flow_cpu_state {
 	u64	idle_seen;		/* --performance: idle_ns at the last timer run */
 	u32	util;			/* --performance: how busy, see flow_track_busy() */
 	u32	shallow;		/* --performance: busy enough to wake up quickly */
+	u32	guard_tgid;		/* --performance: process of curr if it guards the sibling */
+	u32	tgid;			/* --performance: process of curr */
+	u64	hog_clk;		/* --performance: when curr counts as a hog */
+	u64	hold_clk;		/* --performance: idle while a hog waits since then, or 0 */
 } __attribute__((aligned(64)));
 
 /*
@@ -212,6 +227,12 @@ const volatile bool flow_helicoprion;
 
 /* Higher frame rates and lower input latency, enabled by --performance. */
 const volatile bool flow_performance;
+
+/*
+ * --performance on a kernel that may queue a wakeup to the CPU of the
+ * wakee, see flow_runnable().
+ */
+const volatile bool flow_queued_wakeup;
 
 const volatile u32 flow_nr_cpus = 1;
 const volatile u32 flow_nr_usable = 1;	/* online CPUs, see the loader */

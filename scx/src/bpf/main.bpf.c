@@ -20,6 +20,7 @@ UEI_DEFINE(uei);
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
+#include "sibling.bpf.h"
 #include "stats.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
