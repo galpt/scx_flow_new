@@ -2,7 +2,9 @@
 /*
  * Build script for scx_flow.
  *
- * Builds the BPF object and generates the userspace bindings.
+ * Builds the BPF object and generates the userspace bindings. The double
+ * helix queues of --performance come from the arena library of the scx
+ * workspace, which is compiled and linked into the same object.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -12,6 +14,10 @@ fn main() {
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
-        .build()
+        .add_source("../../../lib/common.bpf.c")
+        .add_source("../../../lib/dhq.bpf.c")
+        .add_source("../../../lib/minheap.bpf.c")
+        .add_source("../../../lib/sdt_alloc.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }

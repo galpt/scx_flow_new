@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 //! CPU topology handling for scx_flow.
 //!
-//! Builds the topology tables the BPF program reads and the topology
-//! lines printed at startup.
+//! Builds the topology tables the BPF program reads, including the pairs
+//! of LLCs that share a double helix queue with --performance, and the
+//! topology lines printed at startup.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -108,6 +109,29 @@ fn nr_groups(groups: &BTreeMap<usize, u32>) -> usize {
     groups.values().collect::<BTreeSet<_>>().len()
 }
 
+/// The partner of every LLC in the double helix queues of --performance:
+/// the LLCs of each node are paired in the order of their numbers, and the
+/// last one of an odd count is its own partner, as is an LLC alone in its
+/// node.
+fn llc_mates(llc_node: &[u32]) -> Vec<u32> {
+    let mut mates: Vec<u32> = (0..llc_node.len() as u32).collect();
+    let mut waiting: BTreeMap<u32, u32> = BTreeMap::new();
+
+    for (llc, node) in llc_node.iter().enumerate() {
+        let llc = llc as u32;
+        match waiting.remove(node) {
+            Some(first) => {
+                mates[first as usize] = llc;
+                mates[llc as usize] = first;
+            }
+            None => {
+                waiting.insert(*node, llc);
+            }
+        }
+    }
+    mates
+}
+
 /// Topology tables for the BPF program. LLCs are renumbered from zero in
 /// the order of their ids. Cache sizes are in kibibytes, zero if unknown.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -122,6 +146,8 @@ pub struct BpfTopology {
     pub cpu_sibling: BTreeMap<usize, u32>,
     pub llc_node: Vec<u32>,
     pub llc_kb: Vec<u32>,
+    /// The LLC each LLC shares a double helix queue with, itself if none.
+    pub llc_mate: Vec<u32>,
 }
 
 impl BpfTopology {
@@ -189,9 +215,19 @@ impl BpfTopology {
             cpu_llc,
             cpu_group,
             cpu_sibling: cpu_siblings(topo),
+            llc_mate: llc_mates(&llc_node),
             llc_node,
             llc_kb,
         })
+    }
+
+    /// The number of LLC pairs that share a double helix queue.
+    pub fn nr_llc_pairs(&self) -> usize {
+        self.llc_mate
+            .iter()
+            .enumerate()
+            .filter(|(llc, mate)| (**mate as usize) > *llc)
+            .count()
     }
 }
 
@@ -658,6 +694,27 @@ mod tests {
             tables.cpu_group,
             BTreeMap::from([(0, 0), (1, 0), (2, 1), (3, 1)])
         );
+    }
+
+    #[test]
+    fn llcs_pair_up_within_their_node() {
+        assert_eq!(llc_mates(&[0]), vec![0]);
+        assert_eq!(llc_mates(&[0, 0]), vec![1, 0]);
+        assert_eq!(llc_mates(&[0, 0, 0]), vec![1, 0, 2]);
+        assert_eq!(llc_mates(&[0, 1, 0, 1]), vec![2, 3, 0, 1]);
+        assert_eq!(llc_mates(&[0, 0, 1, 1, 1]), vec![1, 0, 3, 2, 4]);
+        assert_eq!(llc_mates(&[0, 1]), vec![0, 1]);
+
+        let one_per_node = BpfTopology::new(&multi_package_topo(), &BTreeMap::new()).unwrap();
+        assert_eq!(one_per_node.llc_mate, vec![0, 1]);
+        assert_eq!(one_per_node.nr_llc_pairs(), 0);
+
+        let odd = BpfTopology::new(&many_llc_topo(5, 1), &BTreeMap::new()).unwrap();
+        assert_eq!(odd.llc_mate, vec![1, 0, 3, 2, 4]);
+        assert_eq!(odd.nr_llc_pairs(), 2);
+
+        let merged = BpfTopology::new(&many_llc_topo(100, 2), &BTreeMap::new()).unwrap();
+        assert_eq!(merged.llc_mate, vec![0, 1]);
     }
 
     #[test]

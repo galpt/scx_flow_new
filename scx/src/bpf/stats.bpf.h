@@ -6,12 +6,14 @@
  * folds those samples every period into the values the policy reads: the
  * queue length, the base slice and the latency criticality a task needs to
  * preempt another one. The timer also lowers the performance target of
- * CPUs that stayed idle for a whole period, and moves the system virtual
+ * CPUs that were idle for a whole period, and moves the system virtual
  * time on when nothing else does while tasks wait. With --helicoprion,
  * every tenth run also closes the cgroup period that the busy tasks count
  * into, and decides from it whether cgroups compete for the CPUs. With
- * --performance, it also tells which CPUs have been busy lately, and wakes
- * up a CPU that has held a hog back for too long, see sibling.bpf.h.
+ * --performance, it also tells which CPUs have been busy lately, and the
+ * tasks in the strands of the LLCs count as queued, see helix.bpf.h. The
+ * timer only looks at the online CPUs, since the scheduler is loaded again
+ * whenever a CPU comes or goes.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -20,7 +22,7 @@
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
-#include "sibling.bpf.h"
+#include "helix.bpf.h"
 
 enum flow_timer_clock {
 	FLOW_CLOCK_BOOTTIME	= 7,
@@ -155,7 +157,7 @@ static void flow_track_busy(struct flow_cpu_state *cs, u64 idle_start, u64 now)
 
 /*
  * Fold the samples of @cpu into flow_period and lower its performance
- * target if it stayed idle for a whole period.
+ * target if it was idle for a whole period.
  */
 __hidden int flow_sample_cpu(u32 cpu, u64 now)
 {
@@ -186,10 +188,8 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	flow_period.nr_queued += q;
 
 	idle_start = READ_ONCE(cs->idle_start_clk);
-	if (flow_performance) {
+	if (flow_performance)
 		flow_track_busy(cs, idle_start, now);
-		flow_guard_timer(cpu, cs, now);
-	}
 	if (idle_start && now - idle_start >= FLOW_STAT_INTERVAL_NS &&
 	    READ_ONCE(cs->cpuperf_cur) != FLOW_CPUPERF_IDLE && flow_cpu_runs_idle(cpu))
 		flow_cpuperf_commit(cpu, cs, FLOW_CPUPERF_IDLE, now);
@@ -237,15 +237,18 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 
 	__builtin_memset(&flow_period, 0, sizeof(flow_period));
 
-	bpf_for(i, 0, flow_nr_cpus)
-		flow_sample_cpu(i, now);
+	bpf_for(i, 0, flow_nr_usable) {
+		if (i >= FLOW_MAX_CPUS)
+			break;
+		flow_sample_cpu(flow_cpu_ids[i], now);
+	}
 
 	bpf_for(i, 0, flow_nr_llcs) {
 		u64 q;
 
 		if (i >= FLOW_MAX_LLCS)
 			break;
-		q = scx_bpf_dsq_nr_queued(FLOW_LLC_DSQ_BASE + i);
+		q = scx_bpf_dsq_nr_queued(FLOW_LLC_DSQ_BASE + i) + flow_helix_queued(i);
 		WRITE_ONCE(flow_llc_nr_queued[i], flow_period.llc_nr_queued[i] + q);
 		flow_period.nr_queued += q;
 	}

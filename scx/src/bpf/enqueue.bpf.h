@@ -3,8 +3,12 @@
  * Queueing for the flow scheduler.
  *
  * Pinned tasks wait in the DSQ of their CPU and everything else waits in
- * the DSQ of the LLC of its CPU, both ordered by virtual deadline. Every
- * path through ops.enqueue() inserts the task exactly once.
+ * the DSQ of the LLC of its CPU, both ordered by virtual deadline. With
+ * --performance, a task that may run in both LLCs of a pair that shares a
+ * double helix queue waits in the strand of its LLC instead, see
+ * helix.bpf.h, and the last runnable task of a CPU goes back to the local
+ * DSQ of that CPU. Every path through ops.enqueue() queues the task
+ * exactly once.
  *
  * After the insert, flow looks for an idle CPU to wake up. If there is
  * none and the task is urgent enough, it asks the running task with the
@@ -20,6 +24,8 @@
  *
  * When a realtime or deadline task takes a CPU, the tasks waiting in its
  * local DSQ are queued again from ops.cpu_release(), like any other task.
+ * ops.runnable(), ops.quiescent() and ops.disable() keep track of wakers,
+ * bursts and pinned tasks as tasks come and go.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -29,7 +35,7 @@
 #include "maps.bpf.h"
 #include "fair.bpf.h"
 #include "select.bpf.h"
-#include "sibling.bpf.h"
+#include "helix.bpf.h"
 
 struct flow_victim {
 	s32	cpu;
@@ -74,12 +80,10 @@ static bool flow_kick_idle(struct task_struct *p, const struct flow_task_ctx *t,
 
 	if (pinned)
 		idle = scx_bpf_test_and_clear_cpu_idle(cpu) ? cpu : -EBUSY;
-	else if (__COMPAT_is_enq_cpu_selected(enq_flags))
-		return false;
-	else if (flow_performance && flow_long_runner(t, t->acc_runtime_ns))
-		idle = flow_pick_hog_cpu(p, t, cpu, 0, t->acc_runtime_ns);
-	else
+	else if (!__COMPAT_is_enq_cpu_selected(enq_flags))
 		idle = flow_pick_idle_cpu(p, t, cpu, 0);
+	else
+		return false;
 
 	if (idle < 0)
 		return false;
@@ -161,10 +165,12 @@ static __always_inline bool flow_is_urgent(const struct flow_task_ctx *t)
  * Look for a victim for @p among the CPUs of the LLC that @p can use. @cpu
  * is checked first, then a few random CPUs, and the better of the first
  * two candidates goes to @v. Random probes keep enqueues on different CPUs
- * from all going after the same victim.
+ * from all going after the same victim. With --performance, a @pinned task
+ * only looks at @cpu: the CPU mask of a task that disabled migration still
+ * spans other CPUs, which it could not use.
  */
 static bool flow_pick_victim(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc,
-			     struct flow_victim *v)
+			     bool pinned, struct flow_victim *v)
 {
 	struct flow_victim cand[2];
 	struct bpf_cpumask *llc_mask;
@@ -177,7 +183,7 @@ static bool flow_pick_victim(struct task_struct *p, struct flow_task_ctx *t, s32
 		nr = 1;
 
 	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
-	if (llc_mask) {
+	if (llc_mask && !(flow_performance && pinned)) {
 		bpf_for(i, 0, FLOW_VICTIM_PROBES) {
 			s32 probe;
 
@@ -203,11 +209,13 @@ static bool flow_pick_victim(struct task_struct *p, struct flow_task_ctx *t, s32
 }
 
 /* Ask the best victim for an urgent @p, if there is one, to give up its CPU. */
-static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc)
+static void flow_try_preempt(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc,
+			     bool pinned)
 {
 	struct flow_victim v;
 
-	if (flow_is_urgent(t) && flow_pick_victim(p, t, cpu, llc, &v) && flow_ask_yield(&v))
+	if (flow_is_urgent(t) && flow_pick_victim(p, t, cpu, llc, pinned, &v) &&
+	    flow_ask_yield(&v))
 		flow_stat_inc(FLOW_STAT_KICK_PREEMPT);
 }
 
@@ -229,11 +237,12 @@ static bool flow_is_hog(const struct flow_task_ctx *t, s32 cpu, u64 now)
  * interrupted right away instead, which costs the hog no more than an IPI.
  * Bursts count as short below a minimum slice, and with --performance
  * below a maximum slice, which covers the threads of a game that compute
- * for a few milliseconds per frame. Returns whether a CPU was interrupted,
- * so that no other one is asked to give up its CPU as well.
+ * for a few milliseconds per frame. As in flow_pick_victim(), a @pinned
+ * task only looks at @cpu with --performance. Returns whether a CPU was
+ * interrupted, so that no other one is asked to give up its CPU as well.
  */
 static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *t, s32 cpu,
-			     u32 llc, u64 enq_flags)
+			     u32 llc, bool pinned, u64 enq_flags)
 {
 	struct bpf_cpumask *llc_mask;
 	u64 now;
@@ -251,7 +260,7 @@ static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *
 	}
 
 	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
-	if (!llc_mask)
+	if (!llc_mask || (flow_performance && pinned))
 		return false;
 	bpf_for(i, 0, FLOW_VICTIM_PROBES) {
 		s32 probe = bpf_cpumask_any_and_distribute(cast_mask(llc_mask), p->cpus_ptr);
@@ -301,8 +310,6 @@ void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
 	t->acc_runtime_ns = 0;
-	if (flow_performance && flow_long_runner(t, 0))
-		t->ready_clk = flow_now();
 	if (noted || !flow_waker_is_current(p))
 		return;
 
@@ -349,10 +356,11 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 * An affinity change re-enqueues the task before it is migrated, so
 	 * its current CPU can be outside of the new mask.
 	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+	if (!flow_may_run_on(p, cpu))
 		cpu = bpf_cpumask_first(p->cpus_ptr);
 
 	if (!t || !flow_cpu_valid(cpu)) {
+		WRITE_ONCE(flow_fallback_used, true);
 		scx_bpf_dsq_insert(p, FLOW_FALLBACK_DSQ, FLOW_SLICE_MIN_NS, enq_flags);
 		flow_stat_inc(FLOW_STAT_FALLBACK);
 		return;
@@ -387,6 +395,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	llc = flow_llc_of(cpu);
 	deadline = flow_score_task(p, t);
 	slice = flow_calc_slice(t, cpu);
+
+	/*
+	 * A task queued with SCX_ENQ_LAST is the last runnable task of a CPU
+	 * that did not keep it, and that CPU goes idle unless the task is put
+	 * on its local DSQ. With --performance, a task that may still run on
+	 * the CPU is put there, rather than wait for a dispatch that nothing
+	 * triggers.
+	 */
+	if (flow_performance && (enq_flags & SCX_ENQ_LAST) &&
+	    cpu == bpf_get_smp_processor_id()) {
+		scx_bpf_task_set_dsq_vtime(p, deadline);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+		return;
+	}
+
 	if (pinned) {
 		flow_mark_pinned(t, cpu);
 		dsq_id = FLOW_CPU_DSQ_BASE + cpu;
@@ -394,22 +417,22 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		flow_clear_pinned(t);
 		dsq_id = FLOW_LLC_DSQ_BASE + llc;
 	}
-	scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
+	if (pinned || !flow_helix_queue(p, llc, deadline, slice))
+		scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
 
 	/*
-	 * The last runnable task of a CPU whose slice ran out is picked up
-	 * again by that CPU, so waking another one would only migrate it.
-	 * With --performance, a hog that the CPU holds back looks for another
-	 * CPU, see sibling.bpf.h.
+	 * The last runnable task of a CPU whose slice ran out is left for that
+	 * CPU to pick up at its next dispatch, as waking another one would
+	 * only migrate it.
 	 */
-	if ((enq_flags & SCX_ENQ_LAST) &&
-	    !(flow_performance && READ_ONCE(flow_cpu_states[cpu].hold_clk)))
+	if (enq_flags & SCX_ENQ_LAST)
 		return;
 	if (flow_kick_idle(p, t, cpu, pinned, enq_flags))
 		return;
-	if ((flow_helicoprion || flow_performance) && flow_preempt_hog(p, t, cpu, llc, enq_flags))
+	if ((flow_helicoprion || flow_performance) &&
+	    flow_preempt_hog(p, t, cpu, llc, pinned, enq_flags))
 		return;
-	flow_try_preempt(p, t, cpu, llc);
+	flow_try_preempt(p, t, cpu, llc, pinned);
 }
 
 void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
@@ -461,8 +484,6 @@ void BPF_STRUCT_OPS(flow_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 		WRITE_ONCE(cs->lat_cri, 0);
 		WRITE_ONCE(cs->est_stopping_clk, 0);
 		WRITE_ONCE(cs->burst_start_clk, flow_now());
-		if (flow_performance)
-			flow_guard_idle(cpu, cs, 0);
 	}
 	scx_bpf_reenqueue_local();
 }

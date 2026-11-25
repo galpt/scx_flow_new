@@ -2,7 +2,9 @@
 //! Loading and running the scx_flow BPF scheduler.
 //!
 //! With --performance, the busy CPUs are kept out of idle states that take
-//! time to leave while the scheduler runs, see pmqos.rs.
+//! time to leave while the scheduler runs, see pmqos.rs, and the double
+//! helix queues of the LLC pairs are created before the scheduler is
+//! attached, see helix.bpf.h.
 //!
 //! The scheduler is loaded again when the kernel asks for it, as after CPU
 //! hotplug, and after it fails, as on a stall, a few times with a growing
@@ -22,6 +24,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::warn;
@@ -107,6 +110,26 @@ fn log_topology(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) {
     }
 }
 
+/// Create the double helix queues of --performance in the BPF arena.
+/// Returns whether they exist. Without them, every LLC queues its tasks in
+/// its own DSQ, which is no reason to give up the run.
+fn create_helix_queues(skel: &BpfSkel<'_>) -> bool {
+    match skel.progs.flow_helix_init.test_run(ProgramInput::default()) {
+        Ok(out) if out.return_value == 0 => true,
+        Ok(out) => {
+            warn!(
+                "double helix queues not created ({}), LLCs queue in their DSQs",
+                out.return_value as i32
+            );
+            false
+        }
+        Err(e) => {
+            warn!("double helix queues not created ({e:#}), LLCs queue in their DSQs");
+            false
+        }
+    }
+}
+
 /// Copy per-CPU values into a BPF table indexed by CPU id.
 fn fill_per_cpu(slots: &mut [u32], values: &BTreeMap<usize, u32>) {
     for (cpu, value) in values {
@@ -185,9 +208,16 @@ impl<'a> Scheduler<'a> {
             .as_mut()
             .context("BPF read-only data is not mapped")?;
         rodata.flow_nr_cpus = nr_cpus as u32;
-        // The slice and the boost spread the work over the online CPUs.
-        let nr_usable = topo.as_ref().map_or(nr_cpus, |t| t.all_cpus.len());
-        rodata.flow_nr_usable = nr_usable.max(1) as u32;
+        // The slice and the boost spread the work over the online CPUs,
+        // and the statistics timer only looks at those.
+        let online: Vec<usize> = match topo.as_ref() {
+            Some(t) if !t.all_cpus.is_empty() => t.all_cpus.keys().copied().collect(),
+            _ => (0..nr_cpus).collect(),
+        };
+        rodata.flow_nr_usable = online.len() as u32;
+        for (slot, cpu) in rodata.flow_cpu_ids.iter_mut().zip(&online) {
+            *slot = *cpu as u32;
+        }
         rodata.flow_helicoprion = opts.helicoprion;
         rodata.flow_performance = opts.performance;
         rodata.flow_queued_wakeup = queued_wakeup != 0;
@@ -206,12 +236,17 @@ impl<'a> Scheduler<'a> {
             for (slot, kb) in rodata.flow_llc_kb.iter_mut().zip(&t.llc_kb) {
                 *slot = *kb;
             }
+            for (slot, mate) in rodata.flow_llc_mate.iter_mut().zip(&t.llc_mate) {
+                *slot = *mate;
+            }
         }
 
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         if let Some(t) = topo.as_ref() {
             log_topology(t, &caches);
         }
+        let pairs = tables.as_ref().map_or(0, |t| t.nr_llc_pairs());
+        let helix = opts.performance && pairs > 0 && create_helix_queues(&skel);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
         // A run that was killed may have left the idle state limits of
@@ -234,6 +269,9 @@ impl<'a> Scheduler<'a> {
                 "Performance mode: urgent wakeups interrupt their CPU right away, and busy CPUs \
                  only poll while idle"
             );
+        }
+        if helix {
+            info!("Performance mode: double helix queues for {pairs} LLC pair(s)");
         }
 
         Ok(Self {

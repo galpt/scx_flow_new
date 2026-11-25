@@ -5,13 +5,16 @@
  * Tasks are scored by how much they behave like part of an interactive
  * pipeline and wait in per-LLC queues ordered by a virtual deadline derived
  * from that score. Pinned tasks wait in per-CPU queues. Wakeups that find
- * an idle CPU are dispatched to it directly.
+ * an idle CPU are dispatched to it directly. With --performance, the LLCs
+ * of a node share double helix queues in pairs, see helix.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
 #include <scx/common.bpf.h>
 #include <scx/compat.bpf.h>
 #include <bpf_experimental.h>
+#include <lib/dhq.h>
+#include <lib/sdt_alloc.h>
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
@@ -20,7 +23,7 @@ UEI_DEFINE(uei);
 
 #include "maps.bpf.h"
 #include "fair.bpf.h"
-#include "sibling.bpf.h"
+#include "helix.bpf.h"
 #include "stats.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"

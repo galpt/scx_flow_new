@@ -4,13 +4,15 @@
  *
  * Userspace fills in the topology tables before the program is loaded, so
  * the hot paths look up the LLC, NUMA node and core group of a CPU with a
- * plain array access. The tables also carry the L3 size of each LLC. Each
+ * plain array access. The tables also carry the online CPUs and the L3
+ * size of each LLC. Each
  * CPU publishes what it is running in its own cache line for the
  * preemption and statistics code to read. With --helicoprion, each cgroup
  * also keeps its weight and busy task counts here, and the system keeps
  * the totals and whether the cgroups compete for the CPUs. With
- * --performance, each CPU also counts the time it had no task to run and
- * tells its SMT sibling whether its task keeps hogs away from it.
+ * --performance, each CPU also counts the time it had no task to run, and
+ * the LLCs of a node are paired up for the double helix queues of
+ * helix.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -68,12 +70,16 @@ enum flow_tunables {
 	FLOW_AHEAD_DEPTH		= 4,
 
 	/*
-	 * --performance: how long a hog may be kept off a CPU whose sibling
-	 * runs an urgent task, see sibling.bpf.h, and how many tasks of a
-	 * DSQ are looked at for one that is not held back.
+	 * --performance, see helix.bpf.h: how many more tasks one strand of
+	 * a double helix queue may hold than the other, how many entries
+	 * each queue has per CPU of its two LLCs, how many entries a CPU
+	 * takes off a strand before it leaves the rest to its next dispatch,
+	 * and the arena pages the queues are carved from at a time.
 	 */
-	FLOW_HOLD_NS			= FLOW_SLICE_BOOST_MAX_NS,
-	FLOW_HOLD_DEPTH			= 32,
+	FLOW_HELIX_IMBALANCE		= 10,
+	FLOW_HELIX_SLOTS		= 4,
+	FLOW_HELIX_POPS			= 8,
+	FLOW_HELIX_PAGES		= 16,
 
 	/* Priorities below this one belong to realtime and deadline tasks. */
 	FLOW_MAX_RT_PRIO		= 100,
@@ -139,7 +145,7 @@ struct flow_task_ctx {
 	u64	last_wake_clk;		/* when the task last woke up another task */
 	u64	last_quiescent_clk;	/* when the task last went to sleep */
 	u64	score_clk;		/* when last scored at a CPU hand-off */
-	u64	sum_exec_ns;		/* sum_exec_runtime charged so far */
+	u64	sum_exec_ns;		/* sum_exec_runtime already charged */
 	u64	wake_freq;		/* how often the task wakes others, in Hz */
 	u64	wait_freq;		/* how often the task sleeps, in Hz */
 	u64	busy_ns;		/* CPU time charged since the last busy count */
@@ -152,7 +158,6 @@ struct flow_task_ctx {
 	s32	pinned_cpu;		/* CPU whose nr_pinned counts this task */
 	u32	sync_score;		/* how reliably it sleeps after waking others */
 	s32	last_waker;		/* pid of the task that last woke it up */
-	u64	ready_clk;		/* --performance: when it last began to wait for a CPU */
 };
 
 struct flow_cpu_state {
@@ -173,10 +178,6 @@ struct flow_cpu_state {
 	u64	idle_seen;		/* --performance: idle_ns at the last timer run */
 	u32	util;			/* --performance: how busy, see flow_track_busy() */
 	u32	shallow;		/* --performance: busy enough to wake up quickly */
-	u32	guard_tgid;		/* --performance: process of curr if it guards the sibling */
-	u32	tgid;			/* --performance: process of curr */
-	u64	hog_clk;		/* --performance: when curr counts as a hog */
-	u64	hold_clk;		/* --performance: idle while a hog waits since then, or 0 */
 } __attribute__((aligned(64)));
 
 /*
@@ -214,7 +215,7 @@ struct flow_cgrp_stat {
 } __attribute__((aligned(64)));
 
 struct flow_sys_stat {
-	u64	nr_queued;		/* tasks waiting in flow DSQs */
+	u64	nr_queued;		/* tasks waiting in flow DSQs and strands */
 	u64	slice_ns;		/* base slice for the current period */
 	u64	avg_lat_cri;		/* average lat_cri of running tasks */
 	u64	max_lat_cri;		/* average of the highest lat_cri per period */
@@ -238,11 +239,18 @@ const volatile u32 flow_nr_cpus = 1;
 const volatile u32 flow_nr_usable = 1;	/* online CPUs, see the loader */
 const volatile u32 flow_nr_llcs = 1;
 const volatile u32 flow_nr_groups;
+const volatile u32 flow_cpu_ids[FLOW_MAX_CPUS];	/* online CPUs, see flow_nr_usable */
 const volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_group[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_sibling[FLOW_MAX_CPUS];	/* the CPU itself without SMT */
 const volatile u32 flow_llc_node[FLOW_MAX_LLCS];
 const volatile u32 flow_llc_kb[FLOW_MAX_LLCS];
+
+/*
+ * The LLC that each LLC shares a double helix queue with, or the LLC
+ * itself if it has no partner in its node, see helix.bpf.h.
+ */
+const volatile u32 flow_llc_mate[FLOW_MAX_LLCS];
 
 private(FLOW) struct bpf_cpumask flow_llc_cpumask[FLOW_MAX_LLCS];
 private(FLOW) struct bpf_cpumask flow_group_cpumask[FLOW_MAX_GROUPS];
@@ -256,6 +264,12 @@ struct flow_clock flow_clock;
 struct flow_sys_stat flow_sys_stat;
 struct flow_cgrp_stat flow_cgrp_stat;
 u64 flow_llc_nr_queued[FLOW_MAX_LLCS];
+
+/*
+ * Set once a task went to the fallback DSQ. Until then, ops.dispatch()
+ * skips that DSQ, which would always be empty.
+ */
+bool flow_fallback_used;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);

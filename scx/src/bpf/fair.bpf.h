@@ -12,7 +12,7 @@
  *
  * The deadline of a task is its virtual time plus an offset: a full slice
  * plus the length of the current burst, divided by the latency criticality.
- * It keeps growing while a task runs without sleeping and stays tiny for
+ * It keeps growing while a task runs without sleeping and remains tiny for
  * tasks that only run briefly before blocking again.
  *
  * Latency criticality rewards tasks that sleep often, wake up other tasks
@@ -45,6 +45,21 @@
 static __always_inline bool flow_is_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
+}
+
+/* Most tasks may run anywhere, which spares a look at their CPU mask. */
+static __always_inline bool flow_may_run_on(const struct task_struct *p, s32 cpu)
+{
+	return p->nr_cpus_allowed >= flow_nr_cpus || bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
+}
+
+/*
+ * @p, waiting in a shared queue, may be moved to @cpu. The CPU mask of a task
+ * can lag behind a migration it has disabled, which is checked as well.
+ */
+static __always_inline bool flow_task_fits(const struct task_struct *p, s32 cpu)
+{
+	return flow_may_run_on(p, cpu) && !(is_migration_disabled(p) && scx_bpf_task_cpu(p) != cpu);
 }
 
 static __always_inline u64 flow_task_weight(const struct task_struct *p)
