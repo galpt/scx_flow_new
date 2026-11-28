@@ -70,14 +70,18 @@ static __always_inline bool flow_long_burst(u64 acc)
  * Pinned tasks cannot run anywhere else, so they go first unless the head
  * of @llc is due more than a maximum slice before them. Without that
  * limit, CPUs that always have a pinned task waiting would starve the rest
- * of the LLC, as when stress-ng pins two tasks to every CPU.
+ * of the LLC, as when stress-ng pins two tasks to every CPU. With
+ * --lowlatency, the DSQ of a CPU mostly holds the task that a takeover
+ * preempted there, see flow_lowlat_requeue(), and the head of @llc goes
+ * first as soon as it is due before that task.
  */
 static bool flow_consume_local(s32 cpu, u32 llc)
 {
 	u64 cpu_dsq = FLOW_CPU_DSQ_BASE + cpu;
 	struct task_struct *pinned = __COMPAT_scx_bpf_dsq_peek(cpu_dsq);
+	u64 margin = flow_in_lowlatency() ? 0 : FLOW_SLICE_MAX_NS;
 
-	if (pinned && flow_llc_ahead(llc, pinned->scx.dsq_vtime - FLOW_SLICE_MAX_NS, cpu) &&
+	if (pinned && flow_llc_ahead(llc, pinned->scx.dsq_vtime - margin, cpu) &&
 	    flow_take_llc(cpu, llc, llc))
 		return true;
 	return scx_bpf_dsq_move_to_local(cpu_dsq, 0) || flow_take_llc(cpu, llc, llc);
@@ -193,11 +197,8 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 	}
 	WRITE_ONCE(cs->idle_start_clk, 0);
 	if (flow_in_lowlatency()) {
-		bool critical = flow_lowlat_critical(t);
-
-		WRITE_ONCE(cs->critical, critical);
-		if (critical && !(t->flags & FLOW_FLAG_SLACK))
-			flow_lowlat_report(p, t);
+		WRITE_ONCE(cs->critical, flow_lowlat_critical(t));
+		WRITE_ONCE(cs->taken, 0);
 	}
 	if (flow_preempts_hogs())
 		WRITE_ONCE(cs->burst_start_clk, now - t->acc_runtime_ns);

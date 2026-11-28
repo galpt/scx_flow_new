@@ -8,8 +8,8 @@
  * queue waits in a strand of it instead, see helix.bpf.h, and the last
  * runnable task of a CPU goes back to the local DSQ of that CPU. With
  * --lowlatency, a latency critical task that wakes up goes straight to the
- * local DSQ of an idle CPU, or of a busy one that it takes over, see
- * lowlat.bpf.h. Every path through ops.enqueue() queues the task exactly
+ * local DSQ of an idle CPU, or of a busy one that it takes over, and the
+ * task it preempts there waits in the DSQ of that CPU, see lowlat.bpf.h. Every path through ops.enqueue() queues the task exactly
  * once.
  *
  * After the insert, flow looks for an idle CPU to wake up. If there is
@@ -333,6 +333,30 @@ static bool flow_lowlat_place(struct task_struct *p, struct flow_task_ctx *t, s3
 }
 
 /*
+ * --lowlatency: @p, due at @deadline with @slice, was preempted on @cpu by
+ * a latency critical task that took the CPU over, see
+ * flow_lowlat_takeover(). It waits in the DSQ of @cpu, where only @cpu
+ * looks for it, so that it resumes there once the short burst of that task
+ * ends, unless a task of the LLC is due before it, see
+ * flow_consume_local(). It keeps its CPU and its cache that way, and it
+ * does not move to the CPUs that other latency critical tasks leave
+ * behind, which are then still idle when those tasks wake up again.
+ * Returns whether @p was queued.
+ */
+static bool flow_lowlat_requeue(struct task_struct *p, s32 cpu, u64 deadline, u64 slice,
+				u64 enq_flags)
+{
+	struct flow_cpu_state *cs = &flow_cpu_states[cpu];
+
+	if ((enq_flags & SCX_ENQ_WAKEUP) || cpu != bpf_get_smp_processor_id() ||
+	    !READ_ONCE(cs->taken))
+		return false;
+	WRITE_ONCE(cs->taken, 0);
+	scx_bpf_dsq_insert_vtime(p, FLOW_CPU_DSQ_BASE + cpu, slice, deadline, enq_flags);
+	return true;
+}
+
+/*
  * @p was preempted by the wakee it just handed its CPU to, see
  * flow_sync_handoff(). It waits for the reply of the wakee as if it slept,
  * so its burst ends here, and it resumes on the same CPU after the wakee.
@@ -422,6 +446,9 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
 		return;
 	}
+
+	if (flow_in_lowlatency() && flow_lowlat_requeue(p, cpu, deadline, slice, enq_flags))
+		return;
 
 	if (flow_lowlat_critical(t) && (enq_flags & SCX_ENQ_WAKEUP) &&
 	    !__COMPAT_is_enq_cpu_selected(enq_flags) &&

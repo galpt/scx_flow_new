@@ -33,22 +33,20 @@
  * a latency critical task waits in the queues like any other task, ahead
  * of the tasks that compute, since its deadline is earlier.
  *
- * A task only takes over a CPU when nothing queued for that CPU or for its
- * LLC is due before it. A few latency critical tasks that keep waking up
- * could otherwise keep the tasks that compute away from the CPUs for
- * good, which the deadline order prevents.
+ * The task that loses its CPU waits in the DSQ of that CPU, which no other
+ * CPU takes tasks from, see flow_lowlat_requeue(). It resumes there once
+ * the short burst of the latency critical task ends, unless a task queued
+ * for the LLC is due before it.
  *
- * A SCHED_NORMAL task that becomes latency critical also gets the smallest
- * timer slack from userspace, see flow_lowlat_report(). The kernel then
- * fires the timers it sleeps on when they are due, rather than up to the
- * default 50 us later to serve them together with other timers, which no
- * placement on a CPU could make up for. Kernel threads are left out. The
- * threads and processes that such a task creates inherit its slack, so
- * userspace also resets those when the scheduler stops, to the slack of
- * the task they came from or else the default. A thread that later resets
- * its slack with prctl() can get the lowered one back, as the kernel
- * copied that as its default too. Userspace writes the old slack back when
- * the scheduler stops.
+ * A task does not take over a CPU while a task pinned to that CPU is due
+ * before it, or while the first task in the DSQ of its LLC is due before
+ * it and has waited for longer than FLOW_LOWLAT_STARVE_NS. A few latency
+ * critical tasks that keep waking up could otherwise keep the tasks that
+ * compute away from the CPUs for good, which the deadline order prevents.
+ * A task that has waited for less only loses the short burst of the
+ * latency critical task, after which the CPU goes back to the queues,
+ * while the latency critical task would otherwise wait for the next CPU to
+ * free up. In a double helix queue, any task due first counts.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -95,23 +93,6 @@ static __always_inline bool flow_lowlat_critical(const struct flow_task_ctx *t)
 {
 	return flow_in_lowlatency() && t->avg_runtime_ns < FLOW_LOWLAT_BURST_NS &&
 	       t->wait_freq >= FLOW_LOWLAT_WAIT_HZ;
-}
-
-/*
- * --lowlatency: @p just became latency critical. If it is a user task
- * under SCHED_NORMAL, its thread id goes to userspace, which lowers the
- * slack so that the timers it sleeps on are not deferred, see slack.rs.
- * Kernel threads are never reported. A task is only looked at once, unless
- * the ring buffer was full. Userspace drains it on its own schedule, so
- * nothing wakes it up here.
- */
-static void flow_lowlat_report(const struct task_struct *p, struct flow_task_ctx *t)
-{
-	u32 tid = p->pid;
-
-	if (p->policy != FLOW_SCHED_NORMAL || (p->flags & PF_KTHREAD) ||
-	    !bpf_ringbuf_output(&flow_slack_events, &tid, sizeof(tid), BPF_RB_NO_WAKEUP))
-		t->flags |= FLOW_FLAG_SLACK;
 }
 
 /*
@@ -201,6 +182,25 @@ static u32 flow_lowlat_scan(struct task_struct *p, const struct flow_task_ctx *t
 	return found;
 }
 
+extern unsigned CONFIG_HZ __kconfig;
+
+/*
+ * A task queued for @llc that may run on @cpu keeps a latency critical
+ * task due at @deadline from taking over a CPU, see the top of this file.
+ * Only the first task of the DSQ is looked at, and its wait is counted in
+ * ticks since it became runnable.
+ */
+static bool flow_lowlat_starving(u32 llc, u64 deadline, s32 cpu)
+{
+	struct task_struct *head = __COMPAT_scx_bpf_dsq_peek(FLOW_LLC_DSQ_BASE + llc);
+	u64 ticks = FLOW_LOWLAT_STARVE_NS / (FLOW_NSEC_PER_SEC / CONFIG_HZ);
+
+	if (head && time_before(head->scx.dsq_vtime, deadline) &&
+	    time_after(bpf_jiffies64(), head->scx.runnable_at + ticks))
+		return true;
+	return flow_helix_ahead(llc, deadline, cpu);
+}
+
 /*
  * Claim a CPU that @p, latency critical and due at @deadline, takes over
  * as it wakes up on @cpu, see the top of this file.
@@ -243,14 +243,16 @@ static s32 flow_lowlat_takeover(struct task_struct *p, const struct flow_task_ct
 		nr++;
 	if (!nr && !pinned)
 		nr = flow_lowlat_scan(p, t, llc, waker, deadline, now, v);
-	if (!nr || flow_llc_ahead(llc, deadline, cpu))
+	if (!nr || flow_lowlat_starving(llc, deadline, cpu))
 		return -EBUSY;
 
 	bpf_for(i, 0, nr) {
 		if (i >= 2)
 			break;
-		if (flow_claim_victim(&v[i]))
+		if (flow_claim_victim(&v[i])) {
+			WRITE_ONCE(flow_cpu_states[v[i].cpu].taken, 1);
 			return v[i].cpu;
+		}
 	}
 	return -EBUSY;
 }

@@ -26,7 +26,10 @@
  * whichever head of the two strands is due first, through the priority
  * order of the queue, and weigh it against the heads of their DSQs as if
  * the two strands were one. An LLC with a single core or fewer than three
- * CPUs is not split and only uses its DSQ.
+ * CPUs is not split and only uses its DSQ. With --lowlatency, an LLC
+ * without a partner is never split and only uses its DSQ: its latency
+ * critical tasks do not wait in the queues, and the tick and the dispatch
+ * of every CPU of the LLC would take the lock of the one queue they share.
  *
  * A strand takes no more tasks once it holds FLOW_HELIX_IMBALANCE more
  * than the other strand of its queue. That bound is loose on purpose: an

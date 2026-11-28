@@ -10,8 +10,9 @@
  * read. With --helicoprion, each cgroup also keeps its weight and busy
  * task counts here, and the system keeps the totals and whether the
  * cgroups compete for the CPUs. With --performance and --lowlatency, the
- * tables also say which LLCs share a double helix queue and how the other
- * LLCs are split into the two strands of their own queue, see helix.bpf.h.
+ * tables also say which LLCs share a double helix queue, and with
+ * --performance how the other LLCs are split into the two strands of their
+ * own queue, see helix.bpf.h.
  * With --performance, each CPU also counts the time it had no task to run.
  *
  * The mode the scheduler runs in is read through the small predicates at
@@ -90,24 +91,18 @@ enum flow_tunables {
 
 	/*
 	 * --lowlatency, see lowlat.bpf.h: the longest average burst of a
-	 * latency critical task, how often it has to sleep, and how many
-	 * CPUs of an LLC are looked at for one whose task it may preempt.
+	 * latency critical task, how often it has to sleep, how many CPUs of
+	 * an LLC are looked at for one whose task it may preempt, and how
+	 * long a queued task that is due first may wait before it keeps such
+	 * a task from taking over a CPU.
 	 */
 	FLOW_LOWLAT_BURST_NS		= FLOW_SLICE_MAX_NS,
 	FLOW_LOWLAT_WAIT_HZ		= 20,
 	FLOW_LOWLAT_SCAN		= 64,
-
-	/*
-	 * --lowlatency: room for the tasks that became latency critical
-	 * since userspace last looked, see flow_lowlat_report().
-	 */
-	FLOW_SLACK_EVENTS_SIZE		= 4 * 4096,
+	FLOW_LOWLAT_STARVE_NS		= 2 * FLOW_SLICE_MAX_NS,
 
 	/* Priorities below this one belong to realtime and deadline tasks. */
 	FLOW_MAX_RT_PRIO		= 100,
-
-	/* The policy of the fair class that timer slack applies to. */
-	FLOW_SCHED_NORMAL		= 0,
 
 	/*
 	 * A task that wakes up another one and goes to sleep before it has
@@ -158,7 +153,6 @@ enum flow_task_flags {
 	FLOW_FLAG_WOKE			= 1 << 4,	/* woke up a task since it woke up */
 	FLOW_FLAG_NEW			= 1 << 5,	/* not queued since it joined */
 	FLOW_FLAG_NOTED			= 1 << 6,	/* waker noted when it was placed */
-	FLOW_FLAG_SLACK			= 1 << 7,	/* --lowlatency: timer slack handled */
 };
 
 #define FLOW_CPUPERF_IDLE	(SCX_CPUPERF_ONE / 2)
@@ -205,6 +199,7 @@ struct flow_cpu_state {
 	u32	util;			/* --performance: how busy, see flow_track_busy() */
 	u32	shallow;		/* --performance: busy enough to wake up quickly */
 	u32	critical;		/* --lowlatency: curr is latency critical */
+	u32	taken;			/* --lowlatency: curr is preempted by a takeover */
 } __attribute__((aligned(64)));
 
 /*
@@ -333,12 +328,6 @@ struct {
 	__type(key, u32);
 	__type(value, struct flow_cpu_stats);
 } cpu_stats SEC(".maps");
-
-/* --lowlatency: the thread ids of flow_lowlat_report(). */
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, FLOW_SLACK_EVENTS_SIZE);
-} flow_slack_events SEC(".maps");
 
 struct flow_timer {
 	struct bpf_timer timer;

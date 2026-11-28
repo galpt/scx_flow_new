@@ -10,7 +10,6 @@ pub mod cli;
 pub mod metrics;
 pub mod pmqos;
 pub mod run;
-pub mod slack;
 pub mod stats;
 pub mod topology;
 

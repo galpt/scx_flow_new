@@ -74,8 +74,7 @@ pub struct Opts {
 
     /// Do what --performance does, and let latency critical wakeups take
     /// a CPU at once, preempting a task that computes if no CPU is idle.
-    /// Latency critical tasks get the smallest timer slack until the
-    /// scheduler stops, and every CPU only polls while idle.
+    /// Every CPU only polls while idle.
     #[clap(long, conflicts_with_all = ["helicoprion", "performance"])]
     pub lowlatency: bool,
 

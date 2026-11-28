@@ -3,10 +3,9 @@
 //!
 //! With --performance, the busy CPUs are kept out of idle states that take
 //! time to leave while the scheduler runs, and with --lowlatency all of
-//! them are, see pmqos.rs. With --lowlatency, the latency critical tasks
-//! also get the smallest timer slack, see slack.rs. In both modes, the
-//! double helix queues are created before the scheduler is attached, see
-//! helix.bpf.h.
+//! them are, see pmqos.rs. In both modes, the double helix queues are
+//! created before the scheduler is attached, see helix.bpf.h. --lowlatency
+//! does not split an LLC that has no partner.
 //!
 //! The scheduler is loaded again when the kernel asks for it, as after CPU
 //! hotplug, and after it fails, as on a stall, a few times with a growing
@@ -26,11 +25,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use crossbeam::channel::RecvTimeoutError;
-use crossbeam::channel::Sender;
-use libbpf_rs::MapHandle;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::RingBuffer;
-use libbpf_rs::RingBufferBuilder;
 use log::debug;
 use log::info;
 use log::warn;
@@ -52,13 +47,10 @@ use crate::cli::Mode;
 use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
 use crate::pmqos::IdleLimits;
-use crate::slack::TimerSlack;
 use crate::stats::Metrics;
 use crate::topology::BpfTopology;
 
-/// How often the idle state limits follow the busy CPUs, see pmqos.rs, and
-/// how often the tasks that became latency critical get their timer slack
-/// lowered, see slack.rs.
+/// How often the idle state limits follow the busy CPUs, see pmqos.rs.
 const IDLE_LIMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Topology lines printed at startup before the rest is summarized.
@@ -93,7 +85,6 @@ pub(crate) struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
     idle_limits: Option<IdleLimits>,
-    timer_slack: Option<TimerSlack>,
     mode: Mode,
 }
 
@@ -140,18 +131,6 @@ fn create_helix_queues(skel: &BpfSkel<'_>) -> bool {
             false
         }
     }
-}
-
-/// Pass the thread ids that flow_lowlat_report() puts in @map to @tids.
-fn slack_events(map: &MapHandle, tids: Sender<i32>) -> Result<RingBuffer<'_>> {
-    let mut builder = RingBufferBuilder::new();
-    builder.add(map, move |data: &[u8]| {
-        if let Ok(tid) = <[u8; 4]>::try_from(data) {
-            let _ = tids.send(i32::from_ne_bytes(tid));
-        }
-        0
-    })?;
-    Ok(builder.build()?)
 }
 
 /// Copy per-CPU values into a BPF table indexed by CPU id.
@@ -209,10 +188,18 @@ impl<'a> Scheduler<'a> {
             .as_ref()
             .map(|t| crate::cache::read_cpu_caches(t.all_cpus.keys().copied()))
             .unwrap_or_default();
-        let tables = topo
+        let mut tables = topo
             .as_ref()
             .map(|t| BpfTopology::new(t, &caches))
             .transpose()?;
+        // With --lowlatency, an LLC without a partner is not split and
+        // queues in its DSQ, see helix.bpf.h.
+        if mode == Mode::LowLatency
+            && let Some(t) = tables.as_mut()
+        {
+            t.llc_split.fill(false);
+            t.cpu_half.clear();
+        }
 
         try_set_rlimit_infinity();
         let mut skel_builder = BpfSkelBuilder::default();
@@ -307,17 +294,15 @@ impl<'a> Scheduler<'a> {
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
         // A run that was killed may have left the idle state limits of
-        // --performance or --lowlatency behind, or the timer slack of
-        // --lowlatency, whatever mode this run is in. The attach fails
-        // while another scheduler runs, which may be an scx_flow that still
-        // holds them, so they are only restored after it.
+        // --performance or --lowlatency behind, whatever mode this run is
+        // in. The attach fails while another scheduler runs, which may be an
+        // scx_flow that still holds them, so they are only restored after
+        // it.
         crate::pmqos::restore_saved_limits();
-        crate::slack::restore_saved_slack();
 
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
 
         let idle_limits = mode.performance().then(|| IdleLimits::new(online.clone()));
-        let timer_slack = (mode == Mode::LowLatency).then(TimerSlack::default);
         match mode {
             Mode::Performance => info!(
                 "Performance mode: urgent wakeups interrupt their CPU right away, and busy CPUs \
@@ -325,8 +310,8 @@ impl<'a> Scheduler<'a> {
             ),
             Mode::LowLatency => info!(
                 "Low latency mode: latency critical wakeups take a CPU at once, preempting a \
-                 task that computes if none is idle, latency critical tasks get the smallest \
-                 timer slack, and every CPU only polls while idle"
+                 task that computes if none is idle, which then resumes on the same CPU, and \
+                 every CPU only polls while idle"
             ),
             Mode::Default | Mode::Helicoprion => {}
         }
@@ -339,7 +324,6 @@ impl<'a> Scheduler<'a> {
             struct_ops: Some(struct_ops),
             stats_server,
             idle_limits,
-            timer_slack,
             mode,
         })
     }
@@ -388,23 +372,9 @@ impl<'a> Scheduler<'a> {
         } else {
             Duration::from_secs(1)
         };
-        let (tid_tx, tid_rx) = crossbeam::channel::unbounded();
-        let slack_map = self
-            .timer_slack
-            .is_some()
-            .then(|| MapHandle::try_from(&self.skel.maps.flow_slack_events))
-            .transpose()?;
-        let slack_ring = slack_map
-            .as_ref()
-            .map(|map| slack_events(map, tid_tx))
-            .transpose()?;
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             self.update_idle_limits();
-            if let (Some(ring), Some(slack)) = (slack_ring.as_ref(), self.timer_slack.as_mut()) {
-                ring.consume()?;
-                slack.lower(tid_rx.try_iter());
-            }
             match req_ch.recv_timeout(wait) {
                 Ok(()) => {
                     res_ch.send(crate::metrics::collect(&self.skel))?;
