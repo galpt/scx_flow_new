@@ -1,16 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Periodic harness for the flow scheduler.
- * Each worker runs periodic jobs with start jitter
- * plus period plus execution.
- * All threads run with the default policy with no
- * realtime use. One probe thread wakes each 10ms and
- * records wake delay as a light baseline. The control
- * flag marks baseline runs for A and B comparison.
- * The scheduler never kills, the harness counts a
- * miss when wall completion passes release plus
- * deadline. Switch counts use voluntary switches
- * from thread resource use with no extra sampling.
+ *
+ * Each worker starts after a random jitter and then runs jobs of a random
+ * period and execution time. All threads use the default policy, none is
+ * realtime. A probe thread wakes up every 10 ms and records how late it
+ * wakes, as a light baseline. The control flag marks the runs that serve
+ * as the baseline of a comparison. A job that completes after its release
+ * plus its deadline counts as a miss. The switch counts are the voluntary
+ * switches from the resource use of each thread.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -26,17 +24,17 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
-/* Least period in nanos. Matches the harness range. */
+/* Shortest period in nanoseconds, see the README. */
 #define HARNESS_PERIOD_MIN_NS (120ULL * 1000ULL * 1000ULL)
-/* Most period in nanos. Matches the harness range. */
+/* Longest period in nanoseconds. */
 #define HARNESS_PERIOD_MAX_NS (320ULL * 1000ULL * 1000ULL)
-/* Least execution in nanos. Matches the harness range. */
+/* Shortest execution time of a job in nanoseconds. */
 #define HARNESS_AET_MIN_NS (2ULL * 1000ULL * 1000ULL)
-/* Most execution in nanos. Matches the harness range. */
+/* Longest execution time of a job in nanoseconds. */
 #define HARNESS_AET_MAX_NS (16ULL * 1000ULL * 1000ULL)
-/* Most start jitter in nanos. Matches the range. */
+/* Longest start jitter of a worker in nanoseconds. */
 #define HARNESS_JITTER_MAX_NS (1ULL * 1000ULL * 1000ULL)
-/* Probe period in nanos at 10ms with no knob. */
+/* Period of the probe thread, 10 ms. */
 #define HARNESS_PROBE_NS (10ULL * 1000ULL * 1000ULL)
 /* Per thread counts for one run. */
 struct thread_out {
@@ -48,8 +46,7 @@ struct thread_out {
     long nvcsw;
     long nivcsw;
 };
-/* Probe counts for one run with light wakeups. Delays holds each
- * wake delay for p99 with no workload change. */
+/* Probe counts for one run. delays keeps every wake delay, for the p99. */
 struct probe_out {
     uint64_t count;
     uint64_t sum_delay_ns;
@@ -68,7 +65,7 @@ struct run_state {
     struct probe_out probe;
     pthread_barrier_t start_bar;
 };
-/* Time now in nanos on the boot clock. */
+/* The monotonic clock in nanoseconds. */
 static uint64_t now_ns(void)
 {
     struct timespec ts;
@@ -83,7 +80,7 @@ static void ensure_default(void)
     memset(&sp, 0, sizeof(sp));
     pthread_setschedparam(pthread_self(), SCHED_OTHER, &sp);
 }
-/* Uniform nanos in closed range using thread seed. */
+/* A uniform value in [lo, hi] from the seed of the thread. */
 static uint64_t uniform_ns(unsigned int *seed, uint64_t lo,
     uint64_t hi)
 {
@@ -93,7 +90,7 @@ static uint64_t uniform_ns(unsigned int *seed, uint64_t lo,
     r = (r << 32) | (r2 & 0xFFFFFFFFULL);
     return lo + (r % span);
 }
-/* Burn CPU for given nanos with no sleep. */
+/* Spin on the CPU for @ns nanoseconds without sleeping. */
 static void burn_ns(uint64_t ns)
 {
     uint64_t start = now_ns();
@@ -102,7 +99,7 @@ static void burn_ns(uint64_t ns)
         __asm__ volatile("" ::: "memory");
     }
 }
-/* Sleep until target nanos, returns now after sleep. */
+/* Sleep until @target and return the time after the sleep. */
 static uint64_t sleep_until(uint64_t target)
 {
     uint64_t now = now_ns();
@@ -123,12 +120,12 @@ static uint64_t sleep_until(uint64_t target)
             return now;
     }
 }
-/* Worker arg carries run state plus thread index. */
+/* Argument of a worker: the run state and the index of the thread. */
 struct worker_arg {
     struct run_state *st;
     int idx;
 };
-/* Probe arg carries run state with no index. */
+/* Argument of the probe thread. */
 struct probe_arg {
     struct run_state *st;
 };
@@ -203,8 +200,7 @@ static void *worker_idx(void *arg)
         (long)ru_start.ru_nivcsw;
     return NULL;
 }
-/* Light probe loop with 10ms wakes and delay stats. Delays record
- * each wake for p99 with no extra wakeup. */
+/* Probe loop: wake up every 10 ms and record how late each wakeup was. */
 static void *probe_idx(void *arg)
 {
     struct probe_arg *pa = (struct probe_arg *)arg;
@@ -237,7 +233,7 @@ static void *probe_idx(void *arg)
     }
     return NULL;
 }
-/* Compare two delays for sort with no float. */
+/* Order two delays for qsort(). */
 static int cmp_delay(const void *a, const void *b)
 {
     uint64_t va = *(const uint64_t *)a;
@@ -248,7 +244,7 @@ static int cmp_delay(const void *a, const void *b)
         return 1;
     return 0;
 }
-/* Read scheduler state with no change, unknown else. */
+/* Read the sched_ext state, or "unknown" if it cannot be read. */
 static void read_sched_state(char *buf, size_t len)
 {
     FILE *f;
@@ -266,7 +262,7 @@ static void read_sched_state(char *buf, size_t len)
         buf[strcspn(buf, "\r\n")] = '\0';
     fclose(f);
 }
-/* Print short use and exit with failure. */
+/* Print the usage and exit with an error. */
 static void usage(const char *prog)
 {
     fprintf(stderr, "use %s -n N -d SECS -s SEED -o PREFIX\n",
@@ -274,7 +270,7 @@ static void usage(const char *prog)
     fprintf(stderr, "    add -c 1 to mark a control run\n");
     exit(2);
 }
-/* Main. Parses args, runs threads, writes CSV plus JSON. */
+/* Parse the arguments, run the threads and write the CSV and JSON. */
 int main(int argc, char **argv)
 {
     int nthreads = 0;
@@ -359,8 +355,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "no memory\n");
         return 1;
     }
-    /* Probe delays hold one entry per 10ms wake for p99 with no
-     * workload change. Report only with no scheduler use. */
+    /* One entry per wakeup of the probe, for the p99. */
     {
         size_t want = (size_t)(st.duration_ns / HARNESS_PROBE_NS) + 2;
         if (want < 2)
@@ -429,9 +424,8 @@ int main(int argc, char **argv)
         probe_max_us = (double)st.probe.max_delay_ns /
             1000.0;
     }
-    /* Probe p99 reads the sorted probe delays with no extra wakeup.
-     * Occupancy reports threads and spill reports misses, both from
-     * existing counts with no new measurement. */
+    /* The p99 of the probe comes from its sorted delays. Occupancy is
+     * the thread count and spill the number of misses. */
     if (st.probe.len > 0 && st.probe.delays) {
         size_t idx;
         qsort(st.probe.delays, st.probe.len, sizeof(uint64_t), cmp_delay);

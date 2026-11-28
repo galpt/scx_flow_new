@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-//! Idle state limits of --performance.
+//! Idle state limits of --performance and --lowlatency.
 //!
 //! A CPU that wakes up from an idle state first has to leave it, and the
 //! deeper the state, the longer that takes. Even the shallowest one costs
@@ -8,7 +8,9 @@
 //! as busy get a PM QoS resume latency limit of zero, written as "n/a",
 //! which leaves the idle governor nothing but polling. Polling burns power,
 //! so CPUs that are not busy get their old limit back and may sleep as
-//! deeply as before.
+//! deeply as before. --lowlatency gives every CPU that limit for as long
+//! as it runs, since the exit from an idle state would add to the wait of
+//! every wakeup that finds an idle CPU.
 //!
 //! The old limits are written back when the scheduler stops or restarts.
 //! They are also saved in a file under /run, so that the next start writes
@@ -117,8 +119,8 @@ impl CpuLimit {
     }
 }
 
-/// The busy CPUs only poll while idle, see the module comment. The old
-/// limits are written back when dropped.
+/// The CPUs that the caller counts as busy only poll while idle, see the
+/// module comment. The old limits are written back when dropped.
 pub struct IdleLimits {
     cpus: Vec<CpuLimit>,
 }

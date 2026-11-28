@@ -39,15 +39,17 @@ pub struct Metrics {
     pub keep: u64,
     #[stat(desc = "Tasks stopped while still runnable")]
     pub preempted: u64,
-    #[stat(desc = "Tasks queued in the double helix queue of their LLC pair")]
+    #[stat(desc = "Tasks queued in a double helix queue")]
     pub helix: u64,
+    #[stat(desc = "Latency critical wakeups that took over a busy CPU")]
+    pub takeover: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "queued={} dispatched={} direct={} steal={} fallback={} kick_idle={} kick_preempt={} keep={} preempted={} helix={}",
+            "queued={} dispatched={} direct={} steal={} fallback={} kick_idle={} kick_preempt={} keep={} preempted={} helix={} takeover={}",
             self.queued,
             self.dispatched,
             self.direct,
@@ -58,6 +60,7 @@ impl Metrics {
             self.keep,
             self.preempted,
             self.helix,
+            self.takeover,
         )?;
         Ok(())
     }
@@ -86,6 +89,7 @@ impl Metrics {
         self.keep = self.keep.wrapping_add(rhs.keep);
         self.preempted = self.preempted.wrapping_add(rhs.preempted);
         self.helix = self.helix.wrapping_add(rhs.helix);
+        self.takeover = self.takeover.wrapping_add(rhs.takeover);
     }
 
     /// Events since @rhs was taken. The queue length is a gauge and is
@@ -102,6 +106,7 @@ impl Metrics {
             keep: self.keep.wrapping_sub(rhs.keep),
             preempted: self.preempted.wrapping_sub(rhs.preempted),
             helix: self.helix.wrapping_sub(rhs.helix),
+            takeover: self.takeover.wrapping_sub(rhs.takeover),
         }
     }
 }
@@ -173,6 +178,7 @@ mod tests {
             keep: 8,
             preempted: 9,
             helix: 10,
+            takeover: 11,
         };
         let mut sum = one.clone();
         sum.add(&one);
@@ -180,5 +186,6 @@ mod tests {
         assert_eq!(sum.queued, 2);
         assert_eq!(sum.preempted, 18);
         assert_eq!(sum.helix, 20);
+        assert_eq!(sum.takeover, 22);
     }
 }

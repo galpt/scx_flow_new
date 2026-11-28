@@ -10,6 +10,8 @@ use clap::Parser;
 use clap_complete::Shell;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
 
+use crate::bpf_intf;
+
 pub const SCHEDULER_NAME: &str = "scx_flow";
 
 pub fn full_version() -> String {
@@ -70,6 +72,13 @@ pub struct Opts {
     #[clap(long, conflicts_with = "helicoprion")]
     pub performance: bool,
 
+    /// Do what --performance does, and let latency critical wakeups take
+    /// a CPU at once, preempting a task that computes if no CPU is idle.
+    /// Latency critical tasks get the smallest timer slack until the
+    /// scheduler stops, and every CPU only polls while idle.
+    #[clap(long, conflicts_with_all = ["helicoprion", "performance"])]
+    pub lowlatency: bool,
+
     /// Enable debug output, including libbpf messages.
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     pub verbose: bool,
@@ -95,14 +104,87 @@ pub struct Opts {
     pub libbpf: LibbpfOpts,
 }
 
+/// The mode the scheduler runs in, from the mode flags, which exclude each
+/// other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Default,
+    Helicoprion,
+    Performance,
+    LowLatency,
+}
+
+impl Mode {
+    /// The `enum flow_mode` value of the BPF program.
+    pub fn bpf(self) -> u32 {
+        match self {
+            Mode::Default => bpf_intf::flow_mode_FLOW_MODE_DEFAULT,
+            Mode::Helicoprion => bpf_intf::flow_mode_FLOW_MODE_HELICOPRION,
+            Mode::Performance => bpf_intf::flow_mode_FLOW_MODE_PERFORMANCE,
+            Mode::LowLatency => bpf_intf::flow_mode_FLOW_MODE_LOWLATENCY,
+        }
+    }
+
+    /// --performance, or --lowlatency, which does everything it does.
+    pub fn performance(self) -> bool {
+        matches!(self, Mode::Performance | Mode::LowLatency)
+    }
+
+    /// How the startup log names the mode, if it has extras to report.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Mode::Performance => Some("Performance mode"),
+            Mode::LowLatency => Some("Low latency mode"),
+            Mode::Default | Mode::Helicoprion => None,
+        }
+    }
+}
+
+impl Opts {
+    pub fn mode(&self) -> Mode {
+        if self.lowlatency {
+            Mode::LowLatency
+        } else if self.performance {
+            Mode::Performance
+        } else if self.helicoprion {
+            Mode::Helicoprion
+        } else {
+            Mode::Default
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn mode_of(args: &[&str]) -> Option<Mode> {
+        let argv = std::iter::once("scx_flow").chain(args.iter().copied());
+        Opts::try_parse_from(argv).ok().map(|o| o.mode())
+    }
+
     #[test]
-    fn performance_excludes_helicoprion() {
-        assert!(Opts::try_parse_from(["scx_flow", "--performance"]).is_ok());
-        assert!(Opts::try_parse_from(["scx_flow", "--performance", "--helicoprion"]).is_err());
+    fn modes_exclude_each_other() {
+        assert_eq!(mode_of(&[]), Some(Mode::Default));
+        assert_eq!(mode_of(&["--helicoprion"]), Some(Mode::Helicoprion));
+        assert_eq!(mode_of(&["--performance"]), Some(Mode::Performance));
+        assert_eq!(mode_of(&["--lowlatency"]), Some(Mode::LowLatency));
+        for pair in [
+            ["--performance", "--helicoprion"],
+            ["--lowlatency", "--helicoprion"],
+            ["--lowlatency", "--performance"],
+        ] {
+            assert_eq!(mode_of(&pair), None);
+        }
+    }
+
+    #[test]
+    fn lowlatency_builds_on_performance() {
+        assert!(Mode::LowLatency.performance());
+        assert!(Mode::Performance.performance());
+        assert!(!Mode::Helicoprion.performance());
+        assert!(!Mode::Default.performance());
+        assert_ne!(Mode::LowLatency.bpf(), Mode::Performance.bpf());
     }
 
     #[test]

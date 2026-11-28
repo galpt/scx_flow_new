@@ -2,9 +2,11 @@
 //! Loading and running the scx_flow BPF scheduler.
 //!
 //! With --performance, the busy CPUs are kept out of idle states that take
-//! time to leave while the scheduler runs, see pmqos.rs, and the double
-//! helix queues of the LLC pairs are created before the scheduler is
-//! attached, see helix.bpf.h.
+//! time to leave while the scheduler runs, and with --lowlatency all of
+//! them are, see pmqos.rs. With --lowlatency, the latency critical tasks
+//! also get the smallest timer slack, see slack.rs. In both modes, the
+//! double helix queues are created before the scheduler is attached, see
+//! helix.bpf.h.
 //!
 //! The scheduler is loaded again when the kernel asks for it, as after CPU
 //! hotplug, and after it fails, as on a stall, a few times with a growing
@@ -24,7 +26,11 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use crossbeam::channel::RecvTimeoutError;
+use crossbeam::channel::Sender;
+use libbpf_rs::MapHandle;
 use libbpf_rs::ProgramInput;
+use libbpf_rs::RingBuffer;
+use libbpf_rs::RingBufferBuilder;
 use log::debug;
 use log::info;
 use log::warn;
@@ -42,13 +48,17 @@ use crate::BpfSkel;
 use crate::BpfSkelBuilder;
 use crate::bpf_intf;
 use crate::cache::CpuCaches;
+use crate::cli::Mode;
 use crate::cli::Opts;
 use crate::cli::SCHEDULER_NAME;
 use crate::pmqos::IdleLimits;
+use crate::slack::TimerSlack;
 use crate::stats::Metrics;
 use crate::topology::BpfTopology;
 
-/// How often the idle state limits of --performance follow the busy CPUs.
+/// How often the idle state limits follow the busy CPUs, see pmqos.rs, and
+/// how often the tasks that became latency critical get their timer slack
+/// lowered, see slack.rs.
 const IDLE_LIMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Topology lines printed at startup before the rest is summarized.
@@ -83,6 +93,8 @@ pub(crate) struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<(), Metrics>,
     idle_limits: Option<IdleLimits>,
+    timer_slack: Option<TimerSlack>,
+    mode: Mode,
 }
 
 fn log_lines(level: log::Level, (lines, total): (Vec<String>, usize)) {
@@ -110,9 +122,9 @@ fn log_topology(topo: &Topology, caches: &BTreeMap<usize, CpuCaches>) {
     }
 }
 
-/// Create the double helix queues of --performance in the BPF arena.
-/// Returns whether they exist. Without them, every LLC queues its tasks in
-/// its own DSQ, which is no reason to give up the run.
+/// Create the double helix queues of --performance and --lowlatency in the
+/// BPF arena. Returns whether they exist. Without them, every LLC queues
+/// its tasks in its own DSQ, which is no reason to give up the run.
 fn create_helix_queues(skel: &BpfSkel<'_>) -> bool {
     match skel.progs.flow_helix_init.test_run(ProgramInput::default()) {
         Ok(out) if out.return_value == 0 => true,
@@ -130,12 +142,49 @@ fn create_helix_queues(skel: &BpfSkel<'_>) -> bool {
     }
 }
 
+/// Pass the thread ids that flow_lowlat_report() puts in @map to @tids.
+fn slack_events(map: &MapHandle, tids: Sender<i32>) -> Result<RingBuffer<'_>> {
+    let mut builder = RingBufferBuilder::new();
+    builder.add(map, move |data: &[u8]| {
+        if let Ok(tid) = <[u8; 4]>::try_from(data) {
+            let _ = tids.send(i32::from_ne_bytes(tid));
+        }
+        0
+    })?;
+    Ok(builder.build()?)
+}
+
 /// Copy per-CPU values into a BPF table indexed by CPU id.
 fn fill_per_cpu(slots: &mut [u32], values: &BTreeMap<usize, u32>) {
     for (cpu, value) in values {
         if let Some(slot) = slots.get_mut(*cpu) {
             *slot = *value;
         }
+    }
+}
+
+/// Copy per-LLC values into a BPF table indexed by LLC.
+fn fill_per_llc<T: Copy>(slots: &mut [T], values: &[T]) {
+    for (slot, value) in slots.iter_mut().zip(values) {
+        *slot = *value;
+    }
+}
+
+/// Lay out the CPUs of each LLC one after the other in @cpus, and note
+/// where the CPUs of each LLC start in @first and how many it has in @nr.
+fn fill_llc_cpus(cpus: &mut [u32], first: &mut [u32], nr: &mut [u32], llc_cpus: &[Vec<usize>]) {
+    let mut next = 0;
+    for (llc, list) in llc_cpus.iter().enumerate() {
+        let (Some(first), Some(nr)) = (first.get_mut(llc), nr.get_mut(llc)) else {
+            break;
+        };
+        let list = &list[..list.len().min(cpus.len() - next)];
+        *first = next as u32;
+        *nr = list.len() as u32;
+        for (slot, cpu) in cpus[next..].iter_mut().zip(list) {
+            *slot = *cpu as u32;
+        }
+        next += list.len();
     }
 }
 
@@ -146,6 +195,7 @@ impl<'a> Scheduler<'a> {
     ) -> Result<Self> {
         let nr_cpus = *NR_CPU_IDS;
         let max_cpus = bpf_intf::flow_consts_FLOW_MAX_CPUS as usize;
+        let mode = opts.mode();
 
         if nr_cpus > max_cpus {
             bail!("found {nr_cpus} possible CPUs, at most {max_cpus} are supported");
@@ -174,7 +224,7 @@ impl<'a> Scheduler<'a> {
 
         // With --helicoprion, the wakeup and enqueue paths do the work of
         // these callbacks, see flow_wake_task().
-        if opts.helicoprion {
+        if mode == Mode::Helicoprion {
             let ops = skel.struct_ops.flow_ops_mut();
             ops.runnable = std::ptr::null_mut();
             ops.stopping = std::ptr::null_mut();
@@ -192,10 +242,11 @@ impl<'a> Scheduler<'a> {
             skel.progs.flow_cgroup_set_weight.set_autoload(false);
         }
 
-        // With --performance, the kernel may queue a wakeup to the CPU of
-        // the wakee and activate it there, which saves the waker the
-        // remote runqueue lock. Kernels without it read zero here.
-        let queued_wakeup = if opts.performance {
+        // With --performance and --lowlatency, the kernel may queue a
+        // wakeup to the CPU of the wakee and activate it there, which saves
+        // the waker the remote runqueue lock. Kernels without it read zero
+        // here.
+        let queued_wakeup = if mode.performance() {
             *scx_utils::compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
         } else {
             0
@@ -218,8 +269,7 @@ impl<'a> Scheduler<'a> {
         for (slot, cpu) in rodata.flow_cpu_ids.iter_mut().zip(&online) {
             *slot = *cpu as u32;
         }
-        rodata.flow_helicoprion = opts.helicoprion;
-        rodata.flow_performance = opts.performance;
+        rodata.flow_mode = mode.bpf();
         rodata.flow_queued_wakeup = queued_wakeup != 0;
         for (cpu, slot) in rodata.flow_cpu_sibling.iter_mut().enumerate() {
             *slot = cpu as u32;
@@ -230,48 +280,58 @@ impl<'a> Scheduler<'a> {
             fill_per_cpu(&mut rodata.flow_cpu_llc, &t.cpu_llc);
             fill_per_cpu(&mut rodata.flow_cpu_group, &t.cpu_group);
             fill_per_cpu(&mut rodata.flow_cpu_sibling, &t.cpu_sibling);
-            for (slot, node) in rodata.flow_llc_node.iter_mut().zip(&t.llc_node) {
-                *slot = *node;
-            }
-            for (slot, kb) in rodata.flow_llc_kb.iter_mut().zip(&t.llc_kb) {
-                *slot = *kb;
-            }
-            for (slot, mate) in rodata.flow_llc_mate.iter_mut().zip(&t.llc_mate) {
-                *slot = *mate;
-            }
+            fill_per_cpu(&mut rodata.flow_cpu_half, &t.cpu_half);
+            fill_per_llc(&mut rodata.flow_llc_node, &t.llc_node);
+            fill_per_llc(&mut rodata.flow_llc_kb, &t.llc_kb);
+            fill_per_llc(&mut rodata.flow_llc_mate, &t.llc_mate);
+            fill_per_llc(&mut rodata.flow_llc_split, &t.llc_split);
         }
+        // Without a topology, every CPU is in LLC 0.
+        let llc_cpus = tables
+            .as_ref()
+            .map_or_else(|| vec![online.clone()], |t| t.llc_cpus());
+        fill_llc_cpus(
+            &mut rodata.flow_llc_cpus,
+            &mut rodata.flow_llc_first,
+            &mut rodata.flow_llc_nr_cpus,
+            &llc_cpus,
+        );
 
         let mut skel = scx_ops_load!(skel, flow_ops, uei)?;
         if let Some(t) = topo.as_ref() {
             log_topology(t, &caches);
         }
         let pairs = tables.as_ref().map_or(0, |t| t.nr_llc_pairs());
-        let helix = opts.performance && pairs > 0 && create_helix_queues(&skel);
+        let splits = tables.as_ref().map_or(0, |t| t.nr_split_llcs());
+        let helix = mode.performance() && pairs + splits > 0 && create_helix_queues(&skel);
         let struct_ops = scx_ops_attach!(skel, flow_ops)?;
 
         // A run that was killed may have left the idle state limits of
-        // --performance behind, whatever mode this run is in. The attach
-        // fails while another scheduler runs, which may be an scx_flow that
-        // still holds those limits, so they are only restored after it.
+        // --performance or --lowlatency behind, or the timer slack of
+        // --lowlatency, whatever mode this run is in. The attach fails
+        // while another scheduler runs, which may be an scx_flow that still
+        // holds them, so they are only restored after it.
         crate::pmqos::restore_saved_limits();
+        crate::slack::restore_saved_slack();
 
         let stats_server = StatsServer::new(crate::stats::server_data()).launch()?;
 
-        let idle_limits = opts.performance.then(|| {
-            let cpus = match topo.as_ref() {
-                Some(t) => t.all_cpus.keys().copied().collect(),
-                None => (0..nr_cpus).collect(),
-            };
-            IdleLimits::new(cpus)
-        });
-        if opts.performance {
-            info!(
+        let idle_limits = mode.performance().then(|| IdleLimits::new(online.clone()));
+        let timer_slack = (mode == Mode::LowLatency).then(TimerSlack::default);
+        match mode {
+            Mode::Performance => info!(
                 "Performance mode: urgent wakeups interrupt their CPU right away, and busy CPUs \
                  only poll while idle"
-            );
+            ),
+            Mode::LowLatency => info!(
+                "Low latency mode: latency critical wakeups take a CPU at once, preempting a \
+                 task that computes if none is idle, latency critical tasks get the smallest \
+                 timer slack, and every CPU only polls while idle"
+            ),
+            Mode::Default | Mode::Helicoprion => {}
         }
-        if helix {
-            info!("Performance mode: double helix queues for {pairs} LLC pair(s)");
+        if helix && let Some(label) = mode.label() {
+            info!("{label}: double helix queues for {pairs} LLC pair(s) and {splits} split LLC(s)");
         }
 
         Ok(Self {
@@ -279,19 +339,24 @@ impl<'a> Scheduler<'a> {
             struct_ops: Some(struct_ops),
             stats_server,
             idle_limits,
+            timer_slack,
+            mode,
         })
     }
 
-    /// With --performance, keep the CPUs that the BPF side counts as busy
-    /// out of deep idle states, see flow_track_busy().
+    /// Keep the CPUs out of deep idle states: with --performance those that
+    /// the BPF side counts as busy, see flow_track_busy(), and with
+    /// --lowlatency all of them.
     fn update_idle_limits(&mut self) {
         let (Some(limits), Some(bss)) =
             (self.idle_limits.as_mut(), self.skel.maps.bss_data.as_ref())
         else {
             return;
         };
+        let all = self.mode == Mode::LowLatency;
         limits.update(|cpu| {
-            bss.flow_cpu_states
+            all || bss
+                .flow_cpu_states
                 .get(cpu)
                 .is_some_and(|cs| cs.shallow != 0)
         });
@@ -323,9 +388,23 @@ impl<'a> Scheduler<'a> {
         } else {
             Duration::from_secs(1)
         };
+        let (tid_tx, tid_rx) = crossbeam::channel::unbounded();
+        let slack_map = self
+            .timer_slack
+            .is_some()
+            .then(|| MapHandle::try_from(&self.skel.maps.flow_slack_events))
+            .transpose()?;
+        let slack_ring = slack_map
+            .as_ref()
+            .map(|map| slack_events(map, tid_tx))
+            .transpose()?;
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             self.update_idle_limits();
+            if let (Some(ring), Some(slack)) = (slack_ring.as_ref(), self.timer_slack.as_mut()) {
+                ring.consume()?;
+                slack.lower(tid_rx.try_iter());
+            }
             match req_ch.recv_timeout(wait) {
                 Ok(()) => {
                     res_ch.send(crate::metrics::collect(&self.skel))?;

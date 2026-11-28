@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
 # Run the periodic harness across load levels.
-# Each level calibrates thread count for a target use
-# on the host CPU count with average burst plus period.
-# All threads run with the default policy with no
-# realtime use. One probe thread wakes each 10ms for
-# a light baseline. Set CONTROL to 1 to mark runs as
-# control for A and B comparison. The binary is built
-# on each run with no checked in binary. Report adds
-# occupancy plus spill plus probe p99 with no workload
-# change: occupancy reads threads, spill reads misses,
-# and probe p99 reads the sorted probe delays.
+#
+# Each level sets the thread count that reaches its target use on the CPUs
+# of the host, from the average burst and period of a job. All threads use
+# the default policy, and a probe thread wakes up every 10 ms as a light
+# baseline. Set CONTROL to 1 to mark the runs as the baseline of a
+# comparison. The binary is built on every run and never checked in. The
+# report also gives the occupancy, which is the thread count, the spill,
+# which is the number of misses, and the p99 delay of the probe.
 #
 # Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 set -euo pipefail
@@ -33,7 +31,6 @@ need nproc
 need python3
 echo "building harness"
 gcc -O2 -Wall -Wextra -pthread "${HARNESS_C}" -o "${HARNESS_BIN}"
-rm -f "${HARNESS_BIN}.tmp"
 NCPU="$(nproc)"
 echo "host CPUs ${NCPU}"
 mkdir -p "${OUTDIR}"

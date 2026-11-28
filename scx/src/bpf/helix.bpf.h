@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Double helix queues for the flow scheduler, used by --performance.
+ * Double helix queues for the flow scheduler, used by --performance and
+ * --lowlatency.
  *
  * The LLCs of each NUMA node are paired up in the order of their ids, and
  * the two LLCs of a pair share one double helix queue from the arena
@@ -13,21 +14,30 @@
  * other nodes, so that tasks keep running next to their cache while work
  * queued in any pair still reaches every CPU that may run it.
  *
+ * An LLC without a partner in its node, such as the only LLC of a machine
+ * or the last one of an odd count, gets a queue of its own and is split
+ * into two halves, each of which owns one strand. The halves are the two
+ * core groups of the LLC if it has exactly two, and otherwise two runs of
+ * its cores in id order with about as many CPUs each, so the hardware
+ * threads of a core always land in the same half. A task that may run in
+ * both halves waits in the strand of the half of its CPU, which is the
+ * CPU it last ran on or the one it was woken up on. Both halves share the
+ * cache of the LLC, so its CPUs do not favor their own strand: they take
+ * whichever head of the two strands is due first, through the priority
+ * order of the queue, and weigh it against the heads of their DSQs as if
+ * the two strands were one. An LLC with a single core or fewer than three
+ * CPUs is not split and only uses its DSQ.
+ *
  * A strand takes no more tasks once it holds FLOW_HELIX_IMBALANCE more
  * than the other strand of its queue. That bound is loose on purpose: an
- * LLC busy with a game can queue ten more of its threads than its partner
- * before any of them go to its DSQ, so most of its waiting threads share
- * one deadline order, and its partner still only steals from it once it
- * runs dry. A task that a strand does not take, because the strand is
- * that far ahead or the queue is full, waits in the DSQ of its LLC as it
- * would without --performance.
- *
- * An LLC without a partner in its node, such as the last one of an odd
- * count, only uses its DSQ, and so does a machine with a single LLC. All
- * CPUs of an LLC share its cache, so a second strand there would add a
- * lock to every enqueue and dispatch and keep no task closer to its data.
- * If the arena cannot hold every queue when the scheduler loads, all LLCs
- * use their DSQs.
+ * LLC or a half busy with a game can queue ten more of its threads than
+ * its partner before any of them go to the DSQ of the LLC, so most of its
+ * waiting threads share one deadline order, and the partner of an LLC
+ * still only steals from it once it runs dry. A task that a strand does
+ * not take, because the strand is that far ahead or the queue is full,
+ * waits in the DSQ of its LLC as it does in the other modes. If the arena
+ * cannot hold every queue when the scheduler loads, all LLCs use their
+ * DSQs.
  *
  * The kernel does not see the tasks in a strand, so flow makes sure that
  * each of them reaches a CPU:
@@ -44,10 +54,12 @@
  *   an LLC in its mask instead, and a CPU of its mask there is kicked.
  * - An exiting task can lose its pid before it runs for the last time, so
  *   it never waits in a strand.
- * - A CPU does not go idle while its own strand holds entries. It takes up
- *   to FLOW_HELIX_POPS of them per dispatch and kicks itself for the rest.
+ * - A CPU does not go idle while the strand of its LLC holds entries, or
+ *   either strand if its LLC is split. It takes up to FLOW_HELIX_POPS of
+ *   them per dispatch and kicks itself for the rest.
  * - The tick and the choice to keep the previous task running look at the
- *   head of the strand of the LLC as they do at the heads of its DSQs.
+ *   first entry of the queue of the LLC, see flow_helix_peek(), as they do
+ *   at the heads of its DSQs.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -71,28 +83,46 @@ _Static_assert(FLOW_HELIX_SLOTS * FLOW_MAX_CPUS / 2 * sizeof(struct scx_minheap_
 	       "a strand does not fit in the arena block");
 
 /*
- * The queue that each LLC shares with its partner, NULL if it has none.
- * The table lives in the arena, so that every program that reads it is
- * tied to the arena, as the verifier requires of programs that follow
- * arena pointers.
+ * The queue that each LLC shares with its partner, or has to itself when
+ * it is split, NULL if it has none. The table lives in the arena, so that
+ * every program that reads it is tied to the arena, as the verifier
+ * requires of programs that follow arena pointers.
  */
 scx_dhq_t *__arena_global flow_helix[FLOW_MAX_LLCS];
 
 static __always_inline scx_dhq_t *flow_helix_of(u32 llc)
 {
-	if (!flow_performance || llc >= FLOW_MAX_LLCS)
+	if (!flow_in_performance() || llc >= FLOW_MAX_LLCS)
 		return NULL;
 	return flow_helix[llc];
 }
 
-/* The strand of its queue that @llc owns. */
-static __always_inline u64 flow_strand_of(u32 llc)
+/* @llc owns both strands of its queue, see the top of this file. */
+static __always_inline bool flow_helix_split(u32 llc)
 {
+	return llc < FLOW_MAX_LLCS && flow_llc_split[llc];
+}
+
+/* The half of a split LLC that @cpu is in. */
+static __always_inline u32 flow_half_of(s32 cpu)
+{
+	return flow_cpu_valid(cpu) && flow_cpu_half[cpu] ? 1 : 0;
+}
+
+/* The strand of its queue that a task on @cpu of @llc waits in. */
+static __always_inline u64 flow_strand_of(u32 llc, s32 cpu)
+{
+	if (flow_helix_split(llc))
+		return flow_half_of(cpu) ? SCX_DHQ_STRAND_B : SCX_DHQ_STRAND_A;
 	return llc < FLOW_MAX_LLCS && flow_llc_mate[llc] > llc ? SCX_DHQ_STRAND_A :
 								SCX_DHQ_STRAND_B;
 }
 
-/* Entries in the strand of @llc, stale ones too, or zero without one. */
+/*
+ * Entries that the CPUs of @llc take first, stale ones too: those of the
+ * strand of @llc, or of the whole queue if @llc is split. Zero without a
+ * queue.
+ */
 static __always_inline u64 flow_helix_queued(u32 llc)
 {
 	scx_dhq_t *dhq = flow_helix_of(llc);
@@ -100,51 +130,91 @@ static __always_inline u64 flow_helix_queued(u32 llc)
 
 	if (!dhq)
 		return 0;
-	nr = scx_dhq_nr_queued_strand(dhq, flow_strand_of(llc));
+	if (flow_helix_split(llc))
+		nr = scx_dhq_nr_queued(dhq);
+	else
+		nr = scx_dhq_nr_queued_strand(dhq, flow_strand_of(llc, -1));
 	return nr > 0 ? nr : 0;
 }
 
+/* The CPUs that share the queue of @llc with @cpu, from the other strand. */
+static __always_inline struct bpf_cpumask *flow_helix_partner(u32 llc, s32 cpu)
+{
+	if (llc >= FLOW_MAX_LLCS)
+		return NULL;
+	if (flow_helix_split(llc))
+		return MEMBER_VPTR(flow_half_cpumask, [2 * llc + !flow_half_of(cpu)]);
+	return MEMBER_VPTR(flow_llc_cpumask, [flow_llc_mate[llc]]);
+}
+
 /*
- * Queue @p, due at @deadline with @slice, in the strand of @llc. The
- * deadline and the slice are also set on @p, where they are read back
+ * Queue @p, due at @deadline with @slice, in the strand of @cpu of @llc.
+ * The deadline and the slice are also set on @p, where they are read back
  * when a CPU takes it off the strand. Returns false if @p has to wait in
  * the DSQ of @llc instead.
  */
-static bool flow_helix_queue(struct task_struct *p, u32 llc, u64 deadline, u64 slice)
+static bool flow_helix_queue(struct task_struct *p, u32 llc, s32 cpu, u64 deadline, u64 slice)
 {
 	scx_dhq_t *dhq = flow_helix_of(llc);
-	struct bpf_cpumask *mate;
+	struct bpf_cpumask *partner;
 
 	if (!dhq || (p->flags & PF_EXITING))
 		return false;
 	if (p->nr_cpus_allowed < flow_nr_cpus) {
-		mate = MEMBER_VPTR(flow_llc_cpumask, [flow_llc_mate[llc]]);
-		if (!mate || !bpf_cpumask_intersects(cast_mask(mate), p->cpus_ptr))
+		partner = flow_helix_partner(llc, cpu);
+		if (!partner || !bpf_cpumask_intersects(cast_mask(partner), p->cpus_ptr))
 			return false;
 	}
 	scx_bpf_task_set_slice(p, slice);
 	scx_bpf_task_set_dsq_vtime(p, deadline);
-	if (scx_dhq_insert_vtime(dhq, (u64)p->pid, deadline, flow_strand_of(llc)))
+	if (scx_dhq_insert_vtime(dhq, (u64)p->pid, deadline, flow_strand_of(llc, cpu)))
 		return false;
 	flow_stat_inc(FLOW_STAT_HELIX);
 	return true;
 }
 
 /*
- * If the head of the strand of @llc may run on @cpu, return true and its
- * deadline in @vtime. A stale head is judged by what its task waits for
- * now.
+ * The first entry that the CPUs of @llc would take off its queue: the head
+ * of its strand, or the earlier of the two heads if @llc is split. The
+ * entries are not checked against each other without a lock, so the
+ * counts read first only spare the lock when nothing is there.
+ */
+static __always_inline u64 flow_helix_peek(scx_dhq_t *dhq, u32 llc)
+{
+	u64 strand;
+
+	if (flow_helix_split(llc))
+		return scx_dhq_nr_queued(dhq) > 0 ? scx_dhq_peek(dhq) : 0;
+	strand = flow_strand_of(llc, -1);
+	return scx_dhq_nr_queued_strand(dhq, strand) > 0 ? scx_dhq_peek_strand(dhq, strand) : 0;
+}
+
+/* Take the entry that flow_helix_peek() returns, or a later one. */
+static __always_inline u64 flow_helix_pop(scx_dhq_t *dhq, u32 llc)
+{
+	u64 strand;
+
+	if (flow_helix_split(llc))
+		return scx_dhq_nr_queued(dhq) > 0 ? scx_dhq_pop(dhq) : 0;
+	strand = flow_strand_of(llc, -1);
+	return scx_dhq_nr_queued_strand(dhq, strand) > 0 ? scx_dhq_pop_strand(dhq, strand) : 0;
+}
+
+/*
+ * If the entry that the CPUs of @llc take first may run on @cpu, return
+ * true and its deadline in @vtime. A stale entry is judged by what its
+ * task waits for now.
  */
 static bool flow_helix_head(u32 llc, s32 cpu, u64 *vtime)
 {
 	scx_dhq_t *dhq = flow_helix_of(llc);
-	u64 strand = flow_strand_of(llc), pid;
 	struct task_struct *p;
+	u64 pid;
 	bool fits;
 
-	if (!dhq || scx_dhq_nr_queued_strand(dhq, strand) <= 0)
+	if (!dhq)
 		return false;
-	pid = scx_dhq_peek_strand(dhq, strand);
+	pid = flow_helix_peek(dhq, llc);
 	if (!pid)
 		return false;
 	p = bpf_task_from_pid((s32)pid);
@@ -156,12 +226,48 @@ static bool flow_helix_head(u32 llc, s32 cpu, u64 *vtime)
 	return fits;
 }
 
-/* The head of the strand of @llc may run on @cpu and is due before @deadline. */
+/* The first entry of @llc may run on @cpu and is due before @deadline. */
 static __always_inline bool flow_helix_ahead(u32 llc, u64 deadline, s32 cpu)
 {
 	u64 vtime;
 
 	return flow_helix_head(llc, cpu, &vtime) && time_before(vtime, deadline);
+}
+
+/*
+ * True when a task of @dsq_id that can run on @cpu is due before @deadline.
+ * The first FLOW_AHEAD_DEPTH tasks are looked at, so that a head that may
+ * only run on other CPUs does not hide the tasks behind it. The walk takes
+ * the lock of the DSQ at every step, while the head can be read without
+ * it, so the walk only starts when the head is due first but cannot run on
+ * @cpu.
+ */
+static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
+{
+	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	u32 seen = 0;
+
+	if (!p || !time_before(p->scx.dsq_vtime, deadline))
+		return false;
+	if (flow_task_fits(p, cpu))
+		return true;
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		if (!time_before(p->scx.dsq_vtime, deadline) || seen++ >= FLOW_AHEAD_DEPTH)
+			return false;
+		if (flow_task_fits(p, cpu))
+			return true;
+	}
+	return false;
+}
+
+/*
+ * A task of @llc, in its DSQ or its double helix queue, may run on @cpu
+ * and is due before @deadline.
+ */
+static __always_inline bool flow_llc_ahead(u32 llc, u64 deadline, s32 cpu)
+{
+	return flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu) ||
+	       flow_helix_ahead(llc, deadline, cpu);
 }
 
 /*
@@ -195,24 +301,22 @@ static bool flow_helix_place(struct task_struct *p, s32 cpu, u32 llc)
 }
 
 /*
- * Take up to FLOW_HELIX_POPS entries off the strand of @src for @cpu of
- * @llc, until a task is moved to the local DSQ of @cpu. Entries whose task
- * is gone are dropped.
+ * Take up to FLOW_HELIX_POPS entries of @src, in the order of
+ * flow_helix_pop(), for @cpu of @llc, until a task is moved to the local
+ * DSQ of @cpu. Entries whose task is gone are dropped.
  */
 static bool flow_helix_take(s32 cpu, u32 llc, u32 src)
 {
 	scx_dhq_t *dhq = flow_helix_of(src);
-	u64 strand = flow_strand_of(src), pid;
 	struct task_struct *p;
 	bool here;
+	u64 pid;
 	u32 i;
 
 	if (!dhq)
 		return false;
 	bpf_for(i, 0, FLOW_HELIX_POPS) {
-		if (scx_dhq_nr_queued_strand(dhq, strand) <= 0)
-			return false;
-		pid = scx_dhq_pop_strand(dhq, strand);
+		pid = flow_helix_pop(dhq, src);
 		if (!pid)
 			return false;
 		p = bpf_task_from_pid((s32)pid);
@@ -228,8 +332,11 @@ static bool flow_helix_take(s32 cpu, u32 llc, u32 src)
 
 /*
  * Move the most urgent task of @src that may run on @cpu of @llc to the
- * local DSQ of @cpu: the head of the strand of @src if it is due before
- * the head of the DSQ of @src, which goes first otherwise.
+ * local DSQ of @cpu: the first entry of the queue of @src, see
+ * flow_helix_peek(), if it is due before the head of the DSQ of @src,
+ * which goes first otherwise. Most tasks wait in the queue, so the DSQ is
+ * usually empty, and then there is nothing to weigh the entry against and
+ * no reason to take the lock of the queue an extra time to peek at it.
  */
 static bool flow_take_llc(s32 cpu, u32 llc, u32 src)
 {
@@ -239,23 +346,25 @@ static bool flow_take_llc(s32 cpu, u32 llc, u32 src)
 	if (!flow_helix_of(src))
 		return scx_bpf_dsq_move_to_local(dsq_id, 0);
 	head = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	if (!head)
+		return flow_helix_take(cpu, llc, src) || scx_bpf_dsq_move_to_local(dsq_id, 0);
 	if (flow_helix_head(src, cpu, &vtime) &&
-	    (!head || time_before(vtime, head->scx.dsq_vtime)) &&
-	    flow_helix_take(cpu, llc, src))
+	    time_before(vtime, head->scx.dsq_vtime) && flow_helix_take(cpu, llc, src))
 		return true;
 	return scx_bpf_dsq_move_to_local(dsq_id, 0) || flow_helix_take(cpu, llc, src);
 }
 
 /*
  * Create the queues before the scheduler is attached. Each queue gets
- * FLOW_HELIX_SLOTS entries for every online CPU of its two LLCs. If the
- * arena cannot hold all of them, no LLC uses one.
+ * FLOW_HELIX_SLOTS entries for every online CPU of its two LLCs, or of its
+ * LLC if that is split. If the arena cannot hold all of them, no LLC uses
+ * one.
  */
 SEC("syscall")
 int flow_helix_init(void *ctx)
 {
 	u32 nr[FLOW_MAX_LLCS] = {};
-	u32 i, llc, mate;
+	u32 i, llc, mate, slots;
 	scx_dhq_t *dhq;
 	s32 ret;
 
@@ -277,12 +386,15 @@ int flow_helix_init(void *ctx)
 		if (llc >= FLOW_MAX_LLCS)
 			break;
 		mate = flow_llc_mate[llc];
-		if (mate <= llc || mate >= flow_nr_llcs || mate >= FLOW_MAX_LLCS ||
-		    flow_llc_mate[mate] != llc)
+		if (flow_helix_split(llc) && mate == llc && flow_llc_nr_cpus[llc] > 2)
+			slots = FLOW_HELIX_SLOTS * nr[llc];
+		else if (!flow_helix_split(llc) && mate > llc && mate < flow_nr_llcs &&
+			 mate < FLOW_MAX_LLCS && flow_llc_mate[mate] == llc &&
+			 !flow_helix_split(mate))
+			slots = FLOW_HELIX_SLOTS * (nr[llc] + nr[mate]);
+		else
 			continue;
-		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false,
-							   FLOW_HELIX_SLOTS * (nr[llc] + nr[mate]),
-							   SCX_DHQ_MODE_PRIORITY,
+		dhq = (scx_dhq_t *)scx_dhq_create_balanced(false, slots, SCX_DHQ_MODE_PRIORITY,
 							   FLOW_HELIX_IMBALANCE);
 		if (!dhq) {
 			bpf_for(i, 0, FLOW_MAX_LLCS)

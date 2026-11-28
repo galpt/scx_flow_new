@@ -5,8 +5,12 @@
  * Tasks are scored by how much they behave like part of an interactive
  * pipeline and wait in per-LLC queues ordered by a virtual deadline derived
  * from that score. Pinned tasks wait in per-CPU queues. Wakeups that find
- * an idle CPU are dispatched to it directly. With --performance, the LLCs
- * of a node share double helix queues in pairs, see helix.bpf.h.
+ * an idle CPU are dispatched to it directly. With --performance and
+ * --lowlatency, the LLCs of a node share double helix queues in pairs, and
+ * an LLC without a partner that has enough cores is split over the two
+ * strands of a queue of its own, see helix.bpf.h. --lowlatency builds on
+ * --performance and puts latency critical wakeups on a CPU at once,
+ * taking over a busy one if none is idle, see lowlat.bpf.h.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -25,6 +29,7 @@ UEI_DEFINE(uei);
 #include "fair.bpf.h"
 #include "helix.bpf.h"
 #include "stats.bpf.h"
+#include "lowlat.bpf.h"
 #include "select.bpf.h"
 #include "enqueue.bpf.h"
 #include "dispatch.bpf.h"

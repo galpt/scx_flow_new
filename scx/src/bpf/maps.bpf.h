@@ -4,15 +4,19 @@
  *
  * Userspace fills in the topology tables before the program is loaded, so
  * the hot paths look up the LLC, NUMA node and core group of a CPU with a
- * plain array access. The tables also carry the online CPUs and the L3
- * size of each LLC. Each
- * CPU publishes what it is running in its own cache line for the
- * preemption and statistics code to read. With --helicoprion, each cgroup
- * also keeps its weight and busy task counts here, and the system keeps
- * the totals and whether the cgroups compete for the CPUs. With
- * --performance, each CPU also counts the time it had no task to run, and
- * the LLCs of a node are paired up for the double helix queues of
- * helix.bpf.h.
+ * plain array access. The tables also carry the online CPUs, the CPUs of
+ * each LLC and the L3 size of each LLC. Each CPU publishes what it is
+ * running in its own cache line for the preemption and statistics code to
+ * read. With --helicoprion, each cgroup also keeps its weight and busy
+ * task counts here, and the system keeps the totals and whether the
+ * cgroups compete for the CPUs. With --performance and --lowlatency, the
+ * tables also say which LLCs share a double helix queue and how the other
+ * LLCs are split into the two strands of their own queue, see helix.bpf.h.
+ * With --performance, each CPU also counts the time it had no task to run.
+ *
+ * The mode the scheduler runs in is read through the small predicates at
+ * the end of this file, which the verifier resolves when the program is
+ * loaded, so a mode pays nothing for the code of the others.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -49,14 +53,17 @@ enum flow_tunables {
 
 	FLOW_STAT_INTERVAL_NS		= 10000000,	/* 10 ms */
 
-	/* --performance: how busy a CPU must be to wake up quickly, see flow_track_busy(). */
+	/*
+	 * --performance: how busy a CPU must be to wake up quickly, see
+	 * flow_track_busy().
+	 */
 	FLOW_UTIL_ONE			= 1024,
 	FLOW_UTIL_BUSY			= FLOW_UTIL_ONE / 4,
 	FLOW_UTIL_IDLE			= FLOW_UTIL_ONE / 8,
 
 	FLOW_CPUPERF_REFRESH_NS		= 1000000,	/* 1 ms */
 	FLOW_PREEMPT_SHIFT		= 6,
-	FLOW_PERF_PREEMPT_SHIFT		= 1,	/* --performance */
+	FLOW_PERF_PREEMPT_SHIFT		= 1,	/* --performance, --lowlatency */
 	FLOW_VICTIM_PROBES		= 4,
 	FLOW_CLOCK_RETRIES		= 8,
 	FLOW_WEIGHT_DFLT		= 100,
@@ -70,19 +77,37 @@ enum flow_tunables {
 	FLOW_AHEAD_DEPTH		= 4,
 
 	/*
-	 * --performance, see helix.bpf.h: how many more tasks one strand of
-	 * a double helix queue may hold than the other, how many entries
-	 * each queue has per CPU of its two LLCs, how many entries a CPU
-	 * takes off a strand before it leaves the rest to its next dispatch,
-	 * and the arena pages the queues are carved from at a time.
+	 * --performance and --lowlatency, see helix.bpf.h: how many more
+	 * tasks one strand of a double helix queue may hold than the other,
+	 * how many entries each queue has per CPU it serves, how many entries
+	 * a CPU takes off a strand before it leaves the rest to its next
+	 * dispatch, and the arena pages the queues are carved from at a time.
 	 */
 	FLOW_HELIX_IMBALANCE		= 10,
 	FLOW_HELIX_SLOTS		= 4,
 	FLOW_HELIX_POPS			= 8,
 	FLOW_HELIX_PAGES		= 16,
 
+	/*
+	 * --lowlatency, see lowlat.bpf.h: the longest average burst of a
+	 * latency critical task, how often it has to sleep, and how many
+	 * CPUs of an LLC are looked at for one whose task it may preempt.
+	 */
+	FLOW_LOWLAT_BURST_NS		= FLOW_SLICE_MAX_NS,
+	FLOW_LOWLAT_WAIT_HZ		= 20,
+	FLOW_LOWLAT_SCAN		= 64,
+
+	/*
+	 * --lowlatency: room for the tasks that became latency critical
+	 * since userspace last looked, see flow_lowlat_report().
+	 */
+	FLOW_SLACK_EVENTS_SIZE		= 4 * 4096,
+
 	/* Priorities below this one belong to realtime and deadline tasks. */
 	FLOW_MAX_RT_PRIO		= 100,
+
+	/* The policy of the fair class that timer slack applies to. */
+	FLOW_SCHED_NORMAL		= 0,
 
 	/*
 	 * A task that wakes up another one and goes to sleep before it has
@@ -133,6 +158,7 @@ enum flow_task_flags {
 	FLOW_FLAG_WOKE			= 1 << 4,	/* woke up a task since it woke up */
 	FLOW_FLAG_NEW			= 1 << 5,	/* not queued since it joined */
 	FLOW_FLAG_NOTED			= 1 << 6,	/* waker noted when it was placed */
+	FLOW_FLAG_SLACK			= 1 << 7,	/* --lowlatency: timer slack handled */
 };
 
 #define FLOW_CPUPERF_IDLE	(SCX_CPUPERF_ONE / 2)
@@ -178,6 +204,7 @@ struct flow_cpu_state {
 	u64	idle_seen;		/* --performance: idle_ns at the last timer run */
 	u32	util;			/* --performance: how busy, see flow_track_busy() */
 	u32	shallow;		/* --performance: busy enough to wake up quickly */
+	u32	critical;		/* --lowlatency: curr is latency critical */
 } __attribute__((aligned(64)));
 
 /*
@@ -223,15 +250,12 @@ struct flow_sys_stat {
 	u64	saturated;		/* no CPU was idle while tasks waited */
 } __attribute__((aligned(64)));
 
-/* Wakeup latency tuning and cgroup weights, enabled by --helicoprion. */
-const volatile bool flow_helicoprion;
-
-/* Higher frame rates and lower input latency, enabled by --performance. */
-const volatile bool flow_performance;
+/* enum flow_mode, read through flow_in_helicoprion() and the like. */
+const volatile u32 flow_mode;
 
 /*
- * --performance on a kernel that may queue a wakeup to the CPU of the
- * wakee, see flow_runnable().
+ * --performance or --lowlatency on a kernel that may queue a wakeup to
+ * the CPU of the wakee, see flow_runnable().
  */
 const volatile bool flow_queued_wakeup;
 
@@ -239,21 +263,39 @@ const volatile u32 flow_nr_cpus = 1;
 const volatile u32 flow_nr_usable = 1;	/* online CPUs, see the loader */
 const volatile u32 flow_nr_llcs = 1;
 const volatile u32 flow_nr_groups;
-const volatile u32 flow_cpu_ids[FLOW_MAX_CPUS];	/* online CPUs, see flow_nr_usable */
+/* The online CPUs, flow_nr_usable of them. */
+const volatile u32 flow_cpu_ids[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_llc[FLOW_MAX_CPUS];
 const volatile u32 flow_cpu_group[FLOW_MAX_CPUS];
-const volatile u32 flow_cpu_sibling[FLOW_MAX_CPUS];	/* the CPU itself without SMT */
+/* A hardware thread next to each CPU, or the CPU itself without SMT. */
+const volatile u32 flow_cpu_sibling[FLOW_MAX_CPUS];
 const volatile u32 flow_llc_node[FLOW_MAX_LLCS];
 const volatile u32 flow_llc_kb[FLOW_MAX_LLCS];
 
 /*
+ * The online CPUs grouped by LLC: the CPUs of LLC l are the
+ * flow_llc_nr_cpus[l] entries of flow_llc_cpus from flow_llc_first[l] on.
+ */
+const volatile u32 flow_llc_cpus[FLOW_MAX_CPUS];
+const volatile u32 flow_llc_first[FLOW_MAX_LLCS];
+const volatile u32 flow_llc_nr_cpus[FLOW_MAX_LLCS];
+
+/*
  * The LLC that each LLC shares a double helix queue with, or the LLC
- * itself if it has no partner in its node, see helix.bpf.h.
+ * itself if it has no partner in its node. An LLC without a partner may
+ * be split into two halves that own the two strands of a queue of its own,
+ * and flow_cpu_half says which half each of its CPUs is in, see
+ * helix.bpf.h.
  */
 const volatile u32 flow_llc_mate[FLOW_MAX_LLCS];
+const volatile bool flow_llc_split[FLOW_MAX_LLCS];
+const volatile u32 flow_cpu_half[FLOW_MAX_CPUS];
 
 private(FLOW) struct bpf_cpumask flow_llc_cpumask[FLOW_MAX_LLCS];
 private(FLOW) struct bpf_cpumask flow_group_cpumask[FLOW_MAX_GROUPS];
+
+/* The CPUs of each half of a split LLC, at 2 * LLC + half. */
+private(FLOW) struct bpf_cpumask flow_half_cpumask[2 * FLOW_MAX_LLCS];
 
 /* CPUs of the LLCs with the largest L3, set when the LLC sizes differ. */
 private(FLOW) struct bpf_cpumask flow_big_cache_cpumask;
@@ -292,6 +334,12 @@ struct {
 	__type(value, struct flow_cpu_stats);
 } cpu_stats SEC(".maps");
 
+/* --lowlatency: the thread ids of flow_lowlat_report(). */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, FLOW_SLACK_EVENTS_SIZE);
+} flow_slack_events SEC(".maps");
+
 struct flow_timer {
 	struct bpf_timer timer;
 };
@@ -329,10 +377,51 @@ static __always_inline bool flow_cpu_valid(s32 cpu)
 	return cpu >= 0 && (u32)cpu < flow_nr_cpus && (u32)cpu < FLOW_MAX_CPUS;
 }
 
+/* --helicoprion: wakeup latency tuning and cgroup weights. */
+static __always_inline bool flow_in_helicoprion(void)
+{
+	return flow_mode == FLOW_MODE_HELICOPRION;
+}
+
+/*
+ * --performance, or --lowlatency, which builds on it: higher frame rates
+ * and lower input latency.
+ */
+static __always_inline bool flow_in_performance(void)
+{
+	return flow_mode == FLOW_MODE_PERFORMANCE || flow_mode == FLOW_MODE_LOWLATENCY;
+}
+
+/* --lowlatency: a bounded wait for latency critical wakeups. */
+static __always_inline bool flow_in_lowlatency(void)
+{
+	return flow_mode == FLOW_MODE_LOWLATENCY;
+}
+
+/*
+ * A short wakeup interrupts a CPU whose task has been computing for long,
+ * see flow_preempt_hog(), so each CPU tracks when the burst of its task
+ * began.
+ */
+static __always_inline bool flow_preempts_hogs(void)
+{
+	return flow_in_helicoprion() || flow_in_performance();
+}
+
+/*
+ * --performance follows which CPUs are busy, so that userspace can keep
+ * them out of deep idle states, see flow_track_busy(). --lowlatency keeps
+ * every CPU out of them.
+ */
+static __always_inline bool flow_tracks_busy(void)
+{
+	return flow_mode == FLOW_MODE_PERFORMANCE;
+}
+
 /* The cgroups compete for the CPUs, so their weights are followed. */
 static __always_inline bool flow_cgrp_active(void)
 {
-	return flow_helicoprion && READ_ONCE(flow_cgrp_stat.active);
+	return flow_in_helicoprion() && READ_ONCE(flow_cgrp_stat.active);
 }
 
 /* @cpu must have passed flow_cpu_valid(). */

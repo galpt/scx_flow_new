@@ -10,9 +10,32 @@ scx_flow is a knob-free latency score scheduler on sched_ext. Each LLC owns one 
 - Desktop use, such as gaming with browser tabs open.
 - Batch work, such as compiling and rendering.
 
-> [!TIP]
-> 1. Start scx_flow with `--helicoprion` to try the helicoprion mode. This mode is for research into whether it benefits users more than running without it. User feedback may be shared with other developers to help improve other schedulers and, where possible, the [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark itself.
-> 2. Start scx_flow with `--performance` for the highest frame rates and the lowest input latency, at the cost of more power. An urgent task gets its CPU at once, more game threads may push background work aside, LLC pairs share double helix queues, and busy CPUs only poll while idle. It cannot be combined with `--helicoprion`.
+## Built-in Modes
+
+Started without a flag, scx_flow runs its default logic, which suits most machines. Each mode below is turned on with its flag, and only one mode can be used at a time.
+
+### `--helicoprion`
+
+This mode was made for the [helicoprion](https://github.com/Seafoam-Labs/helicoprion) benchmark. It works for daily use, but `--performance` or `--lowlatency` is the better choice, since far more users have tested those two modes. Feedback on this mode may be shared with other developers to help improve their schedulers and, where possible, the benchmark itself.
+
+### `--performance`
+
+This mode builds on the default logic and tunes it for steadier performance under load, such as higher frame rates while background work runs. Busy CPUs avoid deep idle states, so it uses more power.
+
+### `--lowlatency`
+
+This mode builds on `--performance` and tunes it further for much lower latency. When every CPU is busy, a latency critical task that wakes up preempts a task that computes instead of waiting in a queue, and no CPU enters a deep idle state, so it uses the most power. It also lowers the timer slack of latency critical tasks so their timers fire on time. scx_flow puts back the original value when it stops, or on its next start after a crash, and since timer slack belongs to each thread, the change never outlives that thread or a reboot.
+
+The table below shows `cyclictest -m -q -D 60 -i 1000 -t 4 -h 400 --policy=other` on an AMD Ryzen 7 6800H (8 cores, 16 threads, one 16 MiB L3 cache) running Linux 7.3 with a 1000 Hz tick, while `stress-ng --cpu 16` kept every CPU busy. Each value is the median of three 60 second runs.
+
+| Latency (µs) | p50 | p99 | p99.9 |
+|---|---|---|---|
+| `--performance` | 58 | 69 | 122 |
+| `--lowlatency` | 9 | 20 | 52 |
+
+## Production Ready?
+
+scx_flow keeps gaining new ideas and improvements, and each release is checked for stability so that it can run on production machines such as workstations and servers. Contributors are encouraged to stress test their changes before sending a pull request.
 
 ## Limitations
 

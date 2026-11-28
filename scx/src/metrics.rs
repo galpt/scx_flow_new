@@ -41,6 +41,7 @@ fn add_cpu_stats(row: &mut Metrics, cnt: &[u64; NR_STATS]) {
         keep: get(bpf_intf::flow_stat_idx_FLOW_STAT_KEEP),
         preempted: get(bpf_intf::flow_stat_idx_FLOW_STAT_PREEMPTED),
         helix: get(bpf_intf::flow_stat_idx_FLOW_STAT_HELIX),
+        takeover: get(bpf_intf::flow_stat_idx_FLOW_STAT_TAKEOVER),
     });
 }
 
@@ -111,6 +112,10 @@ mod tests {
         assert_eq!(
             row.helix,
             1 + bpf_intf::flow_stat_idx_FLOW_STAT_HELIX as u64
+        );
+        assert_eq!(
+            row.takeover,
+            1 + bpf_intf::flow_stat_idx_FLOW_STAT_TAKEOVER as u64
         );
         assert_eq!(row.queued, 0);
     }

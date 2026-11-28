@@ -42,6 +42,22 @@
 
 #include "maps.bpf.h"
 
+/*
+ * Kernels that count in preempt_count how often hardirqs were disabled,
+ * the ones that have this per-CPU variable, moved the hardirq count up to
+ * bits 24-27 and the NMI count to bit 28, where the helpers of
+ * bpf_experimental.h do not look.
+ */
+extern const unsigned long local_interrupt_disable_state __ksym __weak;
+
+/* The current context is a hardirq or an NMI. */
+static __always_inline bool flow_in_hardirq(void)
+{
+	if (bpf_ksym_exists(&local_interrupt_disable_state))
+		return get_preempt_count() & 0x1f000000;
+	return bpf_in_hardirq() || bpf_in_nmi();
+}
+
 static __always_inline bool flow_is_pinned(const struct task_struct *p)
 {
 	return p->nr_cpus_allowed == 1 || is_migration_disabled(p);
@@ -71,7 +87,6 @@ static __always_inline u64 flow_task_weight(const struct task_struct *p)
 		weight += weight >> 1;
 	return flow_min(weight, FLOW_WEIGHT_MAX);
 }
-
 
 static __always_inline u32 flow_log2_u64(u64 v)
 {
@@ -319,7 +334,7 @@ static u32 flow_calc_lat_cri(const struct task_struct *p, const struct flow_task
 	return lat_cri;
 }
 
-/* Deadline of a task at virtual time @vtime that has run for @acc since waking up. */
+/* Deadline of @t at virtual time @vtime when it ran for @acc since waking up. */
 static __always_inline u64 flow_deadline(const struct flow_task_ctx *t, u64 vtime, u64 acc)
 {
 	u64 runtime = FLOW_SLICE_MAX_NS + flow_min(acc, FLOW_BURST_MAX_NS);
@@ -328,21 +343,27 @@ static __always_inline u64 flow_deadline(const struct flow_task_ctx *t, u64 vtim
 }
 
 /*
- * Keep the virtual time of @t within FLOW_VTIME_LAG_NS of the system
+ * The virtual time of @t kept within FLOW_VTIME_LAG_NS of the system
  * virtual time, or within FLOW_VTIME_LEAD_NS ahead of it while cgroups
  * compete. The lower bound caps the credit of a task that slept, the
  * upper bound caps how far a task that kept computing can fall behind the
  * others.
  */
-static __always_inline void flow_clamp_vtime(struct flow_task_ctx *t)
+static __always_inline u64 flow_clamped_vtime(const struct flow_task_ctx *t)
 {
 	u64 vtime_now = READ_ONCE(flow_clock.vtime_now);
 	u64 lead = flow_cgrp_active() ? FLOW_VTIME_LEAD_NS : FLOW_VTIME_LAG_NS;
 
 	if (time_before(t->vtime, vtime_now - FLOW_VTIME_LAG_NS))
-		t->vtime = vtime_now - FLOW_VTIME_LAG_NS;
-	else if (time_after(t->vtime, vtime_now + lead))
-		t->vtime = vtime_now + lead;
+		return vtime_now - FLOW_VTIME_LAG_NS;
+	if (time_after(t->vtime, vtime_now + lead))
+		return vtime_now + lead;
+	return t->vtime;
+}
+
+static __always_inline void flow_clamp_vtime(struct flow_task_ctx *t)
+{
+	t->vtime = flow_clamped_vtime(t);
 }
 
 /*

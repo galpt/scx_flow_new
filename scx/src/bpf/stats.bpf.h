@@ -10,10 +10,10 @@
  * time on when nothing else does while tasks wait. With --helicoprion,
  * every tenth run also closes the cgroup period that the busy tasks count
  * into, and decides from it whether cgroups compete for the CPUs. With
- * --performance, it also tells which CPUs have been busy lately, and the
- * tasks in the strands of the LLCs count as queued, see helix.bpf.h. The
- * timer only looks at the online CPUs, since the scheduler is loaded again
- * whenever a CPU comes or goes.
+ * --performance, it also tells which CPUs have been busy lately. With
+ * --performance and --lowlatency, the tasks in the double helix queues
+ * count as queued, see helix.bpf.h. The timer only looks at the online
+ * CPUs, since the scheduler is loaded again whenever a CPU comes or goes.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -109,15 +109,15 @@ static u64 flow_calc_base_slice(u64 nr_queued)
 /*
  * Only tasks close to the most latency critical ones may preempt. The bar
  * sits 1/2^FLOW_PREEMPT_SHIFT of the way down from the highest score of
- * recent periods toward the average score. With --performance, it sits
- * halfway, so that the many threads a game wakes up for each frame can
- * push aside the tasks that compute next to them.
+ * recent periods toward the average score. With --performance and
+ * --lowlatency, it sits halfway, so that the many threads a game wakes up
+ * for each frame can push aside the tasks that compute next to them.
  */
 static void flow_update_lat_cri(u64 avg_lat, u64 max_lat)
 {
 	u64 avg = flow_calc_avg(READ_ONCE(flow_sys_stat.avg_lat_cri), avg_lat);
 	u64 max = flow_calc_avg(READ_ONCE(flow_sys_stat.max_lat_cri), max_lat);
-	u32 shift = flow_performance ? FLOW_PERF_PREEMPT_SHIFT : FLOW_PREEMPT_SHIFT;
+	u32 shift = flow_in_performance() ? FLOW_PERF_PREEMPT_SHIFT : FLOW_PREEMPT_SHIFT;
 
 	WRITE_ONCE(flow_sys_stat.avg_lat_cri, avg);
 	WRITE_ONCE(flow_sys_stat.max_lat_cri, max);
@@ -142,7 +142,10 @@ static void flow_track_busy(struct flow_cpu_state *cs, u64 idle_start, u64 now)
 
 	if (idle_start && time_after(now, idle_start))
 		idle += now - idle_start;
-	/* An ops.running() between the two reads above makes idle smaller than last time. */
+	/*
+	 * An ops.running() between the two reads above makes idle smaller than
+	 * last time.
+	 */
 	idled = time_after(idle, cs->idle_seen) ? idle - cs->idle_seen : 0;
 	cs->idle_seen = idle;
 	busy = FLOW_STAT_INTERVAL_NS - flow_min(idled, FLOW_STAT_INTERVAL_NS);
@@ -174,8 +177,11 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	if (lat > flow_period.max_lat_cri)
 		flow_period.max_lat_cri = lat;
 
-	/* A CPU idle since an earlier period counts as idle, though it did not go idle again. */
-	if (flow_helicoprion) {
+	/*
+	 * A CPU idle since an earlier period counts as idle, though it did not
+	 * go idle again.
+	 */
+	if (flow_in_helicoprion()) {
 		u32 idled = __atomic_exchange_n(&cs->idled, 0, __ATOMIC_RELAXED);
 		bool idle = READ_ONCE(cs->idle_start_clk);
 
@@ -188,7 +194,7 @@ __hidden int flow_sample_cpu(u32 cpu, u64 now)
 	flow_period.nr_queued += q;
 
 	idle_start = READ_ONCE(cs->idle_start_clk);
-	if (flow_performance)
+	if (flow_tracks_busy())
 		flow_track_busy(cs, idle_start, now);
 	if (idle_start && now - idle_start >= FLOW_STAT_INTERVAL_NS &&
 	    READ_ONCE(cs->cpuperf_cur) != FLOW_CPUPERF_IDLE && flow_cpu_runs_idle(cpu))
@@ -258,7 +264,7 @@ static int flow_stat_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		flow_update_lat_cri(flow_period.sum_lat_cri / flow_period.nr_sched,
 				    flow_period.max_lat_cri);
 	WRITE_ONCE(flow_sys_stat.nr_queued, flow_period.nr_queued);
-	if (flow_helicoprion) {
+	if (flow_in_helicoprion()) {
 		WRITE_ONCE(flow_sys_stat.saturated, flow_period.nr_queued && !flow_period.idled);
 		if (++flow_stat_runs >= FLOW_CGRP_PERIOD_RUNS) {
 			flow_stat_runs = 0;

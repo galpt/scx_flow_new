@@ -8,18 +8,18 @@
  * LLC that is due well before the pinned tasks goes first, so pinned tasks
  * cannot starve the LLC. When nothing is queued anywhere and the previous
  * task still wants to run, it keeps the CPU with a fresh slice. With
- * --performance, the strand of an LLC counts as one more queue of it, see
- * helix.bpf.h.
+ * --performance and --lowlatency, the double helix queue of an LLC counts
+ * as one more queue of it, see helix.bpf.h.
  *
  * Runtime is charged when a task stops running, from the time it spent on
- * the CPU. With --performance, that time is what the kernel accounted for
- * the run, from the clock of the runqueue of the task. With --helicoprion,
- * it is charged when the task wakes up or is queued again, from the CPU
- * time the kernel accounted for it. At every tick, a task that already had
- * a minimum slice gives up the CPU when a waiting task is due before it,
- * so an urgent wakeup waits for at most about one tick even when every CPU
- * is busy. With --helicoprion, the cgroup callbacks keep the weight of
- * each cgroup for that charge.
+ * the CPU. With --performance and --lowlatency, that time is what the
+ * kernel accounted for the run, from the clock of the runqueue of the
+ * task. With --helicoprion, it is charged when the task wakes up or is
+ * queued again, from the CPU time the kernel accounted for it. At every
+ * tick, a task that already had a minimum slice gives up the CPU when a
+ * waiting task is due before it, so an urgent wakeup waits for at most
+ * about one tick even when every CPU is busy. With --helicoprion, the
+ * cgroup callbacks keep the weight of each cgroup for that charge.
  *
  * A busy CPU asks for its highest performance level when a task starts
  * and refreshes the request every tick, because the cpufreq governor
@@ -35,6 +35,7 @@
 #include "stats.bpf.h"
 #include "enqueue.bpf.h"
 #include "helix.bpf.h"
+#include "lowlat.bpf.h"
 
 /*
  * Pull a task from another LLC for @cpu of @llc, either in the node of
@@ -62,42 +63,6 @@ static bool flow_steal(s32 cpu, u32 llc, bool same_node)
 static __always_inline bool flow_long_burst(u64 acc)
 {
 	return acc >= FLOW_SLICE_BOOST_MAX_NS;
-}
-
-/*
- * True when a task of @dsq_id that can run on @cpu is due before @deadline.
- * The first FLOW_AHEAD_DEPTH tasks are looked at, so that a head that may
- * only run on other CPUs does not hide the tasks behind it. The walk takes
- * the lock of the DSQ at every step, while the head can be read without
- * it, so the walk only starts when the head is due first but cannot run on
- * @cpu.
- */
-static bool flow_queued_ahead(u64 dsq_id, u64 deadline, s32 cpu)
-{
-	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
-	u32 seen = 0;
-
-	if (!p || !time_before(p->scx.dsq_vtime, deadline))
-		return false;
-	if (flow_task_fits(p, cpu))
-		return true;
-	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		if (!time_before(p->scx.dsq_vtime, deadline) || seen++ >= FLOW_AHEAD_DEPTH)
-			return false;
-		if (flow_task_fits(p, cpu))
-			return true;
-	}
-	return false;
-}
-
-/*
- * A task of @llc, in its DSQ or its strand, may run on @cpu and is due
- * before @deadline.
- */
-static __always_inline bool flow_llc_ahead(u32 llc, u64 deadline, s32 cpu)
-{
-	return flow_queued_ahead(FLOW_LLC_DSQ_BASE + llc, deadline, cpu) ||
-	       flow_helix_ahead(llc, deadline, cpu);
 }
 
 /*
@@ -190,12 +155,12 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 	cs = &flow_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, 0);
 	WRITE_ONCE(cs->est_stopping_clk, 0);
-	if (flow_helicoprion && !READ_ONCE(cs->idled))
+	if (flow_in_helicoprion() && !READ_ONCE(cs->idled))
 		WRITE_ONCE(cs->idled, 1);
 	if (!READ_ONCE(cs->idle_start_clk))
 		WRITE_ONCE(cs->idle_start_clk, flow_now());
 
-	/* Come back for the entries left in the strand of the LLC. */
+	/* Come back for the entries left in the strands of the LLC. */
 	if (flow_helix_queued(llc))
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
@@ -212,26 +177,33 @@ void BPF_STRUCT_OPS(flow_running, struct task_struct *p)
 
 	now = flow_now();
 	if ((!flow_long_burst(t->acc_runtime_ns) || flow_cgrp_active()) &&
-	    (!flow_helicoprion ||
+	    (!flow_in_helicoprion() ||
 	     time_after(t->vtime, READ_ONCE(flow_clock.vtime_now) + FLOW_VTIME_GRAIN_NS)))
 		flow_advance_vtime_now(t->vtime);
 	flow_clear_pinned(t);
 	t->last_running_clk = now;
-	/* --performance charges from here, see flow_stopping(). */
-	if (flow_performance)
+	/* With --performance and --lowlatency, see flow_stopping(). */
+	if (flow_in_performance())
 		t->sum_exec_ns = p->se.sum_exec_runtime;
 
 	cs = &flow_cpu_states[cpu];
 	WRITE_ONCE(cs->lat_cri, t->lat_cri);
 	WRITE_ONCE(cs->est_stopping_clk, flow_est_stop(t, t->acc_runtime_ns, p->scx.slice, now));
-	if (flow_performance) {
+	if (flow_tracks_busy()) {
 		u64 idle_start = READ_ONCE(cs->idle_start_clk);
 
 		if (idle_start && time_after(now, idle_start))
 			WRITE_ONCE(cs->idle_ns, cs->idle_ns + now - idle_start);
 	}
 	WRITE_ONCE(cs->idle_start_clk, 0);
-	if (flow_helicoprion || flow_performance)
+	if (flow_in_lowlatency()) {
+		bool critical = flow_lowlat_critical(t);
+
+		WRITE_ONCE(cs->critical, critical);
+		if (critical && !(t->flags & FLOW_FLAG_SLACK))
+			flow_lowlat_report(p, t);
+	}
+	if (flow_preempts_hogs())
 		WRITE_ONCE(cs->burst_start_clk, now - t->acc_runtime_ns);
 	if (t->lat_cri > READ_ONCE(cs->max_lat_cri))
 		WRITE_ONCE(cs->max_lat_cri, t->lat_cri);
@@ -263,7 +235,7 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 	 * briefly poll for each other on two CPUs, which says nothing about
 	 * how they behave once they share one.
 	 */
-	if (flow_helicoprion && flow_ran(t, now) >= FLOW_SLICE_MIN_NS)
+	if (flow_in_helicoprion() && flow_ran(t, now) >= FLOW_SLICE_MIN_NS)
 		t->sync_score = 0;
 
 	/*
@@ -286,10 +258,11 @@ void BPF_STRUCT_OPS(flow_tick, struct task_struct *p)
 }
 
 /*
- * With --performance, @p is charged the CPU time that the kernel accounted
- * for its run. The kernel brings that time up to date right before this,
- * from the clock of the runqueue of @p, which was updated for the switch,
- * so the charge is exact and the clock is not read once more.
+ * With --performance and --lowlatency, @p is charged the CPU time that the
+ * kernel accounted for its run. The kernel brings that time up to date
+ * right before this, from the clock of the runqueue of @p, which was
+ * updated for the switch, so the charge is exact and the clock is not read
+ * once more.
  */
 void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 {
@@ -299,7 +272,7 @@ void BPF_STRUCT_OPS(flow_stopping, struct task_struct *p, bool runnable)
 	if (!t)
 		return;
 
-	if (flow_performance)
+	if (flow_in_performance())
 		used = p->se.sum_exec_runtime - t->sum_exec_ns;
 	else
 		used = t->last_running_clk ? flow_ran(t, flow_now()) : 0;
@@ -398,6 +371,12 @@ static s32 flow_init_cpus(void)
 		mask = MEMBER_VPTR(flow_llc_cpumask, [flow_llc_of(cpu)]);
 		if (mask)
 			bpf_cpumask_set_cpu(cpu, mask);
+		if (flow_in_performance() && flow_helix_split(flow_llc_of(cpu))) {
+			mask = MEMBER_VPTR(flow_half_cpumask,
+					   [2 * flow_llc_of(cpu) + flow_half_of(cpu)]);
+			if (mask)
+				bpf_cpumask_set_cpu(cpu, mask);
+		}
 		if (flow_nr_groups > flow_nr_llcs) {
 			mask = MEMBER_VPTR(flow_group_cpumask, [flow_cpu_group[cpu]]);
 			if (mask)

@@ -4,23 +4,25 @@
  *
  * Pinned tasks wait in the DSQ of their CPU and everything else waits in
  * the DSQ of the LLC of its CPU, both ordered by virtual deadline. With
- * --performance, a task that may run in both LLCs of a pair that shares a
- * double helix queue waits in the strand of its LLC instead, see
- * helix.bpf.h, and the last runnable task of a CPU goes back to the local
- * DSQ of that CPU. Every path through ops.enqueue() queues the task
- * exactly once.
+ * --performance and --lowlatency, a task that may use a double helix
+ * queue waits in a strand of it instead, see helix.bpf.h, and the last
+ * runnable task of a CPU goes back to the local DSQ of that CPU. With
+ * --lowlatency, a latency critical task that wakes up goes straight to the
+ * local DSQ of an idle CPU, or of a busy one that it takes over, see
+ * lowlat.bpf.h. Every path through ops.enqueue() queues the task exactly
+ * once.
  *
  * After the insert, flow looks for an idle CPU to wake up. If there is
  * none and the task is urgent enough, it asks the running task with the
  * lowest latency criticality in the LLC to give up its CPU. The request
  * shortens the slice of that task instead of sending an IPI, so the CPU
- * switches at its next scheduling point. With --helicoprion and
- * --performance, a short task that wakes up while every CPU computes also
- * interrupts a CPU whose task has been computing for a long time, right
- * away. With --performance, bursts of up to a maximum slice count as
- * short for this, the bar for urgent tasks is lower, and the CPU of the
- * victim is interrupted as well, since a whole tick can pass before it
- * looks at its slice again.
+ * switches at its next scheduling point. With --helicoprion,
+ * --performance and --lowlatency, a short task that wakes up while every
+ * CPU computes also interrupts a CPU whose task has been computing for a
+ * long time, right away. With --performance and --lowlatency, bursts of up
+ * to a maximum slice count as short for this, the bar for urgent tasks is
+ * lower, and the CPU of the victim is interrupted as well, since a whole
+ * tick can pass before it looks at its slice again.
  *
  * When a realtime or deadline task takes a CPU, the tasks waiting in its
  * local DSQ are queued again from ops.cpu_release(), like any other task.
@@ -36,12 +38,7 @@
 #include "fair.bpf.h"
 #include "select.bpf.h"
 #include "helix.bpf.h"
-
-struct flow_victim {
-	s32	cpu;
-	u32	lat_cri;
-	u64	est_stop;
-};
+#include "lowlat.bpf.h"
 
 static __always_inline void flow_clear_pinned(struct flow_task_ctx *t)
 {
@@ -119,21 +116,11 @@ static bool flow_probe_victim(s32 cpu, u32 lat_cri, u64 est_stop, struct flow_vi
 }
 
 /*
- * Claim the victim by clearing its stop stamp, so that concurrent
- * enqueues pick someone else.
- */
-static __always_inline bool flow_claim_victim(const struct flow_victim *v)
-{
-	return flow_cpu_valid(v->cpu) &&
-	       __sync_bool_compare_and_swap(&flow_cpu_states[v->cpu].est_stopping_clk,
-					    v->est_stop, 0);
-}
-
-/*
  * Claim the victim, then shorten the slice of its task. A slice of one
  * nanosecond, rather than zero, keeps the kernel from refilling it with the
  * default slice. The victim only notices the new slice at its next tick,
- * so with --performance it is kicked to switch right away.
+ * so with --performance and --lowlatency it is kicked to switch right
+ * away.
  */
 static bool flow_ask_yield(const struct flow_victim *v)
 {
@@ -148,26 +135,18 @@ static bool flow_ask_yield(const struct flow_victim *v)
 	if (curr && curr->pid)
 		asked = scx_bpf_task_set_slice(curr, 1);
 	bpf_rcu_read_unlock();
-	if (asked && flow_performance)
+	if (asked && flow_in_performance())
 		scx_bpf_kick_cpu(v->cpu, SCX_KICK_PREEMPT);
 	return asked;
-}
-
-/* @t is latency critical enough to make another task give up its CPU. */
-static __always_inline bool flow_is_urgent(const struct flow_task_ctx *t)
-{
-	u64 thr = READ_ONCE(flow_sys_stat.thr_lat_cri);
-
-	return thr && t->lat_cri >= thr;
 }
 
 /*
  * Look for a victim for @p among the CPUs of the LLC that @p can use. @cpu
  * is checked first, then a few random CPUs, and the better of the first
  * two candidates goes to @v. Random probes keep enqueues on different CPUs
- * from all going after the same victim. With --performance, a @pinned task
- * only looks at @cpu: the CPU mask of a task that disabled migration still
- * spans other CPUs, which it could not use.
+ * from all going after the same victim. With --performance and
+ * --lowlatency, a @pinned task only looks at @cpu: the CPU mask of a task
+ * that disabled migration still spans other CPUs, which it could not use.
  */
 static bool flow_pick_victim(struct task_struct *p, struct flow_task_ctx *t, s32 cpu, u32 llc,
 			     bool pinned, struct flow_victim *v)
@@ -183,7 +162,7 @@ static bool flow_pick_victim(struct task_struct *p, struct flow_task_ctx *t, s32
 		nr = 1;
 
 	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
-	if (llc_mask && !(flow_performance && pinned)) {
+	if (llc_mask && !(flow_in_performance() && pinned)) {
 		bpf_for(i, 0, FLOW_VICTIM_PROBES) {
 			s32 probe;
 
@@ -235,10 +214,10 @@ static bool flow_is_hog(const struct flow_task_ctx *t, s32 cpu, u64 now)
  * would wait up to a tick for a CPU. It would get that CPU time at the tick
  * anyway, so the first hog among @cpu and a few random CPUs of the LLC is
  * interrupted right away instead, which costs the hog no more than an IPI.
- * Bursts count as short below a minimum slice, and with --performance
- * below a maximum slice, which covers the threads of a game that compute
- * for a few milliseconds per frame. As in flow_pick_victim(), a @pinned
- * task only looks at @cpu with --performance. Returns whether a CPU was
+ * Bursts count as short below a minimum slice, and with --performance and
+ * --lowlatency below a maximum slice, which covers the threads of a game
+ * that compute for a few milliseconds per frame. As in flow_pick_victim(),
+ * a @pinned task only looks at @cpu then. Returns whether a CPU was
  * interrupted, so that no other one is asked to give up its CPU as well.
  */
 static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *t, s32 cpu,
@@ -249,7 +228,7 @@ static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *
 	u32 i;
 
 	if (!(enq_flags & SCX_ENQ_WAKEUP) ||
-	    t->avg_runtime_ns >= (flow_performance ? FLOW_SLICE_MAX_NS : FLOW_SLICE_MIN_NS))
+	    t->avg_runtime_ns >= (flow_in_performance() ? FLOW_SLICE_MAX_NS : FLOW_SLICE_MIN_NS))
 		return false;
 
 	now = flow_now();
@@ -260,7 +239,7 @@ static bool flow_preempt_hog(struct task_struct *p, const struct flow_task_ctx *
 	}
 
 	llc_mask = MEMBER_VPTR(flow_llc_cpumask, [llc]);
-	if (!llc_mask || (flow_performance && pinned))
+	if (!llc_mask || (flow_in_performance() && pinned))
 		return false;
 	bpf_for(i, 0, FLOW_VICTIM_PROBES) {
 		s32 probe = bpf_cpumask_any_and_distribute(cast_mask(llc_mask), p->cpus_ptr);
@@ -320,6 +299,40 @@ void BPF_STRUCT_OPS(flow_runnable, struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * --lowlatency: put @p, latency critical and due at @deadline with @slice,
+ * straight on a CPU, see lowlat.bpf.h. It woke up without ops.select_cpu()
+ * looking for one, so an idle CPU is looked for first. Returns false if
+ * @p has to wait in the queues. A CPU only loses its idle bit or its stop
+ * stamp here when @p is put on it, so that the queueing that follows a
+ * false return still finds every CPU as it was.
+ */
+static bool flow_lowlat_place(struct task_struct *p, struct flow_task_ctx *t, s32 cpu,
+			      bool pinned, u64 deadline, u64 slice, u64 enq_flags)
+{
+	bool takeover = false;
+	s32 target;
+
+	if (!flow_task_fits(p, cpu))
+		return false;
+	if (pinned)
+		target = scx_bpf_test_and_clear_cpu_idle(cpu) ? cpu : -EBUSY;
+	else
+		target = flow_pick_idle_cpu(p, t, cpu, 0);
+	if (target < 0) {
+		target = flow_lowlat_takeover(p, t, cpu, pinned, deadline);
+		if (target < 0)
+			return false;
+		takeover = true;
+	}
+
+	scx_bpf_task_set_dsq_vtime(p, deadline);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | target, slice,
+			   takeover ? enq_flags | SCX_ENQ_PREEMPT : enq_flags);
+	flow_stat_inc(takeover ? FLOW_STAT_TAKEOVER : FLOW_STAT_DIRECT);
+	return true;
+}
+
+/*
  * @p was preempted by the wakee it just handed its CPU to, see
  * flow_sync_handoff(). It waits for the reply of the wakee as if it slept,
  * so its burst ends here, and it resumes on the same CPU after the wakee.
@@ -374,7 +387,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	fresh = t->flags & FLOW_FLAG_NEW;
 	t->flags &= ~FLOW_FLAG_NEW;
-	if (flow_helicoprion) {
+	if (flow_in_helicoprion()) {
 		if (!(enq_flags & SCX_ENQ_WAKEUP)) {
 			flow_charge_exec(p, t);
 			if (!fresh && !(enq_flags & SCX_ENQ_REENQ))
@@ -399,16 +412,21 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * A task queued with SCX_ENQ_LAST is the last runnable task of a CPU
 	 * that did not keep it, and that CPU goes idle unless the task is put
-	 * on its local DSQ. With --performance, a task that may still run on
-	 * the CPU is put there, rather than wait for a dispatch that nothing
-	 * triggers.
+	 * on its local DSQ. With --performance and --lowlatency, a task that
+	 * may still run on the CPU is put there, rather than wait for a
+	 * dispatch that nothing triggers.
 	 */
-	if (flow_performance && (enq_flags & SCX_ENQ_LAST) &&
+	if (flow_in_performance() && (enq_flags & SCX_ENQ_LAST) &&
 	    cpu == bpf_get_smp_processor_id()) {
 		scx_bpf_task_set_dsq_vtime(p, deadline);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
 		return;
 	}
+
+	if (flow_lowlat_critical(t) && (enq_flags & SCX_ENQ_WAKEUP) &&
+	    !__COMPAT_is_enq_cpu_selected(enq_flags) &&
+	    flow_lowlat_place(p, t, cpu, pinned, deadline, slice, enq_flags))
+		return;
 
 	if (pinned) {
 		flow_mark_pinned(t, cpu);
@@ -417,7 +435,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		flow_clear_pinned(t);
 		dsq_id = FLOW_LLC_DSQ_BASE + llc;
 	}
-	if (pinned || !flow_helix_queue(p, llc, deadline, slice))
+	if (pinned || !flow_helix_queue(p, llc, cpu, deadline, slice))
 		scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
 
 	/*
@@ -429,8 +447,7 @@ void BPF_STRUCT_OPS(flow_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	if (flow_kick_idle(p, t, cpu, pinned, enq_flags))
 		return;
-	if ((flow_helicoprion || flow_performance) &&
-	    flow_preempt_hog(p, t, cpu, llc, pinned, enq_flags))
+	if (flow_preempts_hogs() && flow_preempt_hog(p, t, cpu, llc, pinned, enq_flags))
 		return;
 	flow_try_preempt(p, t, cpu, llc, pinned);
 }
@@ -442,7 +459,10 @@ void BPF_STRUCT_OPS(flow_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!t)
 		return;
 
-	/* A pinned task can leave its DSQ without running, e.g. on an affinity change. */
+	/*
+	 * A pinned task can leave its DSQ without running, as on an affinity
+	 * change.
+	 */
 	flow_clear_pinned(t);
 
 	/* The burst ends here, so it can be folded in as a whole. */

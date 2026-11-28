@@ -3,9 +3,10 @@
  * Build script for scx_flow.
  *
  * Builds the BPF object and generates the userspace bindings. The double
- * helix queues of --performance come from the arena library of the scx
- * workspace, which src/bpf/lib links to as in the other schedulers of the
- * workspace. It is compiled and linked into the same object.
+ * helix queues of --performance and --lowlatency come from the arena
+ * library of the scx workspace, which src/bpf/lib links to as in the other
+ * schedulers of the workspace. It is compiled and linked into the same
+ * object.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */

@@ -2,8 +2,9 @@
 //! CPU topology handling for scx_flow.
 //!
 //! Builds the topology tables the BPF program reads, including the pairs
-//! of LLCs that share a double helix queue with --performance, and the
-//! topology lines printed at startup.
+//! of LLCs that share a double helix queue with --performance and
+//! --lowlatency and the halves of the LLCs that have a queue to themselves,
+//! and the topology lines printed at startup.
 //!
 //! Copyright (c) 2026 Galih Tama <galpt@v.recipes>
 
@@ -109,10 +110,11 @@ fn nr_groups(groups: &BTreeMap<usize, u32>) -> usize {
     groups.values().collect::<BTreeSet<_>>().len()
 }
 
-/// The partner of every LLC in the double helix queues of --performance:
-/// the LLCs of each node are paired in the order of their numbers, and the
-/// last one of an odd count is its own partner, as is an LLC alone in its
-/// node.
+/// The partner of every LLC in the double helix queues of --performance and
+/// --lowlatency: the LLCs of each node are paired in the order of their
+/// numbers, and the last one of an odd count is its own partner, as is an
+/// LLC alone in its node. Such an LLC may get a queue of its own, see
+/// llc_halves().
 fn llc_mates(llc_node: &[u32]) -> Vec<u32> {
     let mut mates: Vec<u32> = (0..llc_node.len() as u32).collect();
     let mut waiting: BTreeMap<u32, u32> = BTreeMap::new();
@@ -132,6 +134,69 @@ fn llc_mates(llc_node: &[u32]) -> Vec<u32> {
     mates
 }
 
+/// The halves of the LLCs that have no partner in @llc_mate and so get a
+/// double helix queue of their own: the two core groups of the LLC if it
+/// has exactly two, and otherwise its cores in id order, cut where the
+/// first half reaches half of its CPUs, so that the hardware threads of a
+/// core end up in the same half. An LLC with a single core or fewer than
+/// three CPUs is not split. Returns which LLCs are split, and the half of
+/// each CPU of a split LLC.
+fn llc_halves(
+    topo: &Topology,
+    cpu_llc: &BTreeMap<usize, u32>,
+    cpu_group: &BTreeMap<usize, u32>,
+    llc_mate: &[u32],
+) -> (Vec<bool>, BTreeMap<usize, u32>) {
+    let mut llc_cores: BTreeMap<u32, Vec<Vec<usize>>> = BTreeMap::new();
+    for core in topo.all_cores.values() {
+        let cpus: Vec<usize> = core
+            .cpus
+            .keys()
+            .copied()
+            .filter(|cpu| cpu_llc.contains_key(cpu))
+            .collect();
+        if let Some(llc) = cpus.first().and_then(|cpu| cpu_llc.get(cpu)) {
+            llc_cores.entry(*llc).or_default().push(cpus);
+        }
+    }
+
+    let mut split = vec![false; llc_mate.len()];
+    let mut halves = BTreeMap::new();
+    for (llc, cores) in &llc_cores {
+        let total: usize = cores.iter().map(Vec::len).sum();
+        if llc_mate.get(*llc as usize) != Some(llc) || cores.len() < 2 || total < 3 {
+            continue;
+        }
+        let cpus = || cores.iter().flatten();
+        let groups: BTreeSet<u32> = cpus()
+            .filter_map(|cpu| cpu_group.get(cpu))
+            .copied()
+            .collect();
+        if groups.len() == 2 && cpus().all(|cpu| cpu_group.contains_key(cpu)) {
+            let second = groups.last().copied();
+            for cpu in cpus() {
+                halves.insert(*cpu, u32::from(cpu_group.get(cpu).copied() == second));
+            }
+        } else {
+            let mut taken = 0;
+            let mut first = true;
+            for (i, core) in cores.iter().enumerate() {
+                first &= i == 0 || (taken * 2 < total && i + 1 < cores.len());
+                if first {
+                    taken += core.len();
+                }
+                for cpu in core {
+                    halves.insert(*cpu, u32::from(!first));
+                }
+            }
+        }
+        if let Some(slot) = split.get_mut(*llc as usize) {
+            *slot = true;
+        }
+    }
+    (split, halves)
+}
+
 /// Topology tables for the BPF program. LLCs are renumbered from zero in
 /// the order of their ids. Cache sizes are in kibibytes, zero if unknown.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -148,6 +213,11 @@ pub struct BpfTopology {
     pub llc_kb: Vec<u32>,
     /// The LLC each LLC shares a double helix queue with, itself if none.
     pub llc_mate: Vec<u32>,
+    /// The LLCs without a partner that are split into two halves, which
+    /// own the two strands of a double helix queue of their own.
+    pub llc_split: Vec<bool>,
+    /// The half of every CPU of a split LLC.
+    pub cpu_half: BTreeMap<usize, u32>,
 }
 
 impl BpfTopology {
@@ -177,7 +247,7 @@ impl BpfTopology {
             );
             LlcLayout::Single
         };
-        let cpu_llc = topo
+        let cpu_llc: BTreeMap<usize, u32> = topo
             .all_cpus
             .iter()
             .filter_map(|(id, cpu)| layout.llc_of(cpu).map(|llc| (*id, llc)))
@@ -209,13 +279,18 @@ impl BpfTopology {
             LlcLayout::Single => (vec![0], vec![0]),
         };
 
+        let llc_mate = llc_mates(&llc_node);
+        let (llc_split, cpu_half) = llc_halves(topo, &cpu_llc, &cpu_group, &llc_mate);
+
         Ok(Self {
             nr_llcs: llc_node.len() as u32,
             nr_groups: groups as u32,
             cpu_llc,
             cpu_group,
             cpu_sibling: cpu_siblings(topo),
-            llc_mate: llc_mates(&llc_node),
+            llc_mate,
+            llc_split,
+            cpu_half,
             llc_node,
             llc_kb,
         })
@@ -228,6 +303,22 @@ impl BpfTopology {
             .enumerate()
             .filter(|(llc, mate)| (**mate as usize) > *llc)
             .count()
+    }
+
+    /// The number of LLCs split over a double helix queue of their own.
+    pub fn nr_split_llcs(&self) -> usize {
+        self.llc_split.iter().filter(|split| **split).count()
+    }
+
+    /// The CPUs of each LLC, in the order of their ids.
+    pub fn llc_cpus(&self) -> Vec<Vec<usize>> {
+        let mut cpus = vec![Vec::new(); self.nr_llcs as usize];
+        for (cpu, llc) in &self.cpu_llc {
+            if let Some(list) = cpus.get_mut(*llc as usize) {
+                list.push(*cpu);
+            }
+        }
+        cpus
     }
 }
 
@@ -715,6 +806,86 @@ mod tests {
 
         let merged = BpfTopology::new(&many_llc_topo(100, 2), &BTreeMap::new()).unwrap();
         assert_eq!(merged.llc_mate, vec![0, 1]);
+    }
+
+    /// An LLC of @nr_cores cores with two hardware threads each and no
+    /// cluster ids, numbered from core @first_core and CPU 2 * @first_core.
+    fn smt_llc(id: usize, first_core: usize, nr_cores: usize, node: usize) -> Arc<Llc> {
+        let cores = (first_core..first_core + nr_cores)
+            .map(|core| mk_core(core, &[2 * core, 2 * core + 1], id, node, 0, -1))
+            .collect();
+        mk_llc(id, cores, node)
+    }
+
+    #[test]
+    fn unpaired_llcs_split_in_halves() {
+        let host = BpfTopology::new(&single_host_topo(), &BTreeMap::new()).unwrap();
+        assert_eq!(host.llc_split, vec![true]);
+        assert_eq!(host.nr_split_llcs(), 1);
+        assert_eq!(
+            host.cpu_half,
+            BTreeMap::from([(0, 0), (1, 0), (2, 1), (3, 1)])
+        );
+
+        // One core group: the cut falls between cores, by CPU count.
+        let odd = BpfTopology::new(
+            &mk_topo(vec![(0, vec![smt_llc(0, 0, 3, 0)])]),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(odd.llc_split, vec![true]);
+        assert_eq!(
+            odd.cpu_half,
+            BTreeMap::from([(0, 0), (1, 0), (2, 0), (3, 0), (4, 1), (5, 1)])
+        );
+
+        let large = BpfTopology::new(&large_topo(), &BTreeMap::new()).unwrap();
+        assert_eq!(large.llc_split, vec![true]);
+        assert_eq!(large.cpu_half.values().filter(|h| **h == 1).count(), 271);
+        assert_eq!(large.cpu_half.get(&270), Some(&0));
+        assert_eq!(large.cpu_half.get(&271), Some(&1));
+    }
+
+    #[test]
+    fn small_llcs_stay_whole() {
+        let two_cpus = BpfTopology::new(&two_core_topo(-1, -1), &BTreeMap::new()).unwrap();
+        assert_eq!(two_cpus.llc_split, vec![false]);
+        assert!(two_cpus.cpu_half.is_empty());
+
+        let one_core = mk_topo(vec![(
+            0,
+            vec![mk_llc(0, vec![mk_core(0, &[0, 1, 2, 3], 0, 0, 0, -1)], 0)],
+        )]);
+        let one_core = BpfTopology::new(&one_core, &BTreeMap::new()).unwrap();
+        assert_eq!(one_core.llc_split, vec![false]);
+        assert_eq!(one_core.nr_split_llcs(), 0);
+    }
+
+    #[test]
+    fn only_the_odd_llc_is_split() {
+        let topo = mk_topo(vec![(
+            0,
+            vec![
+                smt_llc(0, 0, 2, 0),
+                smt_llc(1, 2, 2, 0),
+                smt_llc(2, 4, 2, 0),
+            ],
+        )]);
+        let tables = BpfTopology::new(&topo, &BTreeMap::new()).unwrap();
+        assert_eq!(tables.llc_mate, vec![1, 0, 2]);
+        assert_eq!(tables.llc_split, vec![false, false, true]);
+        assert_eq!(tables.nr_llc_pairs(), 1);
+        assert_eq!(
+            tables.cpu_half,
+            BTreeMap::from([(8, 0), (9, 0), (10, 1), (11, 1)])
+        );
+        assert_eq!(
+            tables.llc_cpus(),
+            vec![vec![0, 1, 2, 3], vec![4, 5, 6, 7], vec![8, 9, 10, 11]]
+        );
+
+        let per_node = BpfTopology::new(&multi_package_topo(), &BTreeMap::new()).unwrap();
+        assert_eq!(per_node.llc_split, vec![false, false]);
     }
 
     #[test]

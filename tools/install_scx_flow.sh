@@ -10,7 +10,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="${REPO_DIR}/scx"
 WS="${1:-/tmp/scx-workspace}"
 BIN="scx_flow"
-VER="5.3.5"
+VER="5.3.6"
 # The workspace commit is pinned and matches the one CI uses. CI fetches
 # it from sched-ext/scx, the installer from the galpt/scx mirror, and the
 # check after the fetch refuses any other commit.
@@ -184,7 +184,8 @@ if [ "$(readlink "${DEST}/LICENSE" 2>/dev/null)" != "../../../LICENSE" ]; then
 fi
 
 # src/bpf/lib links to the arena library at the root of the workspace,
-# which the double helix queues of --performance are built from.
+# which the double helix queues of --performance and --lowlatency are
+# built from.
 if [ ! -f "${DEST}/src/bpf/lib/dhq.bpf.c" ]; then
     echo "the workspace has no arena library behind ${DEST}/src/bpf/lib" >&2
     exit 1

@@ -18,6 +18,17 @@ enum flow_consts {
 };
 
 /*
+ * How the scheduler was started. --lowlatency does everything that
+ * --performance does and more, so it comes after it.
+ */
+enum flow_mode {
+	FLOW_MODE_DEFAULT,	/* no mode flag, scheduled as in 5.2.28 */
+	FLOW_MODE_HELICOPRION,	/* --helicoprion */
+	FLOW_MODE_PERFORMANCE,	/* --performance */
+	FLOW_MODE_LOWLATENCY,	/* --lowlatency */
+};
+
+/*
  * Event counters. Each CPU keeps its own copy and userspace folds them
  * per LLC when it reports.
  */
@@ -31,6 +42,7 @@ enum flow_stat_idx {
 	FLOW_STAT_KEEP,		/* previous task kept running with a new slice */
 	FLOW_STAT_PREEMPTED,	/* task stopped while still runnable */
 	FLOW_STAT_HELIX,	/* queued in a double helix queue */
+	FLOW_STAT_TAKEOVER,	/* woke up on a busy CPU, preempting its task */
 	FLOW_NR_STATS,
 };
 
