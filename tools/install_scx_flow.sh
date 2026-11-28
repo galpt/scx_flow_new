@@ -183,6 +183,13 @@ if [ "$(readlink "${DEST}/LICENSE" 2>/dev/null)" != "../../../LICENSE" ]; then
     ln -s ../../../LICENSE "${DEST}/LICENSE"
 fi
 
+# src/bpf/lib links to the arena library at the root of the workspace,
+# which the double helix queues of --performance are built from.
+if [ ! -f "${DEST}/src/bpf/lib/dhq.bpf.c" ]; then
+    echo "the workspace has no arena library behind ${DEST}/src/bpf/lib" >&2
+    exit 1
+fi
+
 echo "building ${BIN} in workspace"
 cargo build --manifest-path "${DEST}/Cargo.toml" --release
 
