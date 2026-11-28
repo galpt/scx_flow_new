@@ -24,7 +24,7 @@ This mode builds on the default logic and tunes it for steadier performance unde
 
 ### `--lowlatency`
 
-This mode builds on `--performance` and tunes it further for much lower latency. When every CPU is busy, a latency critical task that wakes up preempts a task that computes instead of waiting in a queue, and no CPU enters a deep idle state, so it uses the most power. It also lowers the timer slack of latency critical tasks so their timers fire on time. scx_flow puts back the original value when it stops, or on its next start after a crash, and since timer slack belongs to each thread, the change never outlives that thread or a reboot.
+This mode builds on `--performance` and tunes it further for much lower latency. When every CPU is busy, a latency critical task that wakes up preempts a task that computes instead of waiting in a queue, and no CPU enters a deep idle state, so it uses the most power. It also lowers the timer slack of latency critical tasks so their timers fire on time. scx_flow puts back the original value when it stops, or on its next start after a crash, also for the threads that inherited the lower slack, and nothing of it survives a reboot.
 
 The table below shows `cyclictest -m -q -D 60 -i 1000 -t 4 -h 400 --policy=other` on an AMD Ryzen 7 6800H (8 cores, 16 threads, one 16 MiB L3 cache) running Linux 7.3 with a 1000 Hz tick, while `stress-ng --cpu 16` kept every CPU busy. Each value is the median of three 60 second runs.
 

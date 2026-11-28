@@ -42,8 +42,13 @@
  * timer slack from userspace, see flow_lowlat_report(). The kernel then
  * fires the timers it sleeps on when they are due, rather than up to the
  * default 50 us later to serve them together with other timers, which no
- * placement on a CPU could make up for. Userspace writes the old slack
- * back when the scheduler stops.
+ * placement on a CPU could make up for. Kernel threads are left out. The
+ * threads and processes that such a task creates inherit its slack, so
+ * userspace also resets those when the scheduler stops, to the slack of
+ * the task they came from or else the default. A thread that later resets
+ * its slack with prctl() can get the lowered one back, as the kernel
+ * copied that as its default too. Userspace writes the old slack back when
+ * the scheduler stops.
  *
  * Copyright (c) 2026 Galih Tama <galpt@v.recipes>
  */
@@ -93,17 +98,18 @@ static __always_inline bool flow_lowlat_critical(const struct flow_task_ctx *t)
 }
 
 /*
- * --lowlatency: @p just became latency critical. If it runs under
- * SCHED_NORMAL, its thread id goes to userspace, which lowers the slack so
- * that the timers it sleeps on are not deferred, see slack.rs. A task is
- * only looked at once, unless the ring buffer was full. Userspace drains
- * it on its own schedule, so nothing wakes it up here.
+ * --lowlatency: @p just became latency critical. If it is a user task
+ * under SCHED_NORMAL, its thread id goes to userspace, which lowers the
+ * slack so that the timers it sleeps on are not deferred, see slack.rs.
+ * Kernel threads are never reported. A task is only looked at once, unless
+ * the ring buffer was full. Userspace drains it on its own schedule, so
+ * nothing wakes it up here.
  */
 static void flow_lowlat_report(const struct task_struct *p, struct flow_task_ctx *t)
 {
 	u32 tid = p->pid;
 
-	if (p->policy != FLOW_SCHED_NORMAL ||
+	if (p->policy != FLOW_SCHED_NORMAL || (p->flags & PF_KTHREAD) ||
 	    !bpf_ringbuf_output(&flow_slack_events, &tid, sizeof(tid), BPF_RB_NO_WAKEUP))
 		t->flags |= FLOW_FLAG_SLACK;
 }

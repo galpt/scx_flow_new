@@ -159,10 +159,6 @@ void BPF_STRUCT_OPS(flow_dispatch, s32 cpu, struct task_struct *prev)
 		WRITE_ONCE(cs->idled, 1);
 	if (!READ_ONCE(cs->idle_start_clk))
 		WRITE_ONCE(cs->idle_start_clk, flow_now());
-
-	/* Come back for the entries left in the strands of the LLC. */
-	if (flow_helix_queued(llc))
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(flow_running, struct task_struct *p)

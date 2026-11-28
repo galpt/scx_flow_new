@@ -54,9 +54,13 @@
  *   an LLC in its mask instead, and a CPU of its mask there is kicked.
  * - An exiting task can lose its pid before it runs for the last time, so
  *   it never waits in a strand.
- * - A CPU does not go idle while the strand of its LLC holds entries, or
- *   either strand if its LLC is split. It takes up to FLOW_HELIX_POPS of
- *   them per dispatch and kicks itself for the rest.
+ * - A CPU takes up to FLOW_HELIX_POPS entries of the strand of its LLC,
+ *   or of either strand if its LLC is split, per dispatch, and kicks
+ *   itself for the rest only when none of them gave it a task. Entries
+ *   queued later are left to the CPU that the enqueue kicks, as tasks in a
+ *   DSQ are. A CPU that dispatches after a kick of its own still counts as
+ *   idle, so a wakeup could claim it and then wait behind the task it took
+ *   off the queue.
  * - The tick and the choice to keep the previous task running look at the
  *   first entry of the queue of the LLC, see flow_helix_peek(), as they do
  *   at the heads of its DSQs.
@@ -303,7 +307,9 @@ static bool flow_helix_place(struct task_struct *p, s32 cpu, u32 llc)
 /*
  * Take up to FLOW_HELIX_POPS entries of @src, in the order of
  * flow_helix_pop(), for @cpu of @llc, until a task is moved to the local
- * DSQ of @cpu. Entries whose task is gone are dropped.
+ * DSQ of @cpu. Entries whose task is gone are dropped. If all of them pass
+ * without a task for @cpu while more wait, @cpu is kicked to come back
+ * for the rest once it goes idle.
  */
 static bool flow_helix_take(s32 cpu, u32 llc, u32 src)
 {
@@ -327,6 +333,8 @@ static bool flow_helix_take(s32 cpu, u32 llc, u32 src)
 		if (here && scx_bpf_dsq_move_to_local(FLOW_LLC_DSQ_BASE + llc, 0))
 			return true;
 	}
+	if (flow_helix_queued(src))
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	return false;
 }
 
